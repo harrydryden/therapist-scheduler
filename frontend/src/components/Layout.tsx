@@ -12,9 +12,9 @@ export default function Layout({ children }: LayoutProps) {
         <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             {/* Spill logo - teal drop with smile */}
-            <svg width="28" height="28" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M16 2C16 2 6 12 6 20C6 26 10 30 16 30C22 30 26 26 26 20C26 12 16 2 16 2Z" fill="#2DD4BF"/>
-              <path d="M11 21C11 21 13 25 19 25" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            <svg width="28" height="28" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M50 0C50 0 95 45 95 65C95 85 75 100 50 100C25 100 5 85 5 65C5 45 50 0 50 0Z" fill="#2DD4BF"/>
+              <path d="M25 62C25 62 30 75 45 75" stroke="white" strokeWidth="8" strokeLinecap="round"/>
             </svg>
             <span className="text-xl font-extrabold text-slate-900">spill</span>
           </Link>
