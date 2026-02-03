@@ -8,6 +8,7 @@ import {
   takeControl,
   releaseControl,
   sendAdminMessage,
+  clearConversation,
 } from '../api/client';
 import type { AppointmentFilters, AppointmentListItem } from '../types';
 
@@ -55,6 +56,10 @@ export default function AdminDashboardPage() {
   const [messageBody, setMessageBody] = useState('');
   const [controlReason, setControlReason] = useState('');
   const [mutationError, setMutationError] = useState<string | null>(null);
+
+  // Clear conversation state
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearReason, setClearReason] = useState('');
 
   // Fetch appointments list with auto-refresh
   const {
@@ -210,6 +215,21 @@ export default function AdminDashboardPage() {
     },
     onError: (error) => {
       setMutationError(error instanceof Error ? error.message : 'Failed to send message');
+    },
+  });
+
+  const clearConversationMutation = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
+      clearConversation(id, { adminId: 'admin', reason }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
+      queryClient.invalidateQueries({ queryKey: ['appointments'] });
+      setShowClearConfirm(false);
+      setClearReason('');
+      setMutationError(null);
+    },
+    onError: (error) => {
+      setMutationError(error instanceof Error ? error.message : 'Failed to clear conversation');
     },
   });
 
@@ -713,6 +733,61 @@ export default function AdminDashboardPage() {
                                 : 'Failed to send message'}
                             </p>
                           )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Clear Conversation Section - Always visible for non-confirmed appointments */}
+                  {appointmentDetail.status !== 'confirmed' && (
+                    <div className="mt-4 pt-4 border-t border-slate-200">
+                      {!showClearConfirm ? (
+                        <button
+                          onClick={() => setShowClearConfirm(true)}
+                          className="w-full px-4 py-2 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors font-medium text-sm"
+                        >
+                          Clear Conversation History
+                        </button>
+                      ) : (
+                        <div className="p-3 border border-red-200 rounded-lg bg-red-50">
+                          <h4 className="font-medium text-red-800 mb-2">⚠️ Clear Conversation?</h4>
+                          <p className="text-sm text-red-700 mb-3">
+                            This will delete all conversation history and reset the appointment to pending status.
+                            The agent will start fresh as if this is a new request.
+                          </p>
+                          <div className="mb-3">
+                            <label className="text-sm text-red-700 block mb-1">Reason (optional):</label>
+                            <input
+                              type="text"
+                              value={clearReason}
+                              onChange={(e) => setClearReason(e.target.value)}
+                              placeholder="Why are you clearing this conversation?"
+                              className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent outline-none"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => {
+                                setShowClearConfirm(false);
+                                setClearReason('');
+                              }}
+                              className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-white transition-colors text-sm"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() =>
+                                clearConversationMutation.mutate({
+                                  id: appointmentDetail.id,
+                                  reason: clearReason || undefined,
+                                })
+                              }
+                              disabled={clearConversationMutation.isPending}
+                              className="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50 text-sm font-medium"
+                            >
+                              {clearConversationMutation.isPending ? 'Clearing...' : 'Yes, Clear History'}
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>

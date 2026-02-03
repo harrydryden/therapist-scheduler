@@ -18,10 +18,7 @@ import type {
   UpdateKnowledgeRequest,
 } from '../types';
 import { API_BASE, ADMIN_SECRET } from '../config/env';
-
-// Request timeout in milliseconds
-const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
-const LONG_TIMEOUT_MS = 120000; // 2 minutes for file uploads
+import { HEADERS, TIMEOUTS } from '../config/constants';
 
 /**
  * Fetch with timeout using AbortController
@@ -29,7 +26,7 @@ const LONG_TIMEOUT_MS = 120000; // 2 minutes for file uploads
 async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
-  timeoutMs: number = DEFAULT_TIMEOUT_MS
+  timeoutMs: number = TIMEOUTS.DEFAULT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -122,7 +119,7 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
       },
       ...options,
     },
-    DEFAULT_TIMEOUT_MS
+    TIMEOUTS.DEFAULT_MS
   );
 
   const data = await safeParseJson(response);
@@ -178,10 +175,10 @@ export async function previewTherapistCV(file: File, additionalInfo: string): Pr
       method: 'POST',
       body: formData,
       headers: {
-        'x-webhook-secret': ADMIN_SECRET,
+        [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
       },
     },
-    LONG_TIMEOUT_MS
+    TIMEOUTS.LONG_MS
   );
 
   const data = await safeParseJson(response);
@@ -219,10 +216,10 @@ export async function createTherapistFromCV(file: File, adminNotes: AdminNotes):
       method: 'POST',
       body: formData,
       headers: {
-        'x-webhook-secret': ADMIN_SECRET,
+        [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
       },
     },
-    LONG_TIMEOUT_MS
+    TIMEOUTS.LONG_MS
   );
 
   const data = await safeParseJson(response);
@@ -249,12 +246,12 @@ async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promis
     {
       headers: {
         'Content-Type': 'application/json',
-        'x-webhook-secret': ADMIN_SECRET,
+        [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
         ...options?.headers,
       },
       ...options,
     },
-    DEFAULT_TIMEOUT_MS
+    TIMEOUTS.DEFAULT_MS
   );
 
   const data = await safeParseJson(response);
@@ -352,6 +349,23 @@ export async function sendAdminMessage(
   );
   if (!response.data) {
     throw new Error('Failed to send message');
+  }
+  return response.data;
+}
+
+export async function clearConversation(
+  appointmentId: string,
+  data: { adminId: string; reason?: string }
+): Promise<{ id: string; status: string; message: string }> {
+  const response = await fetchAdminApi<{ id: string; status: string; message: string }>(
+    `/admin/dashboard/appointments/${appointmentId}/clear-conversation`,
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }
+  );
+  if (!response.data) {
+    throw new Error('Failed to clear conversation');
   }
   return response.data;
 }
