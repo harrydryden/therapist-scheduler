@@ -8,7 +8,7 @@ import {
   takeControl,
   releaseControl,
   sendAdminMessage,
-  clearConversation,
+  deleteAppointment,
 } from '../api/client';
 import type { AppointmentFilters, AppointmentListItem } from '../types';
 
@@ -57,9 +57,9 @@ export default function AdminDashboardPage() {
   const [controlReason, setControlReason] = useState('');
   const [mutationError, setMutationError] = useState<string | null>(null);
 
-  // Clear conversation state
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [clearReason, setClearReason] = useState('');
+  // Delete appointment state
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteReason, setDeleteReason] = useState('');
 
   // Fetch appointments list with auto-refresh
   const {
@@ -218,18 +218,20 @@ export default function AdminDashboardPage() {
     },
   });
 
-  const clearConversationMutation = useMutation({
+  const deleteAppointmentMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
-      clearConversation(id, { adminId: 'admin', reason }),
+      deleteAppointment(id, { adminId: 'admin', reason }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
+      // Clear selection since appointment no longer exists
+      setSelectedAppointment(null);
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
-      setShowClearConfirm(false);
-      setClearReason('');
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      setShowDeleteConfirm(false);
+      setDeleteReason('');
       setMutationError(null);
     },
     onError: (error) => {
-      setMutationError(error instanceof Error ? error.message : 'Failed to clear conversation');
+      setMutationError(error instanceof Error ? error.message : 'Failed to delete appointment');
     },
   });
 
@@ -738,38 +740,38 @@ export default function AdminDashboardPage() {
                     </div>
                   )}
 
-                  {/* Clear Conversation Section - Always visible for non-confirmed appointments */}
+                  {/* Delete Appointment Section - Always visible for non-confirmed appointments */}
                   {appointmentDetail.status !== 'confirmed' && (
                     <div className="mt-4 pt-4 border-t border-slate-200">
-                      {!showClearConfirm ? (
+                      {!showDeleteConfirm ? (
                         <button
-                          onClick={() => setShowClearConfirm(true)}
+                          onClick={() => setShowDeleteConfirm(true)}
                           className="w-full px-4 py-2 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors font-medium text-sm"
                         >
-                          Clear Conversation History
+                          Delete Appointment
                         </button>
                       ) : (
                         <div className="p-3 border border-red-200 rounded-lg bg-red-50">
-                          <h4 className="font-medium text-red-800 mb-2">⚠️ Clear Conversation?</h4>
+                          <h4 className="font-medium text-red-800 mb-2">⚠️ Delete Appointment?</h4>
                           <p className="text-sm text-red-700 mb-3">
-                            This will delete all conversation history and reset the appointment to pending status.
-                            The agent will start fresh as if this is a new request.
+                            This will permanently delete this appointment request and all conversation history.
+                            This action cannot be undone.
                           </p>
                           <div className="mb-3">
                             <label className="text-sm text-red-700 block mb-1">Reason (optional):</label>
                             <input
                               type="text"
-                              value={clearReason}
-                              onChange={(e) => setClearReason(e.target.value)}
-                              placeholder="Why are you clearing this conversation?"
+                              value={deleteReason}
+                              onChange={(e) => setDeleteReason(e.target.value)}
+                              placeholder="Why are you deleting this appointment?"
                               className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent outline-none"
                             />
                           </div>
                           <div className="flex gap-2">
                             <button
                               onClick={() => {
-                                setShowClearConfirm(false);
-                                setClearReason('');
+                                setShowDeleteConfirm(false);
+                                setDeleteReason('');
                               }}
                               className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-white transition-colors text-sm"
                             >
@@ -777,15 +779,15 @@ export default function AdminDashboardPage() {
                             </button>
                             <button
                               onClick={() =>
-                                clearConversationMutation.mutate({
+                                deleteAppointmentMutation.mutate({
                                   id: appointmentDetail.id,
-                                  reason: clearReason || undefined,
+                                  reason: deleteReason || undefined,
                                 })
                               }
-                              disabled={clearConversationMutation.isPending}
+                              disabled={deleteAppointmentMutation.isPending}
                               className="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50 text-sm font-medium"
                             >
-                              {clearConversationMutation.isPending ? 'Clearing...' : 'Yes, Clear History'}
+                              {deleteAppointmentMutation.isPending ? 'Deleting...' : 'Yes, Delete'}
                             </button>
                           </div>
                         </div>

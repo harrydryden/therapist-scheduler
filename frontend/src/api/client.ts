@@ -353,19 +353,19 @@ export async function sendAdminMessage(
   return response.data;
 }
 
-export async function clearConversation(
+export async function deleteAppointment(
   appointmentId: string,
   data: { adminId: string; reason?: string }
-): Promise<{ id: string; status: string; message: string }> {
-  const response = await fetchAdminApi<{ id: string; status: string; message: string }>(
-    `/admin/dashboard/appointments/${appointmentId}/clear-conversation`,
+): Promise<{ id: string; message: string }> {
+  const response = await fetchAdminApi<{ id: string; message: string }>(
+    `/admin/dashboard/appointments/${appointmentId}`,
     {
-      method: 'POST',
+      method: 'DELETE',
       body: JSON.stringify(data),
     }
   );
   if (!response.data) {
-    throw new Error('Failed to clear conversation');
+    throw new Error('Failed to delete appointment');
   }
   return response.data;
 }
