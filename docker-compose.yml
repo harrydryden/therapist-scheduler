@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-200}
+      - SSE_MAX_CONNECTIONS=${SSE_MAX_CONNECTIONS:-100}
+      - TOKEN_BUCKET_CAPACITY=${TOKEN_BUCKET_CAPACITY:-200}
+      - TOKEN_BUCKET_REFILL_RATE=${TOKEN_BUCKET_REFILL_RATE:-20}
+      - MAX_CONNECTIONS_PER_USER=${MAX_CONNECTIONS_PER_USER:-3}
+      - MAX_TOTAL_CONNECTIONS=${MAX_TOTAL_CONNECTIONS:-50}
+      - CONNECTION_TIMEOUT=${CONNECTION_TIMEOUT:-300000}
+      - PERFORMANCE_MONITORING=${PERFORMANCE_MONITORING:-true}
+      - PERFORMANCE_LOG_INTERVAL=${PERFORMANCE_LOG_INTERVAL:-300000}
+      - PERFORMANCE_MAX_SAMPLES=${PERFORMANCE_MAX_SAMPLES:-100}
+      - SLOW_QUERY_THRESHOLD=${SLOW_QUERY_THRESHOLD:-1000}
+      - SLOW_MESSAGE_THRESHOLD=${SLOW_MESSAGE_THRESHOLD:-5000}
+      - SLOW_AI_THRESHOLD=${SLOW_AI_THRESHOLD:-30000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      limits:
+        cpus: '1.0'
+        memory: 1G
+      reservations:
+        cpus: '0.5'
+        memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-deliberation}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    deploy:
+      limits:
+        cpus: '0.5'
+        memory: 512M
+      reservations:
+        cpus: '0.25'
+        memory: 256M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    deploy:
+      limits:
+        cpus: '0.25'
+        memory: 256M
+      reservations:
+        cpus: '0.1'
+        memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+

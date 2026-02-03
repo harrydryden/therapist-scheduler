@@ -1,0 +1,8 @@
+{
+  "devDependencies": {
+    "supabase": "^2.39.2"
+  },
+  "dependencies": {
+    "@railway/cli": "^4.27.4"
+  }
+}
