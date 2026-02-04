@@ -36,3 +36,29 @@ export const UPLOAD = {
   MAX_FILE_SIZE_MB: 10,
   ALLOWED_TYPES: ['application/pdf'] as const,
 } as const;
+
+// UI Layout constants
+export const UI = {
+  // TherapistCard section heights (in pixels)
+  CATEGORY_SECTION_HEIGHT: 56,
+  BIO_SECTION_HEIGHT: 100,
+  // Maximum visible items before "show more"
+  MAX_VISIBLE_BADGES: 2,
+  MAX_AVAILABILITY_SLOTS: 2,
+  // Bio truncation
+  BIO_TRUNCATE_LENGTH: 100,
+  // Z-index layers
+  Z_INDEX: {
+    TOOLTIP: 9999,
+    MODAL: 1000,
+    DROPDOWN: 100,
+  },
+} as const;
+
+// Admin dashboard settings
+export const ADMIN = {
+  REFETCH_INTERVAL_MS: 30000, // 30 seconds
+  DEFAULT_LIMIT: 100,
+  MAX_CONTENT_HEIGHT: 600, // pixels
+  TEXT_AREA_MAX_LENGTH: 12000, // characters (~2000 words)
+} as const;

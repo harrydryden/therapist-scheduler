@@ -8,6 +8,7 @@ import {
   CATEGORY_LABELS,
   CATEGORY_COLORS,
 } from '../config/therapist-categories';
+import { UI } from '../config/constants';
 
 interface TherapistCardProps {
   therapist: Therapist;
@@ -55,8 +56,9 @@ function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
         <div
           id={`tooltip-${type.replace(/\s/g, '-')}`}
           role="tooltip"
-          className="fixed z-[9999] px-3 py-2 text-xs text-white bg-slate-800 rounded-lg shadow-lg max-w-xs whitespace-normal pointer-events-none"
+          className="fixed px-3 py-2 text-xs text-white bg-slate-800 rounded-lg shadow-lg max-w-xs whitespace-normal pointer-events-none"
           style={{
+            zIndex: UI.Z_INDEX.TOOLTIP,
             top: tooltipPosition.top,
             left: tooltipPosition.left,
             transform: 'translate(-50%, -100%)',
@@ -86,10 +88,6 @@ function GeneralBadge({ categoryType }: { categoryType: 'approach' | 'style' | '
   );
 }
 
-// Constants for category display
-const MAX_VISIBLE_BADGES = 2;
-const SECTION_HEIGHT = 56; // pixels
-
 // Reusable category section component
 interface CategorySectionProps {
   label: string;
@@ -101,14 +99,14 @@ interface CategorySectionProps {
 
 function CategorySection({ label, items, categoryType, isExpanded, onToggle }: CategorySectionProps) {
   const hasItems = items && items.length > 0;
-  const visibleItems = isExpanded ? items : items.slice(0, MAX_VISIBLE_BADGES);
-  const hiddenCount = items.length - MAX_VISIBLE_BADGES;
+  const visibleItems = isExpanded ? items : items.slice(0, UI.MAX_VISIBLE_BADGES);
+  const hiddenCount = items.length - UI.MAX_VISIBLE_BADGES;
   const hasMore = hiddenCount > 0;
 
   return (
     <div
-      className={`${isExpanded ? '' : `h-[${SECTION_HEIGHT}px]`} overflow-hidden`}
-      style={isExpanded ? undefined : { height: `${SECTION_HEIGHT}px` }}
+      className="overflow-hidden"
+      style={isExpanded ? undefined : { height: `${UI.CATEGORY_SECTION_HEIGHT}px` }}
     >
       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
         {label}
@@ -191,8 +189,6 @@ function formatAvailability(availability: TherapistAvailability): string[] {
   });
 }
 
-const MAX_AVAILABILITY_SLOTS = 2;
-
 function AvailabilityDisplay({ availability, isExpanded, onToggle }: AvailabilityDisplayProps) {
   const hasAvailability = availability && availability.slots && availability.slots.length > 0;
 
@@ -208,8 +204,8 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
   }
 
   const formattedSlots = formatAvailability(availability);
-  const displaySlots = isExpanded ? formattedSlots : formattedSlots.slice(0, MAX_AVAILABILITY_SLOTS);
-  const hasMore = formattedSlots.length > MAX_AVAILABILITY_SLOTS;
+  const displaySlots = isExpanded ? formattedSlots : formattedSlots.slice(0, UI.MAX_AVAILABILITY_SLOTS);
+  const hasMore = formattedSlots.length > UI.MAX_AVAILABILITY_SLOTS;
 
   return (
     <div className="text-slate-600">
@@ -224,9 +220,11 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
           {hasMore && (
             <button
               onClick={onToggle}
-              className="text-xs text-teal-600 hover:text-teal-700 font-medium"
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Show fewer availability times' : 'Show more availability times'}
+              className="text-xs text-teal-600 hover:text-teal-700 font-medium focus:outline-none focus:ring-2 focus:ring-teal-500 rounded"
             >
-              {isExpanded ? 'Show less' : `+${formattedSlots.length - MAX_AVAILABILITY_SLOTS} more`}
+              {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more`}
             </button>
           )}
         </div>
@@ -305,11 +303,14 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         />
 
         {/* Bio - fixed height when collapsed */}
-        <div className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'h-[100px] overflow-hidden'}`}>
+        <div
+          className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'overflow-hidden'}`}
+          style={isExpanded('bio') ? undefined : { height: `${UI.BIO_SECTION_HEIGHT}px` }}
+        >
           <p className={`text-sm text-slate-600 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
             {therapist.bio}
           </p>
-          {therapist.bio.length > 100 && (
+          {therapist.bio.length > UI.BIO_TRUNCATE_LENGTH && (
             <button
               onClick={() => toggleSection('bio')}
               aria-expanded={isExpanded('bio')}
