@@ -320,12 +320,10 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Bio - fixed height when collapsed (100px: 16px padding + 56px for text + 28px button) */}
-        <div className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'h-[100px]'} overflow-hidden`}>
-          <p className="text-sm text-slate-600 leading-relaxed line-clamp-2" style={isExpanded('bio') ? {} : undefined}>
-            {isExpanded('bio')
-              ? therapist.bio
-              : therapist.bio.slice(0, 100) + (therapist.bio.length > 100 ? '...' : '')}
+        {/* Bio - fixed height when collapsed */}
+        <div className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'h-[100px] overflow-hidden'}`}>
+          <p className={`text-sm text-slate-600 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
+            {therapist.bio}
           </p>
           {therapist.bio.length > 100 && (
             <button
