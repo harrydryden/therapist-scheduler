@@ -1,4 +1,5 @@
-import { useState, memo } from 'react';
+import { useState, memo, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation } from '@tanstack/react-query';
 import { submitAppointmentRequest } from '../api/client';
 import type { Therapist, TherapistAvailability } from '../types';
@@ -12,7 +13,7 @@ interface TherapistCardProps {
   therapist: Therapist;
 }
 
-// Category badge with tooltip
+// Category badge with tooltip (uses portal to escape overflow:hidden)
 interface CategoryBadgeProps {
   type: string;
   categoryType: 'approach' | 'style' | 'areasOfFocus';
@@ -20,12 +21,25 @@ interface CategoryBadgeProps {
 
 function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
   const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipPosition, setTooltipPosition] = useState({ top: 0, left: 0 });
+  const badgeRef = useRef<HTMLSpanElement>(null);
   const explainer = getExplainer(categoryType, type);
   const colorClass = CATEGORY_COLORS[categoryType];
+
+  useEffect(() => {
+    if (showTooltip && badgeRef.current) {
+      const rect = badgeRef.current.getBoundingClientRect();
+      setTooltipPosition({
+        top: rect.top - 8, // Position above the badge with small gap
+        left: rect.left + rect.width / 2, // Center horizontally
+      });
+    }
+  }, [showTooltip]);
 
   return (
     <div className="relative inline-block">
       <span
+        ref={badgeRef}
         className={`inline-block px-3 py-1 text-xs font-medium rounded-full border cursor-help ${colorClass}`}
         onMouseEnter={() => setShowTooltip(true)}
         onMouseLeave={() => setShowTooltip(false)}
@@ -37,17 +51,23 @@ function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
       >
         {type}
       </span>
-      {showTooltip && explainer && (
+      {showTooltip && explainer && createPortal(
         <div
           id={`tooltip-${type.replace(/\s/g, '-')}`}
           role="tooltip"
-          className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs text-white bg-slate-800 rounded-lg shadow-lg max-w-xs whitespace-normal"
+          className="fixed z-[9999] px-3 py-2 text-xs text-white bg-slate-800 rounded-lg shadow-lg max-w-xs whitespace-normal pointer-events-none"
+          style={{
+            top: tooltipPosition.top,
+            left: tooltipPosition.left,
+            transform: 'translate(-50%, -100%)',
+          }}
         >
           {explainer}
           <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1">
             <div className="border-4 border-transparent border-t-slate-800"></div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
