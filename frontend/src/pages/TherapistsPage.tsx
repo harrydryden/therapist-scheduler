@@ -22,25 +22,29 @@ export default function TherapistsPage() {
     return therapists.filter((t) => t.active);
   }, [therapists]);
 
-  // Helper to get all categories for a therapist
-  const getAllCategories = (t: { approach: string[]; style: string[]; areasOfFocus: string[] }) => {
-    return [...(t.approach || []), ...(t.style || []), ...(t.areasOfFocus || [])];
-  };
-
-  // Extract unique categories from active therapists (combines approach, style, areasOfFocus)
-  const allCategories = useMemo(() => {
+  // Extract unique Areas of Focus from active therapists
+  const areasOfFocusOptions = useMemo(() => {
     const categorySet = new Set<string>();
     activeTherapists.forEach((t) => {
-      getAllCategories(t).forEach((c) => categorySet.add(c));
+      (t.areasOfFocus || []).forEach((c) => categorySet.add(c));
     });
     return Array.from(categorySet).sort();
   }, [activeTherapists]);
 
-  // Filter therapists by selected category
+  // Filter therapists by selected Area of Focus
   const filteredTherapists = useMemo(() => {
     if (!selectedCategory) return activeTherapists;
-    return activeTherapists.filter((t) => getAllCategories(t).includes(selectedCategory));
+    return activeTherapists.filter((t) => (t.areasOfFocus || []).includes(selectedCategory));
   }, [activeTherapists, selectedCategory]);
+
+  // Toggle filter - clicking same option again deselects it
+  const handleFilterChange = (category: string | null) => {
+    if (category === selectedCategory) {
+      setSelectedCategory(null); // Deselect if clicking the same option
+    } else {
+      setSelectedCategory(category);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -73,12 +77,12 @@ export default function TherapistsPage() {
 
   return (
     <div>
-      {/* Filter Bar */}
-      {allCategories.length > 0 && (
+      {/* Filter Bar - Areas of Focus */}
+      {areasOfFocusOptions.length > 0 && (
         <FilterBar
-          categories={allCategories}
+          categories={areasOfFocusOptions}
           selectedCategory={selectedCategory}
-          onFilterChange={setSelectedCategory}
+          onFilterChange={handleFilterChange}
         />
       )}
 
