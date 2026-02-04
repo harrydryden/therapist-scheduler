@@ -66,7 +66,7 @@ function GeneralBadge({ categoryType }: { categoryType: 'approach' | 'style' | '
   );
 }
 
-// Expandable Category section component with fixed height
+// Category section component with expandable overflow
 interface CategorySectionProps {
   label: string;
   items: string[];
@@ -82,9 +82,9 @@ function CategorySection({ label, items, categoryType, maxItems, isExpanded, onT
   const hasOverflow = hasItems && items.length > maxItems;
 
   return (
-    <div className="h-[52px] flex flex-col">
-      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{label}</span>
-      <div className="flex flex-wrap gap-1.5 mt-1 items-center flex-1">
+    <div>
+      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">{label}</span>
+      <div className="flex flex-wrap gap-1.5 items-center">
         {hasItems ? (
           <>
             {displayItems.map((item) => (
@@ -96,6 +96,14 @@ function CategorySection({ label, items, categoryType, maxItems, isExpanded, onT
                 className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors"
               >
                 +{items.length - maxItems}
+              </button>
+            )}
+            {hasOverflow && isExpanded && (
+              <button
+                onClick={onToggle}
+                className="inline-block px-2 py-1 text-xs font-medium text-teal-600 hover:text-teal-700"
+              >
+                Show less
               </button>
             )}
           </>
@@ -127,7 +135,6 @@ const DAY_ABBREVIATIONS: Record<string, string> = {
 };
 
 function formatAvailability(availability: TherapistAvailability): string[] {
-  // Group slots by day
   const slotsByDay: Record<string, string[]> = {};
 
   for (const slot of availability.slots) {
@@ -139,7 +146,6 @@ function formatAvailability(availability: TherapistAvailability): string[] {
     slotsByDay[day].push(timeRange);
   }
 
-  // Sort days and format output
   const sortedDays = Object.keys(slotsByDay).sort(
     (a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b)
   );
@@ -157,7 +163,6 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
   const hasAvailability = availability && availability.slots && availability.slots.length > 0;
 
   if (!hasAvailability) {
-    // Elegant fallback state
     return (
       <div className="flex items-center gap-2 text-slate-500">
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -182,12 +187,12 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
           {displaySlots.map((slot, idx) => (
             <div key={idx} className="text-slate-600">{slot}</div>
           ))}
-          {hasMore && !isExpanded && (
+          {hasMore && (
             <button
               onClick={onToggle}
               className="text-xs text-teal-600 hover:text-teal-700 font-medium"
             >
-              +{formattedSlots.length - MAX_AVAILABILITY_SLOTS} more days
+              {isExpanded ? 'Show less' : `+${formattedSlots.length - MAX_AVAILABILITY_SLOTS} more days`}
             </button>
           )}
         </div>
@@ -195,16 +200,6 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
     </div>
   );
 }
-
-// Fixed heights for consistent alignment
-const SECTION_HEIGHTS = {
-  name: 'h-[36px]',
-  areasOfFocus: 'h-[52px]',
-  approach: 'h-[52px]',
-  style: 'h-[52px]',
-  bio: 'h-[72px]',
-  availability: 'h-[72px]',
-};
 
 const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardProps) {
   const [firstName, setFirstName] = useState('');
@@ -241,20 +236,17 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
     });
   };
 
-  // Check if any section is expanded to adjust layout
-  const hasExpandedContent = expandedSections.size > 0;
-
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden hover:shadow-md transition-all duration-200 flex flex-col">
-      {/* Name - fixed height */}
-      <div className={`px-6 pt-6 ${hasExpandedContent ? '' : SECTION_HEIGHTS.name}`}>
-        <h3 className="text-xl font-bold text-slate-900 break-words line-clamp-1">{therapist.name}</h3>
-      </div>
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden hover:shadow-md transition-all duration-200 flex flex-col h-full">
+      {/* Content area - grows to fill space */}
+      <div className="flex-1 flex flex-col">
+        {/* Name */}
+        <div className="px-6 pt-6 pb-2">
+          <h3 className="text-xl font-bold text-slate-900 break-words line-clamp-1">{therapist.name}</h3>
+        </div>
 
-      {/* Category Sections - fixed heights unless expanded */}
-      <div className="px-6 pt-4 space-y-1">
         {/* Areas of Focus */}
-        <div className={hasExpandedContent && isExpanded('areasOfFocus') ? '' : SECTION_HEIGHTS.areasOfFocus}>
+        <div className="px-6 py-2">
           <CategorySection
             label={CATEGORY_LABELS.areasOfFocus}
             items={therapist.areasOfFocus || []}
@@ -266,7 +258,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         </div>
 
         {/* Approach */}
-        <div className={hasExpandedContent && isExpanded('approach') ? '' : SECTION_HEIGHTS.approach}>
+        <div className="px-6 py-2">
           <CategorySection
             label={CATEGORY_LABELS.approach}
             items={therapist.approach || []}
@@ -278,7 +270,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         </div>
 
         {/* Style */}
-        <div className={hasExpandedContent && isExpanded('style') ? '' : SECTION_HEIGHTS.style}>
+        <div className="px-6 py-2">
           <CategorySection
             label={CATEGORY_LABELS.style}
             items={therapist.style || []}
@@ -288,38 +280,40 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
             onToggle={() => toggleSection('style')}
           />
         </div>
-      </div>
 
-      {/* Bio - fixed height unless expanded */}
-      <div className={`px-6 py-3 ${hasExpandedContent && isExpanded('bio') ? '' : SECTION_HEIGHTS.bio}`}>
-        <p className="text-sm text-slate-600 leading-relaxed">
-          {isExpanded('bio') ? therapist.bio : therapist.bio.slice(0, 100) + (therapist.bio.length > 100 ? '...' : '')}
-        </p>
-        {therapist.bio.length > 100 && (
-          <button
-            onClick={() => toggleSection('bio')}
-            className="text-sm font-medium text-teal-600 hover:text-teal-700 mt-1"
-          >
-            {isExpanded('bio') ? 'Show less' : 'Read more'}
-          </button>
-        )}
-      </div>
+        {/* Bio */}
+        <div className="px-6 py-3">
+          <p className="text-sm text-slate-600 leading-relaxed">
+            {isExpanded('bio')
+              ? therapist.bio
+              : therapist.bio.slice(0, 100) + (therapist.bio.length > 100 ? '...' : '')}
+          </p>
+          {therapist.bio.length > 100 && (
+            <button
+              onClick={() => toggleSection('bio')}
+              className="text-sm font-medium text-teal-600 hover:text-teal-700 mt-1"
+            >
+              {isExpanded('bio') ? 'Show less' : 'Read more'}
+            </button>
+          )}
+        </div>
 
-      {/* Availability Section - fixed height unless expanded */}
-      <div className={`px-6 pb-4 ${hasExpandedContent && isExpanded('availability') ? '' : SECTION_HEIGHTS.availability}`}>
-        <div className="pt-3 border-t border-slate-100">
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Indicative Availability</span>
-          <p className="text-xs text-slate-400 mt-0.5 mb-2">More times available upon request</p>
-          <AvailabilityDisplay
-            availability={therapist.availability}
-            isExpanded={isExpanded('availability')}
-            onToggle={() => toggleSection('availability')}
-          />
+        {/* Availability Section */}
+        <div className="px-6 py-3 mt-auto">
+          <div className="pt-3 border-t border-slate-100">
+            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block">Indicative Availability</span>
+            <p className="text-xs text-slate-400 mt-0.5 mb-2">More times available upon request</p>
+            <AvailabilityDisplay
+              availability={therapist.availability}
+              isExpanded={isExpanded('availability')}
+              onToggle={() => toggleSection('availability')}
+            />
+          </div>
         </div>
       </div>
 
       {/* Booking Form - always at bottom */}
-      <div className="border-t border-slate-100 p-6 bg-slate-50 mt-auto">
+      <div className="border-t border-slate-100 p-6 bg-slate-50">
         {mutation.isSuccess ? (
           <div className="text-center py-2">
             <div className="inline-flex items-center justify-center w-12 h-12 bg-teal-100 rounded-full mb-3">
