@@ -2,6 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
+html, body {
   @apply bg-gray-50 text-gray-900 antialiased;
+  overflow-x: hidden;
+}
+
+/* Ensure smooth scrolling on mobile */
+html {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
 }
