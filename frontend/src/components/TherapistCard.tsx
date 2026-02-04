@@ -197,27 +197,27 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           {therapist.name}
         </h3>
 
-        {/* Categories container - fixed heights for cross-card alignment */}
-        {/* Areas of Focus - 2 rows of badges (100px: 18px label + 6px gap + 76px for 2 badge rows with spacing) */}
-        <div className={`${isExpanded('areasOfFocus') ? '' : 'h-[100px]'} overflow-hidden`}>
+        {/* Categories container - all sections limited to 1 row when collapsed (46px each) */}
+        {/* Areas of Focus */}
+        <div className={`${isExpanded('areasOfFocus') ? '' : 'h-[46px]'} overflow-hidden`}>
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.areasOfFocus}
           </span>
           <div className="flex flex-wrap gap-1.5 items-start content-start">
             {(therapist.areasOfFocus && therapist.areasOfFocus.length > 0) ? (
               <>
-                {(isExpanded('areasOfFocus') ? therapist.areasOfFocus : therapist.areasOfFocus.slice(0, 3)).map((item) => (
+                {(isExpanded('areasOfFocus') ? therapist.areasOfFocus : therapist.areasOfFocus.slice(0, 2)).map((item) => (
                   <CategoryBadge key={item} type={item} categoryType="areasOfFocus" />
                 ))}
-                {therapist.areasOfFocus.length > 3 && !isExpanded('areasOfFocus') && (
+                {therapist.areasOfFocus.length > 2 && !isExpanded('areasOfFocus') && (
                   <button
                     onClick={() => toggleSection('areasOfFocus')}
                     className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors"
                   >
-                    +{therapist.areasOfFocus.length - 3}
+                    +{therapist.areasOfFocus.length - 2}
                   </button>
                 )}
-                {therapist.areasOfFocus.length > 3 && isExpanded('areasOfFocus') && (
+                {therapist.areasOfFocus.length > 2 && isExpanded('areasOfFocus') && (
                   <button
                     onClick={() => toggleSection('areasOfFocus')}
                     className="inline-block px-2 py-1 text-xs font-medium text-teal-600 hover:text-teal-700"
@@ -232,8 +232,8 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Approach - 1 row of badges (52px: 18px label + 6px gap + 28px badge) */}
-        <div className={`${isExpanded('approach') ? '' : 'h-[52px]'} overflow-hidden`}>
+        {/* Approach */}
+        <div className={`${isExpanded('approach') ? '' : 'h-[46px]'} overflow-hidden`}>
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.approach}
           </span>
@@ -266,8 +266,8 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Style - 1 row of badges (52px) */}
-        <div className={`${isExpanded('style') ? '' : 'h-[52px]'} overflow-hidden`}>
+        {/* Style */}
+        <div className={`${isExpanded('style') ? '' : 'h-[46px]'} overflow-hidden`}>
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.style}
           </span>
