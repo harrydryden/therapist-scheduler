@@ -198,9 +198,9 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         </h3>
 
         {/* Categories container - fixed heights for cross-card alignment */}
-        {/* Areas of Focus - 2 rows of badges (approx 72px: 16px label + 4px gap + 52px for 2 badge rows) */}
-        <div className={`${isExpanded('areasOfFocus') ? '' : 'h-[72px]'}`}>
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1">
+        {/* Areas of Focus - 2 rows of badges (100px: 18px label + 6px gap + 76px for 2 badge rows with spacing) */}
+        <div className={`${isExpanded('areasOfFocus') ? '' : 'h-[100px]'} overflow-hidden`}>
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.areasOfFocus}
           </span>
           <div className="flex flex-wrap gap-1.5 items-start content-start">
@@ -232,9 +232,9 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Approach - 1 row of badges (approx 44px: 16px label + 4px gap + 24px badge) */}
-        <div className={`${isExpanded('approach') ? '' : 'h-[44px]'}`}>
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1">
+        {/* Approach - 1 row of badges (52px: 18px label + 6px gap + 28px badge) */}
+        <div className={`${isExpanded('approach') ? '' : 'h-[52px]'} overflow-hidden`}>
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.approach}
           </span>
           <div className="flex flex-wrap gap-1.5 items-start content-start">
@@ -266,9 +266,9 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Style - 1 row of badges (approx 44px) */}
-        <div className={`${isExpanded('style') ? '' : 'h-[44px]'}`}>
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1">
+        {/* Style - 1 row of badges (52px) */}
+        <div className={`${isExpanded('style') ? '' : 'h-[52px]'} overflow-hidden`}>
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
             {CATEGORY_LABELS.style}
           </span>
           <div className="flex flex-wrap gap-1.5 items-start content-start">
@@ -300,8 +300,8 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           </div>
         </div>
 
-        {/* Bio - fixed height when collapsed (approx 88px: 16px padding + 48px for 3 lines + 24px button) */}
-        <div className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'h-[88px]'}`}>
+        {/* Bio - fixed height when collapsed (100px: 16px padding + 56px for text + 28px button) */}
+        <div className={`mt-4 pt-4 border-t border-slate-100 ${isExpanded('bio') ? '' : 'h-[100px]'} overflow-hidden`}>
           <p className="text-sm text-slate-600 leading-relaxed line-clamp-2" style={isExpanded('bio') ? {} : undefined}>
             {isExpanded('bio')
               ? therapist.bio
