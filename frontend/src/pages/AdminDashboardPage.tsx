@@ -573,10 +573,21 @@ export default function AdminDashboardPage() {
                       </p>
                     </div>
                   )}
-                  {appointmentDetail.gmailThreadId && (
-                    <p className="mt-2 text-xs text-slate-400">
-                      Thread ID: {appointmentDetail.gmailThreadId}
-                    </p>
+                  {/* Thread IDs for debugging */}
+                  {(appointmentDetail.gmailThreadId || appointmentDetail.therapistGmailThreadId) && (
+                    <div className="mt-3 p-2 bg-slate-50 rounded-lg border border-slate-200">
+                      <p className="text-xs font-medium text-slate-500 mb-1">Email Thread IDs</p>
+                      {appointmentDetail.gmailThreadId && (
+                        <p className="text-xs text-slate-400 font-mono">
+                          Client: {appointmentDetail.gmailThreadId}
+                        </p>
+                      )}
+                      {appointmentDetail.therapistGmailThreadId && (
+                        <p className="text-xs text-slate-400 font-mono">
+                          Therapist: {appointmentDetail.therapistGmailThreadId}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
 

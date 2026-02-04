@@ -130,6 +130,7 @@ export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCou
   therapistAvailability: TherapistAvailability | null;
   notes: string | null;
   gmailThreadId: string | null;
+  therapistGmailThreadId: string | null;
   humanControlTakenAt: string | null;
   humanControlReason: string | null;
 }
