@@ -62,6 +62,7 @@ function ConfirmModal({
 
 export default function AdminIngestionPage() {
   const [therapistName, setTherapistName] = useState('');
+  const [therapistEmail, setTherapistEmail] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [additionalInfo, setAdditionalInfo] = useState('');
   const [previewData, setPreviewData] = useState<ExtractedTherapistProfile | null>(null);
@@ -87,14 +88,15 @@ export default function AdminIngestionPage() {
       if (!file && additionalInfo.trim().length < 50) {
         throw new Error('When no PDF is uploaded, please provide additional information (minimum 50 characters)');
       }
-      // Prepend the name to additional info so AI knows the correct name
-      const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}\n\n${additionalInfo}`;
+      // Prepend the name and email to additional info so AI knows the correct details
+      const emailInfo = therapistEmail.trim() ? `\nTherapist Email: ${therapistEmail.trim()}` : '';
+      const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}${emailInfo}\n\n${additionalInfo}`;
       return previewTherapistCV(file, fullAdditionalInfo);
     },
     onSuccess: (data) => {
       setPreviewData(data.extractedProfile);
-      // Pre-fill override fields with extracted values
-      setOverrideEmail(data.extractedProfile.email || '');
+      // Pre-fill override fields - use manually entered email if provided, otherwise extracted
+      setOverrideEmail(therapistEmail.trim() || data.extractedProfile.email || '');
       setOverrideSpecialisms(data.extractedProfile.specialisms?.join(', ') || '');
     },
   });
@@ -107,12 +109,14 @@ export default function AdminIngestionPage() {
         throw new Error('When no PDF is uploaded, please provide additional information (minimum 50 characters)');
       }
 
-      // Prepend the name to additional info
-      const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}\n\n${additionalInfo}`;
+      // Prepend the name and email to additional info
+      const emailInfo = therapistEmail.trim() ? `\nTherapist Email: ${therapistEmail.trim()}` : '';
+      const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}${emailInfo}\n\n${additionalInfo}`;
 
       const adminNotes: AdminNotes = {
         additionalInfo: fullAdditionalInfo || undefined,
-        overrideEmail: overrideEmail || undefined,
+        // Use therapistEmail as override if provided, otherwise fall back to overrideEmail from preview
+        overrideEmail: therapistEmail.trim() || overrideEmail || undefined,
         overrideSpecialisms: overrideSpecialisms
           ? overrideSpecialisms.split(',').map((s) => s.trim()).filter(Boolean)
           : undefined,
@@ -125,6 +129,7 @@ export default function AdminIngestionPage() {
       setCreatedTherapist({ id: data.therapistId, url: data.notionUrl });
       // Reset form
       setTherapistName('');
+      setTherapistEmail('');
       setFile(null);
       setAdditionalInfo('');
       setPreviewData(null);
@@ -178,6 +183,7 @@ export default function AdminIngestionPage() {
 
   const handleReset = () => {
     setTherapistName('');
+    setTherapistEmail('');
     setFile(null);
     setAdditionalInfo('');
     setPreviewData(null);
@@ -247,6 +253,24 @@ export default function AdminIngestionPage() {
                 placeholder="Enter the therapist's full name"
                 required
               />
+            </div>
+
+            {/* Therapist Email */}
+            <div>
+              <label htmlFor="therapistEmail" className="block text-sm font-medium text-slate-700 mb-2">
+                Therapist Email <span className="text-slate-400 font-normal">- Optional (can be extracted from PDF)</span>
+              </label>
+              <input
+                type="email"
+                id="therapistEmail"
+                value={therapistEmail}
+                onChange={(e) => setTherapistEmail(e.target.value.trim().replace(/\s/g, ''))}
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                placeholder="therapist@example.com"
+              />
+              <p className="text-sm text-slate-500 mt-1">
+                If provided, this will override any email extracted from the PDF
+              </p>
             </div>
 
             {/* PDF Upload */}
