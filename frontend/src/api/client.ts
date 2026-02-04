@@ -207,6 +207,16 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
   if (adminNotes.overrideSpecialisms) {
     formData.append('overrideSpecialisms', JSON.stringify(adminNotes.overrideSpecialisms));
   }
+  // New category overrides
+  if (adminNotes.overrideApproach) {
+    formData.append('overrideApproach', JSON.stringify(adminNotes.overrideApproach));
+  }
+  if (adminNotes.overrideStyle) {
+    formData.append('overrideStyle', JSON.stringify(adminNotes.overrideStyle));
+  }
+  if (adminNotes.overrideAreasOfFocus) {
+    formData.append('overrideAreasOfFocus', JSON.stringify(adminNotes.overrideAreasOfFocus));
+  }
   if (adminNotes.overrideAvailability) {
     formData.append('overrideAvailability', JSON.stringify(adminNotes.overrideAvailability));
   }

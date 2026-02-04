@@ -2,6 +2,14 @@ import { useState, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { previewTherapistCV, createTherapistFromCV } from '../api/client';
 import type { ExtractedTherapistProfile, AdminNotes } from '../types';
+import {
+  APPROACH_OPTIONS,
+  STYLE_OPTIONS,
+  AREAS_OF_FOCUS_OPTIONS,
+  CATEGORY_LABELS,
+  CATEGORY_COLORS,
+  type CategoryOption,
+} from '../config/therapist-categories';
 
 // Toast notification component for file validation errors
 function Toast({ message, onClose }: { message: string; onClose: () => void }) {
@@ -60,6 +68,50 @@ function ConfirmModal({
   );
 }
 
+// Category selector component with checkboxes and tooltips
+interface CategorySelectorProps {
+  label: string;
+  options: CategoryOption[];
+  selected: string[];
+  onChange: (selected: string[]) => void;
+  colorClass: string;
+}
+
+function CategorySelector({ label, options, selected, onChange, colorClass }: CategorySelectorProps) {
+  const toggleOption = (type: string) => {
+    if (selected.includes(type)) {
+      onChange(selected.filter((s) => s !== type));
+    } else {
+      onChange([...selected, type]);
+    }
+  };
+
+  return (
+    <div>
+      <label className="block text-sm font-medium text-slate-700 mb-2">{label}</label>
+      <div className="space-y-2">
+        {options.map((option) => (
+          <div key={option.type} className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              id={`category-${option.type}`}
+              checked={selected.includes(option.type)}
+              onChange={() => toggleOption(option.type)}
+              className="mt-1 h-4 w-4 text-teal-600 focus:ring-teal-500 border-slate-300 rounded"
+            />
+            <label htmlFor={`category-${option.type}`} className="flex-1 cursor-pointer">
+              <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full border ${colorClass}`}>
+                {option.type}
+              </span>
+              <p className="text-sm text-slate-500 mt-0.5">{option.explainer}</p>
+            </label>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminIngestionPage() {
   const [therapistName, setTherapistName] = useState('');
   const [therapistEmail, setTherapistEmail] = useState('');
@@ -69,7 +121,12 @@ export default function AdminIngestionPage() {
 
   // Override fields
   const [overrideEmail, setOverrideEmail] = useState('');
-  const [overrideSpecialisms, setOverrideSpecialisms] = useState('');
+
+  // New category overrides
+  const [overrideApproach, setOverrideApproach] = useState<string[]>([]);
+  const [overrideStyle, setOverrideStyle] = useState<string[]>([]);
+  const [overrideAreasOfFocus, setOverrideAreasOfFocus] = useState<string[]>([]);
+
   const [internalNotes, setInternalNotes] = useState('');
 
   // Success state
@@ -97,7 +154,11 @@ export default function AdminIngestionPage() {
       setPreviewData(data.extractedProfile);
       // Pre-fill override fields - use manually entered email if provided, otherwise extracted
       setOverrideEmail(therapistEmail.trim() || data.extractedProfile.email || '');
-      setOverrideSpecialisms(data.extractedProfile.specialisms?.join(', ') || '');
+
+      // Pre-fill new categories from extraction
+      setOverrideApproach(data.extractedProfile.approach || []);
+      setOverrideStyle(data.extractedProfile.style || []);
+      setOverrideAreasOfFocus(data.extractedProfile.areasOfFocus || []);
     },
   });
 
@@ -117,9 +178,10 @@ export default function AdminIngestionPage() {
         additionalInfo: fullAdditionalInfo || undefined,
         // Use therapistEmail as override if provided, otherwise fall back to overrideEmail from preview
         overrideEmail: therapistEmail.trim() || overrideEmail || undefined,
-        overrideSpecialisms: overrideSpecialisms
-          ? overrideSpecialisms.split(',').map((s) => s.trim()).filter(Boolean)
-          : undefined,
+        // New category overrides
+        overrideApproach: overrideApproach.length > 0 ? overrideApproach : undefined,
+        overrideStyle: overrideStyle.length > 0 ? overrideStyle : undefined,
+        overrideAreasOfFocus: overrideAreasOfFocus.length > 0 ? overrideAreasOfFocus : undefined,
         notes: internalNotes || undefined,
       };
 
@@ -134,7 +196,9 @@ export default function AdminIngestionPage() {
       setAdditionalInfo('');
       setPreviewData(null);
       setOverrideEmail('');
-      setOverrideSpecialisms('');
+      setOverrideApproach([]);
+      setOverrideStyle([]);
+      setOverrideAreasOfFocus([]);
       setInternalNotes('');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -188,7 +252,9 @@ export default function AdminIngestionPage() {
     setAdditionalInfo('');
     setPreviewData(null);
     setOverrideEmail('');
-    setOverrideSpecialisms('');
+    setOverrideApproach([]);
+    setOverrideStyle([]);
+    setOverrideAreasOfFocus([]);
     setInternalNotes('');
     setCreatedTherapist(null);
     if (fileInputRef.current) {
@@ -394,7 +460,7 @@ export default function AdminIngestionPage() {
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-6">
             <h2 className="text-xl font-bold text-slate-900 mb-4">Extracted Profile</h2>
 
-            <div className="space-y-4">
+            <div className="space-y-6">
               {/* Name */}
               <div>
                 <label className="block text-sm font-medium text-slate-500 mb-1">Name</label>
@@ -423,28 +489,40 @@ export default function AdminIngestionPage() {
                 </div>
               </div>
 
-              {/* Specialisms Override */}
-              <div>
-                <label htmlFor="overrideSpecialisms" className="block text-sm font-medium text-slate-500 mb-1">
-                  Specialisms (comma-separated, editable)
-                </label>
-                <input
-                  type="text"
-                  id="overrideSpecialisms"
-                  value={overrideSpecialisms}
-                  onChange={(e) => setOverrideSpecialisms(e.target.value)}
-                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
-                  placeholder="e.g., Anxiety, Depression, CBT, EMDR"
-                />
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {overrideSpecialisms
-                    .split(',')
-                    .filter((s) => s.trim())
-                    .map((s, i) => (
-                      <span key={i} className="px-2 py-1 bg-teal-50 text-teal-700 text-sm rounded-full">
-                        {s.trim()}
-                      </span>
-                    ))}
+              {/* Category Selectors */}
+              <div className="border-t border-slate-100 pt-6">
+                <h3 className="text-lg font-semibold text-slate-900 mb-4">Therapist Categories</h3>
+                <p className="text-sm text-slate-500 mb-4">
+                  Select the categories that best describe this therapist. These will be displayed to users with explanatory tooltips.
+                </p>
+
+                <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-3">
+                  {/* Approach */}
+                  <CategorySelector
+                    label={CATEGORY_LABELS.approach}
+                    options={APPROACH_OPTIONS}
+                    selected={overrideApproach}
+                    onChange={setOverrideApproach}
+                    colorClass={CATEGORY_COLORS.approach}
+                  />
+
+                  {/* Style */}
+                  <CategorySelector
+                    label={CATEGORY_LABELS.style}
+                    options={STYLE_OPTIONS}
+                    selected={overrideStyle}
+                    onChange={setOverrideStyle}
+                    colorClass={CATEGORY_COLORS.style}
+                  />
+
+                  {/* Areas of Focus */}
+                  <CategorySelector
+                    label={CATEGORY_LABELS.areasOfFocus}
+                    options={AREAS_OF_FOCUS_OPTIONS}
+                    selected={overrideAreasOfFocus}
+                    onChange={setOverrideAreasOfFocus}
+                    colorClass={CATEGORY_COLORS.areasOfFocus}
+                  />
                 </div>
               </div>
 

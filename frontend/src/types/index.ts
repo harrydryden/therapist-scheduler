@@ -15,7 +15,12 @@ export interface Therapist {
   id: string;
   name: string;
   bio: string;
+  /** @deprecated Use approach, style, and areasOfFocus instead */
   specialisms: string[];
+  // New categorization system
+  approach: string[];
+  style: string[];
+  areasOfFocus: string[];
   profileImage: string | null;
   availabilitySummary: string;
   // Note: email is NOT returned from public API for privacy reasons
@@ -49,7 +54,12 @@ export interface ExtractedTherapistProfile {
   name: string;
   email: string;
   bio: string;
+  /** @deprecated Use approach, style, and areasOfFocus instead */
   specialisms: string[];
+  // New categorization system
+  approach: string[];
+  style: string[];
+  areasOfFocus: string[];
   availability?: TherapistAvailability | null;
   qualifications?: string[];
   yearsExperience?: number;
@@ -81,7 +91,12 @@ export interface IngestionCreateResponse {
 export interface AdminNotes {
   additionalInfo?: string;
   overrideEmail?: string;
+  /** @deprecated Use overrideApproach, overrideStyle, overrideAreasOfFocus instead */
   overrideSpecialisms?: string[];
+  // New category overrides
+  overrideApproach?: string[];
+  overrideStyle?: string[];
+  overrideAreasOfFocus?: string[];
   overrideAvailability?: TherapistAvailability;
   notes?: string;
 }
