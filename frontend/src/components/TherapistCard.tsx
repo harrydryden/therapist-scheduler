@@ -66,32 +66,37 @@ function GeneralBadge({ categoryType }: { categoryType: 'approach' | 'style' | '
   );
 }
 
-// Category section component
+// Expandable Category section component with fixed height
 interface CategorySectionProps {
   label: string;
   items: string[];
   categoryType: 'approach' | 'style' | 'areasOfFocus';
-  maxItems?: number;
+  maxItems: number;
+  isExpanded: boolean;
+  onToggle: () => void;
 }
 
-function CategorySection({ label, items, categoryType, maxItems = 3 }: CategorySectionProps) {
+function CategorySection({ label, items, categoryType, maxItems, isExpanded, onToggle }: CategorySectionProps) {
   const hasItems = items && items.length > 0;
-  const displayItems = hasItems ? items.slice(0, maxItems) : [];
-  const remainingCount = hasItems ? items.length - maxItems : 0;
+  const displayItems = hasItems ? (isExpanded ? items : items.slice(0, maxItems)) : [];
+  const hasOverflow = hasItems && items.length > maxItems;
 
   return (
-    <div className="mb-2 min-h-[52px]">
+    <div className="h-[52px] flex flex-col">
       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">{label}</span>
-      <div className="flex flex-wrap gap-1.5 mt-1 min-h-[28px]">
+      <div className="flex flex-wrap gap-1.5 mt-1 items-center flex-1">
         {hasItems ? (
           <>
             {displayItems.map((item) => (
               <CategoryBadge key={item} type={item} categoryType={categoryType} />
             ))}
-            {remainingCount > 0 && (
-              <span className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full">
-                +{remainingCount}
-              </span>
+            {hasOverflow && !isExpanded && (
+              <button
+                onClick={onToggle}
+                className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors"
+              >
+                +{items.length - maxItems}
+              </button>
             )}
           </>
         ) : (
@@ -105,6 +110,8 @@ function CategorySection({ label, items, categoryType, maxItems = 3 }: CategoryS
 // Availability display component
 interface AvailabilityDisplayProps {
   availability: TherapistAvailability | null;
+  isExpanded: boolean;
+  onToggle: () => void;
 }
 
 // Day order for sorting
@@ -144,7 +151,9 @@ function formatAvailability(availability: TherapistAvailability): string[] {
   });
 }
 
-function AvailabilityDisplay({ availability }: AvailabilityDisplayProps) {
+const MAX_AVAILABILITY_SLOTS = 2;
+
+function AvailabilityDisplay({ availability, isExpanded, onToggle }: AvailabilityDisplayProps) {
   const hasAvailability = availability && availability.slots && availability.slots.length > 0;
 
   if (!hasAvailability) {
@@ -160,8 +169,8 @@ function AvailabilityDisplay({ availability }: AvailabilityDisplayProps) {
   }
 
   const formattedSlots = formatAvailability(availability);
-  const displaySlots = formattedSlots.slice(0, 3);
-  const hasMore = formattedSlots.length > 3;
+  const displaySlots = isExpanded ? formattedSlots : formattedSlots.slice(0, MAX_AVAILABILITY_SLOTS);
+  const hasMore = formattedSlots.length > MAX_AVAILABILITY_SLOTS;
 
   return (
     <div className="text-slate-600">
@@ -173,8 +182,13 @@ function AvailabilityDisplay({ availability }: AvailabilityDisplayProps) {
           {displaySlots.map((slot, idx) => (
             <div key={idx} className="text-slate-600">{slot}</div>
           ))}
-          {hasMore && (
-            <div className="text-slate-400 text-xs">+{formattedSlots.length - 3} more days</div>
+          {hasMore && !isExpanded && (
+            <button
+              onClick={onToggle}
+              className="text-xs text-teal-600 hover:text-teal-700 font-medium"
+            >
+              +{formattedSlots.length - MAX_AVAILABILITY_SLOTS} more days
+            </button>
           )}
         </div>
       </div>
@@ -182,14 +196,38 @@ function AvailabilityDisplay({ availability }: AvailabilityDisplayProps) {
   );
 }
 
+// Fixed heights for consistent alignment
+const SECTION_HEIGHTS = {
+  name: 'h-[36px]',
+  areasOfFocus: 'h-[52px]',
+  approach: 'h-[52px]',
+  style: 'h-[52px]',
+  bio: 'h-[72px]',
+  availability: 'h-[72px]',
+};
+
 const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardProps) {
   const [firstName, setFirstName] = useState('');
   const [email, setEmail] = useState('');
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
 
   const mutation = useMutation({
     mutationFn: submitAppointmentRequest,
   });
+
+  const toggleSection = (section: string) => {
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(section)) {
+        next.delete(section);
+      } else {
+        next.add(section);
+      }
+      return next;
+    });
+  };
+
+  const isExpanded = (section: string) => expandedSections.has(section);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,68 +237,88 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
       userName: firstName.trim(),
       userEmail: email,
       therapistNotionId: therapist.id,
-      // therapistEmail and therapistName are looked up on the backend from Notion
-      // This prevents the frontend from sending fake data
-      therapistName: therapist.name, // Still send for backward compat
+      therapistName: therapist.name,
     });
   };
 
-  return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden hover:shadow-md transition-all duration-200 flex flex-col h-full">
-      {/* Name and categories - fixed height */}
-      <div className="p-6 min-h-[56px]">
-        <h3 className="text-xl font-bold text-slate-900 break-words line-clamp-1">{therapist.name}</h3>
+  // Check if any section is expanded to adjust layout
+  const hasExpandedContent = expandedSections.size > 0;
 
-        {/* Category system with tooltips - shows "General" fallback if empty */}
-        <div className="mt-4">
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden hover:shadow-md transition-all duration-200 flex flex-col">
+      {/* Name - fixed height */}
+      <div className={`px-6 pt-6 ${hasExpandedContent ? '' : SECTION_HEIGHTS.name}`}>
+        <h3 className="text-xl font-bold text-slate-900 break-words line-clamp-1">{therapist.name}</h3>
+      </div>
+
+      {/* Category Sections - fixed heights unless expanded */}
+      <div className="px-6 pt-4 space-y-1">
+        {/* Areas of Focus */}
+        <div className={hasExpandedContent && isExpanded('areasOfFocus') ? '' : SECTION_HEIGHTS.areasOfFocus}>
           <CategorySection
             label={CATEGORY_LABELS.areasOfFocus}
             items={therapist.areasOfFocus || []}
             categoryType="areasOfFocus"
             maxItems={3}
+            isExpanded={isExpanded('areasOfFocus')}
+            onToggle={() => toggleSection('areasOfFocus')}
           />
+        </div>
+
+        {/* Approach */}
+        <div className={hasExpandedContent && isExpanded('approach') ? '' : SECTION_HEIGHTS.approach}>
           <CategorySection
             label={CATEGORY_LABELS.approach}
             items={therapist.approach || []}
             categoryType="approach"
             maxItems={2}
+            isExpanded={isExpanded('approach')}
+            onToggle={() => toggleSection('approach')}
           />
+        </div>
+
+        {/* Style */}
+        <div className={hasExpandedContent && isExpanded('style') ? '' : SECTION_HEIGHTS.style}>
           <CategorySection
             label={CATEGORY_LABELS.style}
             items={therapist.style || []}
             categoryType="style"
             maxItems={2}
+            isExpanded={isExpanded('style')}
+            onToggle={() => toggleSection('style')}
           />
         </div>
       </div>
 
-      {/* Bio - fixed height container */}
-      <div className="px-6 pb-4 min-h-[100px]">
+      {/* Bio - fixed height unless expanded */}
+      <div className={`px-6 py-3 ${hasExpandedContent && isExpanded('bio') ? '' : SECTION_HEIGHTS.bio}`}>
         <p className="text-sm text-slate-600 leading-relaxed">
-          {isExpanded ? therapist.bio : therapist.bio.slice(0, 120) + (therapist.bio.length > 120 ? '...' : '')}
+          {isExpanded('bio') ? therapist.bio : therapist.bio.slice(0, 100) + (therapist.bio.length > 100 ? '...' : '')}
         </p>
-        {therapist.bio.length > 120 && (
+        {therapist.bio.length > 100 && (
           <button
-            onClick={() => setIsExpanded(!isExpanded)}
-            className="text-sm font-medium text-teal-600 hover:text-teal-700 mt-2"
+            onClick={() => toggleSection('bio')}
+            className="text-sm font-medium text-teal-600 hover:text-teal-700 mt-1"
           >
-            {isExpanded ? 'Show less' : 'Read more'}
+            {isExpanded('bio') ? 'Show less' : 'Read more'}
           </button>
         )}
       </div>
 
-      {/* Availability Section - fixed height */}
-      <div className="px-6 pb-5 min-h-[120px]">
-        <div className="pt-4 border-t border-slate-100">
+      {/* Availability Section - fixed height unless expanded */}
+      <div className={`px-6 pb-4 ${hasExpandedContent && isExpanded('availability') ? '' : SECTION_HEIGHTS.availability}`}>
+        <div className="pt-3 border-t border-slate-100">
           <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Indicative Availability</span>
-          <p className="text-xs text-slate-400 mt-0.5">More times available upon request</p>
-          <div className="mt-2">
-            <AvailabilityDisplay availability={therapist.availability} />
-          </div>
+          <p className="text-xs text-slate-400 mt-0.5 mb-2">More times available upon request</p>
+          <AvailabilityDisplay
+            availability={therapist.availability}
+            isExpanded={isExpanded('availability')}
+            onToggle={() => toggleSection('availability')}
+          />
         </div>
       </div>
 
-      {/* Booking Form - pushed to bottom with mt-auto */}
+      {/* Booking Form - always at bottom */}
       <div className="border-t border-slate-100 p-6 bg-slate-50 mt-auto">
         {mutation.isSuccess ? (
           <div className="text-center py-2">
