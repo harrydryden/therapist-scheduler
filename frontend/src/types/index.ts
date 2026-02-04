@@ -15,9 +15,7 @@ export interface Therapist {
   id: string;
   name: string;
   bio: string;
-  /** @deprecated Use approach, style, and areasOfFocus instead */
-  specialisms: string[];
-  // New categorization system
+  // Categorization system
   approach: string[];
   style: string[];
   areasOfFocus: string[];
@@ -54,9 +52,7 @@ export interface ExtractedTherapistProfile {
   name: string;
   email: string;
   bio: string;
-  /** @deprecated Use approach, style, and areasOfFocus instead */
-  specialisms: string[];
-  // New categorization system
+  // Categorization system
   approach: string[];
   style: string[];
   areasOfFocus: string[];
@@ -77,13 +73,17 @@ export interface IngestionCreateResponse {
   extractedProfile: {
     name: string;
     email: string;
-    specialisms: string[];
+    approach: string[];
+    style: string[];
+    areasOfFocus: string[];
     bio: string;
   };
   adminNotesApplied: {
     hadAdditionalInfo: boolean;
     hadOverrideEmail: boolean;
-    hadOverrideSpecialisms: boolean;
+    hadOverrideApproach: boolean;
+    hadOverrideStyle: boolean;
+    hadOverrideAreasOfFocus: boolean;
     hadOverrideAvailability: boolean;
   };
 }
@@ -91,9 +91,7 @@ export interface IngestionCreateResponse {
 export interface AdminNotes {
   additionalInfo?: string;
   overrideEmail?: string;
-  /** @deprecated Use overrideApproach, overrideStyle, overrideAreasOfFocus instead */
-  overrideSpecialisms?: string[];
-  // New category overrides
+  // Category overrides
   overrideApproach?: string[];
   overrideStyle?: string[];
   overrideAreasOfFocus?: string[];
