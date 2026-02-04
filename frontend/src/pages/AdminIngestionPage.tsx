@@ -82,8 +82,11 @@ export default function AdminIngestionPage() {
 
   const previewMutation = useMutation({
     mutationFn: () => {
-      if (!file) throw new Error('No file selected');
       if (!therapistName.trim()) throw new Error('Please enter the therapist name');
+      // If no file, require additional info
+      if (!file && additionalInfo.trim().length < 50) {
+        throw new Error('When no PDF is uploaded, please provide additional information (minimum 50 characters)');
+      }
       // Prepend the name to additional info so AI knows the correct name
       const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}\n\n${additionalInfo}`;
       return previewTherapistCV(file, fullAdditionalInfo);
@@ -98,8 +101,11 @@ export default function AdminIngestionPage() {
 
   const createMutation = useMutation({
     mutationFn: () => {
-      if (!file) throw new Error('No file selected');
       if (!therapistName.trim()) throw new Error('Please enter the therapist name');
+      // If no file, require additional info
+      if (!file && additionalInfo.trim().length < 50) {
+        throw new Error('When no PDF is uploaded, please provide additional information (minimum 50 characters)');
+      }
 
       // Prepend the name to additional info
       const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}\n\n${additionalInfo}`;
@@ -246,7 +252,7 @@ export default function AdminIngestionPage() {
             {/* PDF Upload */}
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2">
-                Therapist CV / Application (PDF)
+                Therapist CV / Application (PDF) <span className="text-slate-400 font-normal">- Optional</span>
               </label>
               <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-teal-300 transition-colors">
                 <input
@@ -310,13 +316,20 @@ export default function AdminIngestionPage() {
                 className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none resize-y"
                 placeholder="Enter any additional context about the therapist that isn't in the CV. This could include their preferred approach, specific populations they work with, additional qualifications, bio preferences, etc."
               />
-              <p className="text-sm text-slate-500 mt-1">{additionalInfo.length.toLocaleString()} / 12,000 characters</p>
+              <p className="text-sm text-slate-500 mt-1">
+                {additionalInfo.length.toLocaleString()} / 12,000 characters
+                {!file && additionalInfo.trim().length < 50 && (
+                  <span className="text-amber-600 ml-2">
+                    (Minimum 50 characters required when no PDF is uploaded)
+                  </span>
+                )}
+              </p>
             </div>
 
             {/* Preview Button */}
             <button
               type="submit"
-              disabled={!file || !therapistName.trim() || previewMutation.isPending}
+              disabled={!therapistName.trim() || (!file && additionalInfo.trim().length < 50) || previewMutation.isPending}
               className="w-full py-3 px-4 bg-slate-800 text-white font-semibold rounded-full hover:bg-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {previewMutation.isPending ? (

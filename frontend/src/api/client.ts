@@ -162,9 +162,11 @@ export async function submitAppointmentRequest(request: AppointmentRequest): Pro
 
 // Admin API functions for therapist ingestion
 
-export async function previewTherapistCV(file: File, additionalInfo: string): Promise<IngestionPreviewResponse> {
+export async function previewTherapistCV(file: File | null, additionalInfo: string): Promise<IngestionPreviewResponse> {
   const formData = new FormData();
-  formData.append('file', file);
+  if (file) {
+    formData.append('file', file);
+  }
   if (additionalInfo) {
     formData.append('additionalInfo', additionalInfo);
   }
@@ -190,9 +192,11 @@ export async function previewTherapistCV(file: File, additionalInfo: string): Pr
   return data.data;
 }
 
-export async function createTherapistFromCV(file: File, adminNotes: AdminNotes): Promise<IngestionCreateResponse> {
+export async function createTherapistFromCV(file: File | null, adminNotes: AdminNotes): Promise<IngestionCreateResponse> {
   const formData = new FormData();
-  formData.append('file', file);
+  if (file) {
+    formData.append('file', file);
+  }
 
   if (adminNotes.additionalInfo) {
     formData.append('additionalInfo', adminNotes.additionalInfo);
