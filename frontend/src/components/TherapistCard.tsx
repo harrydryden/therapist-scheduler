@@ -1,7 +1,7 @@
 import { useState, memo } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { submitAppointmentRequest } from '../api/client';
-import type { Therapist } from '../types';
+import type { Therapist, TherapistAvailability } from '../types';
 import {
   getExplainer,
   CATEGORY_LABELS,
@@ -79,6 +79,86 @@ function CategorySection({ label, items, categoryType, maxItems = 3 }: CategoryS
             +{remainingCount}
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Availability display component
+interface AvailabilityDisplayProps {
+  availability: TherapistAvailability | null;
+}
+
+// Day order for sorting
+const DAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const DAY_ABBREVIATIONS: Record<string, string> = {
+  Monday: 'Mon',
+  Tuesday: 'Tue',
+  Wednesday: 'Wed',
+  Thursday: 'Thu',
+  Friday: 'Fri',
+  Saturday: 'Sat',
+  Sunday: 'Sun',
+};
+
+function formatAvailability(availability: TherapistAvailability): string[] {
+  // Group slots by day
+  const slotsByDay: Record<string, string[]> = {};
+
+  for (const slot of availability.slots) {
+    const day = slot.day;
+    const timeRange = `${slot.start}-${slot.end}`;
+    if (!slotsByDay[day]) {
+      slotsByDay[day] = [];
+    }
+    slotsByDay[day].push(timeRange);
+  }
+
+  // Sort days and format output
+  const sortedDays = Object.keys(slotsByDay).sort(
+    (a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b)
+  );
+
+  return sortedDays.map((day) => {
+    const abbrev = DAY_ABBREVIATIONS[day] || day.slice(0, 3);
+    const times = slotsByDay[day].join(', ');
+    return `${abbrev}: ${times}`;
+  });
+}
+
+function AvailabilityDisplay({ availability }: AvailabilityDisplayProps) {
+  const hasAvailability = availability && availability.slots && availability.slots.length > 0;
+
+  if (!hasAvailability) {
+    // Elegant fallback state
+    return (
+      <div className="flex items-center gap-2 text-slate-500">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        <span className="text-sm italic">Available on request</span>
+      </div>
+    );
+  }
+
+  const formattedSlots = formatAvailability(availability);
+  const displaySlots = formattedSlots.slice(0, 3);
+  const hasMore = formattedSlots.length > 3;
+
+  return (
+    <div className="text-slate-600">
+      <div className="flex items-start gap-2">
+        <svg className="w-4 h-4 mt-0.5 text-teal-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        <div className="text-sm space-y-0.5">
+          {displaySlots.map((slot, idx) => (
+            <div key={idx} className="text-slate-600">{slot}</div>
+          ))}
+          {hasMore && (
+            <div className="text-slate-400 text-xs">+{formattedSlots.length - 3} more days</div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -162,7 +242,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
       </div>
 
       {/* Bio */}
-      <div className="px-6 pb-5">
+      <div className="px-6 pb-4">
         <p className="text-sm text-slate-600 leading-relaxed">
           {isExpanded ? therapist.bio : therapist.bio.slice(0, 120) + (therapist.bio.length > 120 ? '...' : '')}
         </p>
@@ -174,6 +254,16 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
             {isExpanded ? 'Show less' : 'Read more'}
           </button>
         )}
+      </div>
+
+      {/* Availability Section */}
+      <div className="px-6 pb-5">
+        <div className="pt-4 border-t border-slate-100">
+          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Availability</span>
+          <div className="mt-2">
+            <AvailabilityDisplay availability={therapist.availability} />
+          </div>
+        </div>
       </div>
 
       {/* Booking Form */}
