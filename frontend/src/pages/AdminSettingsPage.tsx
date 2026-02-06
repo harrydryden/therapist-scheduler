@@ -30,6 +30,11 @@ const categoryInfo: Record<SettingCategory, { label: string; description: string
     description: 'Configure how long to keep appointment data before archiving',
     icon: 'M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4',
   },
+  emailTemplates: {
+    label: 'Email Templates',
+    description: 'Customize appointment confirmation and follow-up email content',
+    icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',
+  },
 };
 
 // Get a persistent admin ID for this browser session
@@ -246,7 +251,7 @@ export default function AdminSettingsPage() {
 
                           {/* Value Display/Edit */}
                           {editingKey === setting.key ? (
-                            <div className="flex items-center gap-2 mt-2">
+                            <div className={`mt-2 ${setting.key.endsWith('Body') ? 'space-y-2' : 'flex items-center gap-2'}`}>
                               {setting.valueType === 'boolean' ? (
                                 <select
                                   value={editValue}
@@ -256,6 +261,22 @@ export default function AdminSettingsPage() {
                                   <option value="true">Enabled</option>
                                   <option value="false">Disabled</option>
                                 </select>
+                              ) : setting.key.endsWith('Body') ? (
+                                /* Multi-line textarea for email body templates */
+                                <div className="w-full">
+                                  <textarea
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    rows={12}
+                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none resize-y"
+                                    placeholder="Email template body..."
+                                  />
+                                  <p className="text-xs text-slate-500 mt-1">
+                                    {setting.description?.match(/Variables: (.+)/)?.[1] && (
+                                      <>Available variables: <code className="bg-slate-100 px-1 rounded">{setting.description.match(/Variables: (.+)/)?.[1]}</code></>
+                                    )}
+                                  </p>
+                                </div>
                               ) : (
                                 <input
                                   type={setting.valueType === 'number' ? 'number' : 'text'}
@@ -263,7 +284,7 @@ export default function AdminSettingsPage() {
                                   onChange={(e) => setEditValue(e.target.value)}
                                   min={setting.minValue ?? undefined}
                                   max={setting.maxValue ?? undefined}
-                                  className="w-32 px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none`}
                                 />
                               )}
                               {setting.valueType === 'number' && (
@@ -273,45 +294,63 @@ export default function AdminSettingsPage() {
                                   {setting.maxValue !== null && `Max: ${setting.maxValue}`}
                                 </span>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => handleSave(setting)}
-                                disabled={isPending}
-                                aria-label={`Save changes to ${setting.label}`}
-                                aria-busy={isPending}
-                                className="px-3 py-1.5 bg-teal-500 text-white text-sm rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50"
-                              >
-                                Save
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleCancel}
-                                disabled={isPending}
-                                aria-label="Cancel editing"
-                                className="px-3 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 transition-colors"
-                              >
-                                Cancel
-                              </button>
+                              <div className={`flex gap-2 ${setting.key.endsWith('Body') ? '' : ''}`}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSave(setting)}
+                                  disabled={isPending}
+                                  aria-label={`Save changes to ${setting.label}`}
+                                  aria-busy={isPending}
+                                  className="px-3 py-1.5 bg-teal-500 text-white text-sm rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleCancel}
+                                  disabled={isPending}
+                                  aria-label="Cancel editing"
+                                  className="px-3 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
                             </div>
                           ) : (
-                            <div className="flex items-center gap-3 mt-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-lg font-mono text-slate-700">
-                                  {setting.valueType === 'boolean'
-                                    ? setting.value ? 'Enabled' : 'Disabled'
-                                    : String(setting.value)}
-                                </span>
-                                {setting.valueType === 'number' && setting.key.includes('Hours') && (
-                                  <span className="text-sm text-slate-400">hours</span>
-                                )}
-                                {setting.valueType === 'number' && setting.key.includes('Days') && (
-                                  <span className="text-sm text-slate-400">days</span>
-                                )}
-                              </div>
-                              {!setting.isDefault && (
-                                <span className="text-xs text-slate-400">
-                                  (default: {String(setting.defaultValue)})
-                                </span>
+                            <div className={`mt-2 ${setting.key.endsWith('Body') ? '' : 'flex items-center gap-3'}`}>
+                              {setting.key.endsWith('Body') ? (
+                                /* Email body template preview */
+                                <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                                  <pre className="text-sm font-mono text-slate-600 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                                    {String(setting.value).slice(0, 300)}{String(setting.value).length > 300 ? '...' : ''}
+                                  </pre>
+                                  {!setting.isDefault && (
+                                    <p className="text-xs text-amber-600 mt-2">
+                                      ✎ Customized (click Edit to see full template)
+                                    </p>
+                                  )}
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`${setting.category === 'emailTemplates' ? 'text-sm' : 'text-lg'} font-mono text-slate-700`}>
+                                      {setting.valueType === 'boolean'
+                                        ? setting.value ? 'Enabled' : 'Disabled'
+                                        : String(setting.value)}
+                                    </span>
+                                    {setting.valueType === 'number' && setting.key.includes('Hours') && (
+                                      <span className="text-sm text-slate-400">hours</span>
+                                    )}
+                                    {setting.valueType === 'number' && setting.key.includes('Days') && (
+                                      <span className="text-sm text-slate-400">days</span>
+                                    )}
+                                  </div>
+                                  {!setting.isDefault && (
+                                    <span className="text-xs text-slate-400">
+                                      (default: {String(setting.defaultValue).slice(0, 50)}{String(setting.defaultValue).length > 50 ? '...' : ''})
+                                    </span>
+                                  )}
+                                </>
                               )}
                             </div>
                           )}
