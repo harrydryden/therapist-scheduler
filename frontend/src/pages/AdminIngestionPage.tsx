@@ -249,34 +249,6 @@ function convertToTherapistAvailability(availability: AvailabilityByDay): Therap
   };
 }
 
-// Helper to convert TherapistAvailability to AvailabilityByDay format
-function convertFromTherapistAvailability(availability: TherapistAvailability | null | undefined): AvailabilityByDay {
-  const result = createEmptyAvailability();
-
-  if (!availability?.slots) return result;
-
-  // Group slots by day
-  const slotsByDay: Record<string, string[]> = {};
-  for (const slot of availability.slots) {
-    if (!slotsByDay[slot.day]) {
-      slotsByDay[slot.day] = [];
-    }
-    slotsByDay[slot.day].push(`${slot.start}-${slot.end}`);
-  }
-
-  // Convert to availability state
-  for (const day of DAYS_OF_WEEK) {
-    if (slotsByDay[day]) {
-      result[day] = {
-        enabled: true,
-        times: slotsByDay[day].join(', '),
-      };
-    }
-  }
-
-  return result;
-}
-
 export default function AdminIngestionPage() {
   const [therapistName, setTherapistName] = useState('');
   const [therapistEmail, setTherapistEmail] = useState('');
@@ -408,8 +380,8 @@ export default function AdminIngestionPage() {
       setOverrideStyle(data.extractedProfile.style || []);
       setOverrideAreasOfFocus(data.extractedProfile.areasOfFocus || []);
 
-      // Pre-fill availability from extraction
-      setOverrideAvailability(convertFromTherapistAvailability(data.extractedProfile.availability));
+      // Don't pre-fill availability - admin should manually select days/times
+      setOverrideAvailability(createEmptyAvailability());
     },
   });
 
