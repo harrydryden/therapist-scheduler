@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { previewTherapistCV, createTherapistFromCV } from '../api/client';
-import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability } from '../types';
+import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability, CategoryWithEvidence } from '../types';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
@@ -98,16 +98,66 @@ function ConfirmModal({
   );
 }
 
-// Category selector component with checkboxes and tooltips
+// Evidence tooltip component
+interface EvidenceTooltipProps {
+  evidence: CategoryWithEvidence;
+}
+
+function EvidenceTooltip({ evidence }: EvidenceTooltipProps) {
+  const [isVisible, setIsVisible] = useState(false);
+
+  if (!evidence.evidence && !evidence.reasoning) {
+    return null;
+  }
+
+  return (
+    <div className="relative inline-block ml-1">
+      <button
+        type="button"
+        onMouseEnter={() => setIsVisible(true)}
+        onMouseLeave={() => setIsVisible(false)}
+        onClick={() => setIsVisible(!isVisible)}
+        className="text-slate-400 hover:text-teal-600 transition-colors"
+        aria-label="View AI reasoning for this selection"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      </button>
+      {isVisible && (
+        <div className="absolute z-10 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-lg">
+          {evidence.evidence && (
+            <div className="mb-2">
+              <span className="font-semibold text-teal-300">Evidence:</span>
+              <p className="mt-0.5 italic">&ldquo;{evidence.evidence}&rdquo;</p>
+            </div>
+          )}
+          {evidence.reasoning && (
+            <div>
+              <span className="font-semibold text-teal-300">Why:</span>
+              <p className="mt-0.5">{evidence.reasoning}</p>
+            </div>
+          )}
+          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1">
+            <div className="border-4 border-transparent border-t-slate-800" />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Category selector component with checkboxes and evidence tooltips
 interface CategorySelectorProps {
   label: string;
   options: CategoryOption[];
   selected: string[];
   onChange: (selected: string[]) => void;
   colorClass: string;
+  evidenceMap?: Map<string, CategoryWithEvidence>; // Evidence from AI extraction
 }
 
-function CategorySelector({ label, options, selected, onChange, colorClass }: CategorySelectorProps) {
+function CategorySelector({ label, options, selected, onChange, colorClass, evidenceMap }: CategorySelectorProps) {
   const toggleOption = (type: string) => {
     if (selected.includes(type)) {
       onChange(selected.filter((s) => s !== type));
@@ -120,23 +170,33 @@ function CategorySelector({ label, options, selected, onChange, colorClass }: Ca
     <div>
       <label className="block text-sm font-medium text-slate-700 mb-2">{label}</label>
       <div className="space-y-2">
-        {options.map((option) => (
-          <div key={option.type} className="flex items-start gap-3">
-            <input
-              type="checkbox"
-              id={`category-${option.type}`}
-              checked={selected.includes(option.type)}
-              onChange={() => toggleOption(option.type)}
-              className="mt-1 h-4 w-4 text-teal-600 focus:ring-teal-500 border-slate-300 rounded"
-            />
-            <label htmlFor={`category-${option.type}`} className="flex-1 cursor-pointer">
-              <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full border ${colorClass}`}>
-                {option.type}
-              </span>
-              <p className="text-sm text-slate-500 mt-0.5">{option.explainer}</p>
-            </label>
-          </div>
-        ))}
+        {options.map((option) => {
+          const isSelected = selected.includes(option.type);
+          const evidence = evidenceMap?.get(option.type);
+
+          return (
+            <div key={option.type} className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                id={`category-${option.type}`}
+                checked={isSelected}
+                onChange={() => toggleOption(option.type)}
+                className="mt-1 h-4 w-4 text-teal-600 focus:ring-teal-500 border-slate-300 rounded"
+              />
+              <label htmlFor={`category-${option.type}`} className="flex-1 cursor-pointer">
+                <div className="flex items-center">
+                  <span className={`inline-block px-2 py-0.5 text-xs font-medium rounded-full border ${colorClass}`}>
+                    {option.type}
+                  </span>
+                  {isSelected && evidence && (evidence.evidence || evidence.reasoning) && (
+                    <EvidenceTooltip evidence={evidence} />
+                  )}
+                </div>
+                <p className="text-sm text-slate-500 mt-0.5">{option.explainer}</p>
+              </label>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -259,10 +319,15 @@ export default function AdminIngestionPage() {
   // Override fields
   const [overrideEmail, setOverrideEmail] = useState('');
 
-  // New category overrides
+  // New category overrides (stores just the type strings)
   const [overrideApproach, setOverrideApproach] = useState<string[]>([]);
   const [overrideStyle, setOverrideStyle] = useState<string[]>([]);
   const [overrideAreasOfFocus, setOverrideAreasOfFocus] = useState<string[]>([]);
+
+  // Evidence maps for displaying AI reasoning (populated from extraction)
+  const [approachEvidence, setApproachEvidence] = useState<Map<string, CategoryWithEvidence>>(new Map());
+  const [styleEvidence, setStyleEvidence] = useState<Map<string, CategoryWithEvidence>>(new Map());
+  const [areasOfFocusEvidence, setAreasOfFocusEvidence] = useState<Map<string, CategoryWithEvidence>>(new Map());
 
   // Availability override
   const [overrideAvailability, setOverrideAvailability] = useState<AvailabilityByDay>(createEmptyAvailability());
@@ -375,10 +440,25 @@ export default function AdminIngestionPage() {
       // Pre-fill override fields - use manually entered email if provided, otherwise extracted
       setOverrideEmail(therapistEmail.trim() || data.extractedProfile.email || '');
 
-      // Pre-fill new categories from extraction
-      setOverrideApproach(data.extractedProfile.approach || []);
-      setOverrideStyle(data.extractedProfile.style || []);
-      setOverrideAreasOfFocus(data.extractedProfile.areasOfFocus || []);
+      // Extract type strings and build evidence maps from CategoryWithEvidence arrays
+      const extractTypes = (categories: CategoryWithEvidence[]): string[] =>
+        categories?.map(c => c.type) || [];
+
+      const buildEvidenceMap = (categories: CategoryWithEvidence[]): Map<string, CategoryWithEvidence> => {
+        const map = new Map<string, CategoryWithEvidence>();
+        categories?.forEach(c => map.set(c.type, c));
+        return map;
+      };
+
+      // Pre-fill categories with just type strings
+      setOverrideApproach(extractTypes(data.extractedProfile.approach));
+      setOverrideStyle(extractTypes(data.extractedProfile.style));
+      setOverrideAreasOfFocus(extractTypes(data.extractedProfile.areasOfFocus));
+
+      // Store evidence maps for tooltip display
+      setApproachEvidence(buildEvidenceMap(data.extractedProfile.approach));
+      setStyleEvidence(buildEvidenceMap(data.extractedProfile.style));
+      setAreasOfFocusEvidence(buildEvidenceMap(data.extractedProfile.areasOfFocus));
 
       // Don't pre-fill availability - admin should manually select days/times
       setOverrideAvailability(createEmptyAvailability());
@@ -428,6 +508,10 @@ export default function AdminIngestionPage() {
       setOverrideAreasOfFocus([]);
       setOverrideAvailability(createEmptyAvailability());
       setInternalNotes('');
+      // Clear evidence maps
+      setApproachEvidence(new Map());
+      setStyleEvidence(new Map());
+      setAreasOfFocusEvidence(new Map());
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -488,6 +572,10 @@ export default function AdminIngestionPage() {
     setOverrideAvailability(createEmptyAvailability());
     setInternalNotes('');
     setCreatedTherapist(null);
+    // Clear evidence maps
+    setApproachEvidence(new Map());
+    setStyleEvidence(new Map());
+    setAreasOfFocusEvidence(new Map());
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -799,6 +887,7 @@ export default function AdminIngestionPage() {
                     selected={overrideApproach}
                     onChange={setOverrideApproach}
                     colorClass={CATEGORY_COLORS.approach}
+                    evidenceMap={approachEvidence}
                   />
 
                   {/* Style */}
@@ -808,6 +897,7 @@ export default function AdminIngestionPage() {
                     selected={overrideStyle}
                     onChange={setOverrideStyle}
                     colorClass={CATEGORY_COLORS.style}
+                    evidenceMap={styleEvidence}
                   />
 
                   {/* Areas of Focus */}
@@ -817,6 +907,7 @@ export default function AdminIngestionPage() {
                     selected={overrideAreasOfFocus}
                     onChange={setOverrideAreasOfFocus}
                     colorClass={CATEGORY_COLORS.areasOfFocus}
+                    evidenceMap={areasOfFocusEvidence}
                   />
                 </div>
               </div>

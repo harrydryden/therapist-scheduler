@@ -47,15 +47,22 @@ export interface ApiResponse<T> {
   count?: number;
 }
 
+// Category with evidence for explainability
+export interface CategoryWithEvidence {
+  type: string;
+  evidence: string;  // Direct quote from source text (max ~100 chars)
+  reasoning: string; // Brief explanation (max ~50 chars)
+}
+
 // Admin types for therapist ingestion
 export interface ExtractedTherapistProfile {
   name: string;
   email: string;
   bio: string;
-  // Categorization system
-  approach: string[];
-  style: string[];
-  areasOfFocus: string[];
+  // Categorization system with evidence
+  approach: CategoryWithEvidence[];
+  style: CategoryWithEvidence[];
+  areasOfFocus: CategoryWithEvidence[];
   availability?: TherapistAvailability | null;
   qualifications?: string[];
   yearsExperience?: number;
@@ -73,9 +80,9 @@ export interface IngestionCreateResponse {
   extractedProfile: {
     name: string;
     email: string;
-    approach: string[];
-    style: string[];
-    areasOfFocus: string[];
+    approach: CategoryWithEvidence[];
+    style: CategoryWithEvidence[];
+    areasOfFocus: CategoryWithEvidence[];
     bio: string;
   };
   adminNotesApplied: {
