@@ -7,13 +7,7 @@ import {
   deleteKnowledgeEntry,
 } from '../api/client';
 import type { KnowledgeEntry, KnowledgeAudience } from '../types';
-
-// Audience badge colors
-const audienceColors: Record<KnowledgeAudience, string> = {
-  therapist: 'bg-purple-100 text-purple-800',
-  user: 'bg-blue-100 text-blue-800',
-  both: 'bg-green-100 text-green-800',
-};
+import { getAudienceColor } from '../config/color-mappings';
 
 const audienceLabels: Record<KnowledgeAudience, string> = {
   therapist: 'Therapist',
@@ -162,6 +156,7 @@ export default function AdminKnowledgePage() {
                 e.stopPropagation();
                 handleCreate();
               }}
+              aria-label="Add new knowledge entry"
               className="px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors font-medium"
             >
               + Add Entry
@@ -245,6 +240,7 @@ export default function AdminKnowledgePage() {
                   e.preventDefault();
                   resetForm();
                 }}
+                aria-label="Cancel and close form"
                 className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors"
               >
                 Cancel
@@ -256,6 +252,8 @@ export default function AdminKnowledgePage() {
                   handleSubmit();
                 }}
                 disabled={!content.trim() || isPending}
+                aria-label={editingEntry ? 'Save changes to knowledge entry' : 'Create new knowledge entry'}
+                aria-busy={isPending}
                 className="px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50 font-medium"
               >
                 {isPending ? 'Saving...' : editingEntry ? 'Save Changes' : 'Create Entry'}
@@ -304,7 +302,7 @@ export default function AdminKnowledgePage() {
                           <h3 className="font-medium text-slate-400 italic">Untitled</h3>
                         )}
                         <span
-                          className={`px-2 py-0.5 text-xs font-medium rounded-full ${audienceColors[entry.audience as KnowledgeAudience]}`}
+                          className={`px-2 py-0.5 text-xs font-medium rounded-full ${getAudienceColor(entry.audience)}`}
                         >
                           {audienceLabels[entry.audience as KnowledgeAudience]}
                         </span>

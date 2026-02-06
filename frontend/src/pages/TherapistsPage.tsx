@@ -66,7 +66,9 @@ export default function TherapistsPage() {
         <h2 className="text-lg font-semibold text-slate-900 mb-2">Unable to load therapists</h2>
         <p className="text-slate-600 mb-4">Please check your connection and try again.</p>
         <button
+          type="button"
           onClick={() => window.location.reload()}
+          aria-label="Refresh page to reload therapists"
           className="px-6 py-3 text-sm font-semibold text-white bg-teal-500 rounded-full hover:bg-teal-600 transition-colors"
         >
           Refresh Page
@@ -102,7 +104,9 @@ export default function TherapistsPage() {
           </p>
           {selectedCategory && (
             <button
+              type="button"
               onClick={() => setSelectedCategory(null)}
+              aria-label={`Clear filter for ${selectedCategory}`}
               className="mt-4 px-4 py-2 text-sm font-medium text-teal-600 hover:text-teal-700"
             >
               Clear filter

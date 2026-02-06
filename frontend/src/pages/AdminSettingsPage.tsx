@@ -5,6 +5,11 @@ import type { SystemSetting, SettingCategory } from '../types';
 
 // Category display info
 const categoryInfo: Record<SettingCategory, { label: string; description: string; icon: string }> = {
+  general: {
+    label: 'General',
+    description: 'General application settings including timezone configuration',
+    icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z',
+  },
   stale: {
     label: 'Stale Detection',
     description: 'Control when appointments are marked as stale and when to alert admins',
@@ -145,6 +150,8 @@ export default function AdminSettingsPage() {
           <button
             type="button"
             onClick={() => setActiveCategory('all')}
+            aria-pressed={activeCategory === 'all'}
+            aria-label="Show all settings categories"
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               activeCategory === 'all'
                 ? 'bg-teal-500 text-white'
@@ -158,6 +165,8 @@ export default function AdminSettingsPage() {
               key={cat}
               type="button"
               onClick={() => setActiveCategory(cat)}
+              aria-pressed={activeCategory === cat}
+              aria-label={`Filter to ${categoryInfo[cat]?.label || cat} settings`}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 activeCategory === cat
                   ? 'bg-teal-500 text-white'
@@ -268,6 +277,8 @@ export default function AdminSettingsPage() {
                                 type="button"
                                 onClick={() => handleSave(setting)}
                                 disabled={isPending}
+                                aria-label={`Save changes to ${setting.label}`}
+                                aria-busy={isPending}
                                 className="px-3 py-1.5 bg-teal-500 text-white text-sm rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50"
                               >
                                 Save
@@ -276,6 +287,7 @@ export default function AdminSettingsPage() {
                                 type="button"
                                 onClick={handleCancel}
                                 disabled={isPending}
+                                aria-label="Cancel editing"
                                 className="px-3 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 transition-colors"
                               >
                                 Cancel
@@ -319,6 +331,7 @@ export default function AdminSettingsPage() {
                             <button
                               type="button"
                               onClick={() => handleEdit(setting)}
+                              aria-label={`Edit ${setting.label} setting`}
                               className="px-3 py-1.5 text-sm border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors"
                             >
                               Edit
@@ -328,6 +341,7 @@ export default function AdminSettingsPage() {
                                 type="button"
                                 onClick={() => handleReset(setting)}
                                 disabled={isPending}
+                                aria-label={`Reset ${setting.label} to default value`}
                                 className="px-3 py-1.5 text-sm border border-orange-200 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors disabled:opacity-50"
                               >
                                 Reset

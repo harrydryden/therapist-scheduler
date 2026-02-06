@@ -12,20 +12,12 @@ import {
 } from '../api/client';
 import type { AppointmentFilters, AppointmentListItem } from '../types';
 import { APP } from '../config/constants';
+import { getStatusColor } from '../config/color-mappings';
 
 // Sanitize text content to prevent XSS
 function sanitizeText(text: string): string {
   return DOMPurify.sanitize(text, { ALLOWED_TAGS: [] }); // Strip all HTML
 }
-
-// Status badge colors
-const statusColors: Record<string, string> = {
-  pending: 'bg-yellow-100 text-yellow-800',
-  contacted: 'bg-blue-100 text-blue-800',
-  negotiating: 'bg-purple-100 text-purple-800',
-  confirmed: 'bg-green-100 text-green-800',
-  cancelled: 'bg-red-100 text-red-800',
-};
 
 // Group appointments by therapist
 interface TherapistGroup {
@@ -417,6 +409,8 @@ export default function AdminDashboardPage() {
                         {/* Therapist Header */}
                         <button
                           onClick={() => toggleTherapistExpanded(group.therapistNotionId)}
+                          aria-expanded={expandedTherapists.has(group.therapistNotionId)}
+                          aria-label={`${group.therapistName}: ${group.appointments.length} clients. ${expandedTherapists.has(group.therapistNotionId) ? 'Click to collapse' : 'Click to expand'}`}
                           className={`w-full p-4 text-left hover:bg-slate-50 transition-colors ${
                             !group.hasConfirmed ? 'bg-amber-50' : ''
                           }`}
@@ -480,7 +474,7 @@ export default function AdminDashboardPage() {
                                   </div>
                                   <div className="flex flex-col gap-1 items-end">
                                     <span
-                                      className={`px-2 py-0.5 text-xs font-medium rounded-full ${statusColors[apt.status] || 'bg-slate-100 text-slate-800'}`}
+                                      className={`px-2 py-0.5 text-xs font-medium rounded-full ${getStatusColor(apt.status)}`}
                                     >
                                       {apt.status}
                                     </span>
@@ -556,7 +550,7 @@ export default function AdminDashboardPage() {
                       <p className="text-sm text-slate-500">{appointmentDetail.userEmail}</p>
                     </div>
                     <span
-                      className={`px-2 py-1 text-xs font-medium rounded-full ${statusColors[appointmentDetail.status] || 'bg-slate-100 text-slate-800'}`}
+                      className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(appointmentDetail.status)}`}
                     >
                       {appointmentDetail.status}
                     </span>
@@ -606,6 +600,7 @@ export default function AdminDashboardPage() {
                         <p className="text-sm text-red-700">{mutationError}</p>
                         <button
                           onClick={() => setMutationError(null)}
+                          aria-label="Dismiss error message"
                           className="text-red-500 hover:text-red-700"
                         >
                           ×
@@ -631,6 +626,8 @@ export default function AdminDashboardPage() {
                           })
                         }
                         disabled={takeControlMutation.isPending}
+                        aria-label="Take human control and pause AI agent"
+                        aria-busy={takeControlMutation.isPending}
                         className="w-full px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50 font-medium"
                       >
                         {takeControlMutation.isPending
@@ -659,6 +656,8 @@ export default function AdminDashboardPage() {
                       <button
                         onClick={() => releaseControlMutation.mutate(appointmentDetail.id)}
                         disabled={releaseControlMutation.isPending}
+                        aria-label="Release human control and resume AI agent"
+                        aria-busy={releaseControlMutation.isPending}
                         className="w-full px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50 font-medium"
                       >
                         {releaseControlMutation.isPending
@@ -670,6 +669,7 @@ export default function AdminDashboardPage() {
                       {!showComposeMessage ? (
                         <button
                           onClick={() => setShowComposeMessage(true)}
+                          aria-label="Open message composer"
                           className="w-full px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-100 transition-colors font-medium"
                         >
                           Compose Message
@@ -729,6 +729,7 @@ export default function AdminDashboardPage() {
                                 setMessageSubject('');
                                 setMessageBody('');
                               }}
+                              aria-label="Cancel message composition"
                               className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors text-sm"
                             >
                               Cancel
@@ -740,6 +741,8 @@ export default function AdminDashboardPage() {
                                 !messageSubject.trim() ||
                                 !messageBody.trim()
                               }
+                              aria-label="Send message to recipient"
+                              aria-busy={sendMessageMutation.isPending}
                               className="flex-1 px-3 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50 text-sm font-medium"
                             >
                               {sendMessageMutation.isPending ? 'Sending...' : 'Send'}
@@ -764,6 +767,7 @@ export default function AdminDashboardPage() {
                       {!showDeleteConfirm ? (
                         <button
                           onClick={() => setShowDeleteConfirm(true)}
+                          aria-label="Show delete appointment confirmation"
                           className="w-full px-4 py-2 border border-red-300 text-red-600 rounded-lg hover:bg-red-50 transition-colors font-medium text-sm"
                         >
                           Delete Appointment
@@ -791,6 +795,7 @@ export default function AdminDashboardPage() {
                                 setShowDeleteConfirm(false);
                                 setDeleteReason('');
                               }}
+                              aria-label="Cancel deletion"
                               className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-white transition-colors text-sm"
                             >
                               Cancel
@@ -803,6 +808,8 @@ export default function AdminDashboardPage() {
                                 })
                               }
                               disabled={deleteAppointmentMutation.isPending}
+                              aria-label="Confirm permanent deletion of appointment"
+                              aria-busy={deleteAppointmentMutation.isPending}
                               className="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50 text-sm font-medium"
                             >
                               {deleteAppointmentMutation.isPending ? 'Deleting...' : 'Yes, Delete'}

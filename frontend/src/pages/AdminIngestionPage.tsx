@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { previewTherapistCV, createTherapistFromCV } from '../api/client';
 import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability } from '../types';
@@ -11,6 +11,7 @@ import {
   type CategoryOption,
 } from '../config/therapist-categories';
 import { APP } from '../config/constants';
+import { useFormPersistence, formatDraftAge } from '../hooks/useFormPersistence';
 
 // Days of the week for availability
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
@@ -23,6 +24,19 @@ type AvailabilityByDay = {
     times: string; // Format: "09:00-12:00, 14:00-17:00"
   };
 };
+
+// Form state for persistence (excludes File which can't be serialized)
+interface IngestionFormState {
+  therapistName: string;
+  therapistEmail: string;
+  additionalInfo: string;
+  overrideEmail: string;
+  overrideApproach: string[];
+  overrideStyle: string[];
+  overrideAreasOfFocus: string[];
+  overrideAvailability: AvailabilityByDay;
+  internalNotes: string;
+}
 
 // Toast notification component for file validation errors
 function Toast({ message, onClose }: { message: string; onClose: () => void }) {
@@ -64,6 +78,7 @@ function ConfirmModal({
           <button
             onClick={onCancel}
             disabled={isLoading}
+            aria-label="Cancel and close dialog"
             className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
           >
             Cancel
@@ -71,6 +86,8 @@ function ConfirmModal({
           <button
             onClick={onConfirm}
             disabled={isLoading}
+            aria-label="Confirm and create therapist"
+            aria-busy={isLoading}
             className="px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50"
           >
             {isLoading ? 'Creating...' : 'Confirm'}
@@ -286,8 +303,88 @@ export default function AdminIngestionPage() {
   // UI state for modals/toasts
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showDraftBanner, setShowDraftBanner] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Form persistence hook
+  const {
+    hasDraft,
+    draftData,
+    draftTimestamp,
+    saveDraft,
+    restoreDraft,
+    dismissDraft,
+    clearDraft,
+  } = useFormPersistence<IngestionFormState>({
+    storageKey: 'therapist_ingestion_draft',
+    debounceMs: 1500,
+    maxAgeMs: 24 * 60 * 60 * 1000, // 24 hours
+  });
+
+  // Show draft banner when draft exists
+  useEffect(() => {
+    if (hasDraft && draftData) {
+      setShowDraftBanner(true);
+    }
+  }, [hasDraft, draftData]);
+
+  // Auto-save form state on changes
+  const saveCurrentFormState = useCallback(() => {
+    // Only save if there's meaningful content
+    if (therapistName.trim() || additionalInfo.trim() || internalNotes.trim()) {
+      saveDraft({
+        therapistName,
+        therapistEmail,
+        additionalInfo,
+        overrideEmail,
+        overrideApproach,
+        overrideStyle,
+        overrideAreasOfFocus,
+        overrideAvailability,
+        internalNotes,
+      });
+    }
+  }, [
+    therapistName,
+    therapistEmail,
+    additionalInfo,
+    overrideEmail,
+    overrideApproach,
+    overrideStyle,
+    overrideAreasOfFocus,
+    overrideAvailability,
+    internalNotes,
+    saveDraft,
+  ]);
+
+  // Trigger auto-save when form fields change
+  useEffect(() => {
+    saveCurrentFormState();
+  }, [saveCurrentFormState]);
+
+  // Restore draft handler
+  const handleRestoreDraft = () => {
+    const draft = restoreDraft();
+    if (draft) {
+      setTherapistName(draft.therapistName);
+      setTherapistEmail(draft.therapistEmail);
+      setAdditionalInfo(draft.additionalInfo);
+      setOverrideEmail(draft.overrideEmail);
+      setOverrideApproach(draft.overrideApproach);
+      setOverrideStyle(draft.overrideStyle);
+      setOverrideAreasOfFocus(draft.overrideAreasOfFocus);
+      setOverrideAvailability(draft.overrideAvailability);
+      setInternalNotes(draft.internalNotes);
+    }
+    setShowDraftBanner(false);
+  };
+
+  // Dismiss draft handler
+  const handleDismissDraft = () => {
+    dismissDraft();
+    setShowDraftBanner(false);
+  };
 
   const previewMutation = useMutation({
     mutationFn: () => {
@@ -345,6 +442,8 @@ export default function AdminIngestionPage() {
     },
     onSuccess: (data) => {
       setCreatedTherapist({ id: data.therapistId, url: data.notionUrl });
+      // Clear the persisted draft on successful creation
+      clearDraft();
       // Reset form
       setTherapistName('');
       setTherapistEmail('');
@@ -403,6 +502,8 @@ export default function AdminIngestionPage() {
   };
 
   const handleReset = () => {
+    // Clear the persisted draft when user explicitly resets
+    clearDraft();
     setTherapistName('');
     setTherapistEmail('');
     setFile(null);
@@ -451,8 +552,63 @@ export default function AdminIngestionPage() {
                   </a>
                 </p>
               </div>
-              <button onClick={() => setCreatedTherapist(null)} className="text-green-600 hover:text-green-800">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <button
+                type="button"
+                onClick={() => setCreatedTherapist(null)}
+                aria-label="Dismiss success message"
+                className="text-green-600 hover:text-green-800"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Draft Restoration Banner */}
+        {showDraftBanner && draftData && (
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-blue-800">Unsaved Draft Found</h3>
+                <p className="text-sm text-blue-700 mt-1">
+                  You have an unsaved form from {draftTimestamp ? formatDraftAge(draftTimestamp) : 'earlier'}.
+                  {draftData.therapistName && (
+                    <span className="font-medium"> Therapist: {draftData.therapistName}</span>
+                  )}
+                </p>
+                <div className="flex gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={handleRestoreDraft}
+                    aria-label="Restore saved draft"
+                    className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Restore Draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDismissDraft}
+                    aria-label="Discard saved draft"
+                    className="px-3 py-1.5 text-sm font-medium text-blue-700 hover:text-blue-800 transition-colors"
+                  >
+                    Start Fresh
+                  </button>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleDismissDraft}
+                aria-label="Dismiss draft notification"
+                className="text-blue-600 hover:text-blue-800"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
@@ -585,6 +741,8 @@ export default function AdminIngestionPage() {
             <button
               type="submit"
               disabled={!therapistName.trim() || (!file && additionalInfo.trim().length < 50) || previewMutation.isPending}
+              aria-label="Preview extracted therapist profile"
+              aria-busy={previewMutation.isPending}
               className="w-full py-3 px-4 bg-slate-800 text-white font-semibold rounded-full hover:bg-slate-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {previewMutation.isPending ? (
@@ -738,8 +896,11 @@ export default function AdminIngestionPage() {
             {/* Action Buttons */}
             <div className="flex gap-4 mt-6">
               <button
+                type="button"
                 onClick={handleCreate}
                 disabled={createMutation.isPending}
+                aria-label="Create therapist profile in Notion"
+                aria-busy={createMutation.isPending}
                 className="flex-1 py-3 px-4 bg-teal-500 text-white font-semibold rounded-full hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {createMutation.isPending ? (
@@ -769,6 +930,7 @@ export default function AdminIngestionPage() {
               <button
                 onClick={handleReset}
                 disabled={createMutation.isPending}
+                aria-label="Reset form and start over"
                 className="py-3 px-6 border border-slate-200 text-slate-700 font-semibold rounded-full hover:bg-slate-50 disabled:opacity-50 transition-colors"
               >
                 Start Over
