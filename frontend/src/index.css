@@ -6,11 +6,6 @@ html, body {
   @apply bg-gray-50 text-gray-900 antialiased;
 }
 
-/* Hide horizontal overflow without breaking sticky positioning */
-body {
-  overflow-x: clip;
-}
-
 /* Ensure smooth scrolling on mobile */
 html {
   scroll-behavior: smooth;
