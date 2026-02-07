@@ -31,7 +31,7 @@ export default function Layout({ children }: LayoutProps) {
           </nav>
         </div>
       </header>
-      <main className="flex-1 mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 w-full">
+      <main className="flex-1 mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8 w-full">
         {children}
       </main>
       <footer className="bg-slate-50 border-t border-gray-100">

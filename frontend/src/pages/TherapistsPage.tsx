@@ -91,7 +91,7 @@ export default function TherapistsPage() {
     <div>
       {/* Introduction Text - from admin settings */}
       {introText && (
-        <div className="mb-8 prose prose-slate max-w-none prose-headings:text-slate-900 prose-h3:text-lg prose-h3:font-semibold prose-h3:mt-6 prose-h3:mb-3 prose-p:text-slate-600 prose-p:leading-relaxed prose-strong:text-slate-900">
+        <div className="mb-6 prose prose-slate prose-sm max-w-none prose-headings:text-slate-900 prose-h3:text-base prose-h3:font-semibold prose-h3:mt-4 prose-h3:mb-2 first:prose-h3:mt-0 prose-p:text-slate-600 prose-p:leading-relaxed prose-p:my-2 prose-strong:text-slate-900">
           <ReactMarkdown>{introText}</ReactMarkdown>
         </div>
       )}
