@@ -8,7 +8,7 @@ interface LayoutProps {
 export default function Layout({ children }: LayoutProps) {
   return (
     <div className="min-h-screen bg-white flex flex-col">
-      <header className="bg-white border-b border-gray-100">
+      <header className="bg-white border-b border-gray-100 sticky top-0 z-50">
         <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8 flex items-center justify-between">
           <Link to="/" className="flex items-center">
             <span className="text-xl font-extrabold text-slate-900">spill</span>
