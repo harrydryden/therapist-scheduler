@@ -42,6 +42,7 @@ export const UI = {
   // TherapistCard section heights (in pixels)
   CATEGORY_SECTION_HEIGHT: 56,
   BIO_SECTION_HEIGHT: 100,
+  AVAILABILITY_SECTION_HEIGHT: 48,
   // Maximum visible items before "show more"
   MAX_VISIBLE_BADGES: 2,
   MAX_AVAILABILITY_SLOTS: 2,
