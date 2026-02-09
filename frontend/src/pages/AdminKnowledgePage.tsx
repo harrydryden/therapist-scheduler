@@ -333,7 +333,7 @@ export default function AdminKnowledgePage() {
                         className={`px-3 py-1 text-xs rounded border transition-colors ${
                           entry.active
                             ? 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                            : 'border-teal-200 text-spill-blue hover:bg-teal-50'
+                            : 'border-primary-200 text-spill-blue hover:bg-primary-50'
                         }`}
                       >
                         {entry.active ? 'Deactivate' : 'Activate'}

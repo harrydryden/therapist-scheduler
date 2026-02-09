@@ -464,7 +464,7 @@ export default function AdminDashboardPage() {
                                 key={apt.id}
                                 onClick={() => setSelectedAppointment(apt.id)}
                                 className={`p-4 pl-8 cursor-pointer hover:bg-slate-100 transition-colors ${
-                                  selectedAppointment === apt.id ? 'bg-teal-50 border-l-4 border-l-teal-500' : ''
+                                  selectedAppointment === apt.id ? 'bg-primary-50 border-l-4 border-l-spill-blue' : ''
                                 }`}
                               >
                                 <div className="flex justify-between items-start mb-1">
@@ -862,7 +862,7 @@ export default function AdminDashboardPage() {
                           key={idx}
                           className={`p-3 rounded-lg ${
                             msg.role === 'assistant'
-                              ? 'bg-teal-50 border border-teal-100'
+                              ? 'bg-primary-50 border border-primary-100'
                               : msg.role === 'admin'
                                 ? 'bg-orange-50 border border-orange-100'
                                 : 'bg-slate-100 border border-slate-200'

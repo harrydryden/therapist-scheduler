@@ -128,13 +128,13 @@ function EvidenceTooltip({ evidence }: EvidenceTooltipProps) {
         <div className="absolute z-10 bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-lg">
           {evidence.evidence && (
             <div className="mb-2">
-              <span className="font-semibold text-teal-300">Evidence:</span>
+              <span className="font-semibold text-spill-aqua">Evidence:</span>
               <p className="mt-0.5 italic">&ldquo;{evidence.evidence}&rdquo;</p>
             </div>
           )}
           {evidence.reasoning && (
             <div>
-              <span className="font-semibold text-teal-300">Why:</span>
+              <span className="font-semibold text-spill-aqua">Why:</span>
               <p className="mt-0.5">{evidence.reasoning}</p>
             </div>
           )}
@@ -718,7 +718,7 @@ export default function AdminIngestionPage() {
               <label className="block text-sm font-medium text-slate-700 mb-2">
                 Therapist CV / Application (PDF) <span className="text-slate-400 font-normal">- Optional</span>
               </label>
-              <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-teal-300 transition-colors">
+              <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-spill-blue transition-colors">
                 <input
                   ref={fileInputRef}
                   type="file"

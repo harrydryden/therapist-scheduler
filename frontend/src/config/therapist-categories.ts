@@ -118,5 +118,5 @@ export const CATEGORY_LABELS = {
 export const CATEGORY_COLORS = {
   approach: 'bg-violet-100 text-violet-800 border-violet-200',
   style: 'bg-amber-100 text-amber-800 border-amber-200',
-  areasOfFocus: 'bg-primary-50 text-teal-800 border-teal-200',
+  areasOfFocus: 'bg-primary-50 text-primary-900 border-primary-200',
 } as const;

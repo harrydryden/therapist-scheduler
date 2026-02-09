@@ -10,7 +10,6 @@ export default {
           blue: '#0099ff',      // Bright blue (primary actions, links)
           aqua: '#66d9e8',      // Light aqua/cyan (hover states, secondary)
           mint: '#96f2d7',      // Mint green (success, highlights)
-          teal: '#00b894',      // Teal/green (CTA buttons, accents)
         },
         primary: {
           50: '#e6f7ff',
