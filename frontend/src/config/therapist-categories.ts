@@ -115,8 +115,12 @@ export const CATEGORY_LABELS = {
 } as const;
 
 // Category colors for badges (using Spill palette)
+// Matches production free.spill.app styling:
+// - Areas of Focus: blue tags
+// - Approach: gray tags
+// - Style: coral/red tags
 export const CATEGORY_COLORS = {
   approach: 'bg-spill-grey-100 text-spill-grey-600 border-spill-grey-200',
-  style: 'bg-spill-yellow-100 text-spill-yellow-600 border-spill-yellow-200',
+  style: 'bg-spill-red-100 text-spill-red-600 border-spill-red-200',
   areasOfFocus: 'bg-spill-blue-100 text-spill-blue-800 border-spill-blue-200',
 } as const;

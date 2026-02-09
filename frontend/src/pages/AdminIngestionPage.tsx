@@ -88,7 +88,7 @@ function ConfirmModal({
             disabled={isLoading}
             aria-label="Confirm and create therapist"
             aria-busy={isLoading}
-            className="px-4 py-2 bg-spill-blue text-white rounded-lg hover:bg-primary-600 transition-colors disabled:opacity-50"
+            className="px-4 py-2 bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
           >
             {isLoading ? 'Creating...' : 'Confirm'}
           </button>
@@ -117,7 +117,7 @@ function EvidenceTooltip({ evidence }: EvidenceTooltipProps) {
         onMouseEnter={() => setIsVisible(true)}
         onMouseLeave={() => setIsVisible(false)}
         onClick={() => setIsVisible(!isVisible)}
-        className="text-slate-400 hover:text-spill-blue transition-colors"
+        className="text-slate-400 hover:text-spill-blue-800 transition-colors"
         aria-label="View AI reasoning for this selection"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -181,7 +181,7 @@ function CategorySelector({ label, options, selected, onChange, colorClass, evid
                 id={`category-${option.type}`}
                 checked={isSelected}
                 onChange={() => toggleOption(option.type)}
-                className="mt-1 h-4 w-4 text-spill-blue focus:ring-spill-blue border-slate-300 rounded"
+                className="mt-1 h-4 w-4 text-spill-blue-800 focus:ring-spill-blue-400-800 border-slate-300 rounded"
               />
               <label htmlFor={`category-${option.type}`} className="flex-1 cursor-pointer">
                 <div className="flex items-center">
@@ -246,7 +246,7 @@ function AvailabilitySelector({ availability, onChange }: AvailabilitySelectorPr
               id={`availability-${day}`}
               checked={availability[day].enabled}
               onChange={() => toggleDay(day)}
-              className="mt-2.5 h-4 w-4 text-spill-blue focus:ring-spill-blue border-slate-300 rounded"
+              className="mt-2.5 h-4 w-4 text-spill-blue-800 focus:ring-spill-blue-400-800 border-slate-300 rounded"
             />
             <div className="flex-1">
               <label
@@ -261,7 +261,7 @@ function AvailabilitySelector({ availability, onChange }: AvailabilitySelectorPr
                   value={availability[day].times}
                   onChange={(e) => updateTimes(day, e.target.value)}
                   placeholder="09:00-17:00"
-                  className="mt-1 w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
+                  className="mt-1 w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
                 />
               )}
             </div>
@@ -689,7 +689,7 @@ export default function AdminIngestionPage() {
                 id="therapistName"
                 value={therapistName}
                 onChange={(e) => setTherapistName(e.target.value)}
-                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
                 placeholder="Enter the therapist's full name"
                 required
               />
@@ -705,7 +705,7 @@ export default function AdminIngestionPage() {
                 id="therapistEmail"
                 value={therapistEmail}
                 onChange={(e) => setTherapistEmail(e.target.value.trim().replace(/\s/g, ''))}
-                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
                 placeholder="therapist@example.com"
               />
               <p className="text-sm text-slate-500 mt-1">
@@ -718,7 +718,7 @@ export default function AdminIngestionPage() {
               <label className="block text-sm font-medium text-slate-700 mb-2">
                 Therapist CV / Application (PDF) <span className="text-slate-400 font-normal">- Optional</span>
               </label>
-              <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-spill-blue transition-colors">
+              <div className="border-2 border-dashed border-slate-200 rounded-xl p-6 text-center hover:border-spill-blue-400 transition-colors">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -730,7 +730,7 @@ export default function AdminIngestionPage() {
                 <label htmlFor="pdfUpload" className="cursor-pointer">
                   {file ? (
                     <div className="flex items-center justify-center gap-3">
-                      <svg className="w-8 h-8 text-spill-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-8 h-8 text-spill-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
@@ -777,7 +777,7 @@ export default function AdminIngestionPage() {
                 onChange={(e) => setAdditionalInfo(e.target.value)}
                 rows={8}
                 maxLength={12000}
-                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none resize-y"
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none resize-y"
                 placeholder={`Enter information about the therapist. Include details about:
 
 - Their therapeutic approach (e.g., CBT, Mindfulness, Person-Centred, Integrative)
@@ -860,7 +860,7 @@ export default function AdminIngestionPage() {
                   id="overrideEmail"
                   value={overrideEmail}
                   onChange={(e) => setOverrideEmail(e.target.value)}
-                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
+                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
                 />
               </div>
 
@@ -950,7 +950,7 @@ export default function AdminIngestionPage() {
                   value={internalNotes}
                   onChange={(e) => setInternalNotes(e.target.value)}
                   rows={3}
-                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none resize-y"
+                  className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none resize-y"
                   placeholder="Any internal notes about this therapist..."
                 />
               </div>
@@ -964,7 +964,7 @@ export default function AdminIngestionPage() {
                 disabled={createMutation.isPending}
                 aria-label="Create therapist profile in Notion"
                 aria-busy={createMutation.isPending}
-                className="flex-1 py-3 px-4 bg-spill-blue text-white font-semibold rounded-full hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="flex-1 py-3 px-4 bg-spill-blue-800 text-white font-semibold rounded-full hover:bg-spill-blue-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 {createMutation.isPending ? (
                   <span className="flex items-center justify-center gap-2">

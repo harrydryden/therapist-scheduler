@@ -212,7 +212,7 @@ export default function AdminSettingsPage() {
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-primary-50 rounded-lg flex items-center justify-center">
                       <svg
-                        className="w-5 h-5 text-spill-blue"
+                        className="w-5 h-5 text-spill-blue-800"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -266,7 +266,7 @@ export default function AdminSettingsPage() {
                                 <select
                                   value={editValue}
                                   onChange={(e) => setEditValue(e.target.value)}
-                                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
+                                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
                                 >
                                   <option value="true">Enabled</option>
                                   <option value="false">Disabled</option>
@@ -278,7 +278,7 @@ export default function AdminSettingsPage() {
                                     value={editValue}
                                     onChange={(e) => setEditValue(e.target.value)}
                                     rows={setting.category === 'frontend' ? 16 : 12}
-                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none resize-y"
+                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none resize-y"
                                     placeholder={setting.category === 'frontend' ? "Markdown content..." : "Email template body..."}
                                   />
                                   <p className="text-xs text-slate-500 mt-1">
@@ -296,7 +296,7 @@ export default function AdminSettingsPage() {
                                   onChange={(e) => setEditValue(e.target.value)}
                                   min={setting.minValue ?? undefined}
                                   max={setting.maxValue ?? undefined}
-                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none`}
+                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none`}
                                 />
                               )}
                               {setting.valueType === 'number' && (
@@ -313,7 +313,7 @@ export default function AdminSettingsPage() {
                                   disabled={isPending}
                                   aria-label={`Save changes to ${setting.label}`}
                                   aria-busy={isPending}
-                                  className="px-3 py-1.5 bg-spill-blue text-white text-sm rounded-lg hover:bg-primary-600 transition-colors disabled:opacity-50"
+                                  className="px-3 py-1.5 bg-spill-blue-800 text-white text-sm rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
                                 >
                                   Save
                                 </button>

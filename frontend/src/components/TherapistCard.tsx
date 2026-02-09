@@ -398,7 +398,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
             <button
               type="submit"
               disabled={mutation.isPending || !firstName.trim() || !email.trim()}
-              className="w-full py-3 px-4 text-sm font-semibold text-white bg-spill-blue-800 rounded-full hover:bg-primary-600 focus:ring-2 focus:ring-spill-blue-800 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              className="w-full py-3 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {mutation.isPending ? (
                 <span className="flex items-center justify-center gap-2">

@@ -60,7 +60,7 @@ export default function TherapistsPage() {
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
-        <div className="animate-spin rounded-full h-10 w-10 border-2 border-slate-200 border-t-spill-blue"></div>
+        <div className="animate-spin rounded-full h-10 w-10 border-2 border-slate-200 border-t-spill-blue-800"></div>
         <p className="text-sm text-slate-500">Loading therapists...</p>
       </div>
     );
@@ -80,7 +80,7 @@ export default function TherapistsPage() {
           type="button"
           onClick={() => window.location.reload()}
           aria-label="Refresh page to reload therapists"
-          className="px-6 py-3 text-sm font-semibold text-white bg-spill-blue rounded-full hover:bg-primary-600 transition-colors"
+          className="px-6 py-3 text-sm font-semibold text-white bg-spill-blue-800 rounded-full hover:bg-spill-blue-400 transition-colors"
         >
           Refresh Page
         </button>
@@ -103,7 +103,7 @@ export default function TherapistsPage() {
           <button
             type="button"
             onClick={() => setIsIntroExpanded(!isIntroExpanded)}
-            className="mt-2 text-sm font-medium text-spill-blue hover:text-primary-700 transition-colors flex items-center gap-1"
+            className="mt-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400 transition-colors flex items-center gap-1"
             aria-expanded={isIntroExpanded}
           >
             {isIntroExpanded ? 'Show less' : 'Read more'}
@@ -147,7 +147,7 @@ export default function TherapistsPage() {
               type="button"
               onClick={() => setSelectedCategory(null)}
               aria-label={`Clear filter for ${selectedCategory}`}
-              className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue hover:text-primary-700"
+              className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400"
             >
               Clear filter
             </button>
