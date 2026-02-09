@@ -157,7 +157,7 @@ export default function AdminKnowledgePage() {
                 handleCreate();
               }}
               aria-label="Add new knowledge entry"
-              className="px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors font-medium"
+              className="px-4 py-2 bg-spill-blue text-white rounded-lg hover:bg-primary-600 transition-colors font-medium"
             >
               + Add Entry
             </button>
@@ -191,7 +191,7 @@ export default function AdminKnowledgePage() {
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="e.g., Session Prep Tips"
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
               />
             </div>
 
@@ -205,7 +205,7 @@ export default function AdminKnowledgePage() {
                 value={audience}
                 onChange={(e) => setAudience(e.target.value as KnowledgeAudience)}
                 aria-describedby="audience-description"
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
               >
                 <option value="both">Both (Therapist & Client)</option>
                 <option value="therapist">Therapist only</option>
@@ -228,7 +228,7 @@ export default function AdminKnowledgePage() {
                 placeholder="Enter the knowledge or FAQ content that the agent should know..."
                 rows={5}
                 aria-required="true"
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none resize-none"
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none resize-none"
               />
             </div>
 
@@ -254,7 +254,7 @@ export default function AdminKnowledgePage() {
                 disabled={!content.trim() || isPending}
                 aria-label={editingEntry ? 'Save changes to knowledge entry' : 'Create new knowledge entry'}
                 aria-busy={isPending}
-                className="px-4 py-2 bg-teal-500 text-white rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50 font-medium"
+                className="px-4 py-2 bg-spill-blue text-white rounded-lg hover:bg-primary-600 transition-colors disabled:opacity-50 font-medium"
               >
                 {isPending ? 'Saving...' : editingEntry ? 'Save Changes' : 'Create Entry'}
               </button>
@@ -283,7 +283,7 @@ export default function AdminKnowledgePage() {
 
           {isLoading ? (
             <div className="p-8 text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-teal-500 mx-auto"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-spill-blue mx-auto"></div>
               <p className="text-sm text-slate-500 mt-2">Loading...</p>
             </div>
           ) : entries && entries.length > 0 ? (
@@ -333,7 +333,7 @@ export default function AdminKnowledgePage() {
                         className={`px-3 py-1 text-xs rounded border transition-colors ${
                           entry.active
                             ? 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                            : 'border-teal-200 text-teal-600 hover:bg-teal-50'
+                            : 'border-teal-200 text-spill-blue hover:bg-teal-50'
                         }`}
                       >
                         {entry.active ? 'Deactivate' : 'Activate'}

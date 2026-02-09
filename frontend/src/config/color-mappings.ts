@@ -30,7 +30,7 @@ export const PRIORITY_COLORS: Record<string, string> = {
 // Common badge styles for labels/tags
 export const TAG_COLORS = {
   default: 'bg-slate-100 text-slate-600',
-  custom: 'bg-teal-100 text-teal-700',
+  custom: 'bg-primary-50 text-primary-700',
   inactive: 'bg-slate-200 text-slate-600',
   warning: 'bg-amber-200 text-amber-800',
   success: 'bg-green-100 text-green-700',

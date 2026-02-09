@@ -169,7 +169,7 @@ export default function AdminSettingsPage() {
             aria-label="Show all settings categories"
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               activeCategory === 'all'
-                ? 'bg-teal-500 text-white'
+                ? 'bg-spill-blue text-white'
                 : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
             }`}
           >
@@ -184,7 +184,7 @@ export default function AdminSettingsPage() {
               aria-label={`Filter to ${categoryInfo[cat]?.label || cat} settings`}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                 activeCategory === cat
-                  ? 'bg-teal-500 text-white'
+                  ? 'bg-spill-blue text-white'
                   : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
               }`}
             >
@@ -196,7 +196,7 @@ export default function AdminSettingsPage() {
         {/* Loading State */}
         {isLoading ? (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-teal-500 mx-auto"></div>
+            <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-spill-blue mx-auto"></div>
             <p className="text-sm text-slate-500 mt-2">Loading settings...</p>
           </div>
         ) : (
@@ -210,9 +210,9 @@ export default function AdminSettingsPage() {
                 {/* Category Header */}
                 <div className="p-4 border-b border-slate-100 bg-slate-50">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center">
+                    <div className="w-10 h-10 bg-primary-50 rounded-lg flex items-center justify-center">
                       <svg
-                        className="w-5 h-5 text-teal-600"
+                        className="w-5 h-5 text-spill-blue"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -250,7 +250,7 @@ export default function AdminSettingsPage() {
                               </span>
                             )}
                             {!setting.isDefault && (
-                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-teal-100 text-teal-700">
+                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-primary-50 text-primary-700">
                                 Custom
                               </span>
                             )}
@@ -266,7 +266,7 @@ export default function AdminSettingsPage() {
                                 <select
                                   value={editValue}
                                   onChange={(e) => setEditValue(e.target.value)}
-                                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none"
+                                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none"
                                 >
                                   <option value="true">Enabled</option>
                                   <option value="false">Disabled</option>
@@ -278,7 +278,7 @@ export default function AdminSettingsPage() {
                                     value={editValue}
                                     onChange={(e) => setEditValue(e.target.value)}
                                     rows={setting.category === 'frontend' ? 16 : 12}
-                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none resize-y"
+                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none resize-y"
                                     placeholder={setting.category === 'frontend' ? "Markdown content..." : "Email template body..."}
                                   />
                                   <p className="text-xs text-slate-500 mt-1">
@@ -296,7 +296,7 @@ export default function AdminSettingsPage() {
                                   onChange={(e) => setEditValue(e.target.value)}
                                   min={setting.minValue ?? undefined}
                                   max={setting.maxValue ?? undefined}
-                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none`}
+                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none`}
                                 />
                               )}
                               {setting.valueType === 'number' && (
@@ -313,7 +313,7 @@ export default function AdminSettingsPage() {
                                   disabled={isPending}
                                   aria-label={`Save changes to ${setting.label}`}
                                   aria-busy={isPending}
-                                  className="px-3 py-1.5 bg-teal-500 text-white text-sm rounded-lg hover:bg-teal-600 transition-colors disabled:opacity-50"
+                                  className="px-3 py-1.5 bg-spill-blue text-white text-sm rounded-lg hover:bg-primary-600 transition-colors disabled:opacity-50"
                                 >
                                   Save
                                 </button>

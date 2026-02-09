@@ -84,7 +84,7 @@ export default function TherapistDetailPage() {
                           return (
                             <span
                               key={item}
-                              className="inline-block px-2.5 py-1 text-xs font-medium bg-teal-50 text-teal-700 rounded-full"
+                              className="inline-block px-2.5 py-1 text-xs font-medium bg-teal-50 text-primary-700 rounded-full"
                               title={option?.explainer}
                             >
                               {item}

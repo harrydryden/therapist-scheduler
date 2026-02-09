@@ -122,7 +122,7 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
                 onClick={onToggle}
                 aria-expanded={false}
                 aria-label={`Show ${hiddenCount} more ${label.toLowerCase()} options`}
-                className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors focus:outline-none focus:ring-2 focus:ring-teal-500"
+                className="inline-block px-2 py-1 text-xs font-medium bg-slate-100 text-slate-500 rounded-full hover:bg-slate-200 transition-colors focus:outline-none focus:ring-2 focus:ring-spill-blue"
               >
                 +{hiddenCount}
               </button>
@@ -132,7 +132,7 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
                 onClick={onToggle}
                 aria-expanded={true}
                 aria-label={`Show fewer ${label.toLowerCase()} options`}
-                className="inline-block px-2 py-1 text-xs font-medium text-teal-600 hover:text-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-500 rounded"
+                className="inline-block px-2 py-1 text-xs font-medium text-spill-blue hover:text-primary-700 focus:outline-none focus:ring-2 focus:ring-spill-blue rounded"
               >
                 Less
               </button>
@@ -221,7 +221,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
       style={isExpanded ? undefined : { height: `${collapsedHeight}px` }}
     >
       <div className="flex items-start gap-2">
-        <svg className="w-4 h-4 mt-0.5 text-teal-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-4 h-4 mt-0.5 text-spill-blue flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
         </svg>
         <div className="text-sm space-y-0.5">
@@ -233,7 +233,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
               onClick={onToggle}
               aria-expanded={isExpanded}
               aria-label={isExpanded ? 'Show fewer availability times' : 'Show more availability times'}
-              className="text-xs text-teal-600 hover:text-teal-700 font-medium focus:outline-none focus:ring-2 focus:ring-teal-500 rounded"
+              className="text-xs text-spill-blue hover:text-primary-700 font-medium focus:outline-none focus:ring-2 focus:ring-spill-blue rounded"
             >
               {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more`}
             </button>
@@ -326,7 +326,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
               onClick={() => toggleSection('bio')}
               aria-expanded={isExpanded('bio')}
               aria-label={isExpanded('bio') ? 'Show less of the bio' : 'Read more of the bio'}
-              className="text-sm font-medium text-teal-600 hover:text-teal-700 mt-1 focus:outline-none focus:ring-2 focus:ring-teal-500 rounded"
+              className="text-sm font-medium text-spill-blue hover:text-primary-700 mt-1 focus:outline-none focus:ring-2 focus:ring-spill-blue rounded"
             >
               {isExpanded('bio') ? 'Show less' : 'Read more'}
             </button>
@@ -353,12 +353,12 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
       <div className="border-t border-slate-100 p-6 bg-slate-50 mt-auto">
         {mutation.isSuccess ? (
           <div className="text-center py-2">
-            <div className="inline-flex items-center justify-center w-12 h-12 bg-teal-100 rounded-full mb-3">
-              <svg className="w-6 h-6 text-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="inline-flex items-center justify-center w-12 h-12 bg-primary-50 rounded-full mb-3">
+              <svg className="w-6 h-6 text-spill-blue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <p className="text-sm font-semibold text-teal-700">Request sent!</p>
+            <p className="text-sm font-semibold text-primary-700">Request sent!</p>
             <p className="text-xs text-slate-500 mt-1">
               We'll email you shortly to schedule your session.
             </p>
@@ -375,7 +375,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
                 value={firstName}
                 onChange={(e) => setFirstName(e.target.value)}
                 placeholder="Your first name"
-                className="w-full px-4 py-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none transition-all"
+                className="w-full px-4 py-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none transition-all"
                 disabled={mutation.isPending}
                 required
               />
@@ -390,7 +390,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Your email"
-                className="w-full px-4 py-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-transparent outline-none transition-all"
+                className="w-full px-4 py-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue focus:border-transparent outline-none transition-all"
                 disabled={mutation.isPending}
                 required
               />
@@ -398,7 +398,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
             <button
               type="submit"
               disabled={mutation.isPending || !firstName.trim() || !email.trim()}
-              className="w-full py-3 px-4 text-sm font-semibold text-white bg-teal-500 rounded-full hover:bg-teal-600 focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              className="w-full py-3 px-4 text-sm font-semibold text-white bg-spill-blue rounded-full hover:bg-primary-600 focus:ring-2 focus:ring-spill-blue focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {mutation.isPending ? (
                 <span className="flex items-center justify-center gap-2">
