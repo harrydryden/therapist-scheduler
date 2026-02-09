@@ -7,6 +7,7 @@ import FilterBar from '../components/FilterBar';
 
 export default function TherapistsPage() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [isIntroExpanded, setIsIntroExpanded] = useState(false);
 
   const {
     data: therapists,
@@ -89,10 +90,44 @@ export default function TherapistsPage() {
 
   return (
     <div>
-      {/* Introduction Text - from admin settings */}
+      {/* Introduction Text - Collapsible section */}
       {introText && (
-        <div className="mb-6 prose prose-slate prose-sm max-w-none prose-headings:text-slate-900 prose-h3:text-base prose-h3:font-semibold prose-h3:mt-4 prose-h3:mb-2 first:prose-h3:mt-0 prose-p:text-slate-600 prose-p:leading-relaxed prose-p:my-2 prose-strong:text-slate-900">
-          <ReactMarkdown>{introText}</ReactMarkdown>
+        <div className="mb-6 bg-slate-50 rounded-lg border border-slate-200">
+          {/* Header - always visible */}
+          <button
+            type="button"
+            onClick={() => setIsIntroExpanded(!isIntroExpanded)}
+            className="w-full flex items-center justify-between p-4 text-left hover:bg-slate-100 transition-colors rounded-lg"
+            aria-expanded={isIntroExpanded}
+            aria-controls="intro-content"
+          >
+            <div className="flex-1 pr-4">
+              <h3 className="text-base font-semibold text-slate-900">
+                How to access your free Spill session
+              </h3>
+              <p className="text-sm text-slate-600 mt-1">
+                At Spill, we are uncompromising about quality. Less than 5% of applicants pass our rigorous screening process...
+              </p>
+            </div>
+            <svg
+              className={`w-5 h-5 text-slate-500 flex-shrink-0 transition-transform ${isIntroExpanded ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {/* Expandable content */}
+          {isIntroExpanded && (
+            <div
+              id="intro-content"
+              className="px-4 pb-4 prose prose-slate prose-sm max-w-none prose-headings:text-slate-900 prose-h3:text-base prose-h3:font-semibold prose-h3:mt-4 prose-h3:mb-2 first:prose-h3:mt-0 prose-p:text-slate-600 prose-p:leading-relaxed prose-p:my-2 prose-strong:text-slate-900"
+            >
+              <ReactMarkdown>{introText}</ReactMarkdown>
+            </div>
+          )}
         </div>
       )}
 
