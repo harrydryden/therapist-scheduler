@@ -4,24 +4,59 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Spill brand colors
+        // Spill brand colors - updated palette
         spill: {
-          navy: '#1e3a5f',      // Dark navy blue (headers, dark accents)
-          blue: '#0099ff',      // Bright blue (primary actions, links)
-          aqua: '#66d9e8',      // Light aqua/cyan (hover states, secondary)
-          mint: '#96f2d7',      // Mint green (success, highlights)
+          black: '#000000',
+          white: '#FFFFFF',
+          // Grey scale
+          grey: {
+            100: '#F6F5F9',
+            200: '#D3D3DB',
+            400: '#707078',
+            600: '#303033',
+          },
+          // Blue scale (primary)
+          blue: {
+            100: '#E8EDFF',
+            200: '#C8D5FF',
+            400: '#8DA9FF',
+            800: '#0C3CAD',
+            900: '#0C1A66',
+          },
+          // Teal scale
+          teal: {
+            100: '#D6F5EF',
+            200: '#A4EDE3',
+            400: '#35D0BA',
+            600: '#08B89F',
+          },
+          // Red scale (errors, warnings)
+          red: {
+            100: '#F9D3CF',
+            200: '#FFB0A8',
+            400: '#FB7466',
+            600: '#D82C29',
+          },
+          // Yellow scale (alerts, highlights)
+          yellow: {
+            100: '#FFF8E7',
+            200: '#FFECBE',
+            400: '#F8CF60',
+            600: '#EFB108',
+          },
         },
+        // Primary color aliases (using blue)
         primary: {
-          50: '#e6f7ff',
-          100: '#b3e6ff',
-          200: '#80d4ff',
-          300: '#4dc3ff',
-          400: '#1ab2ff',
-          500: '#0099ff',       // Bright blue - main
-          600: '#007acc',
-          700: '#005c99',
-          800: '#003d66',
-          900: '#1e3a5f',       // Navy
+          50: '#E8EDFF',
+          100: '#E8EDFF',
+          200: '#C8D5FF',
+          300: '#A8C2FF',
+          400: '#8DA9FF',
+          500: '#0C3CAD',       // Main primary
+          600: '#0C3CAD',
+          700: '#0C2A8A',
+          800: '#0C3CAD',
+          900: '#0C1A66',
         },
       },
     },
