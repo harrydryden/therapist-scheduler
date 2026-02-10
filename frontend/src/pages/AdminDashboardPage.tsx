@@ -323,7 +323,10 @@ export default function AdminDashboardPage() {
               );
               const healthCounts = activeAppointments.reduce(
                 (acc, apt) => {
-                  acc[apt.healthStatus]++;
+                  // Validate health status before incrementing to prevent unexpected keys
+                  if (apt.healthStatus && ['green', 'yellow', 'red'].includes(apt.healthStatus)) {
+                    acc[apt.healthStatus as HealthStatus]++;
+                  }
                   return acc;
                 },
                 { green: 0, yellow: 0, red: 0 } as Record<HealthStatus, number>
