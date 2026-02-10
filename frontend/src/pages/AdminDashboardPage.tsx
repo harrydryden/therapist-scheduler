@@ -470,8 +470,9 @@ export default function AdminDashboardPage() {
               const activeAppointments = appointmentsData.data.filter(
                 (apt) => apt.status !== 'confirmed' && apt.status !== 'cancelled'
               );
-              const humanControlCount = activeAppointments.filter((apt) => apt.humanControlEnabled).length;
-              const agentControlCount = activeAppointments.length - humanControlCount;
+              // Count ALL appointments with human control (including confirmed) since they may need action
+              const humanControlCount = appointmentsData.data.filter((apt) => apt.humanControlEnabled).length;
+              const agentControlCount = activeAppointments.filter((apt) => !apt.humanControlEnabled).length;
               return (
                 <>
                   <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-l-spill-blue-800">
@@ -502,7 +503,8 @@ export default function AdminDashboardPage() {
                 (apt) => apt.status !== 'confirmed' && apt.status !== 'cancelled'
               );
               const redCount = activeAppointments.filter((apt) => apt.healthStatus === 'red').length;
-              const humanCount = activeAppointments.filter((apt) => apt.humanControlEnabled).length;
+              // Count ALL appointments with human control (including confirmed) since they may need action
+              const humanCount = appointmentsData.data.filter((apt) => apt.humanControlEnabled).length;
               return (
                 <>
                   <button
