@@ -21,6 +21,15 @@ function sanitizeText(text: string): string {
   return DOMPurify.sanitize(text, { ALLOWED_TAGS: [] }); // Strip all HTML
 }
 
+// Get and set admin name for audit trail
+function getAdminName(): string {
+  return localStorage.getItem('admin_name') || '';
+}
+
+function setAdminNameStorage(name: string): void {
+  localStorage.setItem('admin_name', name);
+}
+
 // Group appointments by therapist
 interface TherapistGroup {
   therapistName: string;
@@ -66,6 +75,10 @@ export default function AdminDashboardPage() {
   const [editStatus, setEditStatus] = useState<string | null>(null);
   const [editConfirmedDateTime, setEditConfirmedDateTime] = useState('');
   const [editWarning, setEditWarning] = useState<string | null>(null);
+
+  // Admin identity for audit trail
+  const [adminName, setAdminName] = useState(getAdminName);
+  const [showAdminNamePrompt, setShowAdminNamePrompt] = useState(!getAdminName());
 
   // Fetch appointments list with auto-refresh
   const {
@@ -204,7 +217,7 @@ export default function AdminDashboardPage() {
   // Human control mutations
   const takeControlMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
-      takeControl(id, { adminId: 'admin', reason }),
+      takeControl(id, { adminId: adminName || 'admin', reason }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
@@ -239,7 +252,7 @@ export default function AdminDashboardPage() {
       to: string;
       subject: string;
       body: string;
-    }) => sendAdminMessage(id, { to, subject, body, adminId: 'admin' }),
+    }) => sendAdminMessage(id, { to, subject, body, adminId: adminName || 'admin' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       setShowComposeMessage(false);
@@ -254,7 +267,7 @@ export default function AdminDashboardPage() {
 
   const deleteAppointmentMutation = useMutation({
     mutationFn: ({ id, reason, forceDeleteConfirmed: force }: { id: string; reason?: string; forceDeleteConfirmed?: boolean }) =>
-      deleteAppointment(id, { adminId: 'admin', reason, forceDeleteConfirmed: force }),
+      deleteAppointment(id, { adminId: adminName || 'admin', reason, forceDeleteConfirmed: force }),
     onSuccess: () => {
       // Clear selection since appointment no longer exists
       setSelectedAppointment(null);
@@ -283,7 +296,7 @@ export default function AdminDashboardPage() {
       updateAppointment(id, {
         status: status as 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'cancelled' | undefined,
         confirmedDateTime,
-        adminId: 'admin',
+        adminId: adminName || 'admin',
       }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
@@ -330,10 +343,54 @@ export default function AdminDashboardPage() {
   return (
     <div className="min-h-screen bg-slate-50 py-8 px-4">
       <div className="max-w-7xl mx-auto">
+        {/* Admin Name Prompt */}
+        {showAdminNamePrompt && (
+          <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl">
+            <h3 className="font-medium text-blue-900 mb-2">Welcome! Please enter your name</h3>
+            <p className="text-sm text-blue-700 mb-3">
+              Your name will be used in the audit trail when you take actions.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={adminName}
+                onChange={(e) => setAdminName(e.target.value)}
+                placeholder="e.g., Harry, Sarah, etc."
+                className="flex-1 px-3 py-2 border border-blue-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <button
+                onClick={() => {
+                  if (adminName.trim()) {
+                    setAdminNameStorage(adminName.trim());
+                    setShowAdminNamePrompt(false);
+                  }
+                }}
+                disabled={!adminName.trim()}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 font-medium"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-900">Scheduling Dashboard</h1>
-          <p className="text-slate-600 mt-1">Monitor and manage appointment requests</p>
+        <div className="mb-8 flex justify-between items-start">
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900">Scheduling Dashboard</h1>
+            <p className="text-slate-600 mt-1">Monitor and manage appointment requests</p>
+          </div>
+          {adminName && !showAdminNamePrompt && (
+            <div className="text-right">
+              <p className="text-sm text-slate-500">Logged in as</p>
+              <button
+                onClick={() => setShowAdminNamePrompt(true)}
+                className="text-sm font-medium text-spill-blue-800 hover:underline"
+              >
+                {adminName} ✎
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Stats Cards */}
