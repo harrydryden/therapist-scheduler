@@ -399,6 +399,7 @@ export async function releaseControl(
     `/admin/dashboard/appointments/${appointmentId}/release-control`,
     {
       method: 'POST',
+      body: JSON.stringify({}), // Empty body to satisfy Content-Type: application/json
     }
   );
   if (!response.data) {
