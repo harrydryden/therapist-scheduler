@@ -25,6 +25,24 @@ import type {
 import { API_BASE, ADMIN_SECRET } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
 
+// Custom error class to carry API error details
+export class ApiError extends Error {
+  code?: string;
+  details?: {
+    maxAllowed?: number;
+    activeCount?: number;
+    activeTherapists?: string[];
+    [key: string]: unknown;
+  };
+
+  constructor(message: string, code?: string, details?: ApiError['details']) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 /**
  * Fetch with timeout using AbortController
  */
@@ -177,7 +195,11 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
     const data = await safeParseJson(response);
 
     if (!response.ok) {
-      throw new Error(data.error || 'An error occurred');
+      throw new ApiError(
+        data.error || 'An error occurred',
+        data.code,
+        data.details
+      );
     }
 
     return data;

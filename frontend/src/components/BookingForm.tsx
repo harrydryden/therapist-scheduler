@@ -1,8 +1,13 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { submitAppointmentRequest } from '../api/client';
+import { submitAppointmentRequest, ApiError } from '../api/client';
 import type { TherapistDetail, AppointmentRequest } from '../types';
 import { APP } from '../config/constants';
+
+// Helper to check if error is the thread limit error
+function isThreadLimitError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === 'USER_THREAD_LIMIT';
+}
 
 interface BookingFormProps {
   therapist: TherapistDetail;
@@ -110,7 +115,31 @@ export default function BookingForm({ therapist }: BookingFormProps) {
         />
       </div>
 
-      {mutation.isError && (
+      {mutation.isError && isThreadLimitError(mutation.error) && (
+        <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div>
+              <h4 className="font-medium text-amber-800">Active Request Limit Reached</h4>
+              <p className="text-sm text-amber-700 mt-1">
+                You currently have {mutation.error.details?.activeCount || 2} active appointment requests with:
+              </p>
+              <ul className="text-sm text-amber-700 mt-2 list-disc list-inside">
+                {mutation.error.details?.activeTherapists?.map((name, idx) => (
+                  <li key={idx}>{name}</li>
+                ))}
+              </ul>
+              <p className="text-sm text-amber-700 mt-2">
+                Please wait for one of your current requests to be confirmed or cancelled before requesting another therapist. Check your email for updates from {APP.COORDINATOR_NAME}.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mutation.isError && !isThreadLimitError(mutation.error) && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
           <p className="text-sm text-red-700">
             {mutation.error instanceof Error
@@ -130,6 +159,10 @@ export default function BookingForm({ therapist }: BookingFormProps) {
 
       <p className="mt-3 text-xs text-gray-500 text-center">
         Our coordinator will contact you to schedule a time that works for both of you.
+      </p>
+
+      <p className="mt-2 text-xs text-gray-400 text-center">
+        You can have up to 2 active appointment requests at a time.
       </p>
     </form>
   );
