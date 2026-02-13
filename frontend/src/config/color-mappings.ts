@@ -4,12 +4,22 @@
  * Uses Spill color palette (spill-blue, spill-teal, spill-yellow, spill-red, spill-grey)
  */
 
-// Appointment status badge colors
+// Appointment status badge colors - Full lifecycle
 export const STATUS_BADGE_COLORS: Record<string, string> = {
+  // Pre-booking stages
   pending: 'bg-spill-yellow-100 text-spill-yellow-600',
   contacted: 'bg-spill-blue-100 text-spill-blue-800',
   negotiating: 'bg-spill-blue-200 text-spill-blue-900',
+
+  // Booking confirmed
   confirmed: 'bg-spill-teal-100 text-spill-teal-600',
+
+  // Post-session stages
+  session_held: 'bg-spill-teal-200 text-spill-teal-700',
+  feedback_requested: 'bg-purple-100 text-purple-700',
+  completed: 'bg-green-100 text-green-700',
+
+  // Terminal
   cancelled: 'bg-spill-red-100 text-spill-red-600',
 } as const;
 
