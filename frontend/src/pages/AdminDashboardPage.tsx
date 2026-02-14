@@ -146,7 +146,9 @@ export default function AdminDashboardPage() {
       }
 
       // Track health counts (only for non-terminal statuses)
-      if (apt.status !== 'confirmed' && apt.status !== 'cancelled') {
+      // Terminal statuses: confirmed, cancelled, completed, session_held, feedback_requested
+      const terminalStatuses = ['confirmed', 'cancelled', 'completed', 'session_held', 'feedback_requested'];
+      if (!terminalStatuses.includes(apt.status)) {
         if (apt.healthStatus === 'red') {
           group.healthRed++;
         } else if (apt.healthStatus === 'yellow') {

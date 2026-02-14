@@ -246,7 +246,7 @@ export interface UpdateKnowledgeRequest {
 
 // System Settings types
 export type SettingValueType = 'number' | 'boolean' | 'string' | 'json';
-export type SettingCategory = 'frontend' | 'general' | 'stale' | 'postBooking' | 'agent' | 'retention' | 'emailTemplates' | 'weeklyMailing';
+export type SettingCategory = 'frontend' | 'general' | 'stale' | 'postBooking' | 'agent' | 'retention' | 'emailTemplates' | 'weeklyMailing' | 'notifications';
 
 export interface SystemSetting {
   key: string;
