@@ -1,6 +1,7 @@
 import { Routes, Route } from 'react-router-dom';
 import TherapistsPage from './pages/TherapistsPage';
 import TherapistDetailPage from './pages/TherapistDetailPage';
+import AdminHomePage from './pages/AdminHomePage';
 import AdminIngestionPage from './pages/AdminIngestionPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
 import AdminKnowledgePage from './pages/AdminKnowledgePage';
@@ -37,6 +38,14 @@ function App() {
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
         {/* Admin routes with sidebar layout */}
+        <Route
+          path="/admin"
+          element={
+            <AdminLayout>
+              <AdminHomePage />
+            </AdminLayout>
+          }
+        />
         <Route
           path="/admin/dashboard"
           element={
