@@ -388,7 +388,15 @@ export default function AdminDashboardPage() {
                 <div className="bg-teal-50 p-4 h-full border-y border-teal-200">
                   <p className="text-xs font-medium text-teal-600 uppercase tracking-wide mb-1">Session Held</p>
                   <p className="text-3xl font-bold text-teal-700">{stats.byStatus.session_held || 0}</p>
-                  <p className="text-xs text-teal-600 mt-1">Awaiting feedback</p>
+                  <p className="text-xs text-teal-600 mt-1">Session complete</p>
+                </div>
+              </div>
+              <div className="flex items-center text-slate-300">→</div>
+              <div className="flex-1 min-w-0">
+                <div className="bg-cyan-50 p-4 h-full border-y border-cyan-200">
+                  <p className="text-xs font-medium text-cyan-600 uppercase tracking-wide mb-1">Feedback Requested</p>
+                  <p className="text-3xl font-bold text-cyan-700">{stats.byStatus.feedback_requested || 0}</p>
+                  <p className="text-xs text-cyan-600 mt-1">Awaiting response</p>
                 </div>
               </div>
               <div className="flex items-center text-slate-300">→</div>
