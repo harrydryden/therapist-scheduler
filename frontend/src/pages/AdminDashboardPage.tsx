@@ -27,9 +27,11 @@ interface TherapistGroup {
   therapistEmail: string;
   therapistNotionId: string;
   appointments: AppointmentListItem[];
-  hasConfirmed: boolean;
+  // Lifecycle stage counts
   pendingCount: number;
-  inProgressCount: number;
+  negotiatingCount: number;
+  confirmedCount: number;
+  completedCount: number;
   // Health aggregates
   healthRed: number;
   healthYellow: number;
@@ -127,9 +129,10 @@ export default function AdminDashboardPage() {
           therapistEmail: apt.therapistEmail,
           therapistNotionId: apt.therapistNotionId,
           appointments: [],
-          hasConfirmed: false,
           pendingCount: 0,
-          inProgressCount: 0,
+          negotiatingCount: 0,
+          confirmedCount: 0,
+          completedCount: 0,
           healthRed: 0,
           healthYellow: 0,
         });
@@ -137,12 +140,15 @@ export default function AdminDashboardPage() {
       const group = groups.get(key)!;
       group.appointments.push(apt);
 
-      if (apt.status === 'confirmed') {
-        group.hasConfirmed = true;
-      } else if (apt.status === 'pending') {
+      // Count by lifecycle stage
+      if (apt.status === 'pending' || apt.status === 'contacted') {
         group.pendingCount++;
-      } else if (apt.status === 'contacted' || apt.status === 'negotiating') {
-        group.inProgressCount++;
+      } else if (apt.status === 'negotiating') {
+        group.negotiatingCount++;
+      } else if (apt.status === 'confirmed') {
+        group.confirmedCount++;
+      } else if (apt.status === 'completed' || apt.status === 'session_held' || apt.status === 'feedback_requested') {
+        group.completedCount++;
       }
 
       // Track health counts (only for non-terminal statuses)
@@ -157,18 +163,6 @@ export default function AdminDashboardPage() {
       }
     }
 
-    // Check confirmed status from full data (not filtered)
-    if (hideConfirmed) {
-      for (const apt of appointmentsData.data) {
-        if (apt.status === 'confirmed') {
-          const group = groups.get(apt.therapistNotionId);
-          if (group) {
-            group.hasConfirmed = true;
-          }
-        }
-      }
-    }
-
     // Sort groups: prioritize those needing attention
     return Array.from(groups.values()).sort((a, b) => {
       // First by health issues (red > yellow > green)
@@ -178,16 +172,18 @@ export default function AdminDashboardPage() {
       if (a.healthYellow !== b.healthYellow) {
         return b.healthYellow - a.healthYellow;
       }
-      // Then by whether they have confirmed (no confirmed = higher priority)
-      if (a.hasConfirmed !== b.hasConfirmed) {
-        return a.hasConfirmed ? 1 : -1;
+      // Then by earlier lifecycle stages (pending > negotiating > confirmed)
+      const aActiveCount = a.pendingCount + a.negotiatingCount;
+      const bActiveCount = b.pendingCount + b.negotiatingCount;
+      if (aActiveCount !== bActiveCount) {
+        return bActiveCount - aActiveCount;
       }
-      // Then by pending count (more pending = higher priority)
+      // Then by pending count specifically
       if (a.pendingCount !== b.pendingCount) {
         return b.pendingCount - a.pendingCount;
       }
-      // Then by in-progress count
-      return b.inProgressCount - a.inProgressCount;
+      // Then by negotiating count
+      return b.negotiatingCount - a.negotiatingCount;
     });
   }, [appointmentsData?.data, hideConfirmed, quickFilter]);
 
@@ -657,8 +653,9 @@ export default function AdminDashboardPage() {
             <div className="p-4 border-b border-slate-100">
               <h2 className="font-semibold text-slate-900">By Therapist</h2>
               <p className="text-sm text-slate-500">
-                {therapistGroups.length} therapists
-                {hideConfirmed && ` • ${therapistGroups.filter(g => !g.hasConfirmed).length} need booking`}
+                {therapistGroups.length} therapist{therapistGroups.length !== 1 ? 's' : ''}
+                {therapistGroups.reduce((sum, g) => sum + g.pendingCount + g.negotiatingCount, 0) > 0 &&
+                  ` • ${therapistGroups.reduce((sum, g) => sum + g.pendingCount + g.negotiatingCount, 0)} active conversations`}
               </p>
             </div>
 
@@ -720,7 +717,7 @@ export default function AdminDashboardPage() {
                           aria-expanded={expandedTherapists.has(group.therapistNotionId)}
                           aria-label={`${group.therapistName}: ${group.appointments.length} clients. ${expandedTherapists.has(group.therapistNotionId) ? 'Click to collapse' : 'Click to expand'}`}
                           className={`w-full p-4 text-left hover:bg-slate-50 transition-colors ${
-                            group.healthRed > 0 ? 'bg-spill-red-100' : !group.hasConfirmed ? 'bg-spill-yellow-100' : ''
+                            group.healthRed > 0 ? 'bg-spill-red-100' : group.healthYellow > 0 ? 'bg-spill-yellow-50' : ''
                           }`}
                         >
                           <div className="flex justify-between items-start">
@@ -737,21 +734,13 @@ export default function AdminDashboardPage() {
                                     {group.healthYellow} monitoring
                                   </span>
                                 )}
-                                {!group.hasConfirmed && group.healthRed === 0 && (
-                                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-spill-yellow-200 text-spill-yellow-600">
-                                    Needs booking
-                                  </span>
-                                )}
-                                {group.hasConfirmed && group.healthRed === 0 && group.healthYellow === 0 && (
-                                  <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-spill-teal-100 text-spill-teal-600">
-                                    ✓ Has booking
-                                  </span>
-                                )}
                               </div>
                               <p className="text-sm text-slate-500 mt-0.5">
-                                {group.appointments.length} client{group.appointments.length !== 1 ? 's' : ''} requesting
+                                {group.appointments.length} client{group.appointments.length !== 1 ? 's' : ''}
                                 {group.pendingCount > 0 && ` • ${group.pendingCount} pending`}
-                                {group.inProgressCount > 0 && ` • ${group.inProgressCount} in progress`}
+                                {group.negotiatingCount > 0 && ` • ${group.negotiatingCount} negotiating`}
+                                {group.confirmedCount > 0 && ` • ${group.confirmedCount} confirmed`}
+                                {group.completedCount > 0 && ` • ${group.completedCount} completed`}
                               </p>
                             </div>
                             <div className="flex items-center gap-2">

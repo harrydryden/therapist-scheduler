@@ -128,7 +128,7 @@ export interface AppointmentListItem {
   therapistName: string;
   therapistEmail: string;
   therapistNotionId: string;
-  status: 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'cancelled';
+  status: 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'session_held' | 'feedback_requested' | 'completed' | 'cancelled';
   messageCount: number;
   confirmedAt: string | null;
   confirmedDateTime: string | null;
