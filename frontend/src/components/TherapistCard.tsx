@@ -104,10 +104,7 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
   const hasMore = hiddenCount > 0;
 
   return (
-    <div
-      className="overflow-hidden"
-      style={isExpanded ? undefined : { height: `${UI.CATEGORY_SECTION_HEIGHT}px` }}
-    >
+    <div className="mb-3">
       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
         {label}
       </span>

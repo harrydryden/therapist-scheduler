@@ -39,12 +39,13 @@ export const UPLOAD = {
 
 // UI Layout constants
 export const UI = {
-  // TherapistCard section heights (in pixels)
+  // TherapistCard section heights (in pixels) - no longer used for fixed heights
   CATEGORY_SECTION_HEIGHT: 56,
   BIO_SECTION_HEIGHT: 100,
   AVAILABILITY_SECTION_HEIGHT: 48,
   // Maximum visible items before "show more"
-  MAX_VISIBLE_BADGES: 2,
+  // Set high to show all badges by default (user feedback: want to see all areas of focus)
+  MAX_VISIBLE_BADGES: 100,
   MAX_AVAILABILITY_SLOTS: 2,
   // Bio truncation
   BIO_TRUNCATE_LENGTH: 100,
