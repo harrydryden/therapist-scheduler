@@ -48,7 +48,7 @@ export default function AdminDashboardPage() {
   const [selectedAppointment, setSelectedAppointment] = useState<string | null>(null);
   const [hideConfirmed, setHideConfirmed] = useState(true); // Default to hiding confirmed
   const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
-  const [quickFilter, setQuickFilter] = useState<'red' | 'human' | null>(null);
+  const [quickFilter, setQuickFilter] = useState<'red' | 'human' | 'post-session' | 'cancelled' | null>(null);
 
   // Human control state
   const [showComposeMessage, setShowComposeMessage] = useState(false);
@@ -106,9 +106,12 @@ export default function AdminDashboardPage() {
     // Apply filters
     let filteredAppointments = appointmentsData.data;
 
-    // Filter out confirmed if hideConfirmed is true
+    // Filter based on hideConfirmed (which means "show only active")
     if (hideConfirmed) {
-      filteredAppointments = filteredAppointments.filter((apt) => apt.status !== 'confirmed');
+      // "Active" = pre-booking stages only (pending, contacted, negotiating)
+      filteredAppointments = filteredAppointments.filter((apt) =>
+        ['pending', 'contacted', 'negotiating'].includes(apt.status)
+      );
     }
 
     // Apply quick filter
@@ -116,6 +119,12 @@ export default function AdminDashboardPage() {
       filteredAppointments = filteredAppointments.filter((apt) => apt.healthStatus === 'red');
     } else if (quickFilter === 'human') {
       filteredAppointments = filteredAppointments.filter((apt) => apt.humanControlEnabled);
+    } else if (quickFilter === 'post-session') {
+      filteredAppointments = filteredAppointments.filter((apt) =>
+        ['session_held', 'feedback_requested', 'completed'].includes(apt.status)
+      );
+    } else if (quickFilter === 'cancelled') {
+      filteredAppointments = filteredAppointments.filter((apt) => apt.status === 'cancelled');
     }
 
     // Group by therapist
@@ -537,102 +546,141 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
-        {/* Quick Filters */}
-        {appointmentsData?.data && appointmentsData.data.length > 0 && (
-          <div className="flex gap-2 mb-4">
+        {/* Unified Filters */}
+        <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100 mb-6">
+          {/* Primary Filters - Quick access pills */}
+          <div className="flex flex-wrap gap-2 mb-4">
             {(() => {
-              const activeAppointments = appointmentsData.data.filter(
-                (apt) => apt.status !== 'confirmed' && apt.status !== 'cancelled'
+              const data = appointmentsData?.data || [];
+              const activeAppointments = data.filter(
+                (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
               );
               const redCount = activeAppointments.filter((apt) => apt.healthStatus === 'red').length;
-              // Count ALL appointments with human control (including confirmed) since they may need action
-              const humanCount = appointmentsData.data.filter((apt) => apt.humanControlEnabled).length;
+              const humanCount = data.filter((apt) => apt.humanControlEnabled).length;
+
+              // Lifecycle stage counts
+              const activeCount = data.filter((apt) => ['pending', 'contacted', 'negotiating'].includes(apt.status)).length;
+              const confirmedCount = data.filter((apt) => apt.status === 'confirmed').length;
+              const postSessionCount = data.filter((apt) => ['session_held', 'feedback_requested', 'completed'].includes(apt.status)).length;
+
+              type FilterValue = 'all' | 'active' | 'confirmed' | 'post-session' | 'cancelled' | 'red' | 'human';
+              // Determine current filter based on state
+              let currentFilter: FilterValue = 'all';
+              if (quickFilter) {
+                currentFilter = quickFilter;
+              } else if (hideConfirmed) {
+                currentFilter = 'active';
+              } else if (filters.status === 'confirmed') {
+                currentFilter = 'confirmed';
+              }
+
+              const filterOptions: { value: FilterValue; label: string; count?: number; color: string; activeColor: string }[] = [
+                { value: 'all', label: 'All', color: 'bg-slate-100 text-slate-600 hover:bg-slate-200', activeColor: 'bg-slate-700 text-white' },
+                { value: 'active', label: 'Active', count: activeCount, color: 'bg-spill-blue-100 text-spill-blue-600 hover:bg-spill-blue-200', activeColor: 'bg-spill-blue-600 text-white' },
+                { value: 'confirmed', label: 'Confirmed', count: confirmedCount, color: 'bg-spill-teal-100 text-spill-teal-600 hover:bg-spill-teal-200', activeColor: 'bg-spill-teal-600 text-white' },
+                { value: 'post-session', label: 'Post-Session', count: postSessionCount, color: 'bg-purple-100 text-purple-600 hover:bg-purple-200', activeColor: 'bg-purple-600 text-white' },
+                { value: 'cancelled', label: 'Cancelled', color: 'bg-slate-100 text-slate-500 hover:bg-slate-200', activeColor: 'bg-slate-500 text-white' },
+              ];
+
+              const alertOptions: { value: FilterValue; label: string; count: number; color: string; activeColor: string }[] = [
+                { value: 'red', label: 'Needs Attention', count: redCount, color: 'bg-spill-red-100 text-spill-red-600 hover:bg-spill-red-200', activeColor: 'bg-spill-red-600 text-white' },
+                { value: 'human', label: 'Human Control', count: humanCount, color: 'bg-orange-100 text-orange-600 hover:bg-orange-200', activeColor: 'bg-orange-600 text-white' },
+              ];
+
+              const handleFilterClick = (value: FilterValue) => {
+                if (value === 'all') {
+                  setQuickFilter(null);
+                  setHideConfirmed(false);
+                  handleFilterChange('status', '');
+                } else if (value === 'active') {
+                  setQuickFilter(null);
+                  setHideConfirmed(true);
+                  handleFilterChange('status', '');
+                } else if (value === 'confirmed') {
+                  setQuickFilter(null);
+                  setHideConfirmed(false);
+                  handleFilterChange('status', 'confirmed');
+                } else if (value === 'post-session') {
+                  setHideConfirmed(false);
+                  handleFilterChange('status', '');
+                  // Use client-side filtering for multiple statuses
+                  setQuickFilter('post-session');
+                } else if (value === 'cancelled') {
+                  setHideConfirmed(false);
+                  handleFilterChange('status', '');
+                  // Use client-side filtering
+                  setQuickFilter('cancelled');
+                } else if (value === 'red' || value === 'human') {
+                  setHideConfirmed(false);
+                  handleFilterChange('status', '');
+                  setQuickFilter(currentFilter === value ? null : value);
+                }
+              };
+
               return (
                 <>
-                  <button
-                    onClick={() => setQuickFilter(quickFilter === 'red' ? null : 'red')}
-                    className={`px-3 py-1.5 text-sm font-medium rounded-full transition-colors ${
-                      quickFilter === 'red'
-                        ? 'bg-spill-red-600 text-white'
-                        : 'bg-spill-red-100 text-spill-red-600 hover:bg-spill-red-200'
-                    }`}
-                  >
-                    Needs Attention ({redCount})
-                  </button>
-                  <button
-                    onClick={() => setQuickFilter(quickFilter === 'human' ? null : 'human')}
-                    className={`px-3 py-1.5 text-sm font-medium rounded-full transition-colors ${
-                      quickFilter === 'human'
-                        ? 'bg-orange-600 text-white'
-                        : 'bg-orange-100 text-orange-600 hover:bg-orange-200'
-                    }`}
-                  >
-                    Human Control ({humanCount})
-                  </button>
-                  {quickFilter && (
-                    <button
-                      onClick={() => setQuickFilter(null)}
-                      className="px-3 py-1.5 text-sm font-medium rounded-full bg-slate-100 text-slate-600 hover:bg-slate-200 transition-colors"
-                    >
-                      Clear Filter
-                    </button>
-                  )}
+                  {/* Lifecycle stage filters */}
+                  <div className="flex gap-1.5">
+                    {filterOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => handleFilterClick(opt.value)}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-full transition-colors ${
+                          currentFilter === opt.value ? opt.activeColor : opt.color
+                        }`}
+                      >
+                        {opt.label}{opt.count !== undefined ? ` (${opt.count})` : ''}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="h-6 w-px bg-slate-200 mx-1" />
+
+                  {/* Alert filters */}
+                  <div className="flex gap-1.5">
+                    {alertOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => handleFilterClick(opt.value)}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-full transition-colors ${
+                          currentFilter === opt.value ? opt.activeColor : opt.color
+                        }`}
+                      >
+                        {opt.label} ({opt.count})
+                      </button>
+                    ))}
+                  </div>
                 </>
               );
             })()}
           </div>
-        )}
 
-        {/* Filters */}
-        <div className="bg-white rounded-xl p-4 shadow-sm border border-slate-100 mb-6">
-          <div className="flex flex-wrap gap-4 items-center">
-            {/* Hide Confirmed Toggle */}
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={hideConfirmed}
-                onChange={(e) => setHideConfirmed(e.target.checked)}
-                className="w-4 h-4 text-spill-blue-800 border-slate-300 rounded focus:ring-spill-blue-800"
-              />
-              <span className="text-sm text-slate-700">Hide confirmed</span>
-            </label>
-
-            <div className="h-6 w-px bg-slate-200" />
-
-            <select
-              value={filters.status || 'all'}
-              onChange={(e) => handleFilterChange('status', e.target.value === 'all' ? '' : e.target.value)}
-              className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
-            >
-              <option value="all">All Statuses</option>
-              <option value="pending">Pending</option>
-              <option value="contacted">Contacted</option>
-              <option value="negotiating">Negotiating</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
+          {/* Secondary Filters - Date range and sort */}
+          <div className="flex flex-wrap gap-3 items-center pt-3 border-t border-slate-100">
+            <span className="text-xs text-slate-400 uppercase tracking-wide">Date Range</span>
             <input
               type="date"
-              placeholder="From date"
               value={filters.dateFrom || ''}
               onChange={(e) => handleFilterChange('dateFrom', e.target.value)}
-              className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              className="px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
             />
+            <span className="text-slate-400">to</span>
             <input
               type="date"
-              placeholder="To date"
               value={filters.dateTo || ''}
               onChange={(e) => handleFilterChange('dateTo', e.target.value)}
-              className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              className="px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
             />
+
+            <div className="h-5 w-px bg-slate-200 mx-1" />
+
             <select
               value={filters.sortBy || 'updatedAt'}
               onChange={(e) => handleFilterChange('sortBy', e.target.value)}
-              className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              className="px-2 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
             >
               <option value="updatedAt">Sort by Updated</option>
               <option value="createdAt">Sort by Created</option>
-              <option value="status">Sort by Status</option>
             </select>
           </div>
         </div>
