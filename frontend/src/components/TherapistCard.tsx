@@ -103,12 +103,19 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
   const hiddenCount = items.length - UI.MAX_VISIBLE_BADGES;
   const hasMore = hiddenCount > 0;
 
+  // Min height ensures consistent spacing even when sections have fewer badges
+  // 56px = roughly 2 rows of badges (28px each)
+  const minHeight = UI.CATEGORY_SECTION_HEIGHT;
+
   return (
     <div className="mb-4">
       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-2">
         {label}
       </span>
-      <div className="flex flex-wrap gap-1.5 items-start content-start">
+      <div
+        className="flex flex-wrap gap-1.5 items-start content-start"
+        style={{ minHeight: `${minHeight}px` }}
+      >
         {hasItems ? (
           <>
             {visibleItems.map((item) => (
