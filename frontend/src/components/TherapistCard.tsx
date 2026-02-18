@@ -22,7 +22,7 @@ interface CategoryBadgeProps {
 
 function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
   const [showTooltip, setShowTooltip] = useState(false);
-  const [tooltipPosition, setTooltipPosition] = useState({ top: 0, left: 0 });
+  const [tooltipPosition, setTooltipPosition] = useState<{ top: number; left: number } | null>(null);
   const badgeRef = useRef<HTMLSpanElement>(null);
   const explainer = getExplainer(categoryType, type);
   const colorClass = CATEGORY_COLORS[categoryType];
@@ -34,8 +34,17 @@ function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
         top: rect.top - 8, // Position above the badge with small gap
         left: rect.left + rect.width / 2, // Center horizontally
       });
+    } else if (!showTooltip) {
+      setTooltipPosition(null);
     }
   }, [showTooltip]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setShowTooltip((prev) => !prev);
+    }
+  };
 
   return (
     <div className="relative inline-block">
@@ -46,6 +55,7 @@ function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
         onMouseLeave={() => setShowTooltip(false)}
         onFocus={() => setShowTooltip(true)}
         onBlur={() => setShowTooltip(false)}
+        onKeyDown={handleKeyDown}
         tabIndex={0}
         role="button"
         aria-describedby={explainer ? `tooltip-${type.replace(/\s/g, '-')}` : undefined}
@@ -59,9 +69,10 @@ function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
           className="fixed px-3 py-2 text-xs text-white bg-slate-800 rounded-lg shadow-lg max-w-xs whitespace-normal pointer-events-none"
           style={{
             zIndex: UI.Z_INDEX.TOOLTIP,
-            top: tooltipPosition.top,
-            left: tooltipPosition.left,
+            top: tooltipPosition?.top ?? 0,
+            left: tooltipPosition?.left ?? 0,
             transform: 'translate(-50%, -100%)',
+            visibility: tooltipPosition ? 'visible' : 'hidden',
           }}
         >
           {explainer}

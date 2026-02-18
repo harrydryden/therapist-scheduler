@@ -25,11 +25,12 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    // Log error to console in development, could be sent to monitoring service
     console.error('ErrorBoundary caught an error:', error, errorInfo);
 
-    // In production, you might want to send this to an error monitoring service
-    // Example: Sentry.captureException(error, { extra: errorInfo });
+    // TODO: Integrate an error monitoring service (e.g. Sentry).
+    // 1. Install: npm install @sentry/react
+    // 2. Initialize Sentry in main.tsx with Sentry.init({ dsn: '...' })
+    // 3. Replace this comment with: Sentry.captureException(error, { extra: { componentStack: errorInfo.componentStack } })
   }
 
   handleReset = (): void => {

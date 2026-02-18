@@ -144,8 +144,8 @@ export default function TherapistDetailPage() {
                   <h3 className="text-sm font-semibold text-gray-900 mb-2">Availability</h3>
                   {therapist.availability && therapist.availability.slots.length > 0 ? (
                     <div className="space-y-1">
-                      {therapist.availability.slots.map((slot, index) => (
-                        <p key={index} className="text-sm text-gray-600">
+                      {therapist.availability.slots.map((slot) => (
+                        <p key={`${slot.day}-${slot.start}-${slot.end}`} className="text-sm text-gray-600">
                           <span className="font-medium">{slot.day}:</span> {slot.start} - {slot.end}
                         </p>
                       ))}

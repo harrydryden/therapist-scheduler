@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSettings, updateSetting, resetSetting } from '../api/client';
 import type { SystemSetting, SettingCategory } from '../types';
@@ -66,7 +66,7 @@ export default function AdminSettingsPage() {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>('');
   const [activeCategory, setActiveCategory] = useState<SettingCategory | 'all'>('all');
-  const adminId = getAdminId();
+  const adminId = useMemo(() => getAdminId(), []);
 
   // Fetch settings
   const {

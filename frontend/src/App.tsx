@@ -38,54 +38,14 @@ function App() {
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
         {/* Admin routes with sidebar layout */}
-        <Route
-          path="/admin"
-          element={
-            <AdminLayout>
-              <AdminHomePage />
-            </AdminLayout>
-          }
-        />
-        <Route
-          path="/admin/dashboard"
-          element={
-            <AdminLayout>
-              <AdminDashboardPage />
-            </AdminLayout>
-          }
-        />
-        <Route
-          path="/admin/ingestion"
-          element={
-            <AdminLayout>
-              <AdminIngestionPage />
-            </AdminLayout>
-          }
-        />
-        <Route
-          path="/admin/knowledge"
-          element={
-            <AdminLayout>
-              <AdminKnowledgePage />
-            </AdminLayout>
-          }
-        />
-        <Route
-          path="/admin/forms"
-          element={
-            <AdminLayout>
-              <AdminFormsPage />
-            </AdminLayout>
-          }
-        />
-        <Route
-          path="/admin/settings"
-          element={
-            <AdminLayout>
-              <AdminSettingsPage />
-            </AdminLayout>
-          }
-        />
+        <Route path="/admin" element={<AdminLayout />}>
+          <Route index element={<AdminHomePage />} />
+          <Route path="dashboard" element={<AdminDashboardPage />} />
+          <Route path="ingestion" element={<AdminIngestionPage />} />
+          <Route path="knowledge" element={<AdminKnowledgePage />} />
+          <Route path="forms" element={<AdminFormsPage />} />
+          <Route path="settings" element={<AdminSettingsPage />} />
+        </Route>
 
         {/* FIX #33: 404 catch-all route */}
         <Route
