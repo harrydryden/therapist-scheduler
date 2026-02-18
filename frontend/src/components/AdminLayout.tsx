@@ -1,5 +1,6 @@
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { getAdminSecret, setAdminSecret } from '../config/env';
 
 interface AdminLayoutProps {
   children: ReactNode;
@@ -53,17 +54,92 @@ const navItems: NavItem[] = [
 
 export default function AdminLayout({ children }: AdminLayoutProps) {
   const location = useLocation();
+  // FIX #3: Prompt for admin secret if not yet stored in sessionStorage
+  const [secretInput, setSecretInput] = useState('');
+  const [hasSecret, setHasSecret] = useState(() => !!getAdminSecret());
+  // FIX #41: Mobile sidebar toggle state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // If no admin secret in sessionStorage, show login prompt
+  if (!hasSecret) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-sm w-full">
+          <h1 className="text-xl font-bold text-slate-900 mb-2">Admin Login</h1>
+          <p className="text-sm text-slate-500 mb-6">
+            Enter the admin secret to access the admin panel.
+          </p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (secretInput.trim()) {
+                setAdminSecret(secretInput.trim());
+                setHasSecret(true);
+              }
+            }}
+          >
+            <input
+              type="password"
+              value={secretInput}
+              onChange={(e) => setSecretInput(e.target.value)}
+              placeholder="Admin secret"
+              className="w-full px-4 py-3 border border-slate-200 rounded-lg mb-4 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              autoFocus
+            />
+            <button
+              type="submit"
+              disabled={!secretInput.trim()}
+              className="w-full px-4 py-3 bg-spill-blue-800 text-white rounded-lg font-medium hover:bg-spill-blue-900 disabled:opacity-50 transition-colors"
+            >
+              Enter
+            </button>
+          </form>
+          <Link
+            to="/"
+            className="block mt-4 text-center text-sm text-slate-500 hover:text-slate-700 transition-colors"
+          >
+            Back to booking site
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
-      {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col fixed h-full">
+      {/* FIX #41: Mobile overlay backdrop */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/30 z-40 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar - hidden on mobile by default, shown via toggle */}
+      <aside
+        className={`
+          w-64 bg-white border-r border-slate-200 flex flex-col fixed h-full z-50
+          transition-transform duration-200 ease-in-out
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+          lg:translate-x-0
+        `}
+      >
         {/* Logo */}
-        <div className="p-4 border-b border-slate-200">
+        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <span className="text-xl font-extrabold text-slate-900">spill</span>
             <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded">Admin</span>
           </Link>
+          {/* Close button for mobile */}
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden p-1 text-slate-400 hover:text-slate-600"
+            aria-label="Close sidebar"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
 
         {/* Navigation */}
@@ -74,6 +150,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={() => setSidebarOpen(false)}
                 className={`
                   flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all
                   ${isActive
@@ -126,7 +203,21 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 ml-64">
+      <main className="flex-1 lg:ml-64">
+        {/* FIX #41: Mobile header with hamburger toggle */}
+        <div className="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-3">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="p-1 text-slate-600 hover:text-slate-900"
+            aria-label="Open sidebar menu"
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <span className="text-lg font-extrabold text-slate-900">spill</span>
+          <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded">Admin</span>
+        </div>
         {children}
       </main>
     </div>

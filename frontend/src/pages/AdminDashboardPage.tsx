@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import DOMPurify from 'dompurify';
 import {
@@ -37,6 +37,12 @@ interface TherapistGroup {
   healthYellow: number;
 }
 
+// TODO FIX #36: This component is too large (~1400 lines) and should be decomposed into:
+// - AppointmentPipeline (stats section)
+// - TherapistGroupList (grouped appointment list)
+// - AppointmentDetailPanel (detail + human control panel)
+// - AppointmentFilters (filter bar)
+// Each sub-component should receive data/callbacks via props.
 export default function AdminDashboardPage() {
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<AppointmentFilters>({
@@ -68,6 +74,8 @@ export default function AdminDashboardPage() {
   const [editStatus, setEditStatus] = useState<string | null>(null);
   const [editConfirmedDateTime, setEditConfirmedDateTime] = useState('');
   const [editWarning, setEditWarning] = useState<string | null>(null);
+  // FIX #35: Track editWarning timeout for cleanup on unmount
+  const editWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Fetch appointments list with auto-refresh
   const {
@@ -212,6 +220,8 @@ export default function AdminDashboardPage() {
   const takeControlMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
       takeControl(id, { adminId: 'admin', reason }),
+    // FIX #37: Clear mutationError at start of each mutation
+    onMutate: () => { setMutationError(null); },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
@@ -225,6 +235,8 @@ export default function AdminDashboardPage() {
 
   const releaseControlMutation = useMutation({
     mutationFn: (id: string) => releaseControl(id),
+    // FIX #37: Clear mutationError at start of each mutation
+    onMutate: () => { setMutationError(null); },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
@@ -247,6 +259,8 @@ export default function AdminDashboardPage() {
       subject: string;
       body: string;
     }) => sendAdminMessage(id, { to, subject, body, adminId: 'admin' }),
+    // FIX #37: Clear mutationError at start of each mutation
+    onMutate: () => { setMutationError(null); },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       setShowComposeMessage(false);
@@ -262,6 +276,8 @@ export default function AdminDashboardPage() {
   const deleteAppointmentMutation = useMutation({
     mutationFn: ({ id, reason, forceDeleteConfirmed: force }: { id: string; reason?: string; forceDeleteConfirmed?: boolean }) =>
       deleteAppointment(id, { adminId: 'admin', reason, forceDeleteConfirmed: force }),
+    // FIX #37: Clear mutationError at start of each mutation
+    onMutate: () => { setMutationError(null); },
     onSuccess: () => {
       // Clear selection since appointment no longer exists
       setSelectedAppointment(null);
@@ -292,6 +308,8 @@ export default function AdminDashboardPage() {
         confirmedDateTime,
         adminId: 'admin',
       }),
+    // FIX #37: Clear mutationError at start of each mutation
+    onMutate: () => { setMutationError(null); },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
@@ -300,7 +318,11 @@ export default function AdminDashboardPage() {
       setMutationError(null);
       if (data.warning) {
         setEditWarning(data.warning);
-        setTimeout(() => setEditWarning(null), 5000);
+        // FIX #35: Store timeout ref so it can be cleared on unmount
+        if (editWarningTimeoutRef.current) {
+          clearTimeout(editWarningTimeoutRef.current);
+        }
+        editWarningTimeoutRef.current = setTimeout(() => setEditWarning(null), 5000);
       }
     },
     onError: (error) => {
@@ -315,6 +337,15 @@ export default function AdminDashboardPage() {
       setEditConfirmedDateTime(appointmentDetail.confirmedDateTime || '');
     }
   }, [appointmentDetail]);
+
+  // FIX #35: Clear editWarning timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (editWarningTimeoutRef.current) {
+        clearTimeout(editWarningTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleSendMessage = () => {
     if (!appointmentDetail || !messageSubject.trim() || !messageBody.trim()) return;

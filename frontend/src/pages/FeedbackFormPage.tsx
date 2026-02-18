@@ -1,34 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { API_BASE } from '../config/env';
-
-// ============================================
-// Types
-// ============================================
-
-interface FormQuestion {
-  id: string;
-  type: 'text' | 'scale' | 'choice';
-  question: string;
-  required: boolean;
-  prefilled?: boolean;
-  scaleMin?: number;
-  scaleMax?: number;
-  scaleMinLabel?: string;
-  scaleMaxLabel?: string;
-  options?: string[];
-}
-
-interface FormConfig {
-  formName: string;
-  description: string | null;
-  welcomeTitle: string;
-  welcomeMessage: string;
-  thankYouTitle: string;
-  thankYouMessage: string;
-  questions: FormQuestion[];
-  isActive: boolean;
-}
+// FIX #39: Import shared types instead of duplicating them
+import type { FormQuestion, FormConfig } from '../types/feedback';
 
 interface PrefilledData {
   trackingCode: string;
@@ -46,14 +20,37 @@ interface FeedbackFormResponse {
 
 // ============================================
 // API Functions (public, no auth)
+// FIX #31: Added AbortController with 30-second timeout to all fetch calls
 // ============================================
+
+const FEEDBACK_TIMEOUT_MS = 30000;
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FEEDBACK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Request timed out. Please try again.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 async function getFeedbackForm(splCode?: string): Promise<FeedbackFormResponse> {
   const endpoint = splCode
     ? `${API_BASE}/feedback/form/${splCode}`
     : `${API_BASE}/feedback/form`;
 
-  const response = await fetch(endpoint);
+  const response = await fetchWithTimeout(endpoint);
   const data = await response.json();
 
   if (!response.ok) {
@@ -68,7 +65,7 @@ async function submitFeedback(data: {
   therapistName: string;
   responses: Record<string, string | number>;
 }): Promise<{ success: boolean; submissionId: string; message: string }> {
-  const response = await fetch(`${API_BASE}/feedback/submit`, {
+  const response = await fetchWithTimeout(`${API_BASE}/feedback/submit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -206,9 +203,11 @@ export default function FeedbackFormPage() {
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Failed to load form';
+        // FIX #40: Check structured error code in addition to string matching
+        const errorCode = (err as { code?: string })?.code;
 
         // Check if feedback was already submitted
-        if (errorMessage.includes('already submitted')) {
+        if (errorCode === 'ALREADY_SUBMITTED' || errorMessage.includes('already submitted')) {
           setAlreadySubmitted(true);
         } else {
           setError(errorMessage);
@@ -274,8 +273,10 @@ export default function FeedbackFormPage() {
       setIsComplete(true);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to submit feedback';
+      // FIX #40: Check structured error code in addition to string matching
+      const errorCode = (err as { code?: string })?.code;
 
-      if (errorMessage.includes('already submitted')) {
+      if (errorCode === 'ALREADY_SUBMITTED' || errorMessage.includes('already submitted')) {
         setAlreadySubmitted(true);
       } else {
         setError(errorMessage);

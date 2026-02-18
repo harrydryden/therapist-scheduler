@@ -22,7 +22,7 @@ import type {
   UpdateSettingRequest,
   BulkUpdateSettingsRequest,
 } from '../types';
-import { API_BASE, ADMIN_SECRET } from '../config/env';
+import { API_BASE, getAdminSecret } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
 
 // Custom error class to carry API error details
@@ -252,7 +252,7 @@ export async function previewTherapistCV(file: File | null, additionalInfo: stri
       method: 'POST',
       body: formData,
       headers: {
-        [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
+        [HEADERS.WEBHOOK_SECRET]: getAdminSecret(),
       },
     },
     TIMEOUTS.LONG_MS
@@ -302,7 +302,7 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
       method: 'POST',
       body: formData,
       headers: {
-        [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
+        [HEADERS.WEBHOOK_SECRET]: getAdminSecret(),
       },
     },
     TIMEOUTS.LONG_MS
@@ -319,14 +319,15 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
 
 // Admin Dashboard API functions
 //
-// SECURITY NOTE: This webhook secret is exposed in the frontend build.
+// FIX #3: Admin secret is now read from sessionStorage at runtime via getAdminSecret(),
+// instead of being baked into the production JS bundle from VITE_ADMIN_SECRET.
+// The AdminLayout prompts the admin to enter the secret on first visit.
 // TODO: Implement proper session-based authentication for admin routes:
 // 1. Add /admin/login endpoint with password/OAuth
 // 2. Use httpOnly cookies for session tokens
 // 3. Remove x-webhook-secret header from frontend
-// For now, this provides basic protection for internal tools.
 
-async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }> {
+export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }> {
   // FIX M3: Use request deduplication for GET requests
   return fetchWithDedup<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }>(
     endpoint,
@@ -337,7 +338,7 @@ async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promis
         {
           headers: {
             'Content-Type': 'application/json',
-            [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
+            [HEADERS.WEBHOOK_SECRET]: getAdminSecret(),
             ...options?.headers,
           },
           ...options,

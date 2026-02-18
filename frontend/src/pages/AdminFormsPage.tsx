@@ -1,35 +1,15 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { API_BASE, ADMIN_SECRET } from '../config/env';
-import { HEADERS } from '../config/constants';
+// FIX #32: Use shared fetchAdminApi from client instead of local reimplementation
+import { fetchAdminApi } from '../api/client';
+import type { FormQuestion, FormConfig } from '../types/feedback';
 
 // ============================================
-// Types
+// Types (page-specific; shared types in ../types/feedback.ts)
 // ============================================
 
-interface FormQuestion {
+interface AdminFormConfig extends FormConfig {
   id: string;
-  type: 'text' | 'scale' | 'choice';
-  question: string;
-  required: boolean;
-  prefilled?: boolean;
-  scaleMin?: number;
-  scaleMax?: number;
-  scaleMinLabel?: string;
-  scaleMaxLabel?: string;
-  options?: string[];
-}
-
-interface FormConfig {
-  id: string;
-  formName: string;
-  description: string | null;
-  welcomeTitle: string;
-  welcomeMessage: string;
-  thankYouTitle: string;
-  thankYouMessage: string;
-  questions: FormQuestion[];
-  isActive: boolean;
   requiresAuth: boolean;
   createdAt: string;
   updatedAt: string;
@@ -69,37 +49,20 @@ interface FeedbackStats {
 }
 
 // ============================================
-// API Functions
+// API Functions (using shared fetchAdminApi)
 // ============================================
 
-async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${endpoint}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      [HEADERS.WEBHOOK_SECRET]: ADMIN_SECRET,
-      ...options?.headers,
-    },
-    ...options,
-  });
-
-  const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(data.error || 'An error occurred');
-  }
-
-  return data;
+async function getFormConfig(): Promise<AdminFormConfig> {
+  const response = await fetchAdminApi<AdminFormConfig>('/admin/forms/feedback');
+  return response.data as AdminFormConfig;
 }
 
-async function getFormConfig(): Promise<FormConfig> {
-  return fetchAdminApi<FormConfig>('/admin/forms/feedback');
-}
-
-async function updateFormConfig(updates: Partial<FormConfig>): Promise<FormConfig> {
-  return fetchAdminApi<FormConfig>('/admin/forms/feedback', {
+async function updateFormConfig(updates: Partial<AdminFormConfig>): Promise<AdminFormConfig> {
+  const response = await fetchAdminApi<AdminFormConfig>('/admin/forms/feedback', {
     method: 'PUT',
     body: JSON.stringify(updates),
   });
+  return response.data as AdminFormConfig;
 }
 
 async function getSubmissions(params?: {
@@ -115,11 +78,19 @@ async function getSubmissions(params?: {
   if (params?.limit) queryParams.set('limit', String(params.limit));
   if (params?.therapist) queryParams.set('therapist', params.therapist);
 
-  return fetchAdminApi(`/admin/forms/feedback/submissions?${queryParams.toString()}`);
+  const response = await fetchAdminApi<{
+    submissions: FeedbackSubmission[];
+    pagination: { page: number; limit: number; total: number; totalPages: number };
+  }>(`/admin/forms/feedback/submissions?${queryParams.toString()}`);
+  return response.data as {
+    submissions: FeedbackSubmission[];
+    pagination: { page: number; limit: number; total: number; totalPages: number };
+  };
 }
 
 async function getStats(): Promise<FeedbackStats> {
-  return fetchAdminApi<FeedbackStats>('/admin/forms/feedback/stats');
+  const response = await fetchAdminApi<FeedbackStats>('/admin/forms/feedback/stats');
+  return response.data as FeedbackStats;
 }
 
 // ============================================
@@ -290,7 +261,7 @@ export default function AdminFormsPage() {
   const [activeTab, setActiveTab] = useState<'config' | 'submissions' | 'stats'>('config');
 
   // Form config state
-  const [editedConfig, setEditedConfig] = useState<Partial<FormConfig> | null>(null);
+  const [editedConfig, setEditedConfig] = useState<Partial<AdminFormConfig> | null>(null);
   const [page, setPage] = useState(1);
 
   // Fetch form config

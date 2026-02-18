@@ -9,6 +9,9 @@ function isThreadLimitError(error: unknown): error is ApiError {
   return error instanceof ApiError && error.code === 'USER_THREAD_LIMIT';
 }
 
+// TODO FIX #38: The booking form logic (firstName, email, mutation, handleSubmit) is
+// duplicated with the inline form in TherapistCard.tsx. Extract a shared useBookingForm
+// hook or shared component to eliminate duplication.
 interface BookingFormProps {
   therapist: TherapistDetail;
 }

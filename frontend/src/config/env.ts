@@ -5,33 +5,16 @@
 
 interface EnvConfig {
   apiBaseUrl: string;
-  adminSecret: string;
   isDevelopment: boolean;
   isProduction: boolean;
 }
 
 function validateEnv(): EnvConfig {
   const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
-  // Support both VITE_ADMIN_SECRET and legacy VITE_WEBHOOK_SECRET
-  const adminSecret = import.meta.env.VITE_ADMIN_SECRET || import.meta.env.VITE_WEBHOOK_SECRET || '';
   const mode = import.meta.env.MODE;
 
   const isDevelopment = mode === 'development';
   const isProduction = mode === 'production';
-
-  // Warn about missing admin secret in development
-  if (!adminSecret && isDevelopment) {
-    console.warn(
-      '[Config] VITE_ADMIN_SECRET is not set. Admin features will not work correctly.'
-    );
-  }
-
-  // In production, require admin secret
-  if (!adminSecret && isProduction) {
-    console.error(
-      '[Config] CRITICAL: VITE_ADMIN_SECRET is required in production mode.'
-    );
-  }
 
   // Validate API base URL format
   if (apiBaseUrl !== '/api' && !apiBaseUrl.startsWith('http')) {
@@ -42,7 +25,6 @@ function validateEnv(): EnvConfig {
 
   return {
     apiBaseUrl,
-    adminSecret,
     isDevelopment,
     isProduction,
   };
@@ -53,4 +35,22 @@ export const env = validateEnv();
 
 // Re-export for backwards compatibility
 export const API_BASE = env.apiBaseUrl;
-export const ADMIN_SECRET = env.adminSecret;
+
+/**
+ * FIX #3: Read admin secret from sessionStorage instead of baking VITE_ADMIN_SECRET
+ * into the production JS bundle. The admin login page (or admin home) should call
+ * setAdminSecret() to store the secret in sessionStorage after the admin enters it.
+ */
+const ADMIN_SECRET_KEY = 'admin_secret';
+
+export function getAdminSecret(): string {
+  return sessionStorage.getItem(ADMIN_SECRET_KEY) || '';
+}
+
+export function setAdminSecret(secret: string): void {
+  sessionStorage.setItem(ADMIN_SECRET_KEY, secret);
+}
+
+export function clearAdminSecret(): void {
+  sessionStorage.removeItem(ADMIN_SECRET_KEY);
+}

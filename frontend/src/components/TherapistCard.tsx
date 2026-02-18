@@ -354,6 +354,8 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
       </div>
 
       {/* Booking Form - always at bottom */}
+      {/* TODO FIX #38: The booking form logic below (firstName, email, mutation, handleSubmit) is
+          duplicated with BookingForm.tsx. Extract a shared useBookingForm hook or shared component. */}
       <div className="border-t border-slate-100 p-6 bg-slate-50 mt-auto">
         {mutation.isSuccess ? (
           <div className="text-center py-2">
