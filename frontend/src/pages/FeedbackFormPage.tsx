@@ -45,12 +45,12 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise
   }
 }
 
-async function getFeedbackForm(splCode?: string): Promise<FeedbackFormResponse> {
+async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<FeedbackFormResponse> {
   const endpoint = splCode
     ? `${API_BASE}/feedback/form/${splCode}`
     : `${API_BASE}/feedback/form`;
 
-  const response = await fetchWithTimeout(endpoint);
+  const response = await fetchWithTimeout(endpoint, signal ? { signal } : {});
   const data = await response.json();
 
   if (!response.ok) {
@@ -109,6 +109,8 @@ function ScaleQuestion({
             key={num}
             type="button"
             onClick={() => onChange(num)}
+            aria-label={`${num} out of ${max}${num === min && question.scaleMinLabel ? ` - ${question.scaleMinLabel}` : ''}${num === max && question.scaleMaxLabel ? ` - ${question.scaleMaxLabel}` : ''}`}
+            aria-pressed={value === num}
             className={`
               flex-1 py-3 rounded-lg font-medium transition-all
               ${value === num
@@ -179,14 +181,18 @@ export default function FeedbackFormPage() {
   const [isComplete, setIsComplete] = useState(false);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
 
-  // Load form on mount
+  // Load form on mount with cleanup to prevent state updates after unmount
   useEffect(() => {
+    const controller = new AbortController();
+
     async function loadForm() {
       try {
         setIsLoading(true);
         setError(null);
 
-        const data = await getFeedbackForm(splCode);
+        const data = await getFeedbackForm(splCode, controller.signal);
+        if (controller.signal.aborted) return;
+
         setFormConfig(data.form);
         setPrefilled(data.prefilled);
 
@@ -202,6 +208,7 @@ export default function FeedbackFormPage() {
           }));
         }
       } catch (err) {
+        if (controller.signal.aborted) return;
         const errorMessage = err instanceof Error ? err.message : 'Failed to load form';
         // FIX #40: Check structured error code in addition to string matching
         const errorCode = (err as { code?: string })?.code;
@@ -213,11 +220,14 @@ export default function FeedbackFormPage() {
           setError(errorMessage);
         }
       } finally {
-        setIsLoading(false);
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     }
 
     loadForm();
+    return () => controller.abort();
   }, [splCode]);
 
   // Handle response changes
@@ -420,7 +430,14 @@ export default function FeedbackFormPage() {
           <div className="flex justify-between text-sm text-gray-500 mb-2">
             <span>Question {currentQuestionIndex + 1} of {formConfig.questions.length}</span>
           </div>
-          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div
+            role="progressbar"
+            aria-valuenow={Math.round(progress)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Form completion progress"
+            className="h-2 bg-gray-200 rounded-full overflow-hidden"
+          >
             <div
               className="h-full bg-primary-600 transition-all duration-300"
               style={{ width: `${progress}%` }}
@@ -481,10 +498,10 @@ export default function FeedbackFormPage() {
 
           <button
             onClick={handleNext}
-            disabled={currentQuestion.required && !isCurrentQuestionAnswered() || isSubmitting}
+            disabled={(currentQuestion.required && !isCurrentQuestionAnswered()) || isSubmitting}
             className={`
               flex-1 py-3 px-6 rounded-lg font-medium transition-colors
-              ${currentQuestion.required && !isCurrentQuestionAnswered()
+              ${(currentQuestion.required && !isCurrentQuestionAnswered())
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 : 'bg-primary-600 text-white hover:bg-primary-700'
               }

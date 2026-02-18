@@ -13,7 +13,7 @@ export default function Layout({ children }: LayoutProps) {
           <Link to="/" className="flex items-center">
             <span className="text-xl font-extrabold text-slate-900">spill</span>
           </Link>
-          <nav className="flex items-center gap-6">
+          <nav aria-label="Main navigation" className="flex items-center gap-6">
             <a
               href="https://spill.chat"
               target="_blank"

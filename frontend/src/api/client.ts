@@ -119,7 +119,7 @@ async function fetchWithRetry(
 /**
  * Safely parse JSON response, handling non-JSON error pages
  */
-async function safeParseJson(response: Response): Promise<any> {
+async function safeParseJson(response: Response): Promise<unknown> {
   const text = await response.text();
   try {
     return JSON.parse(text);
@@ -136,7 +136,7 @@ async function safeParseJson(response: Response): Promise<any> {
  * FIX M3: Request deduplication to prevent concurrent duplicate requests
  * Stores pending promises by request key to coalesce identical concurrent requests
  */
-const pendingRequests = new Map<string, Promise<any>>();
+const pendingRequests = new Map<string, Promise<unknown>>();
 
 function getRequestKey(method: string, endpoint: string): string {
   // For GET requests, use method:endpoint to deduplicate
@@ -333,7 +333,10 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
     endpoint,
     options,
     async () => {
-      const response = await fetchWithTimeout(
+      const method = options?.method || 'GET';
+      // Use retry logic for GET requests (safe to retry), direct fetch for mutations
+      const fetchFn = method === 'GET' ? fetchWithRetry : fetchWithTimeout;
+      const response = await fetchFn(
         `${API_BASE}${endpoint}`,
         {
           headers: {
@@ -346,10 +349,10 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
         TIMEOUTS.DEFAULT_MS
       );
 
-      const data = await safeParseJson(response);
+      const data = await safeParseJson(response) as Record<string, unknown>;
 
       if (!response.ok) {
-        throw new Error(data.error || 'An error occurred');
+        throw new Error((data.error as string) || 'An error occurred');
       }
 
       return data;

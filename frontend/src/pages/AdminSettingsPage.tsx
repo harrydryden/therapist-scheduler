@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getSettings, updateSetting, resetSetting } from '../api/client';
 import type { SystemSetting, SettingCategory } from '../types';
@@ -118,11 +118,19 @@ export default function AdminSettingsPage() {
     updateMutation.mutate({ key: setting.key, value });
   };
 
-  const handleReset = (setting: SystemSetting) => {
-    if (window.confirm(`Reset "${setting.label}" to default value (${setting.defaultValue})?`)) {
-      resetMutation.mutate(setting.key);
+  // Reset confirmation state
+  const [resetConfirmSetting, setResetConfirmSetting] = useState<SystemSetting | null>(null);
+
+  const handleReset = useCallback((setting: SystemSetting) => {
+    setResetConfirmSetting(setting);
+  }, []);
+
+  const confirmReset = useCallback(() => {
+    if (resetConfirmSetting) {
+      resetMutation.mutate(resetConfirmSetting.key);
+      setResetConfirmSetting(null);
     }
-  };
+  }, [resetConfirmSetting, resetMutation]);
 
   const handleCancel = () => {
     setEditingKey(null);
@@ -446,6 +454,38 @@ export default function AdminSettingsPage() {
           </ul>
         </div>
       </div>
+
+      {/* Reset Confirmation Dialog */}
+      {resetConfirmSetting && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-confirm-title"
+            className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+          >
+            <h3 id="reset-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Reset Setting</h3>
+            <p className="text-slate-600 mb-6">
+              Reset "{resetConfirmSetting.label}" to default value ({String(resetConfirmSetting.defaultValue).slice(0, 100)})?
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setResetConfirmSetting(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmReset}
+                disabled={resetMutation.isPending}
+                className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50"
+              >
+                {resetMutation.isPending ? 'Resetting...' : 'Reset to Default'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -71,8 +71,8 @@ function ConfirmModal({
 }) {
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6">
-        <h3 className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
+      <div role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6">
+        <h3 id="confirm-modal-title" className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
         <p className="text-slate-600 mb-6">{message}</p>
         <div className="flex gap-3 justify-end">
           <button
@@ -117,6 +117,7 @@ function EvidenceTooltip({ evidence }: EvidenceTooltipProps) {
         onMouseEnter={() => setIsVisible(true)}
         onMouseLeave={() => setIsVisible(false)}
         onClick={() => setIsVisible(!isVisible)}
+        onKeyDown={(e) => { if (e.key === 'Escape') setIsVisible(false); }}
         className="text-slate-400 hover:text-spill-blue-800 transition-colors"
         aria-label="View AI reasoning for this selection"
       >

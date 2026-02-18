@@ -54,7 +54,8 @@ interface FeedbackStats {
 
 async function getFormConfig(): Promise<AdminFormConfig> {
   const response = await fetchAdminApi<AdminFormConfig>('/admin/forms/feedback');
-  return response.data as AdminFormConfig;
+  if (!response.data) throw new Error('Failed to load form configuration');
+  return response.data;
 }
 
 async function updateFormConfig(updates: Partial<AdminFormConfig>): Promise<AdminFormConfig> {
@@ -62,7 +63,8 @@ async function updateFormConfig(updates: Partial<AdminFormConfig>): Promise<Admi
     method: 'PUT',
     body: JSON.stringify(updates),
   });
-  return response.data as AdminFormConfig;
+  if (!response.data) throw new Error('Failed to save form configuration');
+  return response.data;
 }
 
 async function getSubmissions(params?: {
@@ -82,15 +84,14 @@ async function getSubmissions(params?: {
     submissions: FeedbackSubmission[];
     pagination: { page: number; limit: number; total: number; totalPages: number };
   }>(`/admin/forms/feedback/submissions?${queryParams.toString()}`);
-  return response.data as {
-    submissions: FeedbackSubmission[];
-    pagination: { page: number; limit: number; total: number; totalPages: number };
-  };
+  if (!response.data) throw new Error('Failed to load submissions');
+  return response.data;
 }
 
 async function getStats(): Promise<FeedbackStats> {
   const response = await fetchAdminApi<FeedbackStats>('/admin/forms/feedback/stats');
-  return response.data as FeedbackStats;
+  if (!response.data) throw new Error('Failed to load statistics');
+  return response.data;
 }
 
 // ============================================
@@ -124,9 +125,10 @@ function QuestionEditor({
 
       <div className="space-y-3">
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Question ID</label>
+          <label htmlFor={`q-${question.id}-id`} className="block text-sm font-medium text-slate-700 mb-1">Question ID</label>
           <input
             type="text"
+            id={`q-${question.id}-id`}
             value={question.id}
             onChange={(e) => onChange({ ...question, id: e.target.value })}
             className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
@@ -135,9 +137,10 @@ function QuestionEditor({
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Question Text</label>
+          <label htmlFor={`q-${question.id}-text`} className="block text-sm font-medium text-slate-700 mb-1">Question Text</label>
           <input
             type="text"
+            id={`q-${question.id}-text`}
             value={question.question}
             onChange={(e) => onChange({ ...question, question: e.target.value })}
             className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
@@ -377,8 +380,11 @@ export default function AdminFormsPage() {
         )}
 
         {/* Tabs */}
-        <div className="mb-6 flex gap-2 border-b border-slate-200">
+        <div role="tablist" aria-label="Forms management" className="mb-6 flex gap-2 border-b border-slate-200">
           <button
+            role="tab"
+            aria-selected={activeTab === 'config'}
+            aria-controls="tab-panel-config"
             onClick={() => setActiveTab('config')}
             className={`px-4 py-2 font-medium text-sm transition-colors ${
               activeTab === 'config'
@@ -389,6 +395,9 @@ export default function AdminFormsPage() {
             Form Configuration
           </button>
           <button
+            role="tab"
+            aria-selected={activeTab === 'submissions'}
+            aria-controls="tab-panel-submissions"
             onClick={() => setActiveTab('submissions')}
             className={`px-4 py-2 font-medium text-sm transition-colors ${
               activeTab === 'submissions'
@@ -399,6 +408,9 @@ export default function AdminFormsPage() {
             Submissions
           </button>
           <button
+            role="tab"
+            aria-selected={activeTab === 'stats'}
+            aria-controls="tab-panel-stats"
             onClick={() => setActiveTab('stats')}
             className={`px-4 py-2 font-medium text-sm transition-colors ${
               activeTab === 'stats'
@@ -412,7 +424,7 @@ export default function AdminFormsPage() {
 
         {/* Form Configuration Tab */}
         {activeTab === 'config' && (
-          <div className="space-y-6">
+          <div id="tab-panel-config" role="tabpanel" className="space-y-6">
             {configLoading ? (
               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>
@@ -606,7 +618,7 @@ export default function AdminFormsPage() {
 
         {/* Submissions Tab */}
         {activeTab === 'submissions' && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          <div id="tab-panel-submissions" role="tabpanel" className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
             {submissionsLoading ? (
               <div className="p-8 text-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>
@@ -699,7 +711,7 @@ export default function AdminFormsPage() {
 
         {/* Statistics Tab */}
         {activeTab === 'stats' && (
-          <div className="space-y-6">
+          <div id="tab-panel-stats" role="tabpanel" className="space-y-6">
             {statsLoading ? (
               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center">
                 <div className="animate-spin rounded-full h-8 w-8 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>

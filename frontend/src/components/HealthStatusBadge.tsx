@@ -28,11 +28,17 @@ export default function HealthStatusBadge({
   // Pulse animation only for red status
   const pulseClass = pulse && status === 'red' ? 'animate-pulse' : '';
 
+  const statusLabel = status === 'green' ? 'Healthy' : status === 'yellow' ? 'Monitoring' : 'Needs attention';
+
   return (
-    <span className="inline-flex items-center gap-1.5" title={`Health: ${status}${score !== undefined ? ` (${score}%)` : ''}`}>
-      <span className={`${sizeClasses} ${colorClass} ${pulseClass} rounded-full inline-block`} />
+    <span
+      className="inline-flex items-center gap-1.5"
+      title={`Health: ${status}${score !== undefined ? ` (${score}%)` : ''}`}
+      aria-label={`Health status: ${statusLabel}${score !== undefined ? `, score ${score}%` : ''}`}
+    >
+      <span className={`${sizeClasses} ${colorClass} ${pulseClass} rounded-full inline-block`} aria-hidden="true" />
       {showScore && score !== undefined && (
-        <span className="text-xs text-slate-500">{score}%</span>
+        <span className="text-xs text-slate-500" aria-hidden="true">{score}%</span>
       )}
     </span>
   );

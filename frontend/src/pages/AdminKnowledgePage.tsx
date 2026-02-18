@@ -128,9 +128,17 @@ export default function AdminKnowledgePage() {
     });
   };
 
+  // Delete confirmation state
+  const [deleteConfirmEntry, setDeleteConfirmEntry] = useState<KnowledgeEntry | null>(null);
+
   const handleDelete = (entry: KnowledgeEntry) => {
-    if (window.confirm('Are you sure you want to delete this knowledge entry?')) {
-      deleteMutation.mutate(entry.id);
+    setDeleteConfirmEntry(entry);
+  };
+
+  const confirmDelete = () => {
+    if (deleteConfirmEntry) {
+      deleteMutation.mutate(deleteConfirmEntry.id);
+      setDeleteConfirmEntry(null);
     }
   };
 
@@ -389,6 +397,15 @@ export default function AdminKnowledgePage() {
           )}
         </div>
 
+        {/* Delete error display */}
+        {deleteMutation.isError && (
+          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
+            <p className="text-red-600 text-sm">
+              {deleteMutation.error instanceof Error ? deleteMutation.error.message : 'Failed to delete entry'}
+            </p>
+          </div>
+        )}
+
         {/* Help Text */}
         <div className="mt-6 p-4 bg-slate-100 rounded-xl">
           <h3 className="font-medium text-slate-700 mb-2">How it works</h3>
@@ -408,6 +425,38 @@ export default function AdminKnowledgePage() {
           </p>
         </div>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      {deleteConfirmEntry && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirm-title"
+            className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+          >
+            <h3 id="delete-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Delete Entry</h3>
+            <p className="text-slate-600 mb-6">
+              Are you sure you want to delete {deleteConfirmEntry.title ? `"${deleteConfirmEntry.title}"` : 'this entry'}? This cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setDeleteConfirmEntry(null)}
+                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleteMutation.isPending}
+                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -20,10 +20,11 @@ export function sanitizeImageUrl(url: string | null | undefined): string | null 
       return null;
     }
 
-    // For data URLs, only allow image types
+    // For data URLs, only allow safe image types (no SVG - can contain scripts)
     if (parsed.protocol === 'data:') {
-      if (!trimmed.startsWith('data:image/')) {
-        console.warn('Blocked non-image data URL');
+      const safeDataTypes = ['data:image/jpeg', 'data:image/png', 'data:image/gif', 'data:image/webp'];
+      if (!safeDataTypes.some(t => trimmed.startsWith(t))) {
+        console.warn('Blocked unsafe data URL type');
         return null;
       }
     }
@@ -41,15 +42,6 @@ export function sanitizeImageUrl(url: string | null | undefined): string | null 
   }
 }
 
-/**
- * Sanitize text to prevent XSS when rendering as HTML
- */
-export function sanitizeText(text: string | null | undefined): string {
-  if (!text) return '';
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
+// Note: sanitizeText was removed as it was dead code.
+// AdminDashboardPage uses DOMPurify.sanitize() for HTML stripping,
+// and JSX auto-escapes text content, making HTML entity encoding unnecessary.

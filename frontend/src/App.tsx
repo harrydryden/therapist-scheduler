@@ -1,16 +1,27 @@
+import { lazy, Suspense } from 'react';
 import { Routes, Route, Link } from 'react-router-dom';
 import TherapistsPage from './pages/TherapistsPage';
 import TherapistDetailPage from './pages/TherapistDetailPage';
-import AdminHomePage from './pages/AdminHomePage';
-import AdminIngestionPage from './pages/AdminIngestionPage';
-import AdminDashboardPage from './pages/AdminDashboardPage';
-import AdminKnowledgePage from './pages/AdminKnowledgePage';
-import AdminSettingsPage from './pages/AdminSettingsPage';
 import FeedbackFormPage from './pages/FeedbackFormPage';
-import AdminFormsPage from './pages/AdminFormsPage';
 import Layout from './components/Layout';
 import AdminLayout from './components/AdminLayout';
 import ErrorBoundary from './components/ErrorBoundary';
+
+// Lazy-load admin pages to reduce initial bundle size for public users
+const AdminHomePage = lazy(() => import('./pages/AdminHomePage'));
+const AdminIngestionPage = lazy(() => import('./pages/AdminIngestionPage'));
+const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'));
+const AdminKnowledgePage = lazy(() => import('./pages/AdminKnowledgePage'));
+const AdminSettingsPage = lazy(() => import('./pages/AdminSettingsPage'));
+const AdminFormsPage = lazy(() => import('./pages/AdminFormsPage'));
+
+function AdminLoadingFallback() {
+  return (
+    <div className="flex items-center justify-center p-12">
+      <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-spill-blue-800"></div>
+    </div>
+  );
+}
 
 function App() {
   return (
@@ -37,17 +48,17 @@ function App() {
         <Route path="/feedback" element={<FeedbackFormPage />} />
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
-        {/* Admin routes with sidebar layout */}
+        {/* Admin routes with sidebar layout - lazy loaded */}
         <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<AdminHomePage />} />
-          <Route path="dashboard" element={<AdminDashboardPage />} />
-          <Route path="ingestion" element={<AdminIngestionPage />} />
-          <Route path="knowledge" element={<AdminKnowledgePage />} />
-          <Route path="forms" element={<AdminFormsPage />} />
-          <Route path="settings" element={<AdminSettingsPage />} />
+          <Route index element={<Suspense fallback={<AdminLoadingFallback />}><AdminHomePage /></Suspense>} />
+          <Route path="dashboard" element={<Suspense fallback={<AdminLoadingFallback />}><AdminDashboardPage /></Suspense>} />
+          <Route path="ingestion" element={<Suspense fallback={<AdminLoadingFallback />}><AdminIngestionPage /></Suspense>} />
+          <Route path="knowledge" element={<Suspense fallback={<AdminLoadingFallback />}><AdminKnowledgePage /></Suspense>} />
+          <Route path="forms" element={<Suspense fallback={<AdminLoadingFallback />}><AdminFormsPage /></Suspense>} />
+          <Route path="settings" element={<Suspense fallback={<AdminLoadingFallback />}><AdminSettingsPage /></Suspense>} />
         </Route>
 
-        {/* FIX #33: 404 catch-all route */}
+        {/* 404 catch-all route */}
         <Route
           path="*"
           element={

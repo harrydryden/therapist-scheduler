@@ -105,6 +105,7 @@ export default function AdminDashboardPage() {
     queryKey: ['appointment', selectedAppointment],
     queryFn: () => getAppointmentDetail(selectedAppointment!),
     enabled: !!selectedAppointment,
+    staleTime: 30000,
   });
 
   // Group appointments by therapist
@@ -380,7 +381,8 @@ export default function AdminDashboardPage() {
             <h2 className="font-semibold text-slate-900 mb-4">Appointment Pipeline</h2>
 
             {/* Pipeline Flow */}
-            <div className="flex items-stretch gap-1 mb-6">
+            <div className="overflow-x-auto -mx-2 px-2">
+            <div className="flex items-stretch gap-1 mb-6 min-w-[700px]">
               {/* Pre-booking stages */}
               <div className="flex-1 min-w-0">
                 <div className="bg-amber-50 rounded-l-xl p-4 h-full border border-amber-200">
@@ -439,6 +441,7 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
             </div>
+            </div>
 
             {/* Summary row */}
             <div className="flex items-center justify-between pt-4 border-t border-slate-100">
@@ -467,7 +470,7 @@ export default function AdminDashboardPage() {
         {/* Health & Control Overview - Combined Card */}
         {appointmentsData?.data && appointmentsData.data.length > 0 && (
           <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-6">
-            <div className="grid grid-cols-2 gap-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
               {/* Health Status Section */}
               <div>
                 <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
@@ -854,7 +857,12 @@ export default function AdminDashboardPage() {
                             {group.appointments.map((apt) => (
                               <div
                                 key={apt.id}
+                                role="button"
+                                tabIndex={0}
                                 onClick={() => setSelectedAppointment(apt.id)}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedAppointment(apt.id); } }}
+                                aria-label={`View appointment for ${apt.userName || apt.userEmail}`}
+                                aria-pressed={selectedAppointment === apt.id}
                                 className={`p-4 pl-8 cursor-pointer hover:bg-slate-100 transition-colors ${
                                   selectedAppointment === apt.id ? 'bg-primary-50 border-l-4 border-l-spill-blue-800' : ''
                                 }`}
@@ -1403,7 +1411,7 @@ export default function AdminDashboardPage() {
                     <div className="space-y-3">
                       {appointmentDetail.conversation.messages.map((msg, idx) => (
                         <div
-                          key={idx}
+                          key={`${msg.role}-${idx}`}
                           className={`p-3 rounded-lg ${
                             msg.role === 'assistant'
                               ? 'bg-primary-50 border border-primary-100'

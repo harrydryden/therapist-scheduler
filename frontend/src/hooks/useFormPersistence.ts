@@ -49,7 +49,7 @@ export function useFormPersistence<T>(
   const [hasDraft, setHasDraft] = useState(false);
   const [draftData, setDraftData] = useState<T | null>(null);
   const [draftTimestamp, setDraftTimestamp] = useState<number | null>(null);
-  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Check for existing draft on mount
   useEffect(() => {

@@ -1,10 +1,6 @@
-import { ReactNode, useState } from 'react';
+import { useState } from 'react';
 import { Link, useLocation, Outlet } from 'react-router-dom';
 import { getAdminSecret, setAdminSecret } from '../config/env';
-
-interface AdminLayoutProps {
-  children?: ReactNode;
-}
 
 interface NavItem {
   name: string;
@@ -52,7 +48,7 @@ const navItems: NavItem[] = [
   },
 ];
 
-export default function AdminLayout({ children }: AdminLayoutProps = {}) {
+export default function AdminLayout() {
   const location = useLocation();
   // FIX #3: Prompt for admin secret if not yet stored in sessionStorage
   const [secretInput, setSecretInput] = useState('');
@@ -218,7 +214,7 @@ export default function AdminLayout({ children }: AdminLayoutProps = {}) {
           <span className="text-lg font-extrabold text-slate-900">spill</span>
           <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded">Admin</span>
         </div>
-        {children ?? <Outlet />}
+        <Outlet />
       </main>
     </div>
   );
