@@ -160,6 +160,54 @@ function ChoiceQuestion({
   );
 }
 
+function ChoiceWithTextQuestion({
+  question,
+  choiceValue,
+  textValue,
+  onChoiceChange,
+  onTextChange,
+}: {
+  question: FormQuestion;
+  choiceValue: string | null;
+  textValue: string;
+  onChoiceChange: (value: string) => void;
+  onTextChange: (value: string) => void;
+}) {
+  const options = question.options || [];
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        {options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            onClick={() => onChoiceChange(option)}
+            className={`
+              w-full py-3 px-4 rounded-lg font-medium text-left transition-all
+              ${choiceValue === option
+                ? 'bg-primary-600 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              }
+            `}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+      {choiceValue && (
+        <textarea
+          value={textValue}
+          onChange={(e) => onTextChange(e.target.value)}
+          placeholder={question.followUpPlaceholder || 'Tell us more (optional)...'}
+          rows={3}
+          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none"
+        />
+      )}
+    </div>
+  );
+}
+
 // ============================================
 // Main Page Component
 // ============================================
@@ -301,6 +349,7 @@ export default function FeedbackFormPage() {
     if (currentQuestionIndex < 0 || !formConfig) return true;
     const currentQuestion = formConfig.questions[currentQuestionIndex];
     const response = responses[currentQuestion.id];
+    // For choice_with_text, the choice itself is required but the text is optional
     return response !== undefined && response !== '' && response !== null;
   };
 
@@ -481,6 +530,16 @@ export default function FeedbackFormPage() {
               question={currentQuestion}
               value={(responses[currentQuestion.id] as string) || null}
               onChange={(value) => handleResponseChange(currentQuestion.id, value)}
+            />
+          )}
+
+          {currentQuestion.type === 'choice_with_text' && (
+            <ChoiceWithTextQuestion
+              question={currentQuestion}
+              choiceValue={(responses[currentQuestion.id] as string) || null}
+              textValue={(responses[`${currentQuestion.id}_text`] as string) || ''}
+              onChoiceChange={(value) => handleResponseChange(currentQuestion.id, value)}
+              onTextChange={(value) => handleResponseChange(`${currentQuestion.id}_text`, value)}
             />
           )}
         </div>

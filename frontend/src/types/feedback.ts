@@ -5,7 +5,7 @@
 
 export interface FormQuestion {
   id: string;
-  type: 'text' | 'scale' | 'choice';
+  type: 'text' | 'scale' | 'choice' | 'choice_with_text';
   question: string;
   required: boolean;
   prefilled?: boolean;
@@ -14,6 +14,7 @@ export interface FormQuestion {
   scaleMinLabel?: string;
   scaleMaxLabel?: string;
   options?: string[];
+  followUpPlaceholder?: string;
 }
 
 export interface FormConfig {
