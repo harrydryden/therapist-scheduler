@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import DOMPurify from 'dompurify';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -12,6 +12,7 @@ import {
 import type { AppointmentDetail } from '../types';
 import { APP } from '../config/constants';
 import { getStatusColor } from '../config/color-mappings';
+import { getAdminId } from '../utils/admin-id';
 
 // Sanitize text content to prevent XSS
 function sanitizeText(text: string): string {
@@ -32,6 +33,7 @@ export default function AppointmentDetailPanel({
   onClearSelection,
 }: AppointmentDetailPanelProps) {
   const queryClient = useQueryClient();
+  const adminId = useMemo(() => getAdminId(), []);
 
   // Human control state
   const [showComposeMessage, setShowComposeMessage] = useState(false);
@@ -54,6 +56,20 @@ export default function AppointmentDetailPanel({
   // FIX #35: Track editWarning timeout for cleanup on unmount
   const editWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Reset all local state when switching appointments to prevent stale UI
+  useEffect(() => {
+    setShowComposeMessage(false);
+    setMessageSubject('');
+    setMessageBody('');
+    setControlReason('');
+    setMutationError(null);
+    setShowDeleteConfirm(false);
+    setDeleteReason('');
+    setForceDeleteConfirmed(false);
+    setShowEditPanel(false);
+    setEditWarning(null);
+  }, [selectedAppointment]);
+
   // Sync edit form state when appointment detail loads
   useEffect(() => {
     if (appointmentDetail) {
@@ -74,7 +90,7 @@ export default function AppointmentDetailPanel({
   // Human control mutations
   const takeControlMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
-      takeControl(id, { adminId: 'admin', reason }),
+      takeControl(id, { adminId, reason }),
     // FIX #37: Clear mutationError at start of each mutation
     onMutate: () => { setMutationError(null); },
     onSuccess: () => {
@@ -113,7 +129,7 @@ export default function AppointmentDetailPanel({
       to: string;
       subject: string;
       body: string;
-    }) => sendAdminMessage(id, { to, subject, body, adminId: 'admin' }),
+    }) => sendAdminMessage(id, { to, subject, body, adminId }),
     // FIX #37: Clear mutationError at start of each mutation
     onMutate: () => { setMutationError(null); },
     onSuccess: () => {
@@ -130,7 +146,7 @@ export default function AppointmentDetailPanel({
 
   const deleteAppointmentMutation = useMutation({
     mutationFn: ({ id, reason, forceDeleteConfirmed: force }: { id: string; reason?: string; forceDeleteConfirmed?: boolean }) =>
-      deleteAppointment(id, { adminId: 'admin', reason, forceDeleteConfirmed: force }),
+      deleteAppointment(id, { adminId, reason, forceDeleteConfirmed: force }),
     // FIX #37: Clear mutationError at start of each mutation
     onMutate: () => { setMutationError(null); },
     onSuccess: () => {
@@ -160,7 +176,7 @@ export default function AppointmentDetailPanel({
       updateAppointment(id, {
         status: status as 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'cancelled' | undefined,
         confirmedDateTime,
-        adminId: 'admin',
+        adminId,
       }),
     // FIX #37: Clear mutationError at start of each mutation
     onMutate: () => { setMutationError(null); },

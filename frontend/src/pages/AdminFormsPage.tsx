@@ -614,10 +614,15 @@ export default function AdminFormsPage() {
                 {/* Save Button */}
                 <div className="flex justify-end gap-3">
                   <button
-                    onClick={() => setEditedConfig(null)}
+                    onClick={() => {
+                      // Reset to server state instead of hiding the editor
+                      if (formConfig) {
+                        setEditedConfig({ ...formConfig });
+                      }
+                    }}
                     className="px-4 py-2 text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200"
                   >
-                    Cancel
+                    Reset
                   </button>
                   <button
                     onClick={handleSave}
