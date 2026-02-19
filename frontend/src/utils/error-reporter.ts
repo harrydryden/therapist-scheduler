@@ -49,8 +49,10 @@ export async function initErrorReporter(): Promise<void> {
 
   try {
     // Dynamic import so Sentry is only loaded when configured
+    // Use variable to prevent Rollup from statically resolving the import
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const Sentry: any = await import('@sentry/react' as string);
+    const sentryModule = '@sentry/react';
+    const Sentry: any = await import(/* @vite-ignore */ sentryModule);
     Sentry.init({
       dsn,
       environment: import.meta.env.MODE,
