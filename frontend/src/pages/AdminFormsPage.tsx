@@ -292,6 +292,7 @@ export default function AdminFormsPage() {
   } = useQuery({
     queryKey: ['feedbackFormConfig'],
     queryFn: getFormConfig,
+    staleTime: 0, // Always refetch to ensure admin sees latest saved config
   });
 
   // Fetch submissions
