@@ -508,11 +508,11 @@ export default function FeedbackFormPage() {
         {/* Input based on question type */}
         <div className="mb-8">
           {currentQuestion.type === 'text' && (
-            <input
-              type="text"
+            <textarea
               value={(responses[currentQuestion.id] as string) || ''}
               onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              rows={4}
+              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none"
               placeholder="Type your answer..."
             />
           )}
