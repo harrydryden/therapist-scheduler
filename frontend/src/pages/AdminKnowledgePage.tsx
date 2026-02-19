@@ -438,12 +438,19 @@ export default function AdminKnowledgePage() {
 
       {/* Delete Confirmation Dialog */}
       {deleteConfirmEntry && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => setDeleteConfirmEntry(null)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setDeleteConfirmEntry(null); }}
+        >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-confirm-title"
             className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+            onClick={(e) => e.stopPropagation()}
+            ref={(el) => el?.focus()}
+            tabIndex={-1}
           >
             <h3 id="delete-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Delete Entry</h3>
             <p className="text-slate-600 mb-6">

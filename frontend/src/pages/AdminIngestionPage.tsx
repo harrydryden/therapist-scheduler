@@ -70,8 +70,20 @@ function ConfirmModal({
   isLoading?: boolean;
 }) {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6">
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onCancel}
+      onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+        onClick={(e) => e.stopPropagation()}
+        ref={(el) => el?.focus()}
+        tabIndex={-1}
+      >
         <h3 id="confirm-modal-title" className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
         <p className="text-slate-600 mb-6">{message}</p>
         <div className="flex gap-3 justify-end">

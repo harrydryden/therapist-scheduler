@@ -449,12 +449,19 @@ export default function AdminSettingsPage() {
 
       {/* Reset Confirmation Dialog */}
       {resetConfirmSetting && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => setResetConfirmSetting(null)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setResetConfirmSetting(null); }}
+        >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="reset-confirm-title"
             className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+            onClick={(e) => e.stopPropagation()}
+            ref={(el) => el?.focus()}
+            tabIndex={-1}
           >
             <h3 id="reset-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Reset Setting</h3>
             <p className="text-slate-600 mb-6">
