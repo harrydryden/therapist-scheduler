@@ -12,11 +12,6 @@
 
 import type { ErrorInfo } from 'react';
 
-interface ErrorReporterConfig {
-  dsn: string;
-  environment?: string;
-}
-
 interface ErrorReporter {
   captureException(error: Error, extra?: Record<string, unknown>): void;
   captureMessage(message: string, level?: 'info' | 'warning' | 'error'): void;
@@ -54,7 +49,8 @@ export async function initErrorReporter(): Promise<void> {
 
   try {
     // Dynamic import so Sentry is only loaded when configured
-    const Sentry = await import('@sentry/react');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const Sentry: any = await import('@sentry/react' as string);
     Sentry.init({
       dsn,
       environment: import.meta.env.MODE,
@@ -67,7 +63,7 @@ export async function initErrorReporter(): Promise<void> {
         Sentry.captureException(error, { extra });
       },
       captureMessage(message: string, level = 'error'): void {
-        Sentry.captureMessage(message, level as Sentry.SeverityLevel);
+        Sentry.captureMessage(message, level);
       },
     };
   } catch {

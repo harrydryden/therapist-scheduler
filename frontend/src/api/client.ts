@@ -192,17 +192,17 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
       TIMEOUTS.DEFAULT_MS
     );
 
-    const data = await safeParseJson(response);
+    const data = await safeParseJson(response) as Record<string, unknown>;
 
     if (!response.ok) {
       throw new ApiError(
-        data.error || 'An error occurred',
-        data.code,
-        data.details
+        (data.error as string) || 'An error occurred',
+        data.code as string | undefined,
+        data.details as ApiError['details']
       );
     }
 
-    return data;
+    return data as unknown as ApiResponse<T>;
   });
 }
 
@@ -258,13 +258,13 @@ export async function previewTherapistCV(file: File | null, additionalInfo: stri
     TIMEOUTS.LONG_MS
   );
 
-  const data = await safeParseJson(response);
+  const data = await safeParseJson(response) as Record<string, unknown>;
 
   if (!response.ok) {
-    throw new Error(data.error || 'Failed to preview CV');
+    throw new Error((data.error as string) || 'Failed to preview CV');
   }
 
-  return data.data;
+  return data.data as IngestionPreviewResponse;
 }
 
 export async function createTherapistFromCV(file: File | null, adminNotes: AdminNotes): Promise<IngestionCreateResponse> {
@@ -308,13 +308,13 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
     TIMEOUTS.LONG_MS
   );
 
-  const data = await safeParseJson(response);
+  const data = await safeParseJson(response) as Record<string, unknown>;
 
   if (!response.ok) {
-    throw new Error(data.error || 'Failed to create therapist');
+    throw new Error((data.error as string) || 'Failed to create therapist');
   }
 
-  return data.data;
+  return data.data as IngestionCreateResponse;
 }
 
 // Admin Dashboard API functions
@@ -355,7 +355,7 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
         throw new Error((data.error as string) || 'An error occurred');
       }
 
-      return data;
+      return data as unknown as ApiResponse<T> & { pagination?: PaginationInfo; total?: number };
     }
   );
 }
