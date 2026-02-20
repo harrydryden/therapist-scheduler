@@ -21,6 +21,10 @@ import type {
   SystemSetting,
   UpdateSettingRequest,
   BulkUpdateSettingsRequest,
+  AdminUser,
+  AdminTherapist,
+  CreateAdminAppointmentRequest,
+  CreateAdminAppointmentResponse,
 } from '../types';
 import { API_BASE, getAdminSecret, clearAdminSecret } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
@@ -670,6 +674,63 @@ export async function getFrontendSettings(): Promise<FrontendSettings> {
   const response = await fetchApi<FrontendSettings>('/settings/frontend');
   if (!response.data) {
     throw new Error('Failed to fetch frontend settings');
+  }
+  return response.data;
+}
+
+// Admin Appointments Management API functions
+
+export async function getAdminUsers(): Promise<AdminUser[]> {
+  const response = await fetchAdminApi<AdminUser[]>('/admin/appointments/users');
+  return response.data || [];
+}
+
+export async function getAdminTherapists(): Promise<AdminTherapist[]> {
+  const response = await fetchAdminApi<AdminTherapist[]>('/admin/appointments/therapists');
+  return response.data || [];
+}
+
+export async function getAllAppointments(filters: {
+  status?: string;
+  search?: string;
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: string;
+} = {}): Promise<{
+  data: AppointmentListItem[];
+  pagination: PaginationInfo;
+}> {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== '') {
+      params.append(key, String(value));
+    }
+  });
+
+  const queryString = params.toString();
+  const response = await fetchAdminApi<AppointmentListItem[]>(
+    `/admin/appointments/all${queryString ? `?${queryString}` : ''}`
+  );
+
+  return {
+    data: response.data || [],
+    pagination: response.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
+  };
+}
+
+export async function createAdminAppointment(
+  data: CreateAdminAppointmentRequest
+): Promise<CreateAdminAppointmentResponse> {
+  const response = await fetchAdminApi<CreateAdminAppointmentResponse>(
+    '/admin/appointments/create',
+    {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }
+  );
+  if (!response.data) {
+    throw new Error('Failed to create appointment');
   }
   return response.data;
 }

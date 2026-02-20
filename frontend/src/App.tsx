@@ -14,6 +14,7 @@ const AdminDashboardPage = lazy(() => import('./pages/AdminDashboardPage'));
 const AdminKnowledgePage = lazy(() => import('./pages/AdminKnowledgePage'));
 const AdminSettingsPage = lazy(() => import('./pages/AdminSettingsPage'));
 const AdminFormsPage = lazy(() => import('./pages/AdminFormsPage'));
+const AdminAppointmentsPage = lazy(() => import('./pages/AdminAppointmentsPage'));
 
 function AdminLoadingFallback() {
   return (
@@ -52,6 +53,7 @@ function App() {
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<Suspense fallback={<AdminLoadingFallback />}><AdminHomePage /></Suspense>} />
           <Route path="dashboard" element={<Suspense fallback={<AdminLoadingFallback />}><AdminDashboardPage /></Suspense>} />
+          <Route path="appointments" element={<Suspense fallback={<AdminLoadingFallback />}><AdminAppointmentsPage /></Suspense>} />
           <Route path="ingestion" element={<Suspense fallback={<AdminLoadingFallback />}><AdminIngestionPage /></Suspense>} />
           <Route path="knowledge" element={<Suspense fallback={<AdminLoadingFallback />}><AdminKnowledgePage /></Suspense>} />
           <Route path="forms" element={<Suspense fallback={<AdminLoadingFallback />}><AdminFormsPage /></Suspense>} />

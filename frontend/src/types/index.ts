@@ -123,6 +123,7 @@ export type HealthStatus = 'green' | 'yellow' | 'red';
 // Admin Dashboard types
 export interface AppointmentListItem {
   id: string;
+  trackingCode: string | null;
   userName: string | null;
   userEmail: string;
   therapistName: string;
@@ -278,4 +279,39 @@ export interface UpdateSettingRequest {
 export interface BulkUpdateSettingsRequest {
   settings: Array<{ key: string; value: string | number | boolean }>;
   adminId: string;
+}
+
+// Admin Appointments Management types
+export interface AdminUser {
+  id: string;
+  email: string;
+  name: string | null;
+  odId: string;
+}
+
+export interface AdminTherapist {
+  id: string;
+  notionId: string;
+  email: string;
+  name: string;
+  odId: string;
+}
+
+export type AdminAppointmentStage = 'confirmed' | 'session_held' | 'feedback_requested';
+
+export interface CreateAdminAppointmentRequest {
+  userEmail: string;
+  userName: string;
+  therapistNotionId: string;
+  stage: AdminAppointmentStage;
+  confirmedDateTime: string;
+  adminId: string;
+  notes?: string;
+}
+
+export interface CreateAdminAppointmentResponse {
+  id: string;
+  trackingCode: string;
+  status: string;
+  confirmedDateTime: string;
 }
