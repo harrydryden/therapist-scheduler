@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getSettings, updateSetting, resetSetting } from '../api/client';
+import { getSettings, updateSetting, resetSetting, getSlackStatus, sendSlackTest, resetSlackCircuit } from '../api/client';
+import type { SlackStatus } from '../api/client';
 import type { SystemSetting, SettingCategory } from '../types';
 import { getAdminId } from '../utils/admin-id';
 
@@ -52,6 +53,222 @@ const categoryInfo: Record<SettingCategory, { label: string; description: string
     icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9',
   },
 };
+
+// Slack Diagnostics Panel Component
+function SlackDiagnosticsPanel({
+  status,
+  isLoading,
+  onRefresh,
+  onTest,
+  onResetCircuit,
+  testPending,
+  testResult,
+  testError,
+  resetPending,
+}: {
+  status: SlackStatus | undefined;
+  isLoading: boolean;
+  onRefresh: () => void;
+  onTest: () => void;
+  onResetCircuit: () => void;
+  testPending: boolean;
+  testResult?: 'success' | 'error';
+  testError?: string;
+  resetPending: boolean;
+}) {
+  const circuitState = status?.circuitBreaker.state;
+  const isHealthy = circuitState === 'CLOSED';
+  const isOpen = circuitState === 'OPEN';
+
+  // Aggregate background task stats
+  const taskStats = status?.backgroundTasks
+    ? Object.values(status.backgroundTasks).reduce(
+        (acc, t) => ({
+          total: acc.total + t.total,
+          success: acc.success + t.success,
+          failed: acc.failed + t.failed,
+          timedOut: acc.timedOut + t.timedOut,
+        }),
+        { total: 0, success: 0, failed: 0, timedOut: 0 }
+      )
+    : null;
+
+  // Collect recent errors across all tasks
+  const recentErrors = status?.backgroundTasks
+    ? Object.entries(status.backgroundTasks)
+        .flatMap(([name, t]) => t.recentErrors.map(e => ({ ...e, taskName: name })))
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 5)
+    : [];
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      {/* Header */}
+      <div className="p-4 border-b border-slate-100 bg-slate-50">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-primary-50 rounded-lg flex items-center justify-center">
+              <svg className="w-5 h-5 text-spill-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="font-semibold text-slate-900">Slack Integration Status</h2>
+              <p className="text-sm text-slate-500">
+                Circuit breaker, queue, and delivery health
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onRefresh}
+            aria-label="Refresh Slack status"
+            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4">
+        {isLoading ? (
+          <div className="text-center py-4">
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>
+            <p className="text-sm text-slate-500 mt-2">Loading Slack status...</p>
+          </div>
+        ) : status ? (
+          <div className="space-y-4">
+            {/* Status Overview */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* Circuit Breaker State */}
+              <div className={`rounded-lg p-3 border ${
+                isHealthy ? 'bg-emerald-50 border-emerald-200' :
+                isOpen ? 'bg-red-50 border-red-200' :
+                'bg-amber-50 border-amber-200'
+              }`}>
+                <p className="text-xs font-medium text-slate-500 mb-1">Circuit Breaker</p>
+                <p className={`text-sm font-semibold ${
+                  isHealthy ? 'text-emerald-700' :
+                  isOpen ? 'text-red-700' :
+                  'text-amber-700'
+                }`}>
+                  {circuitState}
+                </p>
+              </div>
+
+              {/* Webhook */}
+              <div className={`rounded-lg p-3 border ${
+                status.webhookConfigured ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'
+              }`}>
+                <p className="text-xs font-medium text-slate-500 mb-1">Webhook</p>
+                <p className={`text-sm font-semibold ${
+                  status.webhookConfigured ? 'text-emerald-700' : 'text-red-700'
+                }`}>
+                  {status.webhookConfigured ? 'Configured' : 'Not Set'}
+                </p>
+              </div>
+
+              {/* Queue */}
+              <div className={`rounded-lg p-3 border ${
+                status.queue.inMemory === 0 ? 'bg-slate-50 border-slate-200' : 'bg-amber-50 border-amber-200'
+              }`}>
+                <p className="text-xs font-medium text-slate-500 mb-1">Queued</p>
+                <p className={`text-sm font-semibold ${
+                  status.queue.inMemory === 0 ? 'text-slate-700' : 'text-amber-700'
+                }`}>
+                  {status.queue.inMemory} pending
+                </p>
+              </div>
+
+              {/* Success Rate */}
+              <div className="rounded-lg p-3 border bg-slate-50 border-slate-200">
+                <p className="text-xs font-medium text-slate-500 mb-1">Delivery</p>
+                <p className="text-sm font-semibold text-slate-700">
+                  {taskStats && taskStats.total > 0
+                    ? `${Math.round((taskStats.success / taskStats.total) * 100)}%`
+                    : 'No data'}
+                </p>
+              </div>
+            </div>
+
+            {/* Failure Details (if circuit is not healthy) */}
+            {!isHealthy && (
+              <div className={`rounded-lg p-3 border ${isOpen ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
+                <p className={`text-sm font-medium ${isOpen ? 'text-red-800' : 'text-amber-800'} mb-1`}>
+                  {isOpen
+                    ? 'Circuit breaker is OPEN — all notifications are being rejected'
+                    : 'Circuit breaker is testing recovery — limited notifications allowed'}
+                </p>
+                <p className="text-xs text-slate-600">
+                  Failures: {status.circuitBreaker.failures} |
+                  Rejected: {status.circuitBreaker.rejectedRequests}
+                  {status.circuitBreaker.lastFailure && (
+                    <> | Last failure: {new Date(status.circuitBreaker.lastFailure).toLocaleString()}</>
+                  )}
+                </p>
+              </div>
+            )}
+
+            {/* Recent Errors */}
+            {recentErrors.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-slate-500 mb-2">Recent Errors</p>
+                <div className="space-y-1">
+                  {recentErrors.map((err, i) => (
+                    <div key={i} className="text-xs bg-red-50 border border-red-100 rounded px-2 py-1 font-mono text-red-700 truncate">
+                      <span className="text-red-400">{new Date(err.timestamp).toLocaleTimeString()}</span>{' '}
+                      [{err.taskName}] {err.error}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={onTest}
+                disabled={testPending}
+                className="px-3 py-1.5 text-sm bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
+              >
+                {testPending ? 'Sending...' : 'Send Test Notification'}
+              </button>
+              {!isHealthy && (
+                <button
+                  type="button"
+                  onClick={onResetCircuit}
+                  disabled={resetPending}
+                  className="px-3 py-1.5 text-sm border border-orange-300 text-orange-700 rounded-lg hover:bg-orange-50 transition-colors disabled:opacity-50"
+                >
+                  {resetPending ? 'Resetting...' : 'Reset Circuit Breaker'}
+                </button>
+              )}
+            </div>
+
+            {/* Test Result Feedback */}
+            {testResult === 'success' && (
+              <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                Test notification sent — check your Slack channel.
+              </div>
+            )}
+            {testResult === 'error' && (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                Failed to send test notification.{testError ? ` ${testError}` : ''} Check your webhook URL.
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500 text-center py-4">
+            Unable to load Slack status.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export default function AdminSettingsPage() {
   const queryClient = useQueryClient();
@@ -145,6 +362,30 @@ export default function AdminSettingsPage() {
 
   const isPending = updateMutation.isPending || resetMutation.isPending;
 
+  // Slack diagnostics - visible when Notifications category is active
+  const showSlackDiagnostics = activeCategory === 'all' || activeCategory === 'notifications';
+
+  const {
+    data: slackStatus,
+    isLoading: slackLoading,
+    refetch: refetchSlack,
+  } = useQuery({
+    queryKey: ['slack-status'],
+    queryFn: getSlackStatus,
+    enabled: showSlackDiagnostics,
+    refetchInterval: 30000, // Refresh every 30s
+  });
+
+  const testSlackMutation = useMutation({
+    mutationFn: sendSlackTest,
+    onSuccess: () => refetchSlack(),
+  });
+
+  const resetCircuitMutation = useMutation({
+    mutationFn: resetSlackCircuit,
+    onSuccess: () => refetchSlack(),
+  });
+
   return (
     <div className="min-h-screen bg-slate-50 py-8 px-4">
       <div className="max-w-4xl mx-auto">
@@ -207,6 +448,20 @@ export default function AdminSettingsPage() {
         ) : (
           /* Settings Groups */
           <div className="space-y-6">
+            {/* Slack Diagnostics Panel */}
+            {showSlackDiagnostics && (
+              <SlackDiagnosticsPanel
+                status={slackStatus}
+                isLoading={slackLoading}
+                onRefresh={() => refetchSlack()}
+                onTest={() => testSlackMutation.mutate()}
+                onResetCircuit={() => resetCircuitMutation.mutate()}
+                testPending={testSlackMutation.isPending}
+                testResult={testSlackMutation.isSuccess ? 'success' : testSlackMutation.isError ? 'error' : undefined}
+                testError={testSlackMutation.error instanceof Error ? testSlackMutation.error.message : undefined}
+                resetPending={resetCircuitMutation.isPending}
+              />
+            )}
             {Object.entries(groupedSettings).map(([category, settings]) => (
               <div
                 key={category}
