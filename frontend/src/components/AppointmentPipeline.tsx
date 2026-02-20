@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import type { DashboardStats, AppointmentListItem, HealthStatus } from '../types';
 
 interface AppointmentPipelineProps {
@@ -5,7 +6,31 @@ interface AppointmentPipelineProps {
   appointments: AppointmentListItem[] | undefined;
 }
 
-export default function AppointmentPipeline({ stats, appointments }: AppointmentPipelineProps) {
+export default memo(function AppointmentPipeline({ stats, appointments }: AppointmentPipelineProps) {
+  const healthData = useMemo(() => {
+    if (!appointments || appointments.length === 0) return null;
+    const activeAppointments = appointments.filter(
+      (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
+    );
+    const healthCounts = activeAppointments.reduce(
+      (acc, apt) => {
+        if (apt.healthStatus && ['green', 'yellow', 'red'].includes(apt.healthStatus)) {
+          acc[apt.healthStatus as HealthStatus]++;
+        }
+        return acc;
+      },
+      { green: 0, yellow: 0, red: 0 } as Record<HealthStatus, number>
+    );
+    return { activeAppointments, healthCounts, total: activeAppointments.length || 1 };
+  }, [appointments]);
+
+  const controlData = useMemo(() => {
+    if (!appointments || appointments.length === 0) return null;
+    const humanControlCount = appointments.filter((apt) => apt.humanControlEnabled).length;
+    const agentControlCount = appointments.length - humanControlCount;
+    return { humanControlCount, agentControlCount, total: appointments.length || 1 };
+  }, [appointments]);
+
   return (
     <>
       {/* Appointment Lifecycle Stats */}
@@ -101,7 +126,7 @@ export default function AppointmentPipeline({ stats, appointments }: Appointment
       )}
 
       {/* Health & Control Overview - Combined Card */}
-      {appointments && appointments.length > 0 && (
+      {healthData && controlData && (
         <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             {/* Health Status Section */}
@@ -111,64 +136,47 @@ export default function AppointmentPipeline({ stats, appointments }: Appointment
                 Health Status
                 <span className="text-xs font-normal text-slate-400">(active appointments only)</span>
               </h3>
-              {(() => {
-                const activeAppointments = appointments.filter(
-                  (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
-                );
-                const healthCounts = activeAppointments.reduce(
-                  (acc, apt) => {
-                    if (apt.healthStatus && ['green', 'yellow', 'red'].includes(apt.healthStatus)) {
-                      acc[apt.healthStatus as HealthStatus]++;
-                    }
-                    return acc;
-                  },
-                  { green: 0, yellow: 0, red: 0 } as Record<HealthStatus, number>
-                );
-                const total = activeAppointments.length || 1;
-                return (
-                  <div className="space-y-3">
-                    {/* Health bar visualization */}
-                    <div className="flex h-3 rounded-full overflow-hidden bg-slate-100">
-                      {healthCounts.green > 0 && (
-                        <div
-                          className="bg-spill-teal-400 transition-all"
-                          style={{ width: `${(healthCounts.green / total) * 100}%` }}
-                        />
-                      )}
-                      {healthCounts.yellow > 0 && (
-                        <div
-                          className="bg-spill-yellow-400 transition-all"
-                          style={{ width: `${(healthCounts.yellow / total) * 100}%` }}
-                        />
-                      )}
-                      {healthCounts.red > 0 && (
-                        <div
-                          className="bg-spill-red-400 transition-all"
-                          style={{ width: `${(healthCounts.red / total) * 100}%` }}
-                        />
-                      )}
-                    </div>
-                    {/* Legend */}
-                    <div className="flex items-center gap-6 text-sm">
-                      <div className="flex items-center gap-2">
-                        <span className="w-3 h-3 bg-spill-teal-400 rounded-full" />
-                        <span className="text-slate-600">Healthy</span>
-                        <span className="font-semibold text-spill-teal-600">{healthCounts.green}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="w-3 h-3 bg-spill-yellow-400 rounded-full" />
-                        <span className="text-slate-600">Monitoring</span>
-                        <span className="font-semibold text-spill-yellow-600">{healthCounts.yellow}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="w-3 h-3 bg-spill-red-400 rounded-full animate-pulse" />
-                        <span className="text-slate-600">Needs Attention</span>
-                        <span className="font-semibold text-spill-red-600">{healthCounts.red}</span>
-                      </div>
-                    </div>
+              <div className="space-y-3">
+                {/* Health bar visualization */}
+                <div className="flex h-3 rounded-full overflow-hidden bg-slate-100">
+                  {healthData.healthCounts.green > 0 && (
+                    <div
+                      className="bg-spill-teal-400 transition-all"
+                      style={{ width: `${(healthData.healthCounts.green / healthData.total) * 100}%` }}
+                    />
+                  )}
+                  {healthData.healthCounts.yellow > 0 && (
+                    <div
+                      className="bg-spill-yellow-400 transition-all"
+                      style={{ width: `${(healthData.healthCounts.yellow / healthData.total) * 100}%` }}
+                    />
+                  )}
+                  {healthData.healthCounts.red > 0 && (
+                    <div
+                      className="bg-spill-red-400 transition-all"
+                      style={{ width: `${(healthData.healthCounts.red / healthData.total) * 100}%` }}
+                    />
+                  )}
+                </div>
+                {/* Legend */}
+                <div className="flex items-center gap-6 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="w-3 h-3 bg-spill-teal-400 rounded-full" />
+                    <span className="text-slate-600">Healthy</span>
+                    <span className="font-semibold text-spill-teal-600">{healthData.healthCounts.green}</span>
                   </div>
-                );
-              })()}
+                  <div className="flex items-center gap-2">
+                    <span className="w-3 h-3 bg-spill-yellow-400 rounded-full" />
+                    <span className="text-slate-600">Monitoring</span>
+                    <span className="font-semibold text-spill-yellow-600">{healthData.healthCounts.yellow}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="w-3 h-3 bg-spill-red-400 rounded-full animate-pulse" />
+                    <span className="text-slate-600">Needs Attention</span>
+                    <span className="font-semibold text-spill-red-600">{healthData.healthCounts.red}</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Control Status Section */}
@@ -178,47 +186,40 @@ export default function AppointmentPipeline({ stats, appointments }: Appointment
                 Control Status
                 <span className="text-xs font-normal text-slate-400">(all appointments)</span>
               </h3>
-              {(() => {
-                const humanControlCount = appointments.filter((apt) => apt.humanControlEnabled).length;
-                const agentControlCount = appointments.filter((apt) => !apt.humanControlEnabled).length;
-                const total = appointments.length || 1;
-                return (
-                  <div className="space-y-3">
-                    {/* Control bar visualization */}
-                    <div className="flex h-3 rounded-full overflow-hidden bg-slate-100">
-                      {agentControlCount > 0 && (
-                        <div
-                          className="bg-spill-blue-800 transition-all"
-                          style={{ width: `${(agentControlCount / total) * 100}%` }}
-                        />
-                      )}
-                      {humanControlCount > 0 && (
-                        <div
-                          className="bg-orange-400 transition-all"
-                          style={{ width: `${(humanControlCount / total) * 100}%` }}
-                        />
-                      )}
-                    </div>
-                    {/* Legend */}
-                    <div className="flex items-center gap-6 text-sm">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">🤖</span>
-                        <span className="text-slate-600">Agent Control</span>
-                        <span className="font-semibold text-spill-blue-800">{agentControlCount}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">👤</span>
-                        <span className="text-slate-600">Human Control</span>
-                        <span className="font-semibold text-orange-600">{humanControlCount}</span>
-                      </div>
-                    </div>
+              <div className="space-y-3">
+                {/* Control bar visualization */}
+                <div className="flex h-3 rounded-full overflow-hidden bg-slate-100">
+                  {controlData.agentControlCount > 0 && (
+                    <div
+                      className="bg-spill-blue-800 transition-all"
+                      style={{ width: `${(controlData.agentControlCount / controlData.total) * 100}%` }}
+                    />
+                  )}
+                  {controlData.humanControlCount > 0 && (
+                    <div
+                      className="bg-orange-400 transition-all"
+                      style={{ width: `${(controlData.humanControlCount / controlData.total) * 100}%` }}
+                    />
+                  )}
+                </div>
+                {/* Legend */}
+                <div className="flex items-center gap-6 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">🤖</span>
+                    <span className="text-slate-600">Agent Control</span>
+                    <span className="font-semibold text-spill-blue-800">{controlData.agentControlCount}</span>
                   </div>
-                );
-              })()}
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">👤</span>
+                    <span className="text-slate-600">Human Control</span>
+                    <span className="font-semibold text-orange-600">{controlData.humanControlCount}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
     </>
   );
-}
+});

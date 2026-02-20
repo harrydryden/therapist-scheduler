@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { API_BASE } from '../config/env';
+import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
 
@@ -20,37 +21,16 @@ interface FeedbackFormResponse {
 
 // ============================================
 // API Functions (public, no auth)
-// FIX #31: Added AbortController with 30-second timeout to all fetch calls
 // ============================================
 
 const FEEDBACK_TIMEOUT_MS = 30000;
-
-async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FEEDBACK_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    return response;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('Request timed out. Please try again.');
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
 
 async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<FeedbackFormResponse> {
   const endpoint = splCode
     ? `${API_BASE}/feedback/form/${splCode}`
     : `${API_BASE}/feedback/form`;
 
-  const response = await fetchWithTimeout(endpoint, signal ? { signal } : {});
+  const response = await fetchWithTimeout(endpoint, signal ? { signal } : {}, FEEDBACK_TIMEOUT_MS);
   const data = await response.json();
 
   if (!response.ok) {
@@ -69,7 +49,7 @@ async function submitFeedback(data: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
-  });
+  }, FEEDBACK_TIMEOUT_MS);
 
   const result = await response.json();
 

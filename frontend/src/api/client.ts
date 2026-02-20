@@ -63,7 +63,7 @@ export class AuthError extends Error {
 /**
  * Fetch with timeout using AbortController
  */
-async function fetchWithTimeout(
+export async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},
   timeoutMs: number = TIMEOUTS.DEFAULT_MS
