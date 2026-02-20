@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { AppointmentListItem, AppointmentFilters, PaginationInfo } from '../types';
 import { getStatusColor, getStageLabel } from '../config/color-mappings';
 import HealthStatusBadge from './HealthStatusBadge';
@@ -30,7 +31,7 @@ interface TherapistGroupListProps {
 
 export type { TherapistGroup };
 
-export default function TherapistGroupList({
+export default memo(function TherapistGroupList({
   therapistGroups,
   filters,
   pagination,
@@ -252,4 +253,4 @@ export default function TherapistGroupList({
       )}
     </div>
   );
-}
+});

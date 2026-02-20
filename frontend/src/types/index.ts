@@ -151,11 +151,12 @@ export interface AppointmentListItem {
 
 export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCount'> {
   conversation: {
-    systemPrompt: string;
-    messages: Array<{
+    latestMessages: Array<{
       role: 'user' | 'assistant' | 'admin';
       content: string;
+      senderType: 'client' | 'therapist' | 'agent' | 'admin';
     }>;
+    totalMessageCount: number;
   } | null;
   therapistAvailability: TherapistAvailability | null;
   notes: string | null;
