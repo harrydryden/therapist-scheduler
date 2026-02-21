@@ -442,6 +442,7 @@ function AppointmentsTable() {
     }),
     refetchInterval: 30000,
     staleTime: 15000,
+    refetchOnWindowFocus: false, // Polling handles freshness; avoid duplicate requests on tab switch
   });
 
   const appointments = data?.data || [];

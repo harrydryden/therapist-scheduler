@@ -373,7 +373,8 @@ export default function AdminSettingsPage() {
     queryKey: ['slack-status'],
     queryFn: getSlackStatus,
     enabled: showSlackDiagnostics,
-    refetchInterval: 30000, // Refresh every 30s
+    refetchInterval: 30000,
+    refetchOnWindowFocus: false,
   });
 
   const testSlackMutation = useMutation({

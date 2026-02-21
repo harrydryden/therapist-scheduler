@@ -39,6 +39,7 @@ export default function AdminDashboardPage() {
     queryFn: () => getAppointments(filters),
     refetchInterval: 30000,
     staleTime: 30000,
+    refetchOnWindowFocus: false, // Polling handles freshness; avoid duplicate requests on tab switch
   });
 
   // Fetch stats with auto-refresh every 30 seconds
@@ -47,6 +48,7 @@ export default function AdminDashboardPage() {
     queryFn: getDashboardStats,
     refetchInterval: 30000,
     staleTime: 30000,
+    refetchOnWindowFocus: false,
   });
 
   // Fetch selected appointment detail

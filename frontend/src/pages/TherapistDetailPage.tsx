@@ -20,6 +20,7 @@ export default function TherapistDetailPage() {
     queryKey: ['therapist', id],
     queryFn: () => getTherapist(id!),
     enabled: !!id,
+    staleTime: 5 * 60 * 1000, // Cache for 5 min to avoid refetch on back-navigation
   });
 
   if (isLoading) {
