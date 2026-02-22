@@ -19,35 +19,7 @@ import { slackNotificationService } from '../services/slack-notification.service
 import { runBackgroundTask } from '../utils/background-task';
 import { sanitizeFeedback, sanitizeName, sanitizeObject } from '../utils/input-sanitizer';
 import { RATE_LIMITS } from '../constants';
-
-// ============================================
-// Types
-// ============================================
-
-interface FormQuestion {
-  id: string;
-  type: 'text' | 'scale' | 'choice' | 'choice_with_text';
-  question: string;
-  required: boolean;
-  prefilled?: boolean;
-  scaleMin?: number;
-  scaleMax?: number;
-  scaleMinLabel?: string;
-  scaleMaxLabel?: string;
-  options?: string[];
-  followUpPlaceholder?: string;
-}
-
-interface FormConfig {
-  formName: string;
-  description: string | null;
-  welcomeTitle: string;
-  welcomeMessage: string;
-  thankYouTitle: string;
-  thankYouMessage: string;
-  questions: FormQuestion[];
-  isActive: boolean;
-}
+import type { FormQuestion, FormConfig } from '@therapist-scheduler/shared/types/feedback';
 
 interface PrefilledData {
   trackingCode: string;
