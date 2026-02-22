@@ -1,4 +1,8 @@
 {
+  "buildCommand": "npm run build:frontend",
+  "outputDirectory": "packages/frontend/dist",
+  "installCommand": "npm install",
+  "framework": "vite",
   "rewrites": [
     { "source": "/api/:path*", "destination": "https://backend-production-fe25.up.railway.app/api/:path*" },
     { "source": "/((?!api|assets|.*\\..*).*)", "destination": "/index.html" }
