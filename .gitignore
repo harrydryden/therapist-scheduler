@@ -1,11 +1,10 @@
 # Dependencies
 node_modules/
-.npm/
-.nvm/
 
 # Build outputs
 dist/
 build/
+*.tsbuildinfo
 
 # Environment files
 .env
@@ -19,43 +18,13 @@ build/
 
 # OS files
 .DS_Store
-.Trash/
-.CFUserTextEncoding
-.cups/
-.lesshst
-.viminfo
-.zsh_history
-.zsh_sessions/
 
-# User directories (not part of project)
-Applications/
-Desktop/
-Documents/
-Downloads/
-Library/
-Movies/
-Music/
-Pictures/
-Public/
-OneDrive
+# Vercel
+.vercel
 
-# Config files
-.gitconfig
-.zshrc
-.profile
-.ssh/
-.docker/
-.local/
-.cache/
-.config/
-.rustup/
-.railway/
-.antigravity/
-.gemini/
-
-# Claude Code files
+# Claude Code
 .claude/
 .claude.json*
 
-# Supabase
-supabase/
+# Prisma
+packages/backend/prisma/*.db

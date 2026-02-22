@@ -4,6 +4,9 @@ import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
+import path from 'path';
+import fs from 'fs';
 import pino from 'pino';
 import { config } from './config';
 import { therapistRoutes } from './routes/therapists.routes';
@@ -295,6 +298,32 @@ async function buildServer() {
   await fastify.register(unsubscribeRoutes);
   await fastify.register(feedbackFormRoutes);
   await fastify.register(adminFormsRoutes);
+
+  // In production, serve the frontend SPA build
+  if (config.env === 'production') {
+    // Frontend dist is at /app/dist relative to the Docker WORKDIR
+    // In local builds, it's at ../../frontend/dist relative to the backend
+    const frontendDistDir = fs.existsSync(path.resolve(process.cwd(), 'dist'))
+      ? path.resolve(process.cwd(), 'dist')
+      : path.resolve(__dirname, '../../frontend/dist');
+
+    if (fs.existsSync(frontendDistDir)) {
+      await fastify.register(fastifyStatic, {
+        root: frontendDistDir,
+        prefix: '/',
+        wildcard: false,
+      });
+
+      // SPA fallback: serve index.html for non-API routes
+      fastify.setNotFoundHandler((request, reply) => {
+        if (request.url.startsWith('/api/') || request.url.startsWith('/health')) {
+          reply.status(404).send({ success: false, error: 'Not found' });
+        } else {
+          reply.sendFile('index.html');
+        }
+      });
+    }
+  }
 
   // Error handler
   fastify.setErrorHandler((error, request, reply) => {

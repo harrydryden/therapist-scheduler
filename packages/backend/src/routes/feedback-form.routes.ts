@@ -360,7 +360,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         where: { id: 'default' },
         select: { questions: true },
       });
-      const formQuestions = (formConfig?.questions as FormQuestion[]) || [];
+      const formQuestions = (formConfig?.questions as unknown as FormQuestion[]) || [];
       const scaleMaxByQuestionId = new Map<string, number>();
       for (const q of formQuestions) {
         if (q.type === 'scale' && q.scaleMax != null) {

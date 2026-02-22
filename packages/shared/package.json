@@ -2,8 +2,28 @@
   "name": "@therapist-scheduler/shared",
   "version": "1.0.0",
   "description": "Shared types, config, and constants for therapist-scheduler",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./types/feedback": {
+      "types": "./dist/types/feedback.d.ts",
+      "default": "./dist/types/feedback.js"
+    },
+    "./config/therapist-categories": {
+      "types": "./dist/config/therapist-categories.d.ts",
+      "default": "./dist/config/therapist-categories.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "types/feedback": ["dist/types/feedback.d.ts"],
+      "config/therapist-categories": ["dist/config/therapist-categories.d.ts"]
+    }
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit"

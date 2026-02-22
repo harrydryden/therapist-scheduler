@@ -33,8 +33,8 @@ cp .env.example .env
 # Edit .env with your credentials
 
 # Generate Prisma client and push schema
-npm -w packages/backend run db:generate
-npm -w packages/backend run db:push
+npm -w therapist-scheduler-backend run db:generate
+npm -w therapist-scheduler-backend run db:push
 
 # Start development servers
 npm run dev:backend   # API server on :3000
@@ -44,11 +44,12 @@ npm run dev:frontend  # Vite dev server on :5173
 ## Scripts
 
 ```bash
-npm run build           # Build shared → backend → frontend
+npm run build:all       # Build shared → backend → frontend
 npm run dev:frontend    # Start frontend dev server
 npm run dev:backend     # Start backend dev server
-npm run test            # Run backend tests
-npm run typecheck       # Type-check all packages
+npm run test:all        # Run backend tests
+npm run typecheck:all   # Type-check all packages
+npm run lint:all        # Lint all packages
 ```
 
 ## Production Deployment
