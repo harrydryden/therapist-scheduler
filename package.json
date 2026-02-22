@@ -9,6 +9,7 @@
   "scripts": {
     "dev:frontend": "npm -w therapist-scheduling-frontend run dev",
     "dev:backend": "npm -w therapist-scheduler-backend run dev",
+    "build:frontend": "npm -w @therapist-scheduler/shared run build && npm -w therapist-scheduling-frontend run build",
     "build:all": "npm -w @therapist-scheduler/shared run build && npm -w therapist-scheduler-backend run build && npm -w therapist-scheduling-frontend run build",
     "test:all": "npm -w therapist-scheduler-backend run test",
     "lint:all": "npm -w therapist-scheduling-frontend run lint && npm -w therapist-scheduler-backend run lint",
