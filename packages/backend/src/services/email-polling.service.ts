@@ -101,6 +101,16 @@ class EmailPollingService {
     const pollId = Date.now().toString(36);
 
     try {
+      // Proactively refresh OAuth token before polling to prevent mid-operation expiry
+      const tokenStatus = await emailProcessingService.ensureValidToken(10);
+      if (!tokenStatus.valid) {
+        logger.warn(
+          { pollId, trigger, error: tokenStatus.error },
+          'OAuth token invalid before poll - skipping this cycle'
+        );
+        return;
+      }
+
       logger.info({ pollId, trigger }, 'Running backup email poll');
 
       const result = await emailProcessingService.pollForNewEmails(pollId);

@@ -137,13 +137,15 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
           .catch(async (err) => {
             logger.error({ err, requestId, historyId }, 'Failed to process Gmail notification');
 
-            // FIX H12: Store failed notification for retry
-            // The notification will be retried on next poll or manual trigger
+            // FIX H12: Store failed notification for retry using atomic SADD
+            // Previous read-modify-write on JSON list had a race condition where
+            // concurrent failures could overwrite each other's additions.
+            // SADD is atomic and handles deduplication natively.
             try {
               const { redis } = await import('../utils/redis');
               const historyIdStr = historyId.toString();
 
-              // Store notification details for retry
+              // Store notification details for retry (keyed by historyId)
               await redis.set(
                 `gmail:failed:${historyIdStr}`,
                 JSON.stringify({ emailAddress, historyId, requestId, failedAt: Date.now() }),
@@ -151,29 +153,10 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
                 3600 // 1 hour TTL
               );
 
-              // Also add to the failed list for easier retrieval during retry
-              const failedListKey = 'gmail:failed:list';
-              const existingList = await redis.get(failedListKey);
-              let failedIds: string[] = [];
-
-              if (existingList) {
-                try {
-                  failedIds = JSON.parse(existingList);
-                  if (!Array.isArray(failedIds)) failedIds = [];
-                } catch {
-                  failedIds = [];
-                }
-              }
-
-              // Add if not already in list (prevents duplicates), cap at 100 entries
-              if (!failedIds.includes(historyIdStr)) {
-                failedIds.push(historyIdStr);
-                // Trim to most recent 100 entries to prevent unbounded growth
-                if (failedIds.length > 100) {
-                  failedIds = failedIds.slice(-100);
-                }
-                await redis.set(failedListKey, JSON.stringify(failedIds), 'EX', 3600);
-              }
+              // Add to the failed set atomically (SADD is atomic, no read-modify-write race)
+              const failedSetKey = 'gmail:failed:set';
+              await redis.sadd(failedSetKey, historyIdStr);
+              await redis.expire(failedSetKey, 3600);
 
               logger.info({ requestId, historyId }, 'Stored failed notification for retry');
             } catch (storeErr) {

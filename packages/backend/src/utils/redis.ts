@@ -192,7 +192,10 @@ export class CacheManager {
     }
     try {
       await this.redis.setex(key, ttl, value);
+      // FIX: Track write success for backpressure recovery (get() already did this)
+      this.recordSuccess();
     } catch (err) {
+      this.recordFailure();
       logger.warn({ err, key }, 'Cache write error');
     }
   }
@@ -489,6 +492,31 @@ export class CacheManager {
   }
 
   /**
+   * Get all members of a set
+   */
+  async smembers(key: string): Promise<string[]> {
+    if (!this.redis) return [];
+    try {
+      return await this.redis.smembers(key);
+    } catch (err) {
+      logger.warn({ err, key }, 'Redis smembers error');
+      return [];
+    }
+  }
+
+  /**
+   * Remove a member from a set
+   */
+  async srem(key: string, member: string): Promise<void> {
+    if (!this.redis) return;
+    try {
+      await this.redis.srem(key, member);
+    } catch (err) {
+      logger.warn({ err, key }, 'Redis srem error');
+    }
+  }
+
+  /**
    * Set expiration on a key
    */
   async expire(key: string, ttlSeconds: number): Promise<void> {
@@ -761,6 +789,8 @@ export const redis = {
   del: (key: string) => cacheManager.delete(key),
   sismember: (key: string, member: string) => cacheManager.sismember(key, member),
   sadd: (key: string, member: string) => cacheManager.sadd(key, member),
+  smembers: (key: string) => cacheManager.smembers(key),
+  srem: (key: string, member: string) => cacheManager.srem(key, member),
   expire: (key: string, ttlSeconds: number) => cacheManager.expire(key, ttlSeconds),
   incr: (key: string) => cacheManager.incr(key),
   // ZSET methods for per-item TTL tracking

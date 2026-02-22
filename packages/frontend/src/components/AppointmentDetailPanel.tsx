@@ -63,30 +63,64 @@ export default function AppointmentDetailPanel({
     };
   }, []);
 
-  // Mutations
+  // Mutations with optimistic updates for immediate UI feedback
   const takeControlMutation = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
       takeControl(id, { adminId, reason }),
-    onMutate: () => { setMutationError(null); },
+    onMutate: async () => {
+      setMutationError(null);
+      // Optimistically update the appointment detail cache
+      await queryClient.cancelQueries({ queryKey: ['appointment', selectedAppointment] });
+      const previous = queryClient.getQueryData<AppointmentDetail>(['appointment', selectedAppointment]);
+      if (previous) {
+        queryClient.setQueryData(['appointment', selectedAppointment], {
+          ...previous,
+          humanControlEnabled: true,
+          humanControlTakenBy: adminId,
+          humanControlTakenAt: new Date().toISOString(),
+        });
+      }
+      return { previous };
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
       setMutationError(null);
     },
-    onError: (error) => {
+    onError: (error, _vars, context) => {
+      // Rollback optimistic update on error
+      if (context?.previous) {
+        queryClient.setQueryData(['appointment', selectedAppointment], context.previous);
+      }
       setMutationError(error instanceof Error ? error.message : 'Failed to take control');
     },
   });
 
   const releaseControlMutation = useMutation({
     mutationFn: (id: string) => releaseControl(id),
-    onMutate: () => { setMutationError(null); },
+    onMutate: async () => {
+      setMutationError(null);
+      await queryClient.cancelQueries({ queryKey: ['appointment', selectedAppointment] });
+      const previous = queryClient.getQueryData<AppointmentDetail>(['appointment', selectedAppointment]);
+      if (previous) {
+        queryClient.setQueryData(['appointment', selectedAppointment], {
+          ...previous,
+          humanControlEnabled: false,
+          humanControlTakenBy: null,
+          humanControlTakenAt: null,
+        });
+      }
+      return { previous };
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
       setMutationError(null);
     },
-    onError: (error) => {
+    onError: (error, _vars, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(['appointment', selectedAppointment], context.previous);
+      }
       setMutationError(error instanceof Error ? error.message : 'Failed to release control');
     },
   });

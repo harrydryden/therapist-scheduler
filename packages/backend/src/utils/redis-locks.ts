@@ -108,7 +108,20 @@ export async function acquireLock(
     const result = await redis.set(lockKey, instanceId, 'EX', ttlSeconds, 'NX');
     return result === 'OK';
   } catch (error) {
-    logger.warn({ error, lockKey }, 'Redis unavailable for lock - using local guard only');
-    return true; // Allow single-instance operation when Redis is down
+    // FIX: Previous behavior always returned true on Redis failure, which is unsafe
+    // in multi-instance deployments (two instances could both "acquire" the lock).
+    // Now: only allow fallback if explicitly configured for single-instance mode.
+    const isSingleInstanceMode = process.env.SINGLE_INSTANCE_MODE === 'true';
+
+    if (isSingleInstanceMode) {
+      logger.warn({ error, lockKey }, 'Redis unavailable for lock - proceeding (SINGLE_INSTANCE_MODE=true)');
+      return true;
+    }
+
+    logger.error(
+      { error, lockKey },
+      'Redis unavailable for distributed lock - DENYING to prevent duplicates (set SINGLE_INSTANCE_MODE=true to override)'
+    );
+    return false;
   }
 }

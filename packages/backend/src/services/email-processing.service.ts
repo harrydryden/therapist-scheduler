@@ -71,6 +71,27 @@ const CLEANUP_INTERVAL_MESSAGES = 100;
 const CLEANUP_COUNTER_KEY = 'gmail:cleanupCounter';
 
 /**
+ * Lua script for atomic cleanup counter check-and-reset.
+ * Prevents race condition where two instances both read >= threshold
+ * and both run cleanup. Only the instance whose INCR crosses the
+ * threshold resets the counter and gets permission to run cleanup.
+ *
+ * KEYS[1] = counter key
+ * ARGV[1] = threshold
+ * Returns: 1 if this instance should run cleanup, 0 otherwise
+ */
+const CLEANUP_CHECK_AND_RESET_SCRIPT = `
+local key = KEYS[1]
+local threshold = tonumber(ARGV[1])
+local current = redis.call('INCR', key)
+if current >= threshold then
+  redis.call('SET', key, '0')
+  return 1
+end
+return 0
+`;
+
+/**
  * Gmail API Circuit Breaker
  * Protects against cascading failures when Gmail API is degraded or unavailable.
  * - Opens after 5 failures in 60 seconds
@@ -336,6 +357,25 @@ async function safeRedisOp<T>(
     logger.warn({ err, context, traceId }, 'Redis operation failed - continuing without Redis');
     return null;
   }
+}
+
+/**
+ * Mark a Gmail message as processed in both Redis (fast) and database (durable).
+ * Extracted to eliminate 7x duplication of this pattern across processMessage().
+ */
+async function markMessageProcessed(messageId: string, traceId: string, context: string): Promise<void> {
+  await Promise.all([
+    safeRedisOp(
+      () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
+      `mark ${context} as processed`,
+      traceId
+    ),
+    prisma.processedGmailMessage.upsert({
+      where: { id: messageId },
+      create: { id: messageId },
+      update: {},
+    }),
+  ]);
 }
 
 interface EmailMessage {
@@ -785,42 +825,41 @@ export class EmailProcessingService {
    * Value format: { emailAddress, historyId, requestId, failedAt }
    */
   async retryFailedNotifications(traceId: string): Promise<number> {
-    const FAILED_NOTIFICATION_PATTERN = 'gmail:failed:*';
     const MAX_RETRY_AGE_MS = 55 * 60 * 1000; // Only retry notifications < 55 minutes old (before 1h TTL expires)
     const MAX_RETRIES_PER_RUN = 10; // Limit retries per run to avoid overload
+    const FAILED_SET_KEY = 'gmail:failed:set';
 
     let retriedCount = 0;
 
     try {
-      // Scan for failed notification keys
-      // Note: We use SCAN via our cacheManager wrapper
-      const { cacheManager } = await import('../utils/redis');
+      // Use Redis Set (SMEMBERS) instead of JSON list to avoid read-modify-write race conditions.
+      // The webhook handler uses SADD (atomic) to add failed notification IDs.
+      // Also check the legacy JSON list key for backwards compatibility during rollout.
+      let failedHistoryIds: string[] = await redis.smembers(FAILED_SET_KEY);
 
-      // Get list of failed notification keys using a simple approach
-      // Since we can't easily scan patterns, we'll check for specific recent history IDs
-      // that might have failed. For now, we'll rely on the fact that failed notifications
-      // are rare and will be caught by the next poll.
-
-      // Alternative approach: Store failed notifications in a list/set for easier retrieval
-      const failedListKey = 'gmail:failed:list';
-
-      // Check if we have a failed notifications list
-      const failedList = await redis.get(failedListKey);
-      if (!failedList) {
-        return 0;
+      // Backwards compatibility: also check legacy JSON list key
+      const legacyListKey = 'gmail:failed:list';
+      const legacyList = await redis.get(legacyListKey);
+      if (legacyList) {
+        try {
+          const legacyIds = JSON.parse(legacyList);
+          if (Array.isArray(legacyIds)) {
+            // Migrate legacy entries to Set and clean up
+            for (const id of legacyIds) {
+              if (!failedHistoryIds.includes(id)) {
+                failedHistoryIds.push(id);
+                await redis.sadd(FAILED_SET_KEY, id);
+              }
+            }
+            await redis.del(legacyListKey);
+            logger.info({ traceId, migratedCount: legacyIds.length }, 'Migrated legacy failed notification list to Set');
+          }
+        } catch {
+          await redis.del(legacyListKey);
+        }
       }
 
-      let failedHistoryIds: string[];
-      try {
-        failedHistoryIds = JSON.parse(failedList);
-      } catch {
-        logger.warn({ traceId, failedList }, 'Invalid failed notifications list format');
-        // Clear the corrupted list
-        await redis.del(failedListKey);
-        return 0;
-      }
-
-      if (!Array.isArray(failedHistoryIds) || failedHistoryIds.length === 0) {
+      if (failedHistoryIds.length === 0) {
         return 0;
       }
 
@@ -829,16 +868,14 @@ export class EmailProcessingService {
         'Found failed notifications to retry'
       );
 
-      const successfulRetries: string[] = [];
-
       for (const historyId of failedHistoryIds.slice(0, MAX_RETRIES_PER_RUN)) {
         const failedKey = `gmail:failed:${historyId}`;
 
         try {
           const failedData = await redis.get(failedKey);
           if (!failedData) {
-            // Already expired or deleted, remove from list
-            successfulRetries.push(historyId);
+            // Already expired or deleted, remove from set
+            await redis.srem(FAILED_SET_KEY, historyId);
             continue;
           }
 
@@ -848,7 +885,7 @@ export class EmailProcessingService {
           // Check age
           if (Date.now() - failedAt > MAX_RETRY_AGE_MS) {
             logger.info({ traceId, historyId }, 'Skipping retry - notification too old');
-            successfulRetries.push(historyId);
+            await redis.srem(FAILED_SET_KEY, historyId);
             await redis.del(failedKey);
             continue;
           }
@@ -862,8 +899,8 @@ export class EmailProcessingService {
             `${traceId}:retry`
           );
 
-          // Success - remove from failed list
-          successfulRetries.push(historyId);
+          // Success - remove from failed set atomically
+          await redis.srem(FAILED_SET_KEY, historyId);
           await redis.del(failedKey);
           retriedCount++;
 
@@ -873,20 +910,7 @@ export class EmailProcessingService {
             { traceId, historyId, err },
             'Failed to retry notification - will try again later'
           );
-          // Leave in the failed list for next retry attempt
-        }
-      }
-
-      // Update the failed list to remove successful retries
-      if (successfulRetries.length > 0) {
-        const remainingFailed = failedHistoryIds.filter(
-          (id) => !successfulRetries.includes(id)
-        );
-
-        if (remainingFailed.length === 0) {
-          await redis.del(failedListKey);
-        } else {
-          await redis.set(failedListKey, JSON.stringify(remainingFailed), 'EX', 3600);
+          // Leave in the failed set for next retry attempt
         }
       }
 
@@ -1028,21 +1052,20 @@ export class EmailProcessingService {
           return false;
         }
 
-        // FIX #13: Use Redis atomic INCR so cleanup is coordinated across instances.
-        // Each instance increments the shared counter; the one that hits the threshold
-        // resets it and runs cleanup — preventing both double-cleanup and missed cleanup.
-        const count = await safeRedisOp(
-          () => redis.incr(CLEANUP_COUNTER_KEY),
-          'increment cleanup counter',
+        // FIX #13: Atomic check-and-reset to prevent double-cleanup race condition.
+        // Previous INCR + SET was not atomic — two instances could both see >= threshold
+        // before either resets. Now a Lua script atomically increments, checks, and resets.
+        const shouldCleanup = await safeRedisOp(
+          () => redis.eval(
+            CLEANUP_CHECK_AND_RESET_SCRIPT,
+            1,
+            CLEANUP_COUNTER_KEY,
+            CLEANUP_INTERVAL_MESSAGES.toString()
+          ),
+          'atomic cleanup check',
           traceId
         );
-        if (count !== null && count >= CLEANUP_INTERVAL_MESSAGES) {
-          // Reset counter atomically — only one instance will see the threshold value
-          await safeRedisOp(
-            () => redis.set(CLEANUP_COUNTER_KEY, '0'),
-            'reset cleanup counter',
-            traceId
-          );
+        if (shouldCleanup === 1) {
           const cutoffTime = Date.now() - PROCESSED_MESSAGE_TTL_DAYS * 24 * 60 * 60 * 1000;
           await safeRedisOp(
             () => redis.zremrangebyscore(PROCESSED_MESSAGES_KEY, '-inf', cutoffTime),
@@ -1068,19 +1091,7 @@ export class EmailProcessingService {
       if (!email) {
         logger.warn({ traceId, messageId }, 'Failed to parse email - marking as processed to avoid retry loop');
         // Mark unparseable emails as processed to prevent infinite retries
-        // Use safe Redis op since Redis may be down if we're in fallback mode
-        await Promise.all([
-          safeRedisOp(
-            () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-            'mark unparseable as processed',
-            traceId
-          ),
-          prisma.processedGmailMessage.upsert({
-            where: { id: messageId },
-            create: { id: messageId },
-            update: {},
-          }),
-        ]);
+        await markMessageProcessed(messageId, traceId, 'unparseable');
         return false;
       }
 
@@ -1104,19 +1115,7 @@ export class EmailProcessingService {
           { traceId, messageId, from: email.from },
           'Email bounce detected and handled - therapist unfrozen'
         );
-        // Mark as processed
-        await Promise.all([
-          safeRedisOp(
-            () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-            'mark bounce as processed',
-            traceId
-          ),
-          prisma.processedGmailMessage.upsert({
-            where: { id: messageId },
-            create: { id: messageId },
-            update: {},
-          }),
-        ]);
+        await markMessageProcessed(messageId, traceId, 'bounce');
         return true; // Handled as bounce
       }
 
@@ -1126,19 +1125,7 @@ export class EmailProcessingService {
           { traceId, messageId, from: email.from },
           'Skipping own outgoing email - not processing as incoming'
         );
-        // Mark as processed to prevent re-processing
-        await Promise.all([
-          safeRedisOp(
-            () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-            'mark own email as processed',
-            traceId
-          ),
-          prisma.processedGmailMessage.upsert({
-            where: { id: messageId },
-            create: { id: messageId },
-            update: {},
-          }),
-        ]);
+        await markMessageProcessed(messageId, traceId, 'own-email');
         return false;
       }
 
@@ -1147,19 +1134,7 @@ export class EmailProcessingService {
       if (this.isWeeklyMailingReply(email)) {
         const handled = await this.processWeeklyMailingReply(email, messageId, traceId);
         if (handled) {
-          // Mark as processed
-          await Promise.all([
-            safeRedisOp(
-              () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-              'mark weekly mailing reply as processed',
-              traceId
-            ),
-            prisma.processedGmailMessage.upsert({
-              where: { id: messageId },
-              create: { id: messageId },
-              update: {},
-            }),
-          ]);
+          await markMessageProcessed(messageId, traceId, 'weekly-mailing-reply');
           return true;
         }
         // If not handled, fall through to normal appointment matching
@@ -1211,23 +1186,13 @@ export class EmailProcessingService {
 
           // Mark as processed to stop reprocessing
           await Promise.all([
-            // Database is authoritative - must succeed
-            prisma.processedGmailMessage.upsert({
-              where: { id: messageId },
-              create: { id: messageId },
-              update: {},
-            }),
+            markMessageProcessed(messageId, traceId, 'unmatched-abandoned'),
             // Mark as abandoned in database
             prisma.unmatchedEmailAttempt.update({
               where: { id: messageId },
               data: { abandoned: true },
             }),
-            // Redis updates are best-effort
-            safeRedisOp(
-              () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-              'mark unmatched as processed',
-              traceId
-            ),
+            // Clean up attempt counter cache (best-effort)
             safeRedisOp(
               () => redis.del(unmatchedKey),
               'clean up attempt counter cache',
@@ -1286,16 +1251,19 @@ export class EmailProcessingService {
         date: email.date,
       };
 
+      // FIX: Single lookup instead of 6 repeated .find() calls (O(n) each)
+      const matchedAppointment = allActiveAppointments.find(a => a.id === appointmentRequest.id);
+
       const appointmentContext: AppointmentContext = {
         id: appointmentRequest.id,
         userEmail: appointmentRequest.userEmail,
         therapistEmail: appointmentRequest.therapistEmail,
-        therapistName: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.therapistName || '',
-        gmailThreadId: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.gmailThreadId || null,
-        therapistGmailThreadId: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.therapistGmailThreadId || null,
-        initialMessageId: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.initialMessageId || null,
-        status: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.status || 'pending',
-        createdAt: allActiveAppointments.find(a => a.id === appointmentRequest.id)?.createdAt || new Date(),
+        therapistName: matchedAppointment?.therapistName || '',
+        gmailThreadId: matchedAppointment?.gmailThreadId || null,
+        therapistGmailThreadId: matchedAppointment?.therapistGmailThreadId || null,
+        initialMessageId: matchedAppointment?.initialMessageId || null,
+        status: matchedAppointment?.status || 'pending',
+        createdAt: matchedAppointment?.createdAt || new Date(),
       };
 
       const divergence = detectThreadDivergence(
@@ -1373,19 +1341,7 @@ export class EmailProcessingService {
       );
 
       // Mark as processed AFTER successful processing
-      // Use both Redis (fast, if available) and database (durable fallback)
-      await Promise.all([
-        safeRedisOp(
-          () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
-          'mark successfully processed',
-          traceId
-        ),
-        prisma.processedGmailMessage.upsert({
-          where: { id: messageId },
-          create: { id: messageId },
-          update: {}, // No-op if already exists
-        }),
-      ]);
+      await markMessageProcessed(messageId, traceId, 'successfully-processed');
 
       // Mark as read in Gmail
       await this.gmail.users.messages.modify({
@@ -2477,8 +2433,11 @@ ${htmlParts.join('\n')}
 
             failed++;
           } else {
-            // Calculate next retry time using exponential backoff
-            const delayMs = EMAIL.RETRY_DELAYS_MS[Math.min(newRetryCount - 1, EMAIL.RETRY_DELAYS_MS.length - 1)];
+            // Calculate next retry time using exponential backoff with jitter
+            // Jitter prevents thundering herd when multiple emails fail simultaneously
+            const baseDelayMs = EMAIL.RETRY_DELAYS_MS[Math.min(newRetryCount - 1, EMAIL.RETRY_DELAYS_MS.length - 1)];
+            const jitter = Math.floor(baseDelayMs * 0.1 * Math.random());
+            const delayMs = baseDelayMs + jitter;
             const nextRetryAt = new Date(now.getTime() + delayMs);
 
             logger.warn(

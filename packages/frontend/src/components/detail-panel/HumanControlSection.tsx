@@ -320,6 +320,12 @@ export default function HumanControlSection({
                     : 'Failed to send message'}
                 </p>
               )}
+
+              {sendMessageMutation.isSuccess && (
+                <p className="text-green-600 text-xs mt-2">
+                  Email queued successfully
+                </p>
+              )}
             </div>
           )}
         </div>
