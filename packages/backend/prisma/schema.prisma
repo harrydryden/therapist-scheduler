@@ -1,0 +1,451 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// User and Therapist Entities
+// ============================================
+
+// Represents a client/user who books appointments
+// Each user has a unique 10-digit ID (odId) for easy reference
+model User {
+  id        String   @id @default(uuid())
+  odId      String   @unique @map("od_id") // Unique 10-digit ID (e.g., "1234567890")
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  appointments AppointmentRequest[]
+
+  @@index([odId])
+  @@index([email])
+  @@map("users")
+}
+
+// Represents a therapist who provides sessions
+// Each therapist has a unique 10-digit ID (odId) for easy reference
+model Therapist {
+  id        String   @id @default(uuid())
+  odId      String   @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
+  notionId  String   @unique @map("notion_id") // Links to Notion database
+  email     String   @unique
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  appointments AppointmentRequest[]
+
+  @@index([odId])
+  @@index([notionId])
+  @@map("therapists")
+}
+
+// ============================================
+// Appointment System
+// ============================================
+
+// Status values enforced at application level via APPOINTMENT_STATUS constants
+// Using String (not enum) for compatibility with prisma db push on existing databases
+
+model AppointmentRequest {
+  id                    String    @id @default(uuid())
+  userName              String?   @map("user_name")
+  userEmail             String    @map("user_email")
+  therapistNotionId     String    @map("therapist_notion_id")
+  therapistEmail        String    @map("therapist_email")
+  therapistName         String    @map("therapist_name")
+  therapistAvailability Json?     @map("therapist_availability")
+  status                String @default("pending")
+
+  // Links to User and Therapist entities (for data management)
+  userId      String? @map("user_id")
+  therapistId String? @map("therapist_id")
+  user        User?      @relation(fields: [userId], references: [id])
+  therapist   Therapist? @relation(fields: [therapistId], references: [id])
+  conversationState     Json?     @map("conversation_state")
+  // FIX #21: Denormalized columns to avoid loading full conversationState blob (up to 500KB)
+  // in list queries. Updated whenever conversationState is written.
+  messageCount          Int       @default(0) @map("message_count")
+  checkpointStage       String?   @map("checkpoint_stage")
+  confirmedAt           DateTime? @map("confirmed_at")
+  confirmedDateTime     String?   @map("confirmed_date_time") // The actual scheduled appointment date/time
+  notes                 String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  // Email thread tracking for deterministic matching
+  // Separate threads for client and therapist conversations
+  gmailThreadId          String? @map("gmail_thread_id") // Thread with the client
+  initialMessageId       String? @map("initial_message_id")
+  therapistGmailThreadId String? @map("therapist_gmail_thread_id") // Thread with the therapist
+
+  // Tracking code for deterministic email matching (embedded in subjects)
+  // Format: SPL<number> (e.g., SPL1, SPL42) - UNIQUE per appointment
+  // Each appointment gets its own tracking code for feedback forms and email matching
+  // FIX #12: Add @unique constraint - tracking codes are semantically unique identifiers
+  trackingCode String? @unique @map("tracking_code")
+
+  // Idempotency key for preventing duplicate appointment creation
+  // Generated client-side or computed from request data
+  // Used to safely handle retries and double-clicks
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  // Human takeover control fields
+  humanControlEnabled Boolean   @default(false) @map("human_control_enabled")
+  humanControlTakenBy String?   @map("human_control_taken_by")
+  humanControlTakenAt DateTime? @map("human_control_taken_at")
+  humanControlReason  String?   @map("human_control_reason")
+
+  // 48-hour stale flagging
+  lastActivityAt DateTime @default(now()) @map("last_activity_at")
+  isStale        Boolean  @default(false) @map("is_stale")
+
+  // Post-booking follow-up tracking
+  meetingLinkCheckSentAt    DateTime? @map("meeting_link_check_sent_at")
+  feedbackFormSentAt        DateTime? @map("feedback_form_sent_at")
+  feedbackReminderSentAt    DateTime? @map("feedback_reminder_sent_at")
+  confirmedDateTimeParsed   DateTime? @map("confirmed_date_time_parsed")
+
+  // Rescheduling support
+  reschedulingInProgress    Boolean @default(false) @map("rescheduling_in_progress")
+  reschedulingInitiatedBy   String? @map("rescheduling_initiated_by")
+  previousConfirmedDateTime String? @map("previous_confirmed_date_time")
+
+  // Conversation stall detection (FIX NEW: detect spinning conversations)
+  conversationStallAlertAt      DateTime? @map("conversation_stall_alert_at")
+  conversationStallAcknowledged Boolean   @default(false) @map("conversation_stall_acknowledged")
+
+  // Thread divergence tracking (FIX R3: alert when threads diverge critically)
+  threadDivergedAt             DateTime? @map("thread_diverged_at")
+  threadDivergenceDetails      String?   @map("thread_divergence_details")
+  threadDivergenceAcknowledged Boolean   @default(false) @map("thread_divergence_acknowledged")
+
+  // Last tool execution tracking (FIX T1: verify tool success)
+  lastToolExecutedAt      DateTime? @map("last_tool_executed_at")
+  lastToolExecutionFailed Boolean   @default(false) @map("last_tool_execution_failed")
+  lastToolFailureReason   String?   @map("last_tool_failure_reason")
+
+  // Session reminder tracking (Edge Case #6)
+  reminderSentAt DateTime? @map("reminder_sent_at")
+
+  // Auto-escalation tracking (Edge Case #7)
+  autoEscalatedAt DateTime? @map("auto_escalated_at")
+
+  // Relation to pending emails
+  pendingEmails PendingEmail[]
+
+  // Relation to feedback submissions
+  feedbackSubmissions FeedbackSubmission[]
+
+  // Relation to audit events (referential integrity)
+  auditEvents AppointmentAuditEvent[]
+
+  // Relation to side effect logs (referential integrity)
+  sideEffectLogs SideEffectLog[]
+
+  // CONSTRAINT: Only one active appointment per user-therapist pair
+  // This prevents duplicate bookings between the same user and therapist
+  // Note: PostgreSQL partial unique index created via migration (see below)
+  // Prisma doesn't support partial unique indexes natively, so this is enforced at app level
+  // and backed by database trigger/constraint in migration
+
+  // FIX #18: Consolidated indexes — removed standalone low-cardinality boolean indexes
+  // (isStale, humanControlEnabled) which provide no selectivity benefit.
+  // Kept compound indexes that are actually queried.
+  @@index([status])
+  @@index([gmailThreadId])
+  @@index([therapistGmailThreadId])
+  @@index([userEmail])
+  @@index([therapistNotionId])
+  @@index([userEmail, therapistNotionId, status])
+  @@index([status, lastActivityAt]) // For stale check queries
+  @@index([status, isStale]) // For filtering active stale conversations
+  @@index([confirmedAt]) // For dashboard stats queries
+  @@index([therapistEmail]) // For email matching queries
+  @@index([status, confirmedDateTimeParsed]) // For follow-up queries with status filter
+  @@index([conversationStallAlertAt]) // For admin alert dashboard
+  @@index([lastToolExecutedAt]) // For stall detection queries
+  @@index([status, reminderSentAt, confirmedDateTimeParsed]) // For reminder queries
+  @@index([idempotencyKey, createdAt]) // For idempotency key lookups
+  @@index([userId]) // For user lookup queries
+  @@index([therapistId]) // For therapist lookup queries
+  @@map("appointment_requests")
+}
+
+model PendingEmail {
+  id            String    @id @default(uuid())
+  toEmail       String    @map("to_email")
+  subject       String
+  body          String    @db.Text // Allow long email bodies
+  status        String    @default("pending") // pending, sent, failed, abandoned
+  appointmentId String?   @map("appointment_id")
+  errorMessage  String?   @map("error_message")
+  sentAt        DateTime? @map("sent_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  retryCount    Int       @default(0) @map("retry_count")
+  lastRetryAt   DateTime? @map("last_retry_at")
+  nextRetryAt   DateTime? @map("next_retry_at")
+
+  // Foreign key relation to AppointmentRequest
+  // Cascade delete ensures PendingEmails are cleaned up when their appointment is deleted
+  appointment AppointmentRequest? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([appointmentId])
+  @@index([status, createdAt]) // For ordered pending email queries
+  @@index([status, nextRetryAt]) // For retry scheduling
+  @@map("pending_emails")
+}
+
+model KnowledgeBase {
+  id        String   @id @default(uuid())
+  title     String? // Optional title for organization
+  content   String   @db.Text
+  audience  String // 'therapist' | 'user' | 'both'
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([active])
+  @@map("knowledge_base")
+}
+
+// Track therapist booking availability status
+model TherapistBookingStatus {
+  id                  String    @id // therapistNotionId
+  therapistName       String    @map("therapist_name")
+  hasConfirmedBooking Boolean   @default(false) @map("has_confirmed_booking")
+  confirmedAt         DateTime? @map("confirmed_at")
+  frozenAt            DateTime? @map("frozen_at") // When frozen due to first request
+  frozenUntil         DateTime? @map("frozen_until") // Legacy field, kept for compatibility
+  uniqueRequestCount  Int       @default(0) @map("unique_request_count")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  // Admin alert for prolonged inactivity (72h with 2 threads)
+  adminAlertAt           DateTime? @map("admin_alert_at")
+  adminAlertAcknowledged Boolean   @default(false) @map("admin_alert_acknowledged")
+
+  @@index([hasConfirmedBooking])
+  @@index([frozenUntil])
+  @@index([adminAlertAt])
+  @@map("therapist_booking_status")
+}
+
+// Track processed Gmail messages for deduplication
+// Fallback when Redis is unavailable
+model ProcessedGmailMessage {
+  id          String   @id // Gmail message ID
+  processedAt DateTime @default(now()) @map("processed_at")
+
+  @@index([processedAt])
+  @@map("processed_gmail_messages")
+}
+
+// Track unmatched email retry attempts (for E3 fix)
+// Used as database fallback when Redis is unavailable
+model UnmatchedEmailAttempt {
+  id          String   @id // Gmail message ID
+  attempts    Int      @default(1)
+  firstSeenAt DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
+  abandoned   Boolean  @default(false)
+
+  @@index([abandoned])
+  @@index([lastSeenAt])
+  @@map("unmatched_email_attempts")
+}
+
+// Runtime-configurable system settings
+// Each setting is stored as a key-value pair with metadata
+model SystemSetting {
+  id           String   @id // Setting key (e.g., "stale.markStaleHours")
+  value        String // JSON-encoded value
+  category     String // Category for grouping (e.g., "stale", "postBooking", "agent")
+  label        String // Human-readable label
+  description  String? // Optional description for the admin UI
+  valueType    String // Type hint: "number", "boolean", "string", "json"
+  minValue     Float?   @map("min_value") // For numeric values
+  maxValue     Float?   @map("max_value") // For numeric values
+  defaultValue String   @map("default_value") // Default value (JSON-encoded)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  updatedBy    String?  @map("updated_by") // Admin who last updated
+
+  @@index([category])
+  @@map("system_settings")
+}
+
+// Append-only audit log for appointment events
+// Inspired by OpenClaw's JSONL transcript pattern - never modified, only appended
+// Provides full auditability and debuggability for scheduling conversations
+model AppointmentAuditEvent {
+  id                   String   @id @default(uuid())
+  appointmentRequestId String   @map("appointment_request_id")
+  eventType            String   @map("event_type") // email_received, email_sent, tool_executed, claude_response, status_change, human_control, error
+  actor                String // agent, admin, user, therapist, system
+  payload              Json? // Event-specific data
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  // Foreign key relation to ensure referential integrity
+  // Cascade delete: audit events are deleted when appointment is deleted
+  appointment AppointmentRequest @relation(fields: [appointmentRequestId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentRequestId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@index([appointmentRequestId, createdAt]) // For replaying events in order
+  @@map("appointment_audit_events")
+}
+
+// Track weekly mailing inquiry conversations
+// When users reply to weekly promotional emails with questions,
+// the agent handles these as lightweight inquiries (not full bookings)
+model WeeklyMailingInquiry {
+  id                  String   @id @default(uuid())
+  userEmail           String   @map("user_email")
+  userName            String?  @map("user_name")
+  gmailThreadId       String?  @map("gmail_thread_id")
+  conversationState   Json?    @map("conversation_state")
+  status              String @default("active")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+  humanControlEnabled Boolean  @default(false) @map("human_control_enabled")
+
+  @@index([userEmail])
+  @@index([gmailThreadId])
+  @@index([status])
+  @@map("weekly_mailing_inquiries")
+}
+
+// ============================================
+// Feedback Form System
+// ============================================
+
+// Stores form configuration (admin-editable questions and settings)
+model FeedbackFormConfig {
+  id          String  @id @default("default") // Single config for now, could support multiple forms later
+  formName    String  @default("Therapy Interview Feedback") @map("form_name")
+  description String? @db.Text
+
+  // Welcome/intro screen
+  welcomeTitle   String @default("Session Feedback") @map("welcome_title")
+  welcomeMessage String @default("Please take a moment to share your feedback about your therapy session.") @map("welcome_message") @db.Text
+
+  // Thank you screen
+  thankYouTitle   String @default("Thank you!") @map("thank_you_title")
+  thankYouMessage String @default("Thanks for sharing your feedback - we really appreciate it.") @map("thank_you_message") @db.Text
+
+  // Form questions (JSON array of question configs)
+  // Each question: { id, type, question, required, options?, scaleLabels? }
+  questions        Json @default("[]")
+  questionsVersion Int  @default(0) @map("questions_version")
+
+  // Settings
+  isActive     Boolean @default(true) @map("is_active")
+  requiresAuth Boolean @default(false) @map("requires_auth") // If true, requires valid SPL code
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("feedback_form_config")
+}
+
+// Stores individual feedback submissions
+model FeedbackSubmission {
+  id String @id @default(uuid())
+
+  // Link to appointment via SPL code
+  trackingCode         String? @map("tracking_code") // SPL code from URL
+  appointmentRequestId String? @map("appointment_request_id")
+
+  // User info (from appointment lookup or manual entry)
+  userEmail     String? @map("user_email")
+  userName      String? @map("user_name")
+  therapistName String  @map("therapist_name")
+
+  // Form responses (JSON object with question id -> response)
+  responses Json
+
+  // Computed scores for easy querying
+  safetyScore       Int?    @map("safety_score") // 0-5
+  listenedToScore   Int?    @map("listened_to_score") // 0-5 ("Did you feel heard?")
+  professionalScore Int?    @map("professional_score") // 0-5
+  understoodScore   Int?    @map("understood_score") // 0-5 ("Did you feel understood?")
+  wouldBookAgain    String? @map("would_book_again") // "yes", "no", "unsure"
+  wouldBookAgainText String? @map("would_book_again_text") @db.Text
+  wouldRecommend    String? @map("would_recommend") // "yes", "no", "unsure"
+  wouldRecommendText String? @map("would_recommend_text") @db.Text
+  sessionBenefits   String? @map("session_benefits") @db.Text
+  improvementSuggestions String? @map("improvement_suggestions") @db.Text
+  additionalComments String? @map("additional_comments") @db.Text
+
+  // Sync status
+  syncedToNotion Boolean   @default(false) @map("synced_to_notion")
+  notionPageId   String?   @map("notion_page_id")
+  syncedAt       DateTime? @map("synced_at")
+  syncError      String?   @map("sync_error")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  appointment AppointmentRequest? @relation(fields: [appointmentRequestId], references: [id], onDelete: SetNull)
+
+  @@index([trackingCode])
+  @@index([appointmentRequestId])
+  @@index([userEmail])
+  @@index([therapistName])
+  @@index([syncedToNotion])
+  @@index([createdAt])
+  @@map("feedback_submissions")
+}
+
+// ============================================
+// Side Effect Tracking (Two-Phase Commit Pattern)
+// ============================================
+
+// Tracks completion status of side effects triggered by status transitions
+// Used to ensure all side effects complete and can be retried if needed
+model SideEffectLog {
+  id String @id @default(uuid())
+
+  // Link to the appointment
+  appointmentId String @map("appointment_id")
+
+  // Type of side effect
+  effectType String @map("effect_type") // 'slack_notify', 'email_client', 'email_therapist', 'user_sync', 'therapist_freeze_sync'
+
+  // Triggering transition
+  transition String // e.g., 'confirmed', 'cancelled', 'completed'
+
+  // Status tracking
+  status    String    @default("pending") // pending, completed, failed, abandoned
+  attempts  Int       @default(0)
+  errorLog  String?   @map("error_log") @db.Text
+
+  // Timing
+  createdAt   DateTime  @default(now()) @map("created_at")
+  completedAt DateTime? @map("completed_at")
+  lastAttempt DateTime? @map("last_attempt_at")
+
+  // Idempotency - prevent duplicate execution
+  idempotencyKey String @unique @map("idempotency_key")
+
+  // Foreign key relation to ensure referential integrity
+  // Cascade delete: side effect logs are deleted when appointment is deleted
+  appointment AppointmentRequest @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([status])
+  @@index([effectType, status])
+  @@index([status, lastAttempt]) // For retry queries
+  @@map("side_effect_logs")
+}

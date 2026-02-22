@@ -2,25 +2,35 @@ FROM node:18-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
+# Copy root workspace config
 COPY package*.json ./
-COPY backend/package*.json ./backend/
-COPY prisma ./prisma/
+COPY tsconfig.base.json ./
 
-# Install dependencies
-RUN npm ci --only=production && npm cache clean --force
-RUN cd backend && npm ci --only=production && npm cache clean --force && cd ..
+# Copy shared package
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/shared/tsconfig.json ./packages/shared/
+COPY packages/shared/src ./packages/shared/src/
 
-# Copy source code
-COPY . .
+# Copy backend package files
+COPY packages/backend/package*.json ./packages/backend/
+COPY packages/backend/tsconfig.json ./packages/backend/
+COPY packages/backend/prisma ./packages/backend/prisma/
+
+# Copy frontend package files
+COPY packages/frontend/package*.json ./packages/frontend/
+
+# Install all workspace dependencies
+RUN npm ci && npm cache clean --force
+
+# Copy remaining source code
+COPY packages/backend/src ./packages/backend/src/
+COPY packages/backend/jest.config.js ./packages/backend/
+COPY packages/frontend/ ./packages/frontend/
 
 # Generate Prisma client
-RUN cd backend && npx prisma generate && cd ..
+RUN cd packages/backend && npx prisma generate && cd ../..
 
-# Build the backend
-RUN cd backend && npm run build && cd ..
-
-# Build the frontend
+# Build shared package first, then backend, then frontend
 RUN npm run build
 
 # Production stage
@@ -36,20 +46,21 @@ RUN addgroup -g 1001 -S nodejs
 RUN adduser -S nodeuser -u 1001
 
 # Copy built application
-COPY --from=builder --chown=nodeuser:nodejs /app/dist ./dist
-COPY --from=builder --chown=nodeuser:nodejs /app/backend/dist ./backend/dist
-COPY --from=builder --chown=nodeuser:nodejs /app/backend/node_modules ./backend/node_modules
-COPY --from=builder --chown=nodeuser:nodejs /app/backend/package.json ./backend/package.json
-COPY --from=builder --chown=nodeuser:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/frontend/dist ./dist
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/dist ./packages/backend/dist
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/node_modules ./packages/backend/node_modules
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/package.json ./packages/backend/package.json
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/prisma ./packages/backend/prisma
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/shared/package.json ./packages/shared/package.json
 
 USER nodeuser
 
 EXPOSE 3000
 
-# FIX C1: Health check using Node.js (Alpine doesn't have wget/curl by default)
-# The health-check.js script makes an HTTP request to /health endpoint
+# Health check using Node.js (Alpine doesn't have wget/curl by default)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node backend/dist/health-check.js || exit 1
+  CMD node packages/backend/dist/health-check.js || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "backend/dist/server.js"]
+CMD ["node", "packages/backend/dist/server.js"]

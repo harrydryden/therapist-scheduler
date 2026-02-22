@@ -1,8 +1,23 @@
 {
-  "devDependencies": {
-    "supabase": "^2.39.2"
+  "name": "therapist-scheduler",
+  "private": true,
+  "workspaces": [
+    "packages/shared",
+    "packages/frontend",
+    "packages/backend"
+  ],
+  "scripts": {
+    "dev:frontend": "npm -w packages/frontend run dev",
+    "dev:backend": "npm -w packages/backend run dev",
+    "build:shared": "npm -w packages/shared run build",
+    "build:backend": "npm -w packages/backend run build",
+    "build:frontend": "npm -w packages/frontend run build",
+    "build": "npm run build:shared && npm run build:backend && npm run build:frontend",
+    "test": "npm -w packages/backend run test",
+    "lint": "npm -w packages/frontend run lint && npm -w packages/backend run lint",
+    "typecheck": "tsc -b packages/shared packages/backend packages/frontend"
   },
-  "dependencies": {
-    "@railway/cli": "^4.27.4"
+  "devDependencies": {
+    "typescript": "^5.3.3"
   }
 }
