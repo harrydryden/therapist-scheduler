@@ -28,6 +28,7 @@ import { checkForInjection, wrapUntrustedContent } from '../utils/content-saniti
 // Note: getEmailSubject/getEmailBody are now handled by appointmentLifecycleService
 import { getSettingValue, getSettingValues } from './settings.service';
 import { TIMEOUTS, CONVERSATION_LIMITS, CLAUDE_API, EMAIL } from '../constants';
+import { emailQueueService } from './email-queue.service';
 import { formatAvailabilityForUser, formatAvailabilityForEmail } from '../utils/availability-formatter';
 import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
 import {
@@ -2228,22 +2229,18 @@ ${formatClassificationForPrompt(emailClassification)}`;
         'Could not send email directly, queuing for later'
       );
 
-      // Fallback: queue to database for later processing
+      // Fallback: queue via BullMQ for later processing (with DB audit trail)
       // FIX #24: Use normalized params (with tracking code and body normalization)
-      // instead of raw params which miss the tracking code prefix and body cleanup
       try {
-        await prisma.pendingEmail.create({
-          data: {
-            toEmail: emailParams.to,
-            subject: emailParams.subject,
-            body: emailParams.body,
-            status: 'pending',
-            appointmentId: appointmentRequestId,
-          },
+        await emailQueueService.enqueue({
+          to: emailParams.to,
+          subject: emailParams.subject,
+          body: emailParams.body,
+          appointmentId: appointmentRequestId,
         });
         logger.info(
           { traceId: this.traceId, to: params.to },
-          'Email queued successfully'
+          'Email queued successfully via BullMQ'
         );
       } catch (dbError) {
         logger.error(
@@ -3037,14 +3034,10 @@ Please answer their question helpfully and direct them to the booking URL to sch
               'Could not send inquiry email directly, queuing for later'
             );
             // Queue without appointmentId (inquiry emails don't have one)
-            await prisma.pendingEmail.create({
-              data: {
-                toEmail: input.to,
-                subject: normalizedSubject,
-                body: input.body,
-                status: 'pending',
-                // No appointmentId for inquiry emails
-              },
+            await emailQueueService.enqueue({
+              to: input.to,
+              subject: normalizedSubject,
+              body: input.body,
             });
           }
 

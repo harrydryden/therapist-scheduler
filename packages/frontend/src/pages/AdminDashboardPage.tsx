@@ -7,6 +7,7 @@ import {
 } from '../api/client';
 import type { AppointmentFilters } from '../types';
 import { useDebounce } from '../hooks/useDebounce';
+import { useSSE } from '../hooks/useSSE';
 import AppointmentPipeline from '../components/AppointmentPipeline';
 import AppointmentFiltersBar from '../components/AppointmentFilters';
 import TherapistGroupList from '../components/TherapistGroupList';
@@ -33,6 +34,11 @@ export default function AdminDashboardPage() {
   // Debounce filter changes (date range, sort) to avoid excessive API calls
   // Quick filter pills and page changes apply immediately via the non-debounced filters
   const debouncedFilters = useDebounce(filters, 300);
+
+  // SSE: real-time updates from server push events
+  // Invalidates React Query caches on status/health/control changes
+  // Polling remains as fallback if SSE connection fails
+  useSSE();
 
   // Fetch appointments list with auto-refresh
   const {

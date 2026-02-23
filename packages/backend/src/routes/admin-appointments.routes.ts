@@ -21,6 +21,7 @@ import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/convers
 import { calculateConversationHealth, AppointmentForHealth } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
+import { sseService } from '../services/sse.service';
 
 // Schema for listing all appointments (admin page)
 const listAllAppointmentsSchema = z.object({
@@ -433,6 +434,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Human control enabled for appointment'
         );
 
+        sseService.emitHumanControl(id, true, adminId);
+
         return reply.send({
           success: true,
           data: {
@@ -503,6 +506,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         logger.info({ requestId, appointmentId: id }, 'Human control released for appointment');
+
+        sseService.emitHumanControl(id, false);
 
         return reply.send({
           success: true,

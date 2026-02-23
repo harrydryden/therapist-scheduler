@@ -27,6 +27,7 @@ import { postBookingFollowupService } from './services/post-booking-followup.ser
 import { weeklyMailingListService } from './services/weekly-mailing-list.service';
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { notionSyncManager } from './services/notion-sync-manager.service';
+import { emailQueueService } from './services/email-queue.service';
 import { unsubscribeRoutes } from './routes/unsubscribe.routes';
 import { feedbackFormRoutes } from './routes/feedback-form.routes';
 import { adminFormsRoutes } from './routes/admin-forms.routes';
@@ -36,6 +37,7 @@ import { circuitBreakerRegistry } from './utils/circuit-breaker';
 import { getAllTaskMetrics, getBackgroundTaskHealth } from './utils/background-task';
 import { getTimeoutStats } from './utils/timeout';
 import { slackNotificationService } from './services/slack-notification.service';
+import { sseService } from './services/sse.service';
 import { adminAuthHook } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 
@@ -383,6 +385,8 @@ async function start() {
       // Stop background services (they should check isShuttingDown internally)
       logger.info('Stopping background services...');
       if (slackQueueInterval) clearInterval(slackQueueInterval);
+      sseService.stop();
+      await emailQueueService.stop();
       staleCheckService.stop();
       emailPollingService.stop();
       gmailWatchService.stop();
@@ -485,6 +489,7 @@ async function start() {
     }, 30000);
 
     // Start background services
+    await emailQueueService.start(); // BullMQ email queue (retry with backoff)
     staleCheckService.start(); // Checks for 48h+ inactive conversations
     emailPollingService.start(); // Backup polling for missed push notifications
     gmailWatchService.start(); // Auto-renew Gmail push notification watches

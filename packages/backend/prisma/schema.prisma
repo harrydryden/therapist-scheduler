@@ -170,6 +170,7 @@ model AppointmentRequest {
   @@index([status, isStale]) // For filtering active stale conversations
   @@index([confirmedAt]) // For dashboard stats queries
   @@index([therapistEmail]) // For email matching queries
+  @@index([initialMessageId]) // For In-Reply-To/References header matching (Priority 2)
   @@index([status, confirmedDateTimeParsed]) // For follow-up queries with status filter
   @@index([conversationStallAlertAt]) // For admin alert dashboard
   @@index([lastToolExecutedAt]) // For stall detection queries

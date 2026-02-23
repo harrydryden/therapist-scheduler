@@ -12,6 +12,7 @@ import { slackNotificationService } from '../services/slack-notification.service
 import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { RATE_LIMITS } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
+import { emailQueueService } from '../services/email-queue.service';
 import { validateEmail, checkForTypos } from '../utils/email-validator';
 import { getSettingValue, SettingKey } from '../services/settings.service';
 import { getOrCreateTrackingCode } from '../utils/tracking-code';
@@ -430,26 +431,22 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                 },
               });
 
-              // FIX B6: Queue a retry via pending email system
-              // This ensures the request will be retried automatically
-              await prisma.pendingEmail.create({
-                data: {
-                  toEmail: userEmail,
-                  subject: `[RETRY] Initial scheduling for ${therapistName}`,
-                  body: JSON.stringify({
-                    type: 'RETRY_JUSTINTIME_START',
-                    appointmentRequestId: appointmentRequest.id,
-                    userName,
-                    userEmail,
-                    therapistEmail,
-                    therapistName,
-                    therapistAvailability,
-                    originalError: err?.message || 'Unknown error',
-                    queuedAt: new Date().toISOString(),
-                  }),
-                  status: 'pending',
-                  appointmentId: appointmentRequest.id,
-                },
+              // FIX B6: Queue a retry via BullMQ (falls back to DB-only if Redis unavailable)
+              await emailQueueService.enqueue({
+                to: userEmail,
+                subject: `[RETRY] Initial scheduling for ${therapistName}`,
+                body: JSON.stringify({
+                  type: 'RETRY_JUSTINTIME_START',
+                  appointmentRequestId: appointmentRequest.id,
+                  userName,
+                  userEmail,
+                  therapistEmail,
+                  therapistName,
+                  therapistAvailability,
+                  originalError: err?.message || 'Unknown error',
+                  queuedAt: new Date().toISOString(),
+                }),
+                appointmentId: appointmentRequest.id,
               });
 
               logger.info(

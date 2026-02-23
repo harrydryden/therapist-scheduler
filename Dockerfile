@@ -20,6 +20,7 @@ RUN npm ci && npm cache clean --force
 COPY packages/shared/src ./packages/shared/src/
 COPY packages/backend/src ./packages/backend/src/
 COPY packages/backend/prisma ./packages/backend/prisma/
+COPY packages/backend/scripts ./packages/backend/scripts/
 COPY packages/backend/jest.config.js ./packages/backend/
 COPY packages/frontend/ ./packages/frontend/
 
@@ -49,10 +50,11 @@ COPY --from=builder --chown=nodeuser:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/shared/package.json ./packages/shared/package.json
 
-# Copy backend (built + prisma)
+# Copy backend (built + prisma + entrypoint)
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/dist ./packages/backend/dist
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/package.json ./packages/backend/package.json
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/prisma ./packages/backend/prisma
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/scripts/docker-entrypoint.sh ./packages/backend/scripts/docker-entrypoint.sh
 
 # Copy frontend build output (served by backend via @fastify/static)
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/frontend/dist ./dist
@@ -62,8 +64,9 @@ USER nodeuser
 EXPOSE 3000
 
 # Health check using Node.js (Alpine doesn't have wget/curl by default)
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+# start-period accounts for migration time on deploys with schema changes
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD node packages/backend/dist/health-check.js || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "packages/backend/dist/server.js"]
+CMD ["sh", "packages/backend/scripts/docker-entrypoint.sh"]

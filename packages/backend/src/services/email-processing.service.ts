@@ -27,7 +27,6 @@ import {
 } from '../utils/thread-divergence';
 import {
   extractTrackingCode,
-  findAppointmentByTrackingCode,
 } from '../utils/tracking-code';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1684,77 +1683,100 @@ export class EmailProcessingService {
     // - NOT included: cancelled (terminal state)
     const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed'];
 
-    // PRIORITY 1: Match by Gmail thread ID (deterministic)
-    // This prevents crossed wires when a user has multiple active appointments
-    // Check both client thread ID and therapist thread ID
-    if (email.threadId) {
-      const threadMatch = await prisma.appointmentRequest.findFirst({
-        where: {
-          OR: [
-            { gmailThreadId: email.threadId },
-            { therapistGmailThreadId: email.threadId },
-          ],
-          status: { in: MATCHABLE_STATUSES as any },
-        },
-        select: { id: true, userEmail: true, therapistEmail: true },
-      });
-
-      if (threadMatch) {
-        logger.info(
-          { appointmentId: threadMatch.id, threadId: email.threadId },
-          'Matched appointment by Gmail thread ID'
-        );
-        return threadMatch;
-      }
-    }
-
-    // PRIORITY 2: Match by In-Reply-To/References headers
+    // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
+    // The query fetches all potential matches and post-query logic applies priority ordering:
+    //   1. Gmail thread ID match (most deterministic)
+    //   2. In-Reply-To/References header match
+    //   3. Tracking code match (with sender verification)
+    const trackingCode = extractTrackingCode(email.subject);
+    const messageIds: string[] = [];
     if (email.references?.length || email.inReplyTo) {
-      const messageIds = [...(email.references || [])];
+      messageIds.push(...(email.references || []));
       if (email.inReplyTo && !messageIds.includes(email.inReplyTo)) {
         messageIds.push(email.inReplyTo);
       }
-
-      const refMatch = await prisma.appointmentRequest.findFirst({
-        where: {
-          initialMessageId: { in: messageIds },
-          status: { in: MATCHABLE_STATUSES as any },
-        },
-        select: { id: true, userEmail: true, therapistEmail: true },
-      });
-
-      if (refMatch) {
-        logger.info(
-          { appointmentId: refMatch.id, inReplyTo: email.inReplyTo },
-          'Matched appointment by In-Reply-To header'
-        );
-        return refMatch;
-      }
     }
 
-    // PRIORITY 3: Match by tracking code in subject (deterministic, no guessing)
-    // This is the key protection against cross-contamination for multi-appointment users
-    const trackingCode = extractTrackingCode(email.subject);
+    // Build OR conditions for all deterministic match types
+    const deterministicConditions: Array<Record<string, unknown>> = [];
+    if (email.threadId) {
+      deterministicConditions.push({ gmailThreadId: email.threadId });
+      deterministicConditions.push({ therapistGmailThreadId: email.threadId });
+    }
+    if (messageIds.length > 0) {
+      deterministicConditions.push({ initialMessageId: { in: messageIds } });
+    }
     if (trackingCode) {
-      const trackingMatch = await findAppointmentByTrackingCode(trackingCode, MATCHABLE_STATUSES);
-      if (trackingMatch) {
-        // Verify sender is associated with this appointment
-        const senderIsUser = email.from.toLowerCase() === trackingMatch.userEmail.toLowerCase();
-        const senderIsTherapist = email.from.toLowerCase() === trackingMatch.therapistEmail.toLowerCase();
+      deterministicConditions.push({ trackingCode });
+    }
 
-        if (senderIsUser || senderIsTherapist) {
-          logger.info(
-            { appointmentId: trackingMatch.id, trackingCode, senderType: senderIsUser ? 'user' : 'therapist' },
-            'Matched appointment by tracking code (deterministic match)'
+    if (deterministicConditions.length > 0) {
+      const candidates = await prisma.appointmentRequest.findMany({
+        where: {
+          OR: deterministicConditions,
+          status: { in: MATCHABLE_STATUSES as any },
+        },
+        select: {
+          id: true,
+          userEmail: true,
+          therapistEmail: true,
+          gmailThreadId: true,
+          therapistGmailThreadId: true,
+          initialMessageId: true,
+          trackingCode: true,
+        },
+      });
+
+      if (candidates.length > 0) {
+        // Priority 1: Thread ID match
+        if (email.threadId) {
+          const threadMatch = candidates.find(
+            (c) => c.gmailThreadId === email.threadId || c.therapistGmailThreadId === email.threadId
           );
-          return trackingMatch;
-        } else {
-          // Tracking code found but sender doesn't match - suspicious
-          logger.warn(
-            { trackingCode, from: email.from, expectedUser: trackingMatch.userEmail, expectedTherapist: trackingMatch.therapistEmail },
-            'Tracking code found but sender not recognized - possible forwarded email'
+          if (threadMatch) {
+            logger.info(
+              { appointmentId: threadMatch.id, threadId: email.threadId },
+              'Matched appointment by Gmail thread ID'
+            );
+            return { id: threadMatch.id, userEmail: threadMatch.userEmail, therapistEmail: threadMatch.therapistEmail };
+          }
+        }
+
+        // Priority 2: In-Reply-To/References match
+        if (messageIds.length > 0) {
+          const refMatch = candidates.find(
+            (c) => c.initialMessageId && messageIds.includes(c.initialMessageId)
           );
-          // Fall through to other matching methods
+          if (refMatch) {
+            logger.info(
+              { appointmentId: refMatch.id, inReplyTo: email.inReplyTo },
+              'Matched appointment by In-Reply-To header'
+            );
+            return { id: refMatch.id, userEmail: refMatch.userEmail, therapistEmail: refMatch.therapistEmail };
+          }
+        }
+
+        // Priority 3: Tracking code match (with sender verification)
+        if (trackingCode) {
+          const trackingMatch = candidates.find((c) => c.trackingCode === trackingCode);
+          if (trackingMatch) {
+            const senderIsUser = email.from.toLowerCase() === trackingMatch.userEmail.toLowerCase();
+            const senderIsTherapist = email.from.toLowerCase() === trackingMatch.therapistEmail.toLowerCase();
+
+            if (senderIsUser || senderIsTherapist) {
+              logger.info(
+                { appointmentId: trackingMatch.id, trackingCode, senderType: senderIsUser ? 'user' : 'therapist' },
+                'Matched appointment by tracking code (deterministic match)'
+              );
+              return { id: trackingMatch.id, userEmail: trackingMatch.userEmail, therapistEmail: trackingMatch.therapistEmail };
+            } else {
+              logger.warn(
+                { trackingCode, from: email.from, expectedUser: trackingMatch.userEmail, expectedTherapist: trackingMatch.therapistEmail },
+                'Tracking code found but sender not recognized - possible forwarded email'
+              );
+              // Fall through to Priority 4
+            }
+          }
         }
       }
     }

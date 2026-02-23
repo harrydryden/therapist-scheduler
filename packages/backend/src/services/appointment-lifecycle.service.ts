@@ -27,6 +27,7 @@ import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { runBackgroundTask } from '../utils/background-task';
+import { sseService } from './sse.service';
 
 // ============================================
 // Custom Errors for Lifecycle Transitions
@@ -282,6 +283,16 @@ class AppointmentLifecycleService {
     }
   }
 
+  /**
+   * Notify SSE clients of a successful status transition.
+   * Called from each transition method so both updateStatus() and direct callers are covered.
+   */
+  private notifyTransition(result: TransitionResult, appointmentId: string, source: TransitionSource): void {
+    if (result.success && !result.skipped && !result.atomicSkipped) {
+      sseService.emitStatusChange(appointmentId, result.previousStatus, result.newStatus, source);
+    }
+  }
+
   // ============================================
   // Status Transitions
   // ============================================
@@ -344,7 +355,9 @@ class AppointmentLifecycleService {
 
     logger.info({ ...logContext, previousStatus, hasAvailability }, 'Appointment transitioned to contacted');
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONTACTED };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONTACTED };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -407,7 +420,9 @@ class AppointmentLifecycleService {
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to negotiating');
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.NEGOTIATING };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.NEGOTIATING };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -714,7 +729,9 @@ class AppointmentLifecycleService {
       }
     }
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -778,7 +795,9 @@ class AppointmentLifecycleService {
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to session_held');
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.SESSION_HELD };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.SESSION_HELD };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -831,7 +850,9 @@ class AppointmentLifecycleService {
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to feedback_requested');
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -1070,7 +1091,9 @@ class AppointmentLifecycleService {
       );
     }
 
-    return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.COMPLETED };
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.COMPLETED };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
   }
 
   /**
@@ -1418,7 +1441,9 @@ class AppointmentLifecycleService {
       );
     }
 
-    return { success: true, previousStatus: result.previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
+    const transitionResult: TransitionResult = { success: true, previousStatus: result.previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
+    this.notifyTransition(transitionResult, appointmentId, source);
+    return transitionResult;
   }
 
   // ============================================
@@ -1443,27 +1468,31 @@ class AppointmentLifecycleService {
   ): Promise<TransitionResult> {
     const { source, adminId, reason, confirmedDateTime, confirmedDateTimeParsed, sendEmails } = options;
 
+    let result: TransitionResult;
+
     switch (newStatus) {
       case APPOINTMENT_STATUS.CONTACTED:
-        return this.transitionToContacted({
+        result = await this.transitionToContacted({
           appointmentId,
           source,
           adminId,
           hasAvailability: false,
         });
+        break;
 
       case APPOINTMENT_STATUS.NEGOTIATING:
-        return this.transitionToNegotiating({
+        result = await this.transitionToNegotiating({
           appointmentId,
           source,
           adminId,
         });
+        break;
 
       case APPOINTMENT_STATUS.CONFIRMED:
         if (!confirmedDateTime) {
           throw new Error('confirmedDateTime is required for confirmed status');
         }
-        return this.transitionToConfirmed({
+        result = await this.transitionToConfirmed({
           appointmentId,
           confirmedDateTime,
           confirmedDateTimeParsed,
@@ -1471,41 +1500,48 @@ class AppointmentLifecycleService {
           adminId,
           sendEmails,
         });
+        break;
 
       case APPOINTMENT_STATUS.SESSION_HELD:
-        return this.transitionToSessionHeld({
+        result = await this.transitionToSessionHeld({
           appointmentId,
           source,
           adminId,
         });
+        break;
 
       case APPOINTMENT_STATUS.FEEDBACK_REQUESTED:
-        return this.transitionToFeedbackRequested({
+        result = await this.transitionToFeedbackRequested({
           appointmentId,
           source,
           adminId,
         });
+        break;
 
       case APPOINTMENT_STATUS.COMPLETED:
-        return this.transitionToCompleted({
+        result = await this.transitionToCompleted({
           appointmentId,
           source,
           adminId,
           note: reason,
         });
+        break;
 
       case APPOINTMENT_STATUS.CANCELLED:
-        return this.transitionToCancelled({
+        result = await this.transitionToCancelled({
           appointmentId,
           reason: reason || 'No reason provided',
           cancelledBy: source === 'admin' ? 'admin' : 'system',
           source,
           adminId,
         });
+        break;
 
       default:
         throw new Error(`Unknown status: ${newStatus}`);
     }
+
+    return result;
   }
 }
 
