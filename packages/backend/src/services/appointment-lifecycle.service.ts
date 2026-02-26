@@ -117,6 +117,8 @@ export interface TransitionToCompletedParams extends BaseTransitionParams {
   feedbackSubmissionId?: string;
   /** Optional formatted feedback responses - displayed in Slack notification */
   feedbackData?: Record<string, string>;
+  /** When true, the caller is responsible for sending the Slack notification */
+  suppressSlackNotification?: boolean;
 }
 
 export interface TransitionToCancelledParams extends BaseTransitionParams {
@@ -879,7 +881,7 @@ class AppointmentLifecycleService {
    * - Sends Slack notification
    */
   async transitionToCompleted(params: TransitionToCompletedParams): Promise<TransitionResult> {
-    const { appointmentId, source, note, adminId, feedbackSubmissionId, feedbackData } = params;
+    const { appointmentId, source, note, adminId, feedbackSubmissionId, feedbackData, suppressSlackNotification } = params;
     const logContext = { appointmentId, source, adminId };
 
     // Valid transitions to completed
@@ -1085,23 +1087,27 @@ class AppointmentLifecycleService {
     );
 
     // Get notification settings and send Slack notification (non-blocking, tracked)
-    const settings = await this.getNotificationSettings();
-    if (settings.slack.completed) {
-      runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentCompleted(
-          appointmentId,
-          appointment.userName,
-          appointment.therapistName,
-          feedbackSubmissionId,
-          feedbackData
-        ),
-        {
-          name: 'slack-notify-completed',
-          context: logContext,
-          retry: true,
-          maxRetries: 2,
-        }
-      );
+    // When suppressSlackNotification is true, the caller handles the notification
+    // (e.g., feedback route always sends its own to guarantee delivery)
+    if (!suppressSlackNotification) {
+      const settings = await this.getNotificationSettings();
+      if (settings.slack.completed) {
+        runBackgroundTask(
+          () => slackNotificationService.notifyAppointmentCompleted(
+            appointmentId,
+            appointment.userName,
+            appointment.therapistName,
+            feedbackSubmissionId,
+            feedbackData
+          ),
+          {
+            name: 'slack-notify-completed',
+            context: logContext,
+            retry: true,
+            maxRetries: 2,
+          }
+        );
+      }
     }
 
     const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.COMPLETED };

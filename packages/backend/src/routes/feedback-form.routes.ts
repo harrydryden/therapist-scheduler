@@ -389,38 +389,29 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
             note: `Feedback received (submission: ${submission.id})`,
             feedbackSubmissionId: submission.id,
             feedbackData,
+            suppressSlackNotification: true, // We send the notification below to guarantee delivery
           });
           logger.info({ appointmentId: appointment.id, skipped: result.skipped }, 'Appointment transitioned to completed after feedback');
-
-          // If transition was skipped (already completed), the lifecycle service
-          // won't send the Slack notification. Send it directly so feedback is always reported.
-          if (result.skipped) {
-            runBackgroundTask(
-              () => slackNotificationService.notifyAppointmentCompleted(
-                appointment!.id,
-                appointment!.userName,
-                appointment!.therapistName,
-                submission.id,
-                feedbackData,
-              ),
-              { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-            );
-          }
         } catch (error) {
-          // Log but don't fail the feedback submission.
-          // Still send Slack notification so feedback isn't silently lost.
+          // Log but don't fail the feedback submission
           logger.error({ error, appointmentId: appointment.id }, 'Failed to transition appointment to completed');
-          runBackgroundTask(
-            () => slackNotificationService.notifyAppointmentCompleted(
-              appointment!.id,
-              appointment!.userName,
-              appointment!.therapistName,
-              submission.id,
-              feedbackData,
-            ),
-            { name: 'slack-notify-feedback-received-fallback', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-          );
         }
+
+        // Always send Slack notification directly when feedback is received.
+        // Previously this only ran for the skipped/error cases, meaning normal
+        // completions relied on the lifecycle service which gates on the
+        // notifications.slack.completed setting — silently dropping the notification
+        // when that setting was disabled.
+        runBackgroundTask(
+          () => slackNotificationService.notifyAppointmentCompleted(
+            appointment!.id,
+            appointment!.userName,
+            appointment!.therapistName,
+            submission.id,
+            feedbackData,
+          ),
+          { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
+        );
       }
 
       return reply.status(201).send({
