@@ -349,7 +349,7 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
                   {questions[currentQ].required && <span className="text-red-500 ml-1">*</span>}
                 </h3>
                 {questions[currentQ].helperText && (
-                  <p className="text-sm text-gray-500 mt-1">{questions[currentQ].helperText}</p>
+                  <p className="text-sm text-gray-500 italic mt-1">{questions[currentQ].helperText}</p>
                 )}
               </div>
 

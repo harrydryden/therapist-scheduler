@@ -481,7 +481,7 @@ export default function FeedbackFormPage() {
             {currentQuestion.required && <span className="text-red-500 ml-1">*</span>}
           </h2>
           {currentQuestion.helperText && (
-            <p className="text-sm text-gray-500 mt-1">{currentQuestion.helperText}</p>
+            <p className="text-sm text-gray-500 italic mt-1">{currentQuestion.helperText}</p>
           )}
           {currentQuestion.prefilled && prefilled?.therapistName && (
             <p className="text-sm text-gray-500 mt-1">Pre-filled from your appointment</p>
