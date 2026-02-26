@@ -26,6 +26,7 @@ import { emailProcessingService } from './email-processing.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { runBackgroundTask } from '../utils/background-task';
 import { sseService } from './sse.service';
 
@@ -642,16 +643,22 @@ class AppointmentLifecycleService {
       if (settings.email.clientConfirmation) {
         runBackgroundTask(
           async () => {
+            // Format the date in human-friendly relative format
+            const formattedDateTime = await formatEmailDateFromSettings(
+              confirmedDateTimeParsed,
+              confirmedDateTime,
+            );
+
             // Use allSettled to handle partial failures gracefully
             const results = await Promise.allSettled([
               getEmailSubject('clientConfirmation', {
                 therapistName: appointment.therapistName || 'your therapist',
-                confirmedDateTime,
+                confirmedDateTime: formattedDateTime,
               }),
               getEmailBody('clientConfirmation', {
                 userName: appointment.userName || 'there',
                 therapistName: appointment.therapistName || 'your therapist',
-                confirmedDateTime,
+                confirmedDateTime: formattedDateTime,
               }),
             ]);
 
@@ -689,13 +696,19 @@ class AppointmentLifecycleService {
       if (settings.email.therapistConfirmation && appointment.therapistEmail) {
         runBackgroundTask(
           async () => {
+            // Format the date in human-friendly relative format
+            const formattedDateTime = await formatEmailDateFromSettings(
+              confirmedDateTimeParsed,
+              confirmedDateTime,
+            );
+
             const results = await Promise.allSettled([
-              getEmailSubject('therapistConfirmation', { confirmedDateTime }),
+              getEmailSubject('therapistConfirmation', { confirmedDateTime: formattedDateTime }),
               getEmailBody('therapistConfirmation', {
                 therapistFirstName,
                 clientFirstName,
                 userEmail: appointment.userEmail,
-                confirmedDateTime,
+                confirmedDateTime: formattedDateTime,
               }),
             ]);
 
@@ -1131,6 +1144,7 @@ class AppointmentLifecycleService {
         human_control_enabled: boolean;
         notes: string | null;
         confirmed_date_time: string | null;
+        confirmed_date_time_parsed: Date | null;
         gmail_thread_id: string | null;
         therapist_gmail_thread_id: string | null;
       };
@@ -1140,7 +1154,8 @@ class AppointmentLifecycleService {
         const rows = await tx.$queryRaw<AppointmentRow[]>`
           SELECT id, status, user_name, user_email, therapist_name, therapist_email,
                  therapist_notion_id, human_control_enabled, notes,
-                 confirmed_date_time, gmail_thread_id, therapist_gmail_thread_id
+                 confirmed_date_time, confirmed_date_time_parsed,
+                 gmail_thread_id, therapist_gmail_thread_id
           FROM "appointment_requests"
           WHERE id = ${appointmentId}
           FOR UPDATE NOWAIT
@@ -1172,6 +1187,7 @@ class AppointmentLifecycleService {
             therapistEmail: appointment.therapist_email,
             therapistNotionId: appointment.therapist_notion_id,
             confirmedDateTime: appointment.confirmed_date_time,
+            confirmedDateTimeParsed: appointment.confirmed_date_time_parsed,
             gmailThreadId: appointment.gmail_thread_id,
             therapistGmailThreadId: appointment.therapist_gmail_thread_id,
           }
@@ -1260,8 +1276,14 @@ class AppointmentLifecycleService {
         appointment: {
           id: appointment.id,
           userName: appointment.user_name,
+          userEmail: appointment.user_email,
           therapistName: appointment.therapist_name,
+          therapistEmail: appointment.therapist_email,
           therapistNotionId: appointment.therapist_notion_id,
+          confirmedDateTime: appointment.confirmed_date_time,
+          confirmedDateTimeParsed: appointment.confirmed_date_time_parsed,
+          gmailThreadId: appointment.gmail_thread_id,
+          therapistGmailThreadId: appointment.therapist_gmail_thread_id,
         }
       };
     }, {
@@ -1353,6 +1375,12 @@ class AppointmentLifecycleService {
     if (settings.email.clientCancellation && appointment.userEmail) {
       runBackgroundTask(
         async () => {
+          // Format the date in human-friendly relative format
+          const formattedDateTime = await formatEmailDateFromSettings(
+            appointment.confirmedDateTimeParsed,
+            appointment.confirmedDateTime,
+          );
+
           const results = await Promise.allSettled([
             getEmailSubject('clientCancellation', {
               therapistName: therapistFirstName,
@@ -1360,7 +1388,7 @@ class AppointmentLifecycleService {
             getEmailBody('clientCancellation', {
               userName: appointment.userName || 'there',
               therapistName: therapistFirstName,
-              confirmedDateTime: appointment.confirmedDateTime || 'your scheduled time',
+              confirmedDateTime: formattedDateTime,
               cancellationReason: cancellationReasonForClient,
             }),
           ]);
@@ -1399,6 +1427,12 @@ class AppointmentLifecycleService {
     if (settings.email.therapistCancellation && appointment.therapistEmail) {
       runBackgroundTask(
         async () => {
+          // Format the date in human-friendly relative format
+          const formattedDateTime = await formatEmailDateFromSettings(
+            appointment.confirmedDateTimeParsed,
+            appointment.confirmedDateTime,
+          );
+
           const results = await Promise.allSettled([
             getEmailSubject('therapistCancellation', {
               clientFirstName,
@@ -1406,7 +1440,7 @@ class AppointmentLifecycleService {
             getEmailBody('therapistCancellation', {
               therapistFirstName,
               clientFirstName,
-              confirmedDateTime: appointment.confirmedDateTime || 'your scheduled time',
+              confirmedDateTime: formattedDateTime,
               cancellationReason: cancellationReasonForTherapist,
             }),
           ]);

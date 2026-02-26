@@ -174,6 +174,15 @@ const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     defaultValue: 2,
   },
 
+  // === EMAIL DATE FORMAT ===
+  'email.use24HourTime': {
+    category: 'emailTemplates',
+    label: 'Use 24-Hour Clock in Emails',
+    description: 'When enabled, times in emails display as 14:30 instead of 2:30pm',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
+
   // === EMAIL TEMPLATES ===
   'email.clientConfirmationSubject': {
     category: 'emailTemplates',

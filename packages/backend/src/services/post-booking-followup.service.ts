@@ -25,6 +25,7 @@ import {
   isInPast,
 } from '../utils/date-parser';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { getSettingValue } from './settings.service';
 import { POST_BOOKING, APPOINTMENT_STATUS } from '../constants';
 
@@ -890,9 +891,16 @@ class PostBookingFollowupService {
     userEmail: string;
     therapistName: string;
     confirmedDateTime: string | null;
+    confirmedDateTimeParsed: Date | null;
     gmailThreadId: string | null;
   }): Promise<void> {
     const userName = appointment.userName || 'there';
+
+    // Format the date in human-friendly relative format
+    const formattedDateTime = await formatEmailDateFromSettings(
+      appointment.confirmedDateTimeParsed,
+      appointment.confirmedDateTime,
+    );
 
     const subject = await getEmailSubject('meetingLinkCheck', {
       therapistName: appointment.therapistName,
@@ -900,7 +908,7 @@ class PostBookingFollowupService {
     const body = await getEmailBody('meetingLinkCheck', {
       userName,
       therapistName: appointment.therapistName,
-      confirmedDateTime: appointment.confirmedDateTime || 'your scheduled time',
+      confirmedDateTime: formattedDateTime,
     });
 
     await emailProcessingService.sendEmail({
@@ -1136,6 +1144,7 @@ class PostBookingFollowupService {
       therapistName: string;
       therapistEmail: string;
       confirmedDateTime: string | null;
+      confirmedDateTimeParsed: Date | null;
       gmailThreadId: string | null;
       therapistGmailThreadId: string | null;
     },
@@ -1147,6 +1156,12 @@ class PostBookingFollowupService {
     const threadId = isUser ? appointment.gmailThreadId : appointment.therapistGmailThreadId;
     const otherPartyName = isUser ? appointment.therapistName : (appointment.userName || 'your client');
 
+    // Format the date in human-friendly relative format
+    const formattedDateTime = await formatEmailDateFromSettings(
+      appointment.confirmedDateTimeParsed,
+      appointment.confirmedDateTime,
+    );
+
     const subject = await getEmailSubject('sessionReminder', {
       therapistName: appointment.therapistName,
       recipientType: recipient,
@@ -1155,7 +1170,7 @@ class PostBookingFollowupService {
     const body = await getEmailBody('sessionReminder', {
       recipientName,
       otherPartyName,
-      confirmedDateTime: appointment.confirmedDateTime || 'your scheduled time',
+      confirmedDateTime: formattedDateTime,
       recipientType: recipient,
     });
 
