@@ -1085,8 +1085,11 @@ class AppointmentLifecycleService {
     );
 
     // Get notification settings and send Slack notification (non-blocking, tracked)
+    // Always notify when feedback is attached (the team needs to see feedback scores
+    // regardless of the generic completed-notification toggle). For non-feedback
+    // completions (e.g. admin-triggered), respect the admin setting.
     const settings = await this.getNotificationSettings();
-    if (settings.slack.completed) {
+    if (feedbackSubmissionId || settings.slack.completed) {
       runBackgroundTask(
         () => slackNotificationService.notifyAppointmentCompleted(
           appointmentId,
