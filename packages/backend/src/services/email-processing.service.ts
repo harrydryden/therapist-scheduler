@@ -28,6 +28,8 @@ import {
 import {
   extractTrackingCode,
 } from '../utils/tracking-code';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   loadGmailCredentials,
   createOAuth2Client,
@@ -2369,8 +2371,12 @@ ${htmlParts.join('\n')}
     canConnect: boolean;
     emailAddress?: string;
   }> {
-    const credentialsFound = fs.existsSync(CREDENTIALS_PATH);
-    const tokenFound = fs.existsSync(TOKEN_PATH);
+    const credentialsPath = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
+      path.join(process.cwd(), '../mcp-gmail/credentials.json');
+    const tokenPath = process.env.MCP_GMAIL_TOKEN_PATH ||
+      path.join(process.cwd(), '../mcp-gmail/token.json');
+    const credentialsFound = fs.existsSync(credentialsPath);
+    const tokenFound = fs.existsSync(tokenPath);
 
     let canConnect = false;
     let emailAddress: string | undefined;
