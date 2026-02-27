@@ -83,6 +83,7 @@ export interface SlackAlertOptions {
   details: string;
   additionalFields?: Record<string, string>;
   emoji?: string; // Override default severity emoji
+  fallbackSuffix?: string; // Extra text appended to the plain-text fallback (push notifications)
 }
 
 // Emoji mapping for severity
@@ -406,6 +407,7 @@ class SlackNotificationService {
       details,
       additionalFields,
       emoji: customEmoji,
+      fallbackSuffix,
     } = options;
 
     const emoji = customEmoji || SEVERITY_EMOJI[severity];
@@ -419,26 +421,39 @@ class SlackNotificationService {
     // Build compact message with inline fields
     let messageText = details;
 
-    // Add therapist inline if available
+    // Add therapist inline if available (escaped for safety even though
+    // therapist names are admin-set, as defense-in-depth).
     if (therapistName) {
-      messageText += `\n*Therapist:* ${therapistName}`;
+      messageText += `\n*Therapist:* ${escapeSlackMrkdwn(therapistName)}`;
     }
 
-    // Add additional fields inline, truncating long values to stay within Slack limits
+    // Add additional fields inline, truncating long values to stay within Slack limits.
+    // Cap the number of fields to keep the message scannable.
+    const MAX_INLINE_FIELDS = 10;
     if (additionalFields && Object.keys(additionalFields).length > 0) {
-      for (const [key, value] of Object.entries(additionalFields)) {
+      const entries = Object.entries(additionalFields);
+      const shown = entries.slice(0, MAX_INLINE_FIELDS);
+      for (const [key, value] of shown) {
         const truncated = value.length > MAX_FIELD_VALUE_LENGTH
           ? value.substring(0, MAX_FIELD_VALUE_LENGTH) + '...'
           : value;
-        messageText += `\n*${key}:* ${escapeSlackMrkdwn(truncated)}`;
+        messageText += `\n*${escapeSlackMrkdwn(key)}:* ${escapeSlackMrkdwn(truncated)}`;
+      }
+      if (entries.length > MAX_INLINE_FIELDS) {
+        messageText += `\n_…and ${entries.length - MAX_INLINE_FIELDS} more_`;
       }
     }
 
-    // Final safety check: hard-truncate to Slack's section text limit
+    // Final safety check: truncate at the last complete line boundary to avoid
+    // slicing through a key-value pair, which would produce garbled mrkdwn.
     const headerLine = `${emoji} *${title}*\n`;
     const maxBodyLength = SLACK_SECTION_TEXT_LIMIT - headerLine.length;
     if (messageText.length > maxBodyLength) {
-      messageText = messageText.substring(0, maxBodyLength - 3) + '...';
+      const truncated = messageText.substring(0, maxBodyLength - 20);
+      const lastNewline = truncated.lastIndexOf('\n');
+      messageText = lastNewline > 0
+        ? truncated.substring(0, lastNewline) + '\n_…message truncated_'
+        : truncated + '…';
     }
 
     // Build compact blocks
@@ -461,8 +476,13 @@ class SlackNotificationService {
       },
     ];
 
+    // The `text` field is used by Slack as the fallback for push notifications
+    // and email digests where Block Kit isn't rendered. Include the suffix so
+    // key data (e.g. feedback scores) is visible even outside the Slack app.
+    const fallbackText = `${emoji} ${title}: ${details}${fallbackSuffix || ''}`;
+
     const message: SlackMessage = {
-      text: `${emoji} ${title}: ${details}`, // Fallback for notifications
+      text: fallbackText.length > 3000 ? fallbackText.substring(0, 2997) + '...' : fallbackText,
       blocks,
       unfurl_links: false,
       unfurl_media: false,
@@ -622,7 +642,11 @@ class SlackNotificationService {
   }
 
   /**
-   * Notify when an appointment is completed (feedback received)
+   * Notify when an appointment is completed (feedback received).
+   *
+   * Feedback answers are shown as an abridged inline summary beneath a
+   * "Feedback" header. The full responses are always accessible via the
+   * admin forms dashboard link.
    */
   async notifyAppointmentCompleted(
     appointmentId: string,
@@ -632,9 +656,32 @@ class SlackNotificationService {
     feedbackData?: Record<string, string>
   ): Promise<boolean> {
     const formsUrl = this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/forms');
-    const details = feedbackSubmissionId
+
+    let details = feedbackSubmissionId
       ? `Session completed, feedback received. <${formsUrl}|View Feedback>`
-      : `Session completed, feedback received.`;
+      : 'Session completed.';
+
+    const hasFeedback = feedbackData && Object.keys(feedbackData).length > 0;
+
+    // Add a visual separator before feedback answers so they don't
+    // blend into the appointment details line.
+    if (hasFeedback) {
+      details += '\n\n📋 *Feedback:*';
+    }
+
+    // Build a compact fallback that includes key feedback values so
+    // push notifications and email digests are still informative.
+    let fallbackSuffix = '';
+    if (hasFeedback) {
+      const summaryParts = Object.entries(feedbackData!)
+        .slice(0, 4)
+        .map(([k, v]) => {
+          const shortKey = k.length > 25 ? k.slice(0, 22) + '...' : k;
+          const shortVal = v.length > 30 ? v.slice(0, 27) + '...' : v;
+          return `${shortKey}: ${shortVal}`;
+        });
+      fallbackSuffix = ` | ${summaryParts.join(' | ')}`;
+    }
 
     return this.sendAlert({
       title: 'Appointment Completed',
@@ -643,7 +690,8 @@ class SlackNotificationService {
       therapistName,
       details,
       emoji: '✅',
-      additionalFields: feedbackData,
+      additionalFields: hasFeedback ? feedbackData : undefined,
+      fallbackSuffix,
     });
   }
 
