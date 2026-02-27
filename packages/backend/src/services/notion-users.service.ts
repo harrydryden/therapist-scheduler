@@ -561,6 +561,77 @@ class NotionUsersService {
   }
 
   /**
+   * Sync users FROM Notion TO PostgreSQL.
+   *
+   * Detects users that were added directly in the Notion database (i.e. they
+   * have an email but no odId) and ensures they exist in Postgres. The
+   * generated odId is written back to the Notion page so both systems stay
+   * in sync.
+   *
+   * Users that already exist in Postgres (matched by email) will simply have
+   * their odId back-filled into Notion if it's missing there.
+   */
+  async syncNotionUsersToPostgres(): Promise<{ synced: number; skipped: number; failed: number }> {
+    if (!this.databaseId) {
+      logger.warn('Notion users database not configured, skipping Notion→Postgres sync');
+      return { synced: 0, skipped: 0, failed: 0 };
+    }
+
+    let synced = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    try {
+      // 1. Fetch every user from the Notion database
+      const notionUsers = await this.fetchAllUsers();
+
+      // 2. Identify users that need syncing (have email but missing odId)
+      const usersNeedingSync = notionUsers.filter(u => u.email && !u.odId);
+
+      if (usersNeedingSync.length === 0) {
+        logger.debug('All Notion users already have IDs – nothing to sync');
+        return { synced: 0, skipped: notionUsers.length, failed: 0 };
+      }
+
+      // 3. Process each user that needs an ID
+      for (const notionUser of usersNeedingSync) {
+        try {
+          const normalizedEmail = notionUser.email.toLowerCase().trim();
+
+          // getOrCreateUser handles both the "already exists" and "create
+          // with new odId" cases atomically in Postgres.
+          const pgUser = await getOrCreateUser(normalizedEmail, notionUser.name || null);
+
+          // 5. Write the odId back to the Notion page
+          await this.updateUser(notionUser.pageId, { odId: pgUser.odId });
+
+          synced++;
+          logger.info(
+            { email: normalizedEmail, odId: pgUser.odId, pageId: notionUser.pageId },
+            'Synced Notion user to Postgres and back-filled odId'
+          );
+        } catch (error) {
+          failed++;
+          logger.error(
+            { error, email: notionUser.email, pageId: notionUser.pageId },
+            'Failed to sync Notion user to Postgres'
+          );
+        }
+      }
+
+      skipped = notionUsers.length - usersNeedingSync.length;
+      logger.info(
+        { synced, skipped, failed, total: notionUsers.length },
+        'Notion→Postgres user sync complete'
+      );
+    } catch (error) {
+      logger.error({ error }, 'Notion→Postgres user sync failed');
+    }
+
+    return { synced, skipped, failed };
+  }
+
+  /**
    * Get all subscribed users who don't have upcoming appointments
    * Used for weekly mailing list
    *

@@ -15,7 +15,12 @@
  * 2. User Sync (TO Notion) - Every 6 hours
  *    - Syncs user data to Notion users database
  *
- * 3. Appointment Lifecycle Tick - Every 30 min
+ * 3. Notion→Postgres User Sync (FROM Notion) - Every 10 min
+ *    - Detects users added in Notion without an ID
+ *    - Creates them in PostgreSQL with a generated odId
+ *    - Writes the odId back to the Notion page
+ *
+ * 4. Appointment Lifecycle Tick - Every 30 min
  *    - Transitions confirmed appointments to session_held after session time
  */
 
@@ -39,12 +44,14 @@ const SYNC_INTERVALS = {
   therapistFreeze: 5 * 60 * 1000,      // 5 minutes
   appointmentLifecycle: 30 * 60 * 1000, // 30 minutes (transitions confirmed → session_held)
   userSync: 6 * 60 * 60 * 1000,        // 6 hours
+  notionToPostgresUserSync: 10 * 60 * 1000, // 10 minutes (Notion → Postgres user sync)
 };
 
 const STARTUP_DELAYS = {
   therapistFreeze: 0,                   // Immediately
   appointmentLifecycle: 2 * 60 * 1000,  // 2 minutes
   userSync: 30 * 1000,                 // 30 seconds
+  notionToPostgresUserSync: 60 * 1000, // 1 minute (after initial user sync has had time to run)
 };
 
 const LOCK_CONFIG = {
@@ -72,7 +79,7 @@ interface SyncStatus {
   lastResult: SyncResult | null;
 }
 
-type SyncType = 'therapistFreeze' | 'appointmentLifecycle' | 'userSync';
+type SyncType = 'therapistFreeze' | 'appointmentLifecycle' | 'userSync' | 'notionToPostgresUserSync';
 
 // ============================================
 // Notion Sync Manager
@@ -101,12 +108,14 @@ class NotionSyncManager {
     // Start each sync type with its configured delay and interval
     this.startSyncType('therapistFreeze', () => this.syncTherapistFreeze());
     this.startSyncType('userSync', () => this.syncUsers());
+    this.startSyncType('notionToPostgresUserSync', () => this.syncNotionUsersToPostgres());
     this.startSyncType('appointmentLifecycle', () => this.runAppointmentLifecycleTick());
 
     logger.info({
       therapistFreeze: `${SYNC_INTERVALS.therapistFreeze / 1000}s`,
       appointmentLifecycle: `${SYNC_INTERVALS.appointmentLifecycle / 1000}s`,
       userSync: `${SYNC_INTERVALS.userSync / 1000}s`,
+      notionToPostgresUserSync: `${SYNC_INTERVALS.notionToPostgresUserSync / 1000}s`,
     }, 'Notion Sync Manager started with intervals');
   }
 
@@ -138,6 +147,7 @@ class NotionSyncManager {
     return [
       this.getSyncStatus('therapistFreeze', 'Therapist Freeze Sync'),
       this.getSyncStatus('userSync', 'User Sync'),
+      this.getSyncStatus('notionToPostgresUserSync', 'Notion→Postgres User Sync'),
       this.getSyncStatus('appointmentLifecycle', 'Appointment Lifecycle Tick'),
     ];
   }
@@ -152,6 +162,10 @@ class NotionSyncManager {
 
   async triggerUserSync(): Promise<SyncResult> {
     return this.runWithLock('userSync', () => this.syncUsers());
+  }
+
+  async triggerNotionToPostgresUserSync(): Promise<SyncResult> {
+    return this.runWithLock('notionToPostgresUserSync', () => this.syncNotionUsersToPostgres());
   }
 
   async triggerAppointmentLifecycleTick(): Promise<SyncResult> {
@@ -222,6 +236,8 @@ class NotionSyncManager {
       case 'therapistFreeze':
         return notionClientManager.isConfigured();
       case 'userSync':
+        return notionUsersService.isConfigured();
+      case 'notionToPostgresUserSync':
         return notionUsersService.isConfigured();
       case 'appointmentLifecycle':
         return true; // Always enabled — transitions confirmed → session_held
@@ -351,6 +367,25 @@ class NotionSyncManager {
       return { synced: result.synced, errors: result.failed };
     } catch (error) {
       logger.error({ syncId, error }, 'User sync failed');
+      return { synced: 0, errors: 1 };
+    }
+  }
+
+  /**
+   * Sync users FROM Notion TO PostgreSQL
+   * Detects users added in Notion without an odId, creates them in Postgres,
+   * and writes the generated odId back to Notion.
+   */
+  private async syncNotionUsersToPostgres(): Promise<SyncResult> {
+    const syncId = Date.now().toString(36);
+    logger.info({ syncId }, 'Running Notion→Postgres user sync');
+
+    try {
+      const result = await notionUsersService.syncNotionUsersToPostgres();
+      logger.info({ syncId, ...result }, 'Notion→Postgres user sync completed');
+      return { synced: result.synced, errors: result.failed };
+    } catch (error) {
+      logger.error({ syncId, error }, 'Notion→Postgres user sync failed');
       return { synced: 0, errors: 1 };
     }
   }
