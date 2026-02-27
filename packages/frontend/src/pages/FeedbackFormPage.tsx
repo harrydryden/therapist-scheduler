@@ -287,11 +287,9 @@ export default function FeedbackFormPage() {
 
     const currentQuestion = formConfig.questions[currentQuestionIndex];
 
-    // Validate current question if it exists and is required
-    if (currentQuestionIndex >= 0 && currentQuestion?.required) {
-      if (!isCurrentQuestionAnswered()) {
-        return; // Don't proceed if required field is empty
-      }
+    // Validate current question before proceeding
+    if (currentQuestionIndex >= 0 && !isCurrentQuestionAnswered()) {
+      return;
     }
 
     if (currentQuestionIndex < formConfig.questions.length - 1) {
@@ -341,17 +339,24 @@ export default function FeedbackFormPage() {
     }
   };
 
-  // Check if current question is answered
+  // Check if current question can proceed
   const isCurrentQuestionAnswered = () => {
     if (currentQuestionIndex < 0 || !formConfig) return true;
     const currentQuestion = formConfig.questions[currentQuestionIndex];
     const response = responses[currentQuestion.id];
-    if (response === undefined || response === '' || response === null) return false;
-    // For choice_with_text, require explanation text when answer is No or Unsure
+
+    // Required questions must have a base response
+    if (currentQuestion.required && (response === undefined || response === '' || response === null)) {
+      return false;
+    }
+
+    // For choice_with_text, require explanation when answer is No or Unsure
+    // (applies even for non-required questions — if they chose to answer, they must explain)
     if (currentQuestion.type === 'choice_with_text' && isNegativeOrUnsure(response as string)) {
       const textResponse = responses[`${currentQuestion.id}_text`] as string | undefined;
       if (!textResponse || !textResponse.trim()) return false;
     }
+
     return true;
   };
 
@@ -562,10 +567,10 @@ export default function FeedbackFormPage() {
 
           <button
             onClick={handleNext}
-            disabled={(currentQuestion.required && !isCurrentQuestionAnswered()) || isSubmitting}
+            disabled={!isCurrentQuestionAnswered() || isSubmitting}
             className={`
               flex-1 py-3 px-6 rounded-lg font-medium transition-colors
-              ${(currentQuestion.required && !isCurrentQuestionAnswered())
+              ${!isCurrentQuestionAnswered()
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                 : 'bg-primary-600 text-white hover:bg-primary-700'
               }
