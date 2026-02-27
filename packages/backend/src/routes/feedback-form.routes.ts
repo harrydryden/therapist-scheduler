@@ -338,29 +338,32 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       // If linked to appointment, transition to completed using lifecycle service
       // This handles all side effects: Slack notification, Notion sync, audit trail
 
-      // Build feedback data for Slack dynamically from form questions + responses
+      // Build feedback data for Slack dynamically from form questions + responses.
+      // Each question maps to a single key-value pair. For choice_with_text, the
+      // follow-up explanation is merged inline (e.g. 'No — "reason"') rather than
+      // creating a separate "(Detail)" entry, which keeps messages compact and avoids
+      // duplicating the question label.
       const formQuestions = (formConfig?.questions as unknown as FormQuestion[]) || [];
       const feedbackData: Record<string, string> = {};
       for (const q of formQuestions) {
         const val = responses[q.id];
         if (val == null || val === '') continue;
 
-        // Truncate long text for Slack readability
         const label = q.question.length > 50 ? q.question.slice(0, 47) + '...' : q.question;
 
         if (q.type === 'scale') {
           feedbackData[label] = `${val}/${q.scaleMax ?? 5}`;
         } else if (q.type === 'choice' || q.type === 'choice_with_text') {
-          feedbackData[label] = String(val);
-          // Include follow-up text if present
+          let answer = String(val);
           const textVal = responses[`${q.id}_text`];
-          if (textVal && typeof textVal === 'string') {
-            const truncated = textVal.length > 100 ? textVal.slice(0, 97) + '...' : textVal;
-            feedbackData[`${label} (Detail)`] = truncated;
+          if (textVal && typeof textVal === 'string' && textVal.trim()) {
+            const truncated = textVal.length > 120 ? textVal.slice(0, 117) + '...' : textVal;
+            answer += ` — "${truncated}"`;
           }
+          feedbackData[label] = answer;
         } else if (q.type === 'text') {
           const strVal = String(val);
-          feedbackData[label] = strVal.length > 100 ? strVal.slice(0, 97) + '...' : strVal;
+          feedbackData[label] = strVal.length > 150 ? strVal.slice(0, 147) + '...' : strVal;
         }
       }
 
