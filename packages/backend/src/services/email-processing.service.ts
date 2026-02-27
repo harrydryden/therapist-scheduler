@@ -28,31 +28,12 @@ import {
 import {
   extractTrackingCode,
 } from '../utils/tracking-code';
-import * as fs from 'fs';
-import * as path from 'path';
-
-// Gmail credentials - can be loaded from file or environment variable (base64 encoded)
-const CREDENTIALS_PATH = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/credentials.json');
-const TOKEN_PATH = process.env.MCP_GMAIL_TOKEN_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/token.json');
-
-// Load credentials from env var if files don't exist
-function loadCredentialsFromEnv(): { credentials: any; token: any } | null {
-  const credentialsBase64 = process.env.GMAIL_CREDENTIALS_BASE64;
-  const tokenBase64 = process.env.GMAIL_TOKEN_BASE64;
-
-  if (credentialsBase64 && tokenBase64) {
-    try {
-      const credentials = JSON.parse(Buffer.from(credentialsBase64, 'base64').toString('utf-8'));
-      const token = JSON.parse(Buffer.from(tokenBase64, 'base64').toString('utf-8'));
-      return { credentials, token };
-    } catch (error) {
-      logger.error({ error }, 'Failed to parse Gmail credentials from env vars');
-    }
-  }
-  return null;
-}
+import {
+  loadGmailCredentials,
+  createOAuth2Client,
+  acquireTokenRefreshLock,
+  releaseTokenRefreshLock,
+} from '../utils/gmail-auth';
 
 // Redis keys
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
@@ -136,83 +117,6 @@ function canAttemptGmailOperation(): boolean {
  */
 export function getGmailCircuitStats() {
   return gmailCircuitBreaker.getStats();
-}
-
-/**
- * FIX T1: OAuth token refresh mutex
- * Shared lock key with thread-fetching.service.ts to prevent race conditions
- * when multiple workers detect 401 errors and try to refresh simultaneously
- */
-const TOKEN_REFRESH_LOCK_KEY = 'gmail:token_refresh_lock';
-const TOKEN_REFRESH_LOCK_TTL_SECONDS = 30;
-const TOKEN_REFRESH_WAIT_MS = 100;
-const TOKEN_REFRESH_MAX_WAIT_MS = 10000;
-
-// FIX: Return lock value from acquireTokenRefreshLock instead of storing in module-level variable.
-// This prevents race conditions when concurrent callers overwrite each other's lock values.
-
-async function acquireTokenRefreshLock(traceId: string): Promise<string | null> {
-  const startTime = Date.now();
-  const lockValue = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  while (Date.now() - startTime < TOKEN_REFRESH_MAX_WAIT_MS) {
-    try {
-      const result = await redis.set(
-        TOKEN_REFRESH_LOCK_KEY,
-        lockValue,
-        'EX',
-        TOKEN_REFRESH_LOCK_TTL_SECONDS,
-        'NX'
-      );
-
-      if (result === 'OK') {
-        return lockValue;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, TOKEN_REFRESH_WAIT_MS));
-    } catch (err) {
-      logger.warn({ err, traceId }, 'Redis unavailable for token refresh lock');
-      return lockValue; // Proceed without lock on Redis failure
-    }
-  }
-
-  logger.warn({ traceId }, 'Token refresh lock wait timeout');
-  return lockValue; // Proceed anyway to avoid deadlock
-}
-
-/**
- * Lua script for ownership-safe token refresh lock release
- * Only releases if we still own the lock (prevents Process A deleting Process B's lock)
- */
-const TOKEN_LOCK_RELEASE_SCRIPT = `
-local lockKey = KEYS[1]
-local expectedValue = ARGV[1]
-
-local currentValue = redis.call('GET', lockKey)
-if currentValue == expectedValue then
-  redis.call('DEL', lockKey)
-  return 1
-else
-  return 0
-end
-`;
-
-async function releaseTokenRefreshLock(lockValue: string | null): Promise<void> {
-  if (!lockValue) {
-    return; // No lock to release
-  }
-
-  try {
-    // Use ownership-safe release to prevent releasing another process's lock
-    await redis.eval(
-      TOKEN_LOCK_RELEASE_SCRIPT,
-      1,
-      TOKEN_REFRESH_LOCK_KEY,
-      lockValue
-    );
-  } catch (err) {
-    // Ignore - lock will expire naturally
-  }
 }
 
 /**
@@ -403,85 +307,39 @@ export class EmailProcessingService {
    */
   private async initializeGmailClient(): Promise<void> {
     try {
-      let credentials: any;
-      let token: any;
-
-      // First try to load from environment variables (RECOMMENDED for production)
-      // Environment variables: GMAIL_CREDENTIALS_BASE64, GMAIL_TOKEN_BASE64
-      const envCreds = loadCredentialsFromEnv();
-      if (envCreds) {
-        logger.info('Loading Gmail credentials from environment variables (secure)');
-        credentials = envCreds.credentials;
-        token = envCreds.token;
-      } else {
-        // Fall back to file-based credentials (for local development ONLY)
-        // SECURITY WARNING: File-based credentials are stored unencrypted on disk
+      const creds = loadGmailCredentials('EmailProcessingService');
+      if (!creds) {
+        // Startup validation: warn loudly if credentials unavailable
         const isProduction = process.env.NODE_ENV === 'production';
-
-        if (!fs.existsSync(CREDENTIALS_PATH)) {
-          logger.warn({ path: CREDENTIALS_PATH }, 'Gmail credentials file not found');
-          return;
-        }
-        credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8'));
-
-        if (!fs.existsSync(TOKEN_PATH)) {
-          logger.warn({ path: TOKEN_PATH }, 'Gmail token file not found - run OAuth flow first');
-          return;
-        }
-        token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf-8'));
-
-        // Log security warning in production
-        if (isProduction) {
-          logger.warn(
-            {
-              credentialsPath: CREDENTIALS_PATH,
-              tokenPath: TOKEN_PATH,
-            },
-            'SECURITY WARNING: Using file-based Gmail credentials in production. ' +
-            'Consider using GMAIL_CREDENTIALS_BASE64 and GMAIL_TOKEN_BASE64 environment variables instead. ' +
-            'File-based credentials are stored unencrypted on disk.'
-          );
-        } else {
-          logger.info('Loading Gmail credentials from files (development mode)');
-        }
+        const level = isProduction ? 'error' : 'warn';
+        logger[level](
+          'Gmail client not initialized - email sending and receiving will be disabled. ' +
+          'Set GMAIL_CREDENTIALS_BASE64 and GMAIL_TOKEN_BASE64 environment variables.'
+        );
+        return;
       }
 
-      const { client_id, client_secret, redirect_uris } = credentials.installed || credentials.web;
-      this.oauth2Client = new OAuth2Client(client_id, client_secret, redirect_uris?.[0]);
-
-      // Handle token format - might be from MCP (with nested structure) or direct OAuth
-      if (token.refresh_token) {
-        this.oauth2Client.setCredentials({
-          refresh_token: token.refresh_token,
-          access_token: token.token || token.access_token,
-          token_type: 'Bearer',
-          expiry_date: token.expiry ? new Date(token.expiry).getTime() : undefined,
-        });
-      } else {
-        this.oauth2Client.setCredentials(token);
-      }
+      this.oauth2Client = createOAuth2Client(creds.credentials, creds.token);
 
       // Configure Gmail client with timeout to prevent hanging requests
-      // Note: googleapis uses GaxiosOptions which includes timeout at the request level
       this.gmail = google.gmail({
         version: 'v1',
         auth: this.oauth2Client,
-        timeout: DEFAULT_TIMEOUTS.HTTP_FETCH, // 30 second timeout on all Gmail API calls
-        retry: true, // Enable automatic retries for transient errors
+        timeout: DEFAULT_TIMEOUTS.HTTP_FETCH,
+        retry: true,
       });
       logger.info('Gmail client initialized with timeout protection');
     } catch (error) {
       logger.error({ error }, 'Failed to initialize Gmail client');
-    }
 
-    // Startup validation: warn loudly if Gmail is not initialized
-    if (!this.gmail) {
-      const isProduction = process.env.NODE_ENV === 'production';
-      const level = isProduction ? 'error' : 'warn';
-      logger[level](
-        'Gmail client not initialized - email sending and receiving will be disabled. ' +
-        'Set GMAIL_CREDENTIALS_BASE64 and GMAIL_TOKEN_BASE64 environment variables.'
-      );
+      if (!this.gmail) {
+        const isProduction = process.env.NODE_ENV === 'production';
+        const level = isProduction ? 'error' : 'warn';
+        logger[level](
+          'Gmail client not initialized - email sending and receiving will be disabled. ' +
+          'Set GMAIL_CREDENTIALS_BASE64 and GMAIL_TOKEN_BASE64 environment variables.'
+        );
+      }
     }
   }
 
