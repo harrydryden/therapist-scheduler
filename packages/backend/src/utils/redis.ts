@@ -629,6 +629,99 @@ export class CacheManager {
     }
   }
 
+  // ============================================
+  // List operations (for write-ahead log / queue support)
+  // ============================================
+
+  /**
+   * Push a value to the right end of a list (RPUSH).
+   * Returns the length of the list after the push.
+   */
+  async rpush(key: string, value: string): Promise<number> {
+    if (!this.redis) {
+      throw new Error('Redis not available - cannot rpush');
+    }
+    try {
+      const result = await this.redis.rpush(key, value);
+      this.recordSuccess();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
+  /**
+   * Pop and return the leftmost element of a list (LPOP).
+   * Returns null if the list is empty or does not exist.
+   */
+  async lpop(key: string): Promise<string | null> {
+    if (!this.redis) {
+      throw new Error('Redis not available - cannot lpop');
+    }
+    try {
+      const result = await this.redis.lpop(key);
+      this.recordSuccess();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
+  /**
+   * Get the length of a list (LLEN).
+   * Returns 0 if the key does not exist.
+   */
+  async llen(key: string): Promise<number> {
+    if (!this.redis) {
+      throw new Error('Redis not available - cannot llen');
+    }
+    try {
+      const result = await this.redis.llen(key);
+      this.recordSuccess();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
+  /**
+   * Get a range of elements from a list (LRANGE).
+   * Indices are 0-based. Use -1 for the last element.
+   */
+  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+    if (!this.redis) {
+      throw new Error('Redis not available - cannot lrange');
+    }
+    try {
+      const result = await this.redis.lrange(key, start, stop);
+      this.recordSuccess();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
+  /**
+   * Get the number of members in a set (SCARD).
+   */
+  async scard(key: string): Promise<number> {
+    if (!this.redis) {
+      throw new Error('Redis not available - cannot scard');
+    }
+    try {
+      const result = await this.redis.scard(key);
+      this.recordSuccess();
+      return result;
+    } catch (err) {
+      this.recordFailure();
+      throw err;
+    }
+  }
+
   /**
    * Execute a Lua script atomically
    * Used for atomic lock+check operations to prevent race conditions
@@ -797,6 +890,12 @@ export const redis = {
   zadd: (key: string, score: number, member: string) => cacheManager.zadd(key, score, member),
   zscore: (key: string, member: string) => cacheManager.zscore(key, member),
   zremrangebyscore: (key: string, min: string | number, max: string | number) => cacheManager.zremrangebyscore(key, min, max),
+  // List operations (for write-ahead log / queue support)
+  rpush: (key: string, value: string) => cacheManager.rpush(key, value),
+  lpop: (key: string) => cacheManager.lpop(key),
+  llen: (key: string) => cacheManager.llen(key),
+  lrange: (key: string, start: number, stop: number) => cacheManager.lrange(key, start, stop),
+  scard: (key: string) => cacheManager.scard(key),
   // Lua script execution for atomic operations
   eval: (script: string, numKeys: number, ...args: (string | number)[]) => cacheManager.eval(script, numKeys, ...args),
   // Health check for readiness probe
