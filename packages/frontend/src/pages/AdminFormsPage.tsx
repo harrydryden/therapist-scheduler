@@ -466,7 +466,7 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
 
 export default function AdminFormsPage() {
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<'config' | 'preview' | 'submissions' | 'stats'>('config');
+  const [activeTab, setActiveTab] = useState<'config' | 'preview' | 'submissions' | 'stats'>('submissions');
 
   // Form config state
   const [editedConfig, setEditedConfig] = useState<Partial<AdminFormConfig> | null>(null);
@@ -617,6 +617,19 @@ export default function AdminFormsPage() {
         <div role="tablist" aria-label="Forms management" className="mb-6 flex gap-2 border-b border-slate-200">
           <button
             role="tab"
+            aria-selected={activeTab === 'submissions'}
+            aria-controls="tab-panel-submissions"
+            onClick={() => setActiveTab('submissions')}
+            className={`px-4 py-2 font-medium text-sm transition-colors ${
+              activeTab === 'submissions'
+                ? 'text-spill-blue-800 border-b-2 border-spill-blue-800'
+                : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            Submissions
+          </button>
+          <button
+            role="tab"
             aria-selected={activeTab === 'config'}
             aria-controls="tab-panel-config"
             onClick={() => setActiveTab('config')}
@@ -640,19 +653,6 @@ export default function AdminFormsPage() {
             }`}
           >
             Preview
-          </button>
-          <button
-            role="tab"
-            aria-selected={activeTab === 'submissions'}
-            aria-controls="tab-panel-submissions"
-            onClick={() => setActiveTab('submissions')}
-            className={`px-4 py-2 font-medium text-sm transition-colors ${
-              activeTab === 'submissions'
-                ? 'text-spill-blue-800 border-b-2 border-spill-blue-800'
-                : 'text-slate-500 hover:text-slate-700'
-            }`}
-          >
-            Submissions
           </button>
           <button
             role="tab"
