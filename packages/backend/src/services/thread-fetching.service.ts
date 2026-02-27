@@ -2,91 +2,12 @@ import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { logger } from '../utils/logger';
 import { EMAIL, THREAD_LIMITS } from '../constants';
-import { redis } from '../utils/redis';
-import * as fs from 'fs';
-import * as path from 'path';
-
-/**
- * FIX T1: OAuth token refresh mutex
- * Prevents concurrent token refresh attempts which can cause race conditions
- * where multiple instances refresh simultaneously and invalidate each other's tokens
- */
-const TOKEN_REFRESH_LOCK_KEY = 'gmail:token_refresh_lock';
-const TOKEN_REFRESH_LOCK_TTL_SECONDS = 30; // Lock expires after 30 seconds
-const TOKEN_REFRESH_WAIT_MS = 100; // Polling interval while waiting for lock
-const TOKEN_REFRESH_MAX_WAIT_MS = 10000; // Maximum time to wait for another refresh
-
-/**
- * Acquire the token refresh lock or wait if another process is refreshing.
- * Returns the lock value string (for ownership-safe release) if acquired, null if timed out.
- */
-async function acquireTokenRefreshLock(traceId: string): Promise<string | null> {
-  const startTime = Date.now();
-  const lockValue = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-  while (Date.now() - startTime < TOKEN_REFRESH_MAX_WAIT_MS) {
-    try {
-      const result = await redis.set(
-        TOKEN_REFRESH_LOCK_KEY,
-        lockValue,
-        'EX',
-        TOKEN_REFRESH_LOCK_TTL_SECONDS,
-        'NX'
-      );
-
-      if (result === 'OK') {
-        logger.debug({ traceId }, 'Acquired OAuth token refresh lock');
-        return lockValue;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, TOKEN_REFRESH_WAIT_MS));
-    } catch (err) {
-      logger.warn({ err, traceId }, 'Redis unavailable for token refresh lock - proceeding without lock');
-      return lockValue; // Proceed without lock on Redis failure
-    }
-  }
-
-  logger.warn({ traceId }, 'Token refresh lock wait timeout - proceeding anyway');
-  return lockValue;
-}
-
-/**
- * Ownership-safe lock release using Lua script.
- * Only releases if the caller still owns the lock.
- */
-const TOKEN_LOCK_RELEASE_SCRIPT = `
-local lockKey = KEYS[1]
-local expectedValue = ARGV[1]
-local currentValue = redis.call('GET', lockKey)
-if currentValue == expectedValue then
-  redis.call('DEL', lockKey)
-  return 1
-else
-  return 0
-end
-`;
-
-async function releaseTokenRefreshLock(lockValue: string | null): Promise<void> {
-  if (!lockValue) return;
-  try {
-    await redis.eval(TOKEN_LOCK_RELEASE_SCRIPT, 1, TOKEN_REFRESH_LOCK_KEY, lockValue);
-  } catch (err) {
-    // Ignore - lock will expire naturally
-  }
-}
-
-/**
- * Context markers used for structuring thread content
- * These MUST be escaped in email bodies to prevent confusion
- */
-const CONTEXT_MARKERS = [
-  '=== COMPLETE EMAIL THREAD HISTORY ===',
-  '=== END OF THREAD HISTORY ===',
-  '=== NEW EMAIL REQUIRING RESPONSE ===',
-  '--- Message',
-  '---BEGIN',
-  '---END',
-];
+import {
+  loadGmailCredentials,
+  createOAuth2Client,
+  acquireTokenRefreshLock,
+  releaseTokenRefreshLock,
+} from '../utils/gmail-auth';
 
 /**
  * Escape context markers in email content to prevent AI confusion
@@ -114,12 +35,6 @@ function escapeContextMarkers(content: string): string {
   return escaped;
 }
 
-// Gmail credentials paths (shared with email-processing.service.ts)
-const CREDENTIALS_PATH = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/credentials.json');
-const TOKEN_PATH = process.env.MCP_GMAIL_TOKEN_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/token.json');
-
 /**
  * Represents a single email message in a thread
  */
@@ -144,25 +59,6 @@ export interface EmailThread {
 }
 
 /**
- * Load credentials from environment variables (for production)
- */
-function loadCredentialsFromEnv(): { credentials: any; token: any } | null {
-  const credentialsBase64 = process.env.GMAIL_CREDENTIALS_BASE64;
-  const tokenBase64 = process.env.GMAIL_TOKEN_BASE64;
-
-  if (credentialsBase64 && tokenBase64) {
-    try {
-      const credentials = JSON.parse(Buffer.from(credentialsBase64, 'base64').toString('utf-8'));
-      const token = JSON.parse(Buffer.from(tokenBase64, 'base64').toString('utf-8'));
-      return { credentials, token };
-    } catch (error) {
-      logger.error({ error }, 'Failed to parse Gmail credentials from env vars');
-    }
-  }
-  return null;
-}
-
-/**
  * Service for fetching complete email thread history from Gmail
  *
  * This service ensures the AI agent has full context of all messages
@@ -182,54 +78,10 @@ export class ThreadFetchingService {
    */
   private async initializeGmailClient(): Promise<void> {
     try {
-      let credentials: any;
-      let token: any;
+      const creds = loadGmailCredentials('ThreadFetchingService');
+      if (!creds) return;
 
-      // First try to load from environment variables (RECOMMENDED for production)
-      const envCreds = loadCredentialsFromEnv();
-      if (envCreds) {
-        logger.info('ThreadFetchingService: Loading Gmail credentials from environment variables (secure)');
-        credentials = envCreds.credentials;
-        token = envCreds.token;
-      } else {
-        // Fall back to file-based credentials (for local development ONLY)
-        const isProduction = process.env.NODE_ENV === 'production';
-
-        if (!fs.existsSync(CREDENTIALS_PATH)) {
-          logger.warn({ path: CREDENTIALS_PATH }, 'ThreadFetchingService: Gmail credentials file not found');
-          return;
-        }
-        credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8'));
-
-        if (!fs.existsSync(TOKEN_PATH)) {
-          logger.warn({ path: TOKEN_PATH }, 'ThreadFetchingService: Gmail token file not found');
-          return;
-        }
-        token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf-8'));
-
-        // Log security warning in production
-        if (isProduction) {
-          logger.warn(
-            'ThreadFetchingService: SECURITY WARNING - Using file-based credentials in production'
-          );
-        }
-      }
-
-      const { client_id, client_secret, redirect_uris } = credentials.installed || credentials.web;
-      this.oauth2Client = new OAuth2Client(client_id, client_secret, redirect_uris?.[0]);
-
-      // Handle token format - might be from MCP (with nested structure) or direct OAuth
-      if (token.refresh_token) {
-        this.oauth2Client.setCredentials({
-          refresh_token: token.refresh_token,
-          access_token: token.token || token.access_token,
-          token_type: 'Bearer',
-          expiry_date: token.expiry ? new Date(token.expiry).getTime() : undefined,
-        });
-      } else {
-        this.oauth2Client.setCredentials(token);
-      }
-
+      this.oauth2Client = createOAuth2Client(creds.credentials, creds.token);
       this.gmail = google.gmail({ version: 'v1', auth: this.oauth2Client });
 
       // Get the actual scheduler email address
@@ -279,73 +131,7 @@ export class ThreadFetchingService {
         format: 'full',
       });
 
-      if (!threadResponse.data.messages || threadResponse.data.messages.length === 0) {
-        logger.warn({ traceId, threadId }, 'Thread has no messages');
-        return null;
-      }
-
-      // FIX: Large thread memory protection
-      // If thread has too many messages, only process the most recent ones
-      let gmailMessages = threadResponse.data.messages;
-      const originalCount = gmailMessages.length;
-
-      if (originalCount > THREAD_LIMITS.MAX_MESSAGES_PER_THREAD) {
-        logger.warn(
-          { traceId, threadId, originalCount, limit: THREAD_LIMITS.MAX_MESSAGES_PER_THREAD },
-          'Thread exceeds message limit - keeping only recent messages'
-        );
-        // Keep only the most recent messages (they're in chronological order from Gmail)
-        gmailMessages = gmailMessages.slice(-THREAD_LIMITS.KEEP_RECENT_MESSAGES);
-      }
-
-      const messages: ThreadMessage[] = [];
-      const participantEmails = new Set<string>();
-      let totalBodySize = 0;
-
-      for (const gmailMessage of gmailMessages) {
-        const parsed = this.parseGmailMessage(gmailMessage);
-        if (parsed) {
-          // Track total body size to prevent memory exhaustion
-          const bodySize = Buffer.byteLength(parsed.body, 'utf-8');
-          if (totalBodySize + bodySize > THREAD_LIMITS.MAX_THREAD_BODY_SIZE) {
-            logger.warn(
-              { traceId, threadId, totalBodySize, limit: THREAD_LIMITS.MAX_THREAD_BODY_SIZE },
-              'Thread body size limit reached - truncating older messages'
-            );
-            break;
-          }
-          totalBodySize += bodySize;
-
-          messages.push(parsed);
-          if (parsed.from) participantEmails.add(parsed.from.toLowerCase());
-          if (parsed.to) participantEmails.add(parsed.to.toLowerCase());
-        }
-      }
-
-      // Sort messages chronologically (oldest first)
-      messages.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-      const thread: EmailThread = {
-        threadId,
-        messages,
-        participantEmails: Array.from(participantEmails),
-        messageCount: messages.length,
-      };
-
-      // Log if thread was truncated
-      if (originalCount > messages.length) {
-        logger.info(
-          { traceId, threadId, originalCount, processedCount: messages.length },
-          'Thread was truncated to prevent memory issues'
-        );
-      }
-
-      logger.info(
-        { traceId, threadId, messageCount: thread.messageCount, participants: thread.participantEmails },
-        'Thread history fetched successfully'
-      );
-
-      return thread;
+      return this.processGmailThread(threadId, traceId, threadResponse.data.messages || []);
     } catch (error: any) {
       // Handle thread not found (404)
       if (error?.code === 404 || error?.status === 404) {
@@ -357,9 +143,6 @@ export class ThreadFetchingService {
       if (error?.code === 401 || error?.status === 401) {
         logger.warn({ traceId, threadId }, 'Gmail token expired - attempting refresh');
         try {
-          // FIX T1: Use mutex to prevent concurrent refresh attempts
-          // Multiple workers hitting 401 simultaneously could all try to refresh
-          // and invalidate each other's tokens. The mutex ensures only one refreshes.
           const lockValue = await acquireTokenRefreshLock(traceId);
           if (this.oauth2Client) {
             if (lockValue) {
@@ -371,45 +154,13 @@ export class ThreadFetchingService {
             }
             logger.info({ traceId, threadId }, 'Token refreshed successfully - retrying fetch');
 
-            // Retry the thread fetch once
             const retryResponse = await this.gmail!.users.threads.get({
               userId: 'me',
               id: threadId,
               format: 'full',
             });
 
-            if (!retryResponse.data.messages || retryResponse.data.messages.length === 0) {
-              logger.warn({ traceId, threadId }, 'Thread has no messages after retry');
-              return null;
-            }
-
-            const messages: ThreadMessage[] = [];
-            const participantEmails = new Set<string>();
-
-            for (const gmailMessage of retryResponse.data.messages) {
-              const parsed = this.parseGmailMessage(gmailMessage);
-              if (parsed) {
-                messages.push(parsed);
-                if (parsed.from) participantEmails.add(parsed.from.toLowerCase());
-                if (parsed.to) participantEmails.add(parsed.to.toLowerCase());
-              }
-            }
-
-            messages.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-            const thread: EmailThread = {
-              threadId,
-              messages,
-              participantEmails: Array.from(participantEmails),
-              messageCount: messages.length,
-            };
-
-            logger.info(
-              { traceId, threadId, messageCount: thread.messageCount },
-              'Thread fetched successfully after token refresh'
-            );
-
-            return thread;
+            return this.processGmailThread(threadId, traceId, retryResponse.data.messages || []);
           }
         } catch (refreshError) {
           logger.error(
@@ -432,6 +183,84 @@ export class ThreadFetchingService {
       logger.error({ error, traceId, threadId }, 'Failed to fetch thread');
       throw error;
     }
+  }
+
+  /**
+   * Process raw Gmail messages into an EmailThread with memory protection.
+   *
+   * Applies MAX_MESSAGES_PER_THREAD and MAX_THREAD_BODY_SIZE limits consistently.
+   * Previously, the 401-retry code path skipped these limits, risking memory
+   * exhaustion on large threads after a token refresh.
+   */
+  private processGmailThread(
+    threadId: string,
+    traceId: string,
+    rawMessages: gmail_v1.Schema$Message[]
+  ): EmailThread | null {
+    if (rawMessages.length === 0) {
+      logger.warn({ traceId, threadId }, 'Thread has no messages');
+      return null;
+    }
+
+    // Large thread memory protection: cap message count
+    let gmailMessages = rawMessages;
+    const originalCount = gmailMessages.length;
+
+    if (originalCount > THREAD_LIMITS.MAX_MESSAGES_PER_THREAD) {
+      logger.warn(
+        { traceId, threadId, originalCount, limit: THREAD_LIMITS.MAX_MESSAGES_PER_THREAD },
+        'Thread exceeds message limit - keeping only recent messages'
+      );
+      gmailMessages = gmailMessages.slice(-THREAD_LIMITS.KEEP_RECENT_MESSAGES);
+    }
+
+    const messages: ThreadMessage[] = [];
+    const participantEmails = new Set<string>();
+    let totalBodySize = 0;
+
+    for (const gmailMessage of gmailMessages) {
+      const parsed = this.parseGmailMessage(gmailMessage);
+      if (parsed) {
+        // Track total body size to prevent memory exhaustion
+        const bodySize = Buffer.byteLength(parsed.body, 'utf-8');
+        if (totalBodySize + bodySize > THREAD_LIMITS.MAX_THREAD_BODY_SIZE) {
+          logger.warn(
+            { traceId, threadId, totalBodySize, limit: THREAD_LIMITS.MAX_THREAD_BODY_SIZE },
+            'Thread body size limit reached - truncating older messages'
+          );
+          break;
+        }
+        totalBodySize += bodySize;
+
+        messages.push(parsed);
+        if (parsed.from) participantEmails.add(parsed.from.toLowerCase());
+        if (parsed.to) participantEmails.add(parsed.to.toLowerCase());
+      }
+    }
+
+    // Sort messages chronologically (oldest first)
+    messages.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    const thread: EmailThread = {
+      threadId,
+      messages,
+      participantEmails: Array.from(participantEmails),
+      messageCount: messages.length,
+    };
+
+    if (originalCount > messages.length) {
+      logger.info(
+        { traceId, threadId, originalCount, processedCount: messages.length },
+        'Thread was truncated to prevent memory issues'
+      );
+    }
+
+    logger.info(
+      { traceId, threadId, messageCount: thread.messageCount, participants: thread.participantEmails },
+      'Thread history fetched successfully'
+    );
+
+    return thread;
   }
 
   /**

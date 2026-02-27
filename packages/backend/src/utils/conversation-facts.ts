@@ -58,65 +58,88 @@ export function createEmptyFacts(): ConversationFacts {
 }
 
 /**
- * Time-related patterns for extraction
+ * Time-related patterns for extraction.
+ *
+ * IMPORTANT: These are stored as source/flags pairs and new RegExp instances are
+ * created at each call site. Module-level RegExp with the 'g' flag has mutable
+ * `lastIndex` state, causing `.test()` and `.matchAll()` to alternate between
+ * finding and missing matches across calls.
  */
-const TIME_PATTERNS = [
+const TIME_PATTERN_SOURCES: Array<{ source: string; flags: string }> = [
   // Day + time: "Monday at 3pm", "Tuesday 2:30pm"
-  /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/gi,
-
+  { source: '\\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\s+(?:at\\s+)?(\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)', flags: 'gi' },
   // Date + time: "January 15th at 2pm", "15th March 3pm"
-  /\b(\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/gi,
-
+  { source: '\\b(\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?)\\s+(?:at\\s+)?(\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)', flags: 'gi' },
   // Relative: "tomorrow at 3pm", "next Monday 2pm"
-  /\b(tomorrow|next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)/gi,
+  { source: '\\b(tomorrow|next\\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\\s+(?:at\\s+)?(\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)', flags: 'gi' },
 ];
 
+function createTimePatterns(): RegExp[] {
+  return TIME_PATTERN_SOURCES.map(p => new RegExp(p.source, p.flags));
+}
+
 /**
- * Preference patterns
+ * Preference pattern sources
  */
-const PREFERENCE_PATTERNS = {
+const PREFERENCE_PATTERN_SOURCES = {
   therapist: [
-    /(?:i\s+)?prefer\s+([^.!?]+)/gi,
-    /(?:i'm\s+)?(?:usually\s+)?(?:available|free)\s+([^.!?]+)/gi,
-    /(?:my|the)\s+(?:best|preferred)\s+(?:time|day)s?\s+(?:is|are)\s+([^.!?]+)/gi,
-    /(?:mornings?|afternoons?|evenings?)\s+(?:work|are)\s+(?:best|better)\s+(?:for me)?/gi,
+    { source: '(?:i\\s+)?prefer\\s+([^.!?]+)', flags: 'gi' },
+    { source: "(?:i'm\\s+)?(?:usually\\s+)?(?:available|free)\\s+([^.!?]+)", flags: 'gi' },
+    { source: '(?:my|the)\\s+(?:best|preferred)\\s+(?:time|day)s?\\s+(?:is|are)\\s+([^.!?]+)', flags: 'gi' },
+    { source: '(?:mornings?|afternoons?|evenings?)\\s+(?:work|are)\\s+(?:best|better)\\s+(?:for me)?', flags: 'gi' },
   ],
   user: [
-    /(?:i\s+)?(?:can|could|would)\s+(?:do|make)\s+([^.!?]+)/gi,
-    /(?:i'm\s+)?(?:available|free)\s+([^.!?]+)/gi,
-    /(?:that|this)\s+(?:works?|sounds?\s+good)/gi,
-    /(?:i'd\s+)?prefer\s+([^.!?]+)/gi,
+    { source: '(?:i\\s+)?(?:can|could|would)\\s+(?:do|make)\\s+([^.!?]+)', flags: 'gi' },
+    { source: "(?:i'm\\s+)?(?:available|free)\\s+([^.!?]+)", flags: 'gi' },
+    { source: '(?:that|this)\\s+(?:works?|sounds?\\s+good)', flags: 'gi' },
+    { source: "(?:i'd\\s+)?prefer\\s+([^.!?]+)", flags: 'gi' },
   ],
 };
 
-/**
- * Blocker patterns
- */
-const BLOCKER_PATTERNS = [
-  /(?:i'm\s+)?(?:not\s+)?(?:away|traveling|out\s+of\s+(?:town|office)|on\s+(?:holiday|vacation|leave))\s+([^.!?]+)/gi,
-  /(?:won't|can't|cannot)\s+(?:be\s+)?(?:available|make\s+it|do)\s+([^.!?]+)/gi,
-  /(?:that|this)\s+(?:day|time|week)\s+(?:doesn't|won't|won't)\s+work/gi,
-  /(?:unfortunately|sorry),?\s+(?:i\s+)?(?:can't|cannot|won't)/gi,
-];
+function createPreferencePatterns(type: 'therapist' | 'user'): RegExp[] {
+  return PREFERENCE_PATTERN_SOURCES[type].map(p => new RegExp(p.source, p.flags));
+}
 
 /**
- * Selection patterns (user picking a time)
+ * Blocker pattern sources
  */
-const SELECTION_PATTERNS = [
-  /(?:let's\s+)?(?:go\s+)?(?:with|for)\s+([^.!?]+)/gi,
-  /(?:i'll\s+)?(?:take|choose|pick)\s+([^.!?]+)/gi,
-  /(?:that|this)\s+(?:works?|sounds?\s+(?:good|great|perfect))/gi,
-  /(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:works?|sounds?\s+(?:good|great|perfect)|please)/gi,
+const BLOCKER_PATTERN_SOURCES = [
+  { source: "(?:i'm\\s+)?(?:not\\s+)?(?:away|traveling|out\\s+of\\s+(?:town|office)|on\\s+(?:holiday|vacation|leave))\\s+([^.!?]+)", flags: 'gi' },
+  { source: "(?:won't|can't|cannot)\\s+(?:be\\s+)?(?:available|make\\s+it|do)\\s+([^.!?]+)", flags: 'gi' },
+  { source: "(?:that|this)\\s+(?:day|time|week)\\s+(?:doesn't|won't|won't)\\s+work", flags: 'gi' },
+  { source: "(?:unfortunately|sorry),?\\s+(?:i\\s+)?(?:can't|cannot|won't)", flags: 'gi' },
 ];
 
+function createBlockerPatterns(): RegExp[] {
+  return BLOCKER_PATTERN_SOURCES.map(p => new RegExp(p.source, p.flags));
+}
+
 /**
- * Confirmation patterns (therapist confirming)
+ * Selection pattern sources (user picking a time)
  */
-const CONFIRMATION_PATTERNS = [
-  /(?:confirmed|booked|see\s+you\s+(?:then|on|at))/gi,
-  /(?:that's\s+)?(?:confirmed|all\s+set|booked\s+in)/gi,
-  /(?:i'll\s+)?send\s+(?:you\s+)?(?:the\s+)?(?:meeting\s+)?link/gi,
+const SELECTION_PATTERN_SOURCES = [
+  { source: "(?:let's\\s+)?(?:go\\s+)?(?:with|for)\\s+([^.!?]+)", flags: 'gi' },
+  { source: "(?:i'll\\s+)?(?:take|choose|pick)\\s+([^.!?]+)", flags: 'gi' },
+  { source: '(?:that|this)\\s+(?:works?|sounds?\\s+(?:good|great|perfect))', flags: 'gi' },
+  { source: '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\s+(?:at\\s+)?(\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)\\s+(?:works?|sounds?\\s+(?:good|great|perfect)|please)', flags: 'gi' },
 ];
+
+function createSelectionPatterns(): RegExp[] {
+  return SELECTION_PATTERN_SOURCES.map(p => new RegExp(p.source, p.flags));
+}
+
+/**
+ * Confirmation pattern sources (therapist confirming)
+ */
+const CONFIRMATION_PATTERN_SOURCES = [
+  { source: '(?:confirmed|booked|see\\s+you\\s+(?:then|on|at))', flags: 'gi' },
+  { source: "(?:that's\\s+)?(?:confirmed|all\\s+set|booked\\s+in)", flags: 'gi' },
+  { source: "(?:i'll\\s+)?send\\s+(?:you\\s+)?(?:the\\s+)?(?:meeting\\s+)?link", flags: 'gi' },
+];
+
+function createConfirmationPatterns(): RegExp[] {
+  return CONFIRMATION_PATTERN_SOURCES.map(p => new RegExp(p.source, p.flags));
+}
 
 /**
  * Extract facts from a single message
@@ -127,10 +150,18 @@ function extractFromMessage(
   existingFacts: ConversationFacts
 ): ConversationFacts {
   const facts = { ...existingFacts };
-  const contentLower = content.toLowerCase();
+
+  // Create fresh regex instances to avoid stale lastIndex state
+  const timePatterns = createTimePatterns();
+  const prefPatterns = isFromTherapist
+    ? createPreferencePatterns('therapist')
+    : createPreferencePatterns('user');
+  const blockerPatterns = createBlockerPatterns();
+  const selectionPatterns = createSelectionPatterns();
+  const confirmationPatterns = createConfirmationPatterns();
 
   // Extract proposed times
-  for (const pattern of TIME_PATTERNS) {
+  for (const pattern of timePatterns) {
     const matches = content.matchAll(pattern);
     for (const match of matches) {
       const time = match[0].trim();
@@ -141,9 +172,6 @@ function extractFromMessage(
   }
 
   // Extract preferences
-  const prefPatterns = isFromTherapist
-    ? PREFERENCE_PATTERNS.therapist
-    : PREFERENCE_PATTERNS.user;
   const prefArray = isFromTherapist
     ? facts.therapistPreferences
     : facts.userPreferences;
@@ -159,7 +187,7 @@ function extractFromMessage(
   }
 
   // Extract blockers
-  for (const pattern of BLOCKER_PATTERNS) {
+  for (const pattern of blockerPatterns) {
     const matches = content.matchAll(pattern);
     for (const match of matches) {
       const blocker = (match[1] || match[0]).trim();
@@ -171,10 +199,11 @@ function extractFromMessage(
 
   // Check for user selection (only from user messages)
   if (!isFromTherapist) {
-    for (const pattern of SELECTION_PATTERNS) {
+    for (const pattern of selectionPatterns) {
       if (pattern.test(content)) {
         // Try to extract the specific time they selected
-        for (const timePattern of TIME_PATTERNS) {
+        // Create fresh time patterns for this nested search
+        for (const timePattern of createTimePatterns()) {
           const timeMatch = content.match(timePattern);
           if (timeMatch) {
             facts.selectedTime = timeMatch[0].trim();
@@ -188,7 +217,7 @@ function extractFromMessage(
 
   // Check for therapist confirmation
   if (isFromTherapist) {
-    for (const pattern of CONFIRMATION_PATTERNS) {
+    for (const pattern of confirmationPatterns) {
       if (pattern.test(content)) {
         // The confirmed time should be the selected time or most recently proposed time
         facts.confirmedTime = facts.selectedTime || facts.proposedTimes[facts.proposedTimes.length - 1];
