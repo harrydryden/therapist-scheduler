@@ -46,6 +46,9 @@ const PROCESSED_MESSAGE_TTL_DAYS = 30;
 const MAX_UNMATCHED_ATTEMPTS = 3;
 const UNMATCHED_ATTEMPT_TTL_SECONDS = 3600; // 1 hour window for retry attempts
 
+// DB key for Gmail history ID persistence (SystemSetting id)
+const HISTORY_ID_SETTING_KEY = 'gmail.lastHistoryId';
+
 // FIX M11: Only run cleanup every N messages to reduce database load
 const CLEANUP_INTERVAL_MESSAGES = 100;
 // FIX #13: Use Redis atomic counter instead of module-level variable
@@ -442,6 +445,75 @@ export class EmailProcessingService {
   }
 
   /**
+   * Read the Gmail history ID checkpoint from Redis with database fallback.
+   * If Redis has no value (e.g., after a Redis restart), falls back to the
+   * durable copy in the SystemSetting table.
+   */
+  private async getHistoryId(): Promise<number> {
+    // Try Redis first (fast path)
+    try {
+      const redisValue = await redis.get(HISTORY_ID_KEY);
+      if (redisValue) {
+        return parseInt(redisValue, 10);
+      }
+    } catch {
+      // Redis unavailable — fall through to DB
+    }
+
+    // Fallback to database
+    try {
+      const setting = await prisma.systemSetting.findUnique({
+        where: { id: HISTORY_ID_SETTING_KEY },
+      });
+      if (setting) {
+        const dbValue = parseInt(JSON.parse(setting.value), 10);
+        // Re-populate Redis for future fast lookups
+        await safeRedisOp(
+          () => redis.set(HISTORY_ID_KEY, dbValue.toString()),
+          'restore history ID to Redis from DB'
+        );
+        logger.info({ historyId: dbValue }, 'Restored Gmail history ID from database fallback');
+        return dbValue;
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to read history ID from database fallback');
+    }
+
+    return 0;
+  }
+
+  /**
+   * Persist the Gmail history ID checkpoint to both Redis and database.
+   * Redis provides fast access; database provides durability across Redis restarts.
+   */
+  private async setHistoryId(historyId: number): Promise<void> {
+    // Write to Redis (fast, primary)
+    await safeRedisOp(
+      () => redis.set(HISTORY_ID_KEY, historyId.toString()),
+      'set history ID in Redis'
+    );
+
+    // Write to database (durable, fallback) — fire and forget to avoid slowing the hot path
+    prisma.systemSetting.upsert({
+      where: { id: HISTORY_ID_SETTING_KEY },
+      create: {
+        id: HISTORY_ID_SETTING_KEY,
+        value: JSON.stringify(historyId),
+        category: 'gmail',
+        label: 'Last Gmail History ID',
+        description: 'Durable checkpoint for Gmail push notification sync. Do not edit manually.',
+        valueType: 'number',
+        defaultValue: JSON.stringify(0),
+      },
+      update: {
+        value: JSON.stringify(historyId),
+      },
+    }).catch((err: unknown) => {
+      logger.warn({ err, historyId }, 'Failed to persist history ID to database (non-critical)');
+    });
+  }
+
+  /**
    * Process a Gmail push notification
    *
    * IMPORTANT: Pub/Sub can deliver notifications out of order.
@@ -466,8 +538,8 @@ export class EmailProcessingService {
 
     try {
       // Get the last processed history ID (our sync point)
-      const lastHistoryId = await redis.get(HISTORY_ID_KEY);
-      const lastHistoryIdNum = lastHistoryId ? parseInt(lastHistoryId, 10) : 0;
+      // Uses Redis with database fallback for durability across Redis restarts
+      const lastHistoryIdNum = await this.getHistoryId();
 
       // Don't skip out-of-order notifications - always fetch from our sync point
       // The message-level deduplication handles any duplicates safely
@@ -577,8 +649,8 @@ export class EmailProcessingService {
             );
           }
 
-          // Reset to notification history ID and update Redis
-          await redis.set(HISTORY_ID_KEY, notificationHistoryId.toString());
+          // Reset to notification history ID and persist to both Redis and DB
+          await this.setHistoryId(notificationHistoryId);
           return;
         }
         // Unknown error - rethrow
@@ -597,7 +669,7 @@ export class EmailProcessingService {
         logger.info({ traceId }, 'No new messages in history');
         // Use MAX to ensure we only move forward, never backward
         if (actualLatestHistoryId > lastHistoryIdNum) {
-          await redis.set(HISTORY_ID_KEY, actualLatestHistoryId.toString());
+          await this.setHistoryId(actualLatestHistoryId);
         }
         return;
       }
@@ -618,7 +690,7 @@ export class EmailProcessingService {
       // Update to the actual latest history ID from the API response
       // Only move forward to prevent re-processing on out-of-order notifications
       if (actualLatestHistoryId > lastHistoryIdNum) {
-        await redis.set(HISTORY_ID_KEY, actualLatestHistoryId.toString());
+        await this.setHistoryId(actualLatestHistoryId);
         logger.info(
           { traceId, previousHistoryId: lastHistoryIdNum, newHistoryId: actualLatestHistoryId },
           'Updated history ID checkpoint'
@@ -1786,8 +1858,8 @@ export class EmailProcessingService {
     const historyId = response.data.historyId || '';
     const expiration = response.data.expiration || '';
 
-    // Store initial history ID
-    await redis.set(HISTORY_ID_KEY, historyId);
+    // Store initial history ID (persist to both Redis and DB)
+    await this.setHistoryId(parseInt(historyId, 10));
 
     logger.info({ historyId, expiration, topicName }, 'Gmail push notifications set up');
 
@@ -2248,12 +2320,38 @@ ${htmlParts.join('\n')}
               : (email.appointment.gmailThreadId ?? undefined);
           }
 
-          await this.sendEmail({
-            to: email.toEmail,
-            subject: email.subject,
-            body: bodyContent,
-            threadId,
-          });
+          // Idempotent send guard: check if this email was already sent.
+          // Prevents duplicate sends when Gmail succeeds but DB update fails on a prior attempt.
+          const sendGuardKey = `email:send-guard:${email.id}`;
+          let alreadySent = false;
+          try {
+            const guardValue = await redis.get(sendGuardKey);
+            if (guardValue) {
+              alreadySent = true;
+              logger.info(
+                { traceId, emailId: email.id },
+                'Send guard: email already sent — skipping send, updating DB only'
+              );
+            }
+          } catch {
+            // Redis unavailable — proceed with send (better duplicate than no send)
+          }
+
+          if (!alreadySent) {
+            await this.sendEmail({
+              to: email.toEmail,
+              subject: email.subject,
+              body: bodyContent,
+              threadId,
+            });
+
+            // Set send guard in Redis before DB update
+            try {
+              await redis.set(sendGuardKey, 'sent', 'EX', 3600);
+            } catch {
+              // Redis unavailable — proceed without guard
+            }
+          }
 
           await prisma.pendingEmail.update({
             where: { id: email.id },

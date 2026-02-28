@@ -17,6 +17,7 @@ import { adminTherapistRoutes } from './admin-therapists.routes';
 import { adminStatsRoutes } from './admin-stats.routes';
 import { adminDataRoutes } from './admin-data.routes';
 import { adminSSERoutes } from './admin-sse.routes';
+import { adminQueueReviewRoutes } from './admin-queue-review.routes';
 
 export async function adminDashboardRoutes(fastify: FastifyInstance) {
   await fastify.register(adminAppointmentRoutes);
@@ -25,4 +26,5 @@ export async function adminDashboardRoutes(fastify: FastifyInstance) {
   await fastify.register(adminStatsRoutes);
   await fastify.register(adminDataRoutes);
   await fastify.register(adminSSERoutes);
+  await fastify.register(adminQueueReviewRoutes);
 }

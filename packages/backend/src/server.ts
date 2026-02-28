@@ -28,6 +28,7 @@ import { weeklyMailingListService } from './services/weekly-mailing-list.service
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { notionSyncManager } from './services/notion-sync-manager.service';
 import { emailQueueService } from './services/email-queue.service';
+import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { unsubscribeRoutes } from './routes/unsubscribe.routes';
 import { feedbackFormRoutes } from './routes/feedback-form.routes';
 import { adminFormsRoutes } from './routes/admin-forms.routes';
@@ -391,6 +392,7 @@ async function start() {
       emailPollingService.stop();
       gmailWatchService.stop();
       pendingEmailService.stop();
+      sideEffectRetryService.stop();
       postBookingFollowupService.stop();
       weeklyMailingListService.stop();
       slackWeeklySummaryService.stop();
@@ -497,10 +499,16 @@ async function start() {
     emailPollingService.start(); // Backup polling for missed push notifications
     gmailWatchService.start(); // Auto-renew Gmail push notification watches
     pendingEmailService.start(); // Retry failed email sends
+    sideEffectRetryService.start(); // Retry failed side effects (emails, Slack, Notion syncs)
     postBookingFollowupService.start(); // Post-booking follow-ups (meeting link checks, feedback forms)
     weeklyMailingListService.start(); // Weekly promotional mailing list
     notionSyncManager.start(); // Unified Notion sync (therapist freeze, users, feedback read/write)
     slackWeeklySummaryService.start(); // Weekly Slack summary (Monday 9am)
+
+    // Recover any emails buffered in Redis WAL during database downtime
+    emailQueueService.recoverFromWAL().catch((err) => {
+      logger.warn({ err }, 'WAL recovery on startup failed (non-critical — will retry on next cycle)');
+    });
 
     logger.info(
       {
