@@ -720,6 +720,28 @@ class SlackNotificationService {
     });
   }
 
+  /**
+   * Alert when an incoming email could not be matched to any appointment
+   * after max retries. This means a therapist or client reply was silently dropped.
+   */
+  async notifyUnmatchedEmailAbandoned(
+    messageId: string,
+    from: string,
+    subject: string,
+    attempts: number
+  ): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Unmatched Email Dropped',
+      severity: 'high',
+      details: `Incoming email could not be matched to any appointment after *${attempts}* attempts and was abandoned. Manual review needed.`,
+      additionalFields: {
+        'From': from,
+        'Subject': subject.slice(0, 100),
+        'Message ID': messageId,
+      },
+    });
+  }
+
   // ============================================
   // Summary Reports
   // ============================================

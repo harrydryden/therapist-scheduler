@@ -15,6 +15,7 @@ function getJustinTimeService(): typeof import('./justin-time.service').JustinTi
 }
 import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
+import { slackNotificationService } from './slack-notification.service';
 import { EMAIL, PENDING_EMAIL_QUEUE } from '../constants';
 import {
   detectThreadDivergence,
@@ -1133,6 +1134,18 @@ export class EmailProcessingService {
               traceId
             ),
           ]);
+
+          // Alert admins — an unmatched email likely means a therapist or client
+          // reply was silently dropped. This needs manual review.
+          slackNotificationService.notifyUnmatchedEmailAbandoned(
+            messageId,
+            email.from,
+            email.subject,
+            attempts
+          ).catch((err) => {
+            logger.warn({ traceId, err }, 'Failed to send Slack alert for unmatched email');
+          });
+
           return false;
         }
 
@@ -2405,7 +2418,7 @@ ${htmlParts.join('\n')}
 
             // Set send guard in Redis before DB update
             try {
-              await redis.set(sendGuardKey, 'sent', 'EX', 3600);
+              await redis.set(sendGuardKey, 'sent', 'EX', 5 * 3600); // 5h, must exceed max retry backoff (4h)
             } catch {
               // Redis unavailable — proceed without guard
             }

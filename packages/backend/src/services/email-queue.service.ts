@@ -21,7 +21,7 @@ import { EMAIL } from '../constants';
 
 // Redis keys for reliability features
 const SEND_GUARD_PREFIX = 'email:send-guard:'; // Idempotent send guard
-const SEND_GUARD_TTL_SECONDS = 3600; // 1 hour
+const SEND_GUARD_TTL_SECONDS = 5 * 3600; // 5 hours (must exceed max retry backoff of 4h)
 const WAL_KEY = 'email:write-ahead-log'; // Write-ahead log for DB downtime
 const WAL_ENTRY_TTL_SECONDS = 86400; // 24 hours
 

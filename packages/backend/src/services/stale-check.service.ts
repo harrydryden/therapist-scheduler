@@ -4,6 +4,7 @@ import { releaseLock, renewLock, acquireLock } from '../utils/redis-locks';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
+import { emailQueueService } from './email-queue.service';
 import { STALE_THRESHOLDS, STALL_DETECTION, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, INACTIVITY_THRESHOLDS } from '../constants';
 import { getSettingValue } from './settings.service';
 
@@ -631,6 +632,21 @@ class StaleCheckService {
           { checkId, recoveredCount },
           'Recovered missed replies from stale threads'
         );
+      }
+
+      // Periodic WAL recovery: sync any emails buffered in Redis during DB downtime.
+      // WAL entries expire after 24h, so hourly recovery prevents silent email loss
+      // if the server didn't restart after the DB recovered.
+      try {
+        const walRecovered = await emailQueueService.recoverFromWAL();
+        if (walRecovered > 0) {
+          logger.info(
+            { checkId, walRecovered },
+            'Recovered emails from write-ahead log during periodic check'
+          );
+        }
+      } catch (walErr) {
+        logger.warn({ checkId, error: walErr }, 'Periodic WAL recovery failed (non-critical)');
       }
 
       // Edge Case #7: Auto-escalation to human control
