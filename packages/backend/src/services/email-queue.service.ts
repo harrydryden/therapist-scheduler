@@ -451,12 +451,12 @@ class EmailQueueService {
   /**
    * Get queue health metrics.
    */
-  async getStats() {
+  async getStats(): Promise<{ available: boolean; waiting: number; active: number; delayed: number; failed: number }> {
     if (!this.queue) {
       return { available: false, waiting: 0, active: 0, delayed: 0, failed: 0 };
     }
     const counts = await this.queue.getJobCounts('waiting', 'active', 'delayed', 'failed');
-    return { available: true, ...counts };
+    return { available: true, waiting: counts.waiting, active: counts.active, delayed: counts.delayed, failed: counts.failed };
   }
 
   /**

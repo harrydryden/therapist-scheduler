@@ -642,6 +642,25 @@ class SlackNotificationService {
   }
 
   /**
+   * Notify when an appointment is cancelled
+   */
+  async notifyAppointmentCancelled(
+    appointmentId: string,
+    userName: string | null,
+    therapistName: string,
+    reason: string
+  ): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Appointment Cancelled',
+      severity: 'medium',
+      appointmentId,
+      therapistName,
+      details: `Reason: ${reason}`,
+      emoji: '❌',
+    });
+  }
+
+  /**
    * Notify when an appointment is completed (feedback received).
    *
    * Feedback answers are shown as an abridged inline summary beneath a

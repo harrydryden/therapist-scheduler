@@ -93,11 +93,11 @@ class MessageQueueHealthService {
 
     // Determine email queue status
     let emailQueueStatus: 'healthy' | 'degraded' | 'unavailable' = 'healthy';
-    if (!bullmqStats.available && pendingEmailStats.pending > 10) {
-      emailQueueStatus = 'degraded';
-    }
     if (pendingEmailStats.abandoned > 0 || pendingEmailStats.failed > 5) {
       emailQueueStatus = 'degraded';
+    }
+    if (!bullmqStats.available) {
+      emailQueueStatus = 'unavailable';
     }
 
     // Determine side effect status
