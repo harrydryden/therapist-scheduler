@@ -431,7 +431,16 @@ export default function HumanControlSection({
                 </button>
                 {reprocessPreview.unprocessedCount > 0 && (
                   <button
-                    onClick={() => reprocessThreadMutation.mutate({ id: appointment.id })}
+                    onClick={() => {
+                      const unprocessedIds = reprocessPreview.threads
+                        .flatMap(t => t.messages)
+                        .filter(m => m.status === 'unprocessed')
+                        .map(m => m.messageId);
+                      reprocessThreadMutation.mutate({
+                        id: appointment.id,
+                        forceMessageIds: unprocessedIds,
+                      });
+                    }}
                     disabled={reprocessThreadMutation.isPending}
                     aria-busy={reprocessThreadMutation.isPending}
                     className="flex-1 px-3 py-2 bg-spill-blue-800 text-white rounded-lg hover:bg-primary-600 transition-colors disabled:opacity-50 text-sm font-medium"
