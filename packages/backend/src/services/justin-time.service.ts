@@ -2,20 +2,11 @@ import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { config } from '../config';
 import { CLAUDE_MODELS, MODEL_CONFIG } from '../config/models';
-import {
-  anthropicClient,
-  isTransientError as isTransientApiError,
-  addJitter,
-  RateLimitError,
-} from '../utils/anthropic-client';
+import { anthropicClient } from '../utils/anthropic-client';
 import { logger } from '../utils/logger';
-import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
 import { prisma } from '../utils/database';
 import { emailProcessingService } from './email-processing.service';
 import { notionService } from './notion.service';
-import { knowledgeService } from './knowledge.service';
-// Note: therapistBookingStatusService and userSyncService are now handled by appointmentLifecycleService
-import { staleCheckService } from './stale-check.service';
 import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
@@ -24,41 +15,37 @@ import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { parseConfirmedDateTime, areDatetimesEqual } from '../utils/date-parser';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
-// Note: getEmailSubject/getEmailBody are now handled by appointmentLifecycleService
-import { getSettingValue, getSettingValues } from './settings.service';
-import { TIMEOUTS, CONVERSATION_LIMITS, CLAUDE_API, EMAIL } from '../constants';
-import { sleep } from '../utils/timeout';
+import { getSettingValue } from './settings.service';
+import { CONVERSATION_LIMITS, EMAIL } from '../constants';
 import { emailQueueService } from './email-queue.service';
-import { formatAvailabilityForUser, formatAvailabilityForEmail } from '../utils/availability-formatter';
 import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
 import {
   type ConversationCheckpoint,
-  type ConversationStage,
   type ConversationAction,
-  createCheckpoint,
   updateCheckpoint,
-  stageFromAction,
-  getStageDescription,
-  getRecoveryMessage,
-  needsRecovery,
-  getValidActionsForStage,
 } from '../utils/conversation-checkpoint';
 import {
   type ConversationFacts,
   createEmptyFacts,
   updateFacts,
-  formatFactsForPrompt,
 } from '../utils/conversation-facts';
 import { prependTrackingCodeToSubject } from '../utils/tracking-code';
 import { runBackgroundTask } from '../utils/background-task';
 import {
   calculateResponseTimeHours,
   categorizeResponseSpeed,
-  needsFollowUp,
-  getFollowUpMessage,
   type ResponseEvent,
 } from '../utils/response-time-tracking';
 import type { ConversationState } from '../types';
+
+// Extracted modules (previously inline in this file)
+import { buildSystemPrompt } from './system-prompt-builder';
+import { runToolLoop, schedulingTools, type ExecutedTool } from './agent-tool-loop';
+import { resilientCall } from '../utils/resilient-call';
+import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
+
+// Circuit breaker instance for any remaining direct Claude API calls
+const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
 // Tool input validation schemas
 const sendEmailInputSchema = z.object({
@@ -152,183 +139,19 @@ async function markToolExecuted(hash: string, traceId: string): Promise<void> {
   }
 }
 
-/**
- * Transient error retry configuration (shorter than rate limit retries)
- * These errors are typically short-lived (network blips, temporary server issues)
- */
-const TRANSIENT_ERROR_CONFIG = {
-  MAX_RETRIES: 2, // Fewer retries than rate limits
-  RETRY_DELAYS_MS: [2000, 5000, 10000], // 2s, 5s, 10s - shorter delays
-} as const;
+// withRateLimitRetry, TRANSIENT_ERROR_CONFIG, and claudeCircuitBreaker are now
+// consolidated in resilientCall (utils/resilient-call.ts) and agent-tool-loop.ts
 
-// Get or create the Claude API circuit breaker
-const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
+// withRateLimitRetry has been replaced by resilientCall (utils/resilient-call.ts)
+// which fixes the unbounded loop bug (for-loop condition allowed more iterations than intended)
+// and provides the same rate-limit + transient error retry behavior with bounded iteration count.
 
-/**
- * Execute a Claude API call with circuit breaker protection and retry logic
- *
- * Handles two types of retryable errors:
- * 1. Rate limit errors (429) - uses longer backoff from CLAUDE_API config
- * 2. Transient errors (5xx, connection issues) - uses shorter backoff
- *
- * @param operation - Function that makes the Claude API call
- * @param context - Context string for logging
- * @param traceId - Trace ID for correlation
- * @returns The result of the operation
- * @throws CircuitBreakerError if circuit is open, or the original error after retries exhausted
- */
-async function withRateLimitRetry<T>(
-  operation: () => Promise<T>,
-  context: string,
-  traceId: string
-): Promise<T> {
-  // Wrap the entire retry logic in the circuit breaker
-  return claudeCircuitBreaker.execute(async () => {
-    let lastError: Error | null = null;
-    // FIX A9: Maximum retry-after we'll accept from server (5 minutes)
-    const MAX_SERVER_RETRY_AFTER_MS = 5 * 60 * 1000;
-
-    // Track retries separately for rate limits and transient errors
-    let rateLimitAttempts = 0;
-    let transientAttempts = 0;
-
-    // Total attempts (we'll exit based on which type of error we hit)
-    const maxTotalAttempts = Math.max(CLAUDE_API.MAX_RETRIES, TRANSIENT_ERROR_CONFIG.MAX_RETRIES) + 1;
-
-    for (let totalAttempt = 0; totalAttempt < maxTotalAttempts + CLAUDE_API.MAX_RETRIES + TRANSIENT_ERROR_CONFIG.MAX_RETRIES; totalAttempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        // Check if this is a rate limit error (429)
-        if (error instanceof RateLimitError) {
-          rateLimitAttempts++;
-
-          // Check if we have rate limit retries remaining
-          if (rateLimitAttempts > CLAUDE_API.MAX_RETRIES) {
-            logger.error(
-              { traceId, context, rateLimitAttempts, maxRetries: CLAUDE_API.MAX_RETRIES },
-              'Claude API rate limit - max retries exhausted'
-            );
-            throw error;
-          }
-
-          // FIX A9: Check for server-provided retry-after header
-          let retryDelay: number;
-          const rateLimitError = error as RateLimitError & { headers?: Record<string, string> };
-          const retryAfterHeader = rateLimitError.headers?.['retry-after'];
-
-          if (retryAfterHeader) {
-            const serverDelaySeconds = parseInt(retryAfterHeader, 10);
-            if (!isNaN(serverDelaySeconds) && serverDelaySeconds > 0) {
-              const serverDelayMs = serverDelaySeconds * 1000;
-              if (serverDelayMs <= MAX_SERVER_RETRY_AFTER_MS) {
-                retryDelay = addJitter(serverDelayMs);
-                logger.info(
-                  { traceId, context, serverRetryAfter: serverDelaySeconds },
-                  'Using server-provided retry-after delay'
-                );
-              } else {
-                retryDelay = addJitter(MAX_SERVER_RETRY_AFTER_MS);
-                logger.warn(
-                  { traceId, context, serverRetryAfter: serverDelaySeconds, maxAllowed: MAX_SERVER_RETRY_AFTER_MS / 1000 },
-                  'Server retry-after exceeds max - using capped delay'
-                );
-              }
-            } else {
-              const baseDelay = CLAUDE_API.RETRY_DELAYS_MS[Math.min(rateLimitAttempts - 1, CLAUDE_API.RETRY_DELAYS_MS.length - 1)];
-              retryDelay = addJitter(baseDelay);
-            }
-          } else {
-            const baseDelay = CLAUDE_API.RETRY_DELAYS_MS[Math.min(rateLimitAttempts - 1, CLAUDE_API.RETRY_DELAYS_MS.length - 1)];
-            retryDelay = addJitter(baseDelay);
-          }
-
-          logger.warn(
-            {
-              traceId,
-              context,
-              attempt: rateLimitAttempts,
-              maxRetries: CLAUDE_API.MAX_RETRIES,
-              retryDelayMs: retryDelay,
-              hasServerRetryAfter: !!retryAfterHeader,
-            },
-            `Claude API rate limit (429) - retrying in ${Math.round(retryDelay / 1000)}s`
-          );
-
-          await sleep(retryDelay);
-          continue;
-        }
-
-        // Check if this is a transient error (5xx, connection issues)
-        if (isTransientApiError(error)) {
-          transientAttempts++;
-
-          // Check if we have transient retries remaining
-          if (transientAttempts > TRANSIENT_ERROR_CONFIG.MAX_RETRIES) {
-            logger.error(
-              { traceId, context, transientAttempts, maxRetries: TRANSIENT_ERROR_CONFIG.MAX_RETRIES, errorType: error.constructor.name },
-              'Claude API transient error - max retries exhausted'
-            );
-            throw error;
-          }
-
-          const baseDelay = TRANSIENT_ERROR_CONFIG.RETRY_DELAYS_MS[Math.min(transientAttempts - 1, TRANSIENT_ERROR_CONFIG.RETRY_DELAYS_MS.length - 1)];
-          const retryDelay = addJitter(baseDelay);
-
-          logger.warn(
-            {
-              traceId,
-              context,
-              attempt: transientAttempts,
-              maxRetries: TRANSIENT_ERROR_CONFIG.MAX_RETRIES,
-              retryDelayMs: retryDelay,
-              errorType: error.constructor.name,
-              errorMessage: error instanceof Error ? error.message : String(error),
-            },
-            `Claude API transient error - retrying in ${Math.round(retryDelay / 1000)}s`
-          );
-
-          await sleep(retryDelay);
-          continue;
-        }
-
-        // Non-retryable error - throw immediately
-        throw error;
-      }
-    }
-
-    // Should never reach here, but TypeScript needs this
-    throw lastError || new Error('Unexpected retry loop exit');
-  });
-}
-
-/**
- * Truncate a message to prevent conversation state size bomb attacks
- * Large email content (e.g., 50KB+ emails) is truncated to MAX_MESSAGE_LENGTH
- * to prevent memory exhaustion and database storage issues
- *
- * @param content - The message content to potentially truncate
- * @returns Truncated content if over limit, original content otherwise
- */
+/** Truncate message content to prevent state size bombs */
 function truncateMessageContent(content: string): string {
-  const { MAX_MESSAGE_LENGTH, TRUNCATION_SUFFIX } = CONVERSATION_LIMITS;
-
-  if (content.length <= MAX_MESSAGE_LENGTH) {
-    return content;
-  }
-
-  // Truncate and add suffix
-  const truncatedLength = MAX_MESSAGE_LENGTH - TRUNCATION_SUFFIX.length;
-  const truncated = content.slice(0, truncatedLength) + TRUNCATION_SUFFIX;
-
-  logger.warn(
-    { originalLength: content.length, truncatedLength: MAX_MESSAGE_LENGTH },
-    'Message content truncated to prevent state size bomb'
-  );
-
-  return truncated;
+  const MAX_LENGTH = CONVERSATION_LIMITS.MAX_MESSAGE_LENGTH;
+  const SUFFIX = CONVERSATION_LIMITS.TRUNCATION_SUFFIX;
+  if (content.length <= MAX_LENGTH) return content;
+  return content.slice(0, MAX_LENGTH - SUFFIX.length) + SUFFIX;
 }
 
 export interface SchedulingContext {
@@ -345,410 +168,15 @@ export interface ConversationMessage {
   content: string;
 }
 
-// Tool definitions for Claude
-const schedulingTools: Anthropic.Tool[] = [
-  {
-    name: 'send_email',
-    description: 'Send an email to a recipient',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        to: {
-          type: 'string',
-          description: 'Recipient email address',
-        },
-        subject: {
-          type: 'string',
-          description: 'Email subject line. MUST include "Spill" somewhere in the subject (e.g., "Spill Therapy - Scheduling your session").',
-        },
-        body: {
-          type: 'string',
-          description: 'Email body content (plain text). IMPORTANT: Do NOT insert line breaks within paragraphs - only use blank lines between paragraphs. Let the email client handle text wrapping. Each paragraph should be a single continuous line of text.',
-        },
-      },
-      required: ['to', 'subject', 'body'],
-    },
-  },
-  {
-    name: 'update_therapist_availability',
-    description: 'Save therapist availability to the database for future bookings. Use this when a therapist provides their general availability for the first time.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        availability: {
-          type: 'object',
-          description: 'Availability by day of week. Keys are day names (Monday, Tuesday, etc.), values are time ranges like "09:00-12:00, 14:00-17:00"',
-          additionalProperties: {
-            type: 'string',
-          },
-        },
-      },
-      required: ['availability'],
-    },
-  },
-  {
-    name: 'mark_scheduling_complete',
-    description: 'Mark the scheduling as complete and send final confirmation emails to both parties. Use this AFTER the therapist confirms they will send the meeting link.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        confirmed_datetime: {
-          type: 'string',
-          description: 'The confirmed appointment date and time (e.g., "Monday 3rd February at 10:00am")',
-        },
-        notes: {
-          type: 'string',
-          description: 'Any additional notes about the booking',
-        },
-      },
-      required: ['confirmed_datetime'],
-    },
-  },
-  {
-    name: 'cancel_appointment',
-    description: 'Cancel the appointment when either the client or therapist indicates they want to cancel or can no longer proceed. This frees up the therapist for other bookings.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        reason: {
-          type: 'string',
-          description: 'The reason for cancellation (e.g., "Client requested cancellation", "Therapist unavailable")',
-        },
-        cancelled_by: {
-          type: 'string',
-          enum: ['client', 'therapist'],
-          description: 'Who initiated the cancellation',
-        },
-      },
-      required: ['reason', 'cancelled_by'],
-    },
-  },
-  {
-    name: 'flag_for_human_review',
-    description: 'Flag this conversation for human review when you are uncertain how to proceed, the situation is unusual, or you need guidance. This enables human control mode so an admin can review and respond. Use this proactively when unsure rather than guessing or stalling.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        reason: {
-          type: 'string',
-          description: 'Clear explanation of why you are flagging this for review and what you are uncertain about',
-        },
-        suggested_action: {
-          type: 'string',
-          description: 'Your best guess at what the next action should be (optional - helps the admin understand your thinking)',
-        },
-      },
-      required: ['reason'],
-    },
-  },
-];
+// schedulingTools is now imported from './agent-tool-loop'
 
-/**
- * Wraps a promise with a timeout
- * @throws Error if the promise doesn't resolve within the timeout
- */
-async function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  operation: string
-): Promise<T> {
-  let timeoutId: NodeJS.Timeout;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
+// withTimeout is now in system-prompt-builder.ts
 
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    clearTimeout(timeoutId!);
-  }
-}
+// buildSystemPrompt is now in './system-prompt-builder'
 
-// System prompt for Justin Time
-async function buildSystemPrompt(
-  context: SchedulingContext,
-  checkpoint?: ConversationCheckpoint | null,
-  facts?: ConversationFacts | null
-): Promise<string> {
-  // Fetch knowledge base entries with timeout
-  // Default to empty knowledge if query times out to avoid blocking processing
-  let knowledge: { forTherapist: string; forUser: string };
-  try {
-    knowledge = await withTimeout(
-      knowledgeService.getKnowledgeForPrompt(),
-      TIMEOUTS.KNOWLEDGE_QUERY_MS,
-      'Knowledge base query'
-    );
-  } catch (err) {
-    logger.warn(
-      { err, timeoutMs: TIMEOUTS.KNOWLEDGE_QUERY_MS },
-      'Knowledge base query failed or timed out - continuing with empty knowledge'
-    );
-    knowledge = { forTherapist: '', forUser: '' };
-  }
-
-  // Batch fetch all settings in a single DB query instead of 9 separate calls
-  const settingsMap = await getSettingValues<string>([
-    'email.initialClientWithAvailabilitySubject',
-    'email.initialClientWithAvailabilityBody',
-    'email.initialTherapistWithAvailabilitySubject',
-    'email.initialTherapistWithAvailabilityBody',
-    'email.initialTherapistNoAvailabilitySubject',
-    'email.initialTherapistNoAvailabilityBody',
-    'email.slotConfirmationToTherapistSubject',
-    'email.slotConfirmationToTherapistBody',
-    'agent.languageStyle',
-  ]);
-  const initialClientSubject = settingsMap.get('email.initialClientWithAvailabilitySubject')!;
-  const initialClientBody = settingsMap.get('email.initialClientWithAvailabilityBody')!;
-  const initialTherapistWithAvailSubject = settingsMap.get('email.initialTherapistWithAvailabilitySubject')!;
-  const initialTherapistWithAvailBody = settingsMap.get('email.initialTherapistWithAvailabilityBody')!;
-  const initialTherapistSubject = settingsMap.get('email.initialTherapistNoAvailabilitySubject')!;
-  const initialTherapistBody = settingsMap.get('email.initialTherapistNoAvailabilityBody')!;
-  const slotConfirmSubject = settingsMap.get('email.slotConfirmationToTherapistSubject')!;
-  const slotConfirmBody = settingsMap.get('email.slotConfirmationToTherapistBody')!;
-  const languageStyle = settingsMap.get('agent.languageStyle')!;
-
-  const hasAvailability = context.therapistAvailability &&
-    (context.therapistAvailability as any).slots &&
-    ((context.therapistAvailability as any).slots as any[]).length > 0;
-
-  // Use a shared reference date for consistent slot calculation across formatters
-  const referenceDate = new Date();
-
-  // Use smart slot formatting for better UX
-  const formattedAvailability = hasAvailability
-    ? formatAvailabilityForUser(context.therapistAvailability, 'Europe/London', referenceDate)
-    : null;
-
-  const availabilityText = formattedAvailability
-    ? formattedAvailability.summary
-    : 'NOT AVAILABLE - must request from therapist first';
-
-  // Generate email-ready slot list - use same reference date for consistency
-  const emailSlotList = formattedAvailability
-    ? formatAvailabilityForEmail(context.therapistAvailability, 6, referenceDate)
-    : '';
-
-  // Build workflow instructions with injected email templates
-  const workflowInstructions = hasAvailability
-    ? `## Your Workflow (Availability IS Available)
-
-1. **Contact Both Parties**: Send initial emails to both the user and therapist:
-
-   **To the User** - Share the therapist's available time slots:
-   - **Subject:** "${initialClientSubject}"
-   - **Body:** "${initialClientBody}"
-   - Replace {userName} with "${context.userName}" and {therapistName} with "${context.therapistName}".
-   - Replace [AVAILABILITY_SLOTS] with the formatted list of available times from the database.
-
-   **To the Therapist** - Notify them of the new client:
-   - **Subject:** "${initialTherapistWithAvailSubject}"
-   - **Body:** "${initialTherapistWithAvailBody}"
-   - Replace {therapistFirstName} with the therapist's first name and {clientFirstName} with the client's first name.
-
-2. **Confirm with Therapist**: Once the user selects a time, email the therapist to confirm that specific slot is still available using this template:
-   - **Subject:** "${slotConfirmSubject}"
-   - **Body:** "${slotConfirmBody}"
-
-   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {selectedDateTime} with the user's selected time.
-
-3. **Final Confirmation Gate**: When the therapist responds about the selected time:
-   - **Proceed with confirmation** if they use ANY positive acknowledgment such as: "confirmed", "booked", "that works", "perfect", "great", "sounds good", "yes", "I'll send the link", "see you then", "looking forward", "all set", or similar positive responses
-   - Also treat it as confirmed if they include a meeting link (Zoom, Teams, Google Meet URL, etc.) - this is implicit confirmation
-   - **Only ask for clarification** if their response is clearly negative ("that doesn't work", "not available then") or genuinely ambiguous (e.g., they ask a question without confirming)
-   - **IMPORTANT**: When therapist confirms, ONLY call mark_scheduling_complete - do NOT send a separate email to the therapist. The tool automatically sends confirmation emails to BOTH parties that include all necessary details (client email, session time, request to send meeting link). Sending a separate email would create duplicates.
-
-4. **Handle Conflicts**: If the therapist says the time is no longer available (booked by someone else), go back to the user with alternative times.
-   - If this happens more than once, consider asking the therapist for their most up-to-date availability.`
-    : `## Your Workflow (NO Availability Yet)
-
-1. **Contact Therapist First**: Email the therapist asking for their general availability using this template:
-   - **Subject:** "${initialTherapistSubject}"
-   - **Body:** "${initialTherapistBody}"
-
-   Replace {therapistFirstName} with the therapist's first name and {clientFirstName} with the client's first name.
-
-2. **Handle Therapist's Availability Response**:
-
-   **If therapist gives specific times** (e.g., "Monday 2-5pm, Wednesday 10am-1pm"):
-   - Use the update_therapist_availability tool to save it to the database
-   - Then email the user with those specific slots
-
-   **If therapist says they're flexible** (e.g., "anytime", "I'm flexible", "whatever works for them", "any day works"):
-   - Do NOT try to save "anytime" to the database
-   - Instead, email the user asking what times work best for THEM
-   - Explain that the therapist is flexible and can accommodate their schedule
-   - Once the user provides their preferred times, confirm directly with the therapist
-
-3. **Email User**: After understanding availability, email the user with options:
-   - **Subject:** "${initialClientSubject}"
-   - **Body:** "${initialClientBody}"
-
-   Replace {userName} with "${context.userName}" and {therapistName} with "${context.therapistName}".
-   If therapist gave specific slots, replace [AVAILABILITY_SLOTS] with those times.
-   If therapist is flexible, ask the user what times work best for them instead.
-
-4. **Confirm with Therapist**: When the user selects a time, email the therapist to confirm using this template:
-   - **Subject:** "${slotConfirmSubject}"
-   - **Body:** "${slotConfirmBody}"
-
-   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {selectedDateTime} with the user's selected time.
-
-5. **Final Confirmation Gate**: When the therapist responds about the selected time:
-   - **Proceed with confirmation** if they use ANY positive acknowledgment such as: "confirmed", "booked", "that works", "perfect", "great", "sounds good", "yes", "I'll send the link", "see you then", "looking forward", "all set", or similar positive responses
-   - Also treat it as confirmed if they include a meeting link (Zoom, Teams, Google Meet URL, etc.) - this is implicit confirmation
-   - **Only ask for clarification** if their response is clearly negative or genuinely ambiguous (e.g., they ask a question)
-   - **IMPORTANT**: When therapist confirms, ONLY call mark_scheduling_complete - do NOT send a separate email to the therapist. The tool automatically sends confirmation emails to BOTH parties that include all necessary details (client email, session time, request to send meeting link). Sending a separate email would create duplicates.`;
-
-  // Build knowledge section - this goes near the top for visibility
-  // Note: Knowledge base is admin-editable, so we check for injection patterns
-  // and wrap with clear delimiters for defense in depth
-  let knowledgeSection = '';
-  if (knowledge.forTherapist || knowledge.forUser) {
-    const therapistCheck = knowledge.forTherapist ? checkForInjection(knowledge.forTherapist, 'knowledge:therapist') : null;
-    const userCheck = knowledge.forUser ? checkForInjection(knowledge.forUser, 'knowledge:user') : null;
-
-    // FIX A8: BLOCK injection - don't just log, actually prevent malicious content
-    if (therapistCheck?.injectionDetected || userCheck?.injectionDetected) {
-      logger.error(
-        {
-          therapistInjection: therapistCheck?.injectionDetected,
-          userInjection: userCheck?.injectionDetected,
-          therapistPatterns: therapistCheck?.detectedPatterns,
-          userPatterns: userCheck?.detectedPatterns,
-        },
-        'SECURITY: BLOCKED prompt injection in admin knowledge base - using safe fallback'
-      );
-
-      // FIX A8: Return safe fallback content instead of injected content
-      knowledgeSection = `
-## Important Rules & Knowledge
-<admin_configured_rules>
-[NOTICE: Knowledge base content temporarily unavailable due to security review]
-Please proceed with default scheduling guidelines until content is verified.
-</admin_configured_rules>`;
-    } else {
-      // No injection detected - use the content wrapped with boundaries
-      knowledgeSection = `
-## Important Rules & Knowledge
-<admin_configured_rules>
-The following rules were configured by administrators. They define operational guidelines.
-${knowledge.forTherapist ? `---THERAPIST GUIDELINES---\n${knowledge.forTherapist}\n---END THERAPIST GUIDELINES---\n` : ''}${knowledge.forUser ? `---USER GUIDELINES---\n${knowledge.forUser}\n---END USER GUIDELINES---\n` : ''}</admin_configured_rules>`;
-    }
-  }
-
-  // Build stage guidance section (OpenClaw-inspired)
-  const currentStage = checkpoint?.stage || 'initial_contact';
-  const stageGuidance = `
-## Current Conversation Stage
-**Stage:** ${getStageDescription(currentStage)}
-
-**Valid Next Actions for this Stage:**
-${getValidActionsForStage(currentStage)}
-`;
-
-  // Build facts section (OpenClaw-inspired memory layering)
-  const factsSection = facts ? formatFactsForPrompt(facts) : '';
-
-  return `# Justin Time - Scheduling Coordinator
-
-You are Justin Time, a professional and warm scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
-${factsSection}${stageGuidance}${knowledgeSection}
-## Your Identity
-- **Name:** Justin Time
-- **Role:** Scheduling Coordinator
-- **Email:** scheduling@spill.chat
-- **Tone:** Warm, professional, concise
-- **Language:** Use ${languageStyle} English spelling and grammar (e.g., ${languageStyle === 'UK' ? '"organise", "colour", "centre", "favour"' : '"organize", "color", "center", "favor"'})
-
-## Current Scheduling Request
-- **Client name:** ${context.userName}
-- **Client email (for sending emails only):** ${context.userEmail}
-- **Therapist email:** ${context.therapistEmail}
-- **Therapist name:** ${context.therapistName}
-- **Availability in database:** ${hasAvailability ? 'YES' : 'NO'}
-${hasAvailability ? `- **Available slots:**\n${availabilityText}` : ''}
-
-${workflowInstructions}
-
-## Availability Context
-
-**Initial availability** from the database is shown above. However, availability may change during the conversation:
-
-- If the therapist shares NEW or UPDATED availability in their emails, use that information
-- The most recent availability mentioned in the thread takes precedence over database availability
-- You don't need to save one-off availability to the database - just use it for this booking
-- Only use update_therapist_availability if the therapist provides their REGULAR recurring schedule
-
-**Example:** If the database shows "Tuesday 12pm-4pm" but the therapist emails "I can also do Friday 2-4pm this week", offer both options to the user.
-
-## Important Guidelines
-
-- **Address client by name**: Always address the client as "${context.userName}" (e.g., "Hi ${context.userName},")
-- **CRITICAL Privacy Rule**: When emailing the therapist during negotiation, refer to the client ONLY by their first name "${context.userName}". You have the client's email to send them emails, but NEVER include or mention the client's email address in any message to the therapist. The client's email will be automatically shared with the therapist only when you use mark_scheduling_complete after the booking is confirmed.
-- **ALWAYS Review Thread History**: When you receive a new email, you will be provided with the COMPLETE thread history. ALWAYS read through all previous messages in the thread before responding. This ensures you have full context of what has been discussed, any time preferences mentioned, and the current state of the negotiation. Never respond based solely on the latest message - the full history is essential for accurate, contextual responses.
-- **EMAIL FORMATTING**: When writing email bodies, write each paragraph as a single continuous line of text. Do NOT insert line breaks or newlines within paragraphs - only use blank lines to separate paragraphs. Email clients will handle word wrapping automatically. Never break sentences across multiple lines.
-- **SIGNATURE FORMATTING**: Always format your sign-off with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
-
-Best wishes
-Justin
-
-Never write "Best wishes, Justin" or "Best wishes Justin" on a single line. The closing phrase and your name must each be on their own line.
-
-## Appointment Rescheduling
-
-If either party (client or therapist) indicates they need to change the appointment time AFTER booking is confirmed:
-
-1. **When one party reports a time change**: Email the OTHER party to confirm the new proposed time.
-2. **Wait for confirmation**: Do not finalize until the other party agrees to the new time.
-3. **Finalize the reschedule**: Once both parties agree on a new time, use mark_scheduling_complete with the NEW datetime. This will:
-   - Update the appointment to the new time
-   - Store the previous time for reference
-   - Reset follow-up email schedules for the new appointment time
-4. **Handle conflicts**: If the other party cannot make the proposed new time, facilitate finding an alternative that works for both.
-
-**Important**: Always verify with BOTH parties before finalizing any time change.
-
-## Post-Booking Issues
-
-After a booking is confirmed, the client may report issues. Handle these as follows:
-
-1. **Missing Meeting Link**: If the client says they haven't received the meeting link from the therapist:
-   - Acknowledge their concern and reassure them you'll follow up
-   - Email the therapist asking them to resend the meeting link directly to the client
-   - Let the client know you've contacted the therapist
-
-2. **Session Details Questions**: If the client asks about session details (duration, what to expect, etc.):
-   - Provide any information from the knowledge base if available
-   - For questions you can't answer, suggest they ask the therapist directly or wait for the therapist's pre-session email
-
-3. **Last-Minute Issues**: If issues arise close to the appointment time, respond with appropriate urgency.
-
-## Available Tools
-
-- send_email: Send emails to client or therapist
-- update_therapist_availability: Save therapist's availability to database (use when therapist first provides their times)
-- mark_scheduling_complete: Mark done AFTER therapist confirms they'll send the meeting link. This also sends final confirmation emails to both parties.
-- cancel_appointment: Cancel the appointment if either party indicates they want to cancel or cannot proceed. This frees the therapist for other bookings.
-- flag_for_human_review: Flag this conversation for admin review when you are uncertain how to proceed. **Use this proactively** rather than stalling or guessing incorrectly.
-
-## When to Flag for Human Review
-
-Use flag_for_human_review when:
-- You receive a response you don't know how to interpret
-- The conversation has become confusing or off-track
-- You've tried an approach that didn't work and aren't sure what to try next
-- The client or therapist is expressing frustration or complaints
-- You're asked to do something outside normal scheduling
-- The situation feels unusual and you're not confident in the next step
-
-**It's always better to flag for review than to stall or send an inappropriate response.**
-
-Begin now based on whether availability exists or not.`;
-}
+// The hasAvailability check below is used only in startScheduling() now.
+// The full system prompt logic (availability formatting, workflow instructions,
+// knowledge sections, etc.) lives in system-prompt-builder.ts.
 
 export class JustinTimeService {
   private traceId: string;
@@ -792,175 +220,18 @@ export class JustinTimeService {
         ],
       };
 
-      // Build messages for Claude API - start with initial message
-      let messagesForClaude: Anthropic.MessageParam[] = [
-        {
-          role: 'user',
-          content: initialMessage,
-        },
-      ];
+      // Run the unified tool loop (extracted from the previously duplicated inline loop)
+      const { result: loopResult } = await runToolLoop(
+        systemPrompt,
+        [{ role: 'user', content: initialMessage }],
+        conversationState,
+        context,
+        { executeToolCall: (tc, ctx) => this.executeToolCall(tc, ctx) },
+        this.traceId,
+        'startScheduling',
+      );
 
-      // Tool continuation loop - same as processEmailReply
-      const MAX_TOOL_ITERATIONS = 5;
-      let iteration = 0;
-      let totalToolErrors = 0;
-
-      // FIX RSA-4: Track executed tools for compensation if state save fails
-      const executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }> = [];
-
-      while (iteration < MAX_TOOL_ITERATIONS) {
-        iteration++;
-        logger.debug(
-          { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, iteration },
-          'startScheduling - Claude API call iteration'
-        );
-
-        const response = await withRateLimitRetry(
-          () => anthropicClient.messages.create({
-            model: CLAUDE_MODELS.AGENT,
-            max_tokens: MODEL_CONFIG.agent.maxTokens,
-            system: systemPrompt,
-            tools: schedulingTools,
-            messages: messagesForClaude,
-          }),
-          'startScheduling',
-          this.traceId
-        );
-
-        logger.info(
-          { traceId: this.traceId, stopReason: response.stop_reason, iteration },
-          'Claude response received'
-        );
-
-        // Process tool calls and text
-        const toolCalls = response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
-        const textBlocks = response.content.filter((block): block is Anthropic.TextBlock => block.type === 'text');
-        const assistantText = textBlocks.map((b) => b.text).join('\n');
-
-        // Save assistant response to conversation state
-        if (assistantText) {
-          conversationState.messages.push({
-            role: 'assistant',
-            content: truncateMessageContent(assistantText),
-          });
-        }
-
-        // If no tool calls, we're done
-        if (toolCalls.length === 0) {
-          logger.info(
-            { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, iterations: iteration },
-            'startScheduling - Claude finished responding (no more tool calls)'
-          );
-          break;
-        }
-
-        // Execute tools and collect results
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-        for (const toolCall of toolCalls) {
-          let toolResult: string;
-          let isError = false;
-
-          // FIX T1: Use returned ToolExecutionResult for explicit success/failure handling
-          const result = await this.executeToolCall(toolCall, context);
-
-          if (result.success) {
-            if (result.skipped) {
-              toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
-            } else {
-              toolResult = `Tool ${result.toolName} executed successfully.`;
-
-              // FIX RSA-4: Track executed tools for compensation if state save fails
-              executedTools.push({
-                toolName: result.toolName,
-                emailSentTo: result.emailSentTo,
-                timestamp: new Date().toISOString(),
-              });
-
-              // FIX RSA-1: Update checkpoint after successful tool execution
-              if (result.checkpointAction) {
-                const currentCheckpoint = conversationState.checkpoint;
-                const updatedCheckpoint = updateCheckpoint(
-                  currentCheckpoint || null,
-                  result.checkpointAction,
-                  null,
-                  result.emailSentTo ? { lastEmailSentTo: result.emailSentTo } : undefined
-                );
-                conversationState.checkpoint = updatedCheckpoint;
-
-                logger.info(
-                  {
-                    traceId: this.traceId,
-                    appointmentRequestId: context.appointmentRequestId,
-                    action: result.checkpointAction,
-                    newStage: updatedCheckpoint.stage,
-                  },
-                  'startScheduling - Checkpoint updated after tool execution'
-                );
-              }
-            }
-
-            // For flag_for_human_review, stop the loop
-            if (toolCall.name === 'flag_for_human_review' && !result.skipped) {
-              logger.info(
-                { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId },
-                'startScheduling - Agent flagged for human review'
-              );
-              conversationState.messages.push({
-                role: 'admin' as const,
-                content: '[System: Conversation flagged for human review. Agent processing paused.]',
-              });
-              iteration = MAX_TOOL_ITERATIONS; // Exit loop
-              break;
-            }
-          } else {
-            // FIX T1: Tool explicitly reported failure
-            toolResult = `Error: ${result.error}`;
-            isError = true;
-            totalToolErrors++;
-            logger.error(
-              { traceId: this.traceId, tool: result.toolName, error: result.error },
-              'startScheduling - Tool execution failed'
-            );
-          }
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolCall.id,
-            content: toolResult,
-            is_error: isError,
-          });
-        }
-
-        // Exit if flagged for human review
-        if (iteration >= MAX_TOOL_ITERATIONS) {
-          break;
-        }
-
-        // Add assistant response with tool calls and user message with tool results
-        messagesForClaude = [
-          ...messagesForClaude,
-          {
-            role: 'assistant' as const,
-            content: response.content,
-          },
-          {
-            role: 'user' as const,
-            content: toolResults,
-          },
-        ];
-
-        logger.info(
-          { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, toolCount: toolCalls.length, iteration },
-          'startScheduling - Tools executed, continuing conversation'
-        );
-      }
-
-      if (iteration >= MAX_TOOL_ITERATIONS) {
-        logger.warn(
-          { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, iterations: iteration },
-          'startScheduling - Hit max tool iterations'
-        );
-      }
+      const { totalToolErrors, executedTools } = loopResult;
 
       // FIX RSA-4 + FIX #27 note: Save conversation state with retry and compensation.
       // No optimistic lock for initial save — this is intentional since there's no prior version.
@@ -1323,206 +594,62 @@ ${formatClassificationForPrompt(emailClassification)}`;
 
       const freshSystemPrompt = await buildSystemPrompt(context, checkpoint, updatedFacts);
 
-      // Continue the conversation with Claude using a tool loop
-      // After Claude calls tools, we need to send results back and get the next response
+      // Continue the conversation with Claude using the unified tool loop
       conversationState.systemPrompt = freshSystemPrompt;
 
       // Build messages for Claude API (filter out admin messages)
-      let messagesForClaude: Anthropic.MessageParam[] = conversationState.messages
+      const messagesForClaude: Anthropic.MessageParam[] = conversationState.messages
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }));
 
-      const MAX_TOOL_ITERATIONS = 5; // Prevent infinite loops
-      let iteration = 0;
       let currentStateVersion = stateVersion;
 
-      // FIX RSA-4: Track executed tools for compensation if state save fails
-      const executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }> = [];
-
-      while (iteration < MAX_TOOL_ITERATIONS) {
-        iteration++;
-        logger.debug(
-          { traceId: this.traceId, appointmentRequestId, iteration },
-          'Claude API call iteration'
-        );
-
-        const response = await withRateLimitRetry(
-          () => anthropicClient.messages.create({
-            model: CLAUDE_MODELS.AGENT,
-            max_tokens: MODEL_CONFIG.agent.maxTokens,
-            system: freshSystemPrompt,
-            tools: schedulingTools,
-            messages: messagesForClaude,
-          }),
-          'processEmailReply',
-          this.traceId
-        );
-
-        // Process tool calls and text
-        const toolCalls = response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
-        const textBlocks = response.content.filter((block): block is Anthropic.TextBlock => block.type === 'text');
-        const assistantText = textBlocks.map((b) => b.text).join('\n');
-
-        // Save assistant response to conversation state
-        if (assistantText) {
-          conversationState.messages.push({
-            role: 'assistant',
-            content: truncateMessageContent(assistantText),
-          });
-        }
-
-        // If no tool calls, we're done - Claude has finished responding
-        if (toolCalls.length === 0) {
-          logger.info(
-            { traceId: this.traceId, appointmentRequestId, iterations: iteration },
-            'Claude finished responding (no more tool calls)'
-          );
-          break;
-        }
-
-        // Checkpoint state only before side-effecting tools (email sends, confirmations)
-        // to reduce DB writes. Non-side-effecting iterations are saved at the end.
-        const SIDE_EFFECT_TOOLS = new Set(['send_email', 'mark_scheduling_complete', 'flag_for_human_review']);
-        const hasSideEffects = toolCalls.some(tc => SIDE_EFFECT_TOOLS.has(tc.name));
-
-        if (hasSideEffects) {
-          try {
-            await this.storeConversationState(appointmentRequestId, conversationState, currentStateVersion);
-            const updated = await prisma.appointmentRequest.findUnique({
-              where: { id: appointmentRequestId },
-              select: { updatedAt: true },
-            });
-            currentStateVersion = updated?.updatedAt ?? new Date();
-            logger.debug(
-              { traceId: this.traceId, appointmentRequestId },
-              'Conversation state checkpointed before side-effecting tool execution'
-            );
-          } catch (checkpointError) {
-            const errorMsg = checkpointError instanceof Error ? checkpointError.message : 'Unknown';
-            if (errorMsg.includes('Optimistic locking conflict')) {
-              logger.warn(
-                { traceId: this.traceId, appointmentRequestId },
-                'Optimistic lock conflict at checkpoint - another process modified state'
-              );
-              throw new Error('Concurrent modification detected - request will be reprocessed');
-            }
-            throw checkpointError;
-          }
-        }
-
-        // Execute tools and collect results
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-        for (const toolCall of toolCalls) {
-          let toolResult: string;
-          let isError = false;
-
-          // FIX T1: Use returned ToolExecutionResult for explicit success/failure handling
-          const result = await this.executeToolCall(toolCall, context);
-
-          if (result.success) {
-            if (result.skipped) {
-              toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
-            } else {
-              toolResult = `Tool ${result.toolName} executed successfully.`;
-
-              // FIX RSA-4: Track executed tools for compensation if state save fails
-              executedTools.push({
-                toolName: result.toolName,
-                emailSentTo: result.emailSentTo,
-                timestamp: new Date().toISOString(),
-              });
-
-              // FIX RSA-1: Update checkpoint after successful tool execution
-              if (result.checkpointAction) {
-                const currentCheckpoint = conversationState.checkpoint;
-                const updatedCheckpoint = updateCheckpoint(
-                  currentCheckpoint || null,
-                  result.checkpointAction,
-                  null, // pendingAction will be set based on new stage
-                  result.emailSentTo ? { lastEmailSentTo: result.emailSentTo } : undefined
-                );
-                conversationState.checkpoint = updatedCheckpoint;
-
-                logger.info(
-                  {
-                    traceId: this.traceId,
-                    appointmentRequestId,
-                    action: result.checkpointAction,
-                    newStage: updatedCheckpoint.stage,
-                  },
-                  'Checkpoint updated after tool execution'
-                );
-              }
-            }
-
-            // For flag_for_human_review, we should stop the loop
-            if (toolCall.name === 'flag_for_human_review' && !result.skipped) {
-              logger.info(
-                { traceId: this.traceId, appointmentRequestId },
-                'Agent flagged for human review - stopping tool loop'
-              );
-              // Add a message to state about the flag
-              conversationState.messages.push({
-                role: 'admin' as const,
-                content: '[System: Conversation flagged for human review. Agent processing paused.]',
-              });
-              // Save final state and return early
+      // Run the unified tool loop (replaces the previously duplicated inline loop)
+      const { result: loopResult } = await runToolLoop(
+        freshSystemPrompt,
+        messagesForClaude,
+        conversationState,
+        context,
+        {
+          executeToolCall: (tc, ctx) => this.executeToolCall(tc, ctx),
+          // Checkpoint state before side-effecting tools to enable recovery
+          checkpointBeforeSideEffects: async () => {
+            try {
               await this.storeConversationState(appointmentRequestId, conversationState, currentStateVersion);
-              // Skip to status update section
-              iteration = MAX_TOOL_ITERATIONS; // Exit the loop
-              break;
+              const updated = await prisma.appointmentRequest.findUnique({
+                where: { id: appointmentRequestId },
+                select: { updatedAt: true },
+              });
+              currentStateVersion = updated?.updatedAt ?? new Date();
+              logger.debug(
+                { traceId: this.traceId, appointmentRequestId },
+                'Conversation state checkpointed before side-effecting tool execution'
+              );
+            } catch (checkpointError) {
+              const errorMsg = checkpointError instanceof Error ? checkpointError.message : 'Unknown';
+              if (errorMsg.includes('Optimistic locking conflict')) {
+                logger.warn(
+                  { traceId: this.traceId, appointmentRequestId },
+                  'Optimistic lock conflict at checkpoint - another process modified state'
+                );
+                throw new Error('Concurrent modification detected - request will be reprocessed');
+              }
+              throw checkpointError;
             }
-          } else {
-            // FIX T1: Tool explicitly reported failure
-            toolResult = `Error: ${result.error}`;
-            isError = true;
-            logger.error(
-              { traceId: this.traceId, tool: result.toolName, error: result.error },
-              'Tool execution failed'
-            );
-          }
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolCall.id,
-            content: toolResult,
-            is_error: isError,
-          });
-        }
-
-        // If we hit max iterations due to flag_for_human_review, break out
-        if (iteration >= MAX_TOOL_ITERATIONS) {
-          break;
-        }
-
-        // Add assistant response with tool calls and user message with tool results
-        // This follows Anthropic's expected message format for tool use
-        messagesForClaude = [
-          ...messagesForClaude,
-          {
-            role: 'assistant' as const,
-            content: response.content,
           },
-          {
-            role: 'user' as const,
-            content: toolResults,
-          },
-        ];
+        },
+        this.traceId,
+        'processEmailReply',
+      );
 
-        logger.info(
-          { traceId: this.traceId, appointmentRequestId, toolCount: toolCalls.length, iteration },
-          'Tools executed, continuing conversation with results'
-        );
-      }
+      const executedTools = loopResult.executedTools;
 
-      if (iteration >= MAX_TOOL_ITERATIONS) {
-        logger.warn(
-          { traceId: this.traceId, appointmentRequestId, iterations: iteration },
-          'Hit max tool iterations - conversation may be incomplete'
-        );
+      // If flagged for human review, save final state
+      if (loopResult.flaggedForHumanReview) {
+        await this.storeConversationState(appointmentRequestId, conversationState, currentStateVersion);
       }
 
       // FIX RSA-4: Final state save with retry and compensation
@@ -2928,7 +2055,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
       }));
 
       // Call Claude
-      const response = await withRateLimitRetry(
+      const response = await resilientCall(
         () => anthropicClient.messages.create({
           model: CLAUDE_MODELS.AGENT,
           max_tokens: MODEL_CONFIG.agent.maxTokens,
@@ -2936,8 +2063,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
           tools: inquiryTools,
           messages: messagesForClaude,
         }),
-        'processInquiryReply',
-        this.traceId
+        { context: 'processInquiryReply', traceId: this.traceId, circuitBreaker: claudeCircuitBreaker }
       );
 
       // Process response

@@ -5,21 +5,12 @@
  * (email notifications, Slack messages, Notion syncs, etc.) that were
  * registered via the SideEffectTrackerService.
  *
- * This closes the critical gap where the SideEffectTrackerService infrastructure
- * exists but nothing was retrying failed effects. Without this service, any
- * side effect that fails (e.g., confirmation email, Slack notification) would
- * sit in 'failed' status permanently with no automated recovery.
- *
- * Features:
- * - Distributed lock for multi-instance safety
- * - Exponential backoff via attempt count
- * - Max retry limit before abandoning
- * - Integrates with existing SideEffectTrackerService
+ * Refactored to use LockedTaskRunner instead of duplicating the
+ * lock-acquire/renew/release pattern that was copy-pasted across 5+ services.
  */
 
 import { logger } from '../utils/logger';
-import { redis } from '../utils/redis';
-import { releaseLock, renewLock } from '../utils/redis-locks';
+import { LockedTaskRunner } from '../utils/locked-task-runner';
 import {
   sideEffectTrackerService,
   SideEffectType,
@@ -29,7 +20,7 @@ import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
 import { notionSyncManager } from './notion-sync-manager.service';
 
-// Distributed lock settings
+// Lock settings
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
 const LOCK_RENEWAL_INTERVAL_MS = 30 * 1000;
@@ -46,9 +37,8 @@ const STARTUP_DELAY_MS = 30 * 1000;
 class SideEffectRetryService {
   private intervalId: NodeJS.Timeout | null = null;
   private startupTimeoutId: NodeJS.Timeout | null = null;
-  private lockRenewalId: NodeJS.Timeout | null = null;
   private instanceId: string;
-  private lockValid = true;
+  private lockedRunner: LockedTaskRunner;
   private stats = {
     totalRetried: 0,
     totalSucceeded: 0,
@@ -59,6 +49,13 @@ class SideEffectRetryService {
 
   constructor() {
     this.instanceId = `side-effect-retry-${process.pid}-${Date.now().toString(36)}`;
+    this.lockedRunner = new LockedTaskRunner({
+      lockKey: LOCK_KEY,
+      lockTtlSeconds: LOCK_TTL_SECONDS,
+      renewalIntervalMs: LOCK_RENEWAL_INTERVAL_MS,
+      instanceId: this.instanceId,
+      context: 'side-effect-retry',
+    });
   }
 
   start(): void {
@@ -91,85 +88,35 @@ class SideEffectRetryService {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    this.stopLockRenewal();
-    this.releaseInstanceLock().catch(() => {});
     logger.info({ instanceId: this.instanceId }, 'Side effect retry service stopped');
   }
 
-  private async tryAcquireLock(): Promise<boolean> {
-    try {
-      const result = await redis.set(
-        LOCK_KEY,
-        this.instanceId,
-        'EX',
-        LOCK_TTL_SECONDS,
-        'NX'
-      );
-      return result === 'OK';
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      if (errorMessage.includes('Redis not available') && process.env.SINGLE_INSTANCE_MODE === 'true') {
-        return true;
-      }
-      logger.error({ err, instanceId: this.instanceId }, 'Side effect retry lock acquisition failed');
-      return false;
-    }
-  }
-
-  private async releaseInstanceLock(): Promise<void> {
-    await releaseLock(LOCK_KEY, this.instanceId, 'side-effect-retry');
-  }
-
-  private startLockRenewal(): void {
-    this.lockValid = true;
-    this.lockRenewalId = setInterval(async () => {
-      const renewed = await renewLock(LOCK_KEY, this.instanceId, LOCK_TTL_SECONDS);
-      if (!renewed) {
-        this.lockValid = false;
-        logger.warn({ instanceId: this.instanceId }, 'Side effect retry lock renewal failed');
-        this.stopLockRenewal();
-      }
-    }, LOCK_RENEWAL_INTERVAL_MS);
-  }
-
-  private stopLockRenewal(): void {
-    if (this.lockRenewalId) {
-      clearInterval(this.lockRenewalId);
-      this.lockRenewalId = null;
-    }
-  }
-
   private async runSafeRetry(trigger: 'startup' | 'scheduled' | 'manual'): Promise<void> {
-    const acquired = await this.tryAcquireLock();
-    if (!acquired) {
+    const taskResult = await this.lockedRunner.run(async (ctx) => {
+      return this.retryFailedEffects(trigger, ctx.isLockValid);
+    });
+
+    if (!taskResult.acquired) {
       logger.debug({ instanceId: this.instanceId, trigger }, 'Skipping side effect retry - another instance holds lock');
       return;
     }
 
-    this.startLockRenewal();
+    if (taskResult.error) {
+      logger.error({ trigger, error: taskResult.error }, 'Error in side effect retry cycle');
+      return;
+    }
 
-    try {
-      const result = await this.retryFailedEffects(trigger);
+    const result = taskResult.result!;
+    this.stats.lastRunTime = new Date();
+    this.stats.totalRetried += result.retried;
+    this.stats.totalSucceeded += result.succeeded;
+    this.stats.totalFailed += result.failed;
+    this.stats.totalAbandoned += result.abandoned;
 
-      this.stats.lastRunTime = new Date();
-      this.stats.totalRetried += result.retried;
-      this.stats.totalSucceeded += result.succeeded;
-      this.stats.totalFailed += result.failed;
-      this.stats.totalAbandoned += result.abandoned;
-
-      if (result.retried > 0) {
-        logger.info(
-          { trigger, ...result },
-          'Side effect retry cycle complete'
-        );
-      } else {
-        logger.debug({ trigger }, 'No side effects to retry');
-      }
-    } catch (error) {
-      logger.error({ trigger, error }, 'Error in side effect retry cycle');
-    } finally {
-      this.stopLockRenewal();
-      await this.releaseInstanceLock();
+    if (result.retried > 0) {
+      logger.info({ trigger, ...result }, 'Side effect retry cycle complete');
+    } else {
+      logger.debug({ trigger }, 'No side effects to retry');
     }
   }
 
@@ -177,7 +124,8 @@ class SideEffectRetryService {
    * Core retry logic: fetch failed effects and re-execute them.
    */
   private async retryFailedEffects(
-    trigger: string
+    trigger: string,
+    isLockValid: () => boolean
   ): Promise<{ retried: number; succeeded: number; failed: number; abandoned: number }> {
     let retried = 0;
     let succeeded = 0;
@@ -191,7 +139,7 @@ class SideEffectRetryService {
     );
 
     for (const effect of effectsToRetry) {
-      if (!this.lockValid) {
+      if (!isLockValid()) {
         logger.warn({ trigger }, 'Aborting side effect retry - lock lost');
         break;
       }
@@ -239,7 +187,6 @@ class SideEffectRetryService {
 
   /**
    * Re-execute a side effect based on its type.
-   * Fetches the necessary data from the appointment to reconstruct the operation.
    */
   private async executeEffect(effect: {
     id: string;
@@ -307,7 +254,6 @@ class SideEffectRetryService {
         break;
 
       case 'slack_notify_completed':
-        // Slack completed notification - best effort
         logger.info(
           { appointmentId: appointment.id, effectType: effect.effectType },
           'Retrying completion notification'
