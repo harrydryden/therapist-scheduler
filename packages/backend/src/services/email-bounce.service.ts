@@ -13,7 +13,7 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { slackNotificationService } from './slack-notification.service';
+import { notificationDispatcher } from './notification-dispatcher.service';
 
 /**
  * Common bounce message patterns
@@ -263,13 +263,12 @@ export async function handleBounce(
     );
 
     // Send Slack notification for email bounce
-    await slackNotificationService.notifyEmailBounce(
-      appointment.id,
-      appointment.userName,
-      appointment.therapistName,
-      bounceInfo.originalRecipient || appointment.userEmail,
-      bounceInfo.reason || bounceInfo.bounceType || 'Unknown bounce reason'
-    );
+    await notificationDispatcher.emailBounce({
+      appointmentId: appointment.id,
+      therapistName: appointment.therapistName,
+      bouncedEmail: bounceInfo.originalRecipient || appointment.userEmail,
+      bounceReason: bounceInfo.reason || bounceInfo.bounceType || 'Unknown bounce reason',
+    });
 
     return result;
   } catch (error) {

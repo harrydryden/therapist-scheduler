@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 import { JustinTimeService } from '../services/justin-time.service';
 import { notionService } from '../services/notion.service';
 import { notionUsersService } from '../services/notion-users.service';
-import { slackNotificationService } from '../services/slack-notification.service';
+import { notificationDispatcher } from '../services/notification-dispatcher.service';
 import { adminAuthHook } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -111,14 +111,11 @@ export async function webhookRoutes(fastify: FastifyInstance) {
           'Appointment request created with tracking code'
         );
 
-        // Send Slack notification for new appointment (non-blocking)
-        slackNotificationService.notifyAppointmentCreated(
-          appointmentRequest.id,
-          userName,
+        // Send Slack notification for new appointment (non-blocking, settings-checked)
+        notificationDispatcher.appointmentCreated({
+          appointmentId: appointmentRequest.id,
           therapistName,
-          userEmail
-        ).catch((err) => {
-          logger.error({ err, requestId }, 'Failed to send Slack notification for new appointment');
+          userEmail,
         });
 
         // Ensure user exists in Notion users database (non-blocking)

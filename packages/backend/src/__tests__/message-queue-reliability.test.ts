@@ -533,13 +533,12 @@ describe('Side Effect Retry Patterns', () => {
 
     await slackNotificationService.notifyAppointmentConfirmed(
       'apt-1',
-      'John Doe',
       'Dr. Smith',
       'Monday 3pm'
     );
 
     expect(slackNotificationService.notifyAppointmentConfirmed).toHaveBeenCalledWith(
-      'apt-1', 'John Doe', 'Dr. Smith', 'Monday 3pm'
+      'apt-1', 'Dr. Smith', 'Monday 3pm'
     );
   });
 

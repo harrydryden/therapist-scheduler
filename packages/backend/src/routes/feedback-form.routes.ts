@@ -15,8 +15,7 @@ import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
-import { slackNotificationService } from '../services/slack-notification.service';
-import { runBackgroundTask } from '../utils/background-task';
+import { notificationDispatcher } from '../services/notification-dispatcher.service';
 import { sanitizeName, sanitizeObject } from '../utils/input-sanitizer';
 import { RATE_LIMITS } from '../constants';
 import type { FormQuestion, FormConfig } from '@therapist-scheduler/shared/types/feedback';
@@ -389,31 +388,23 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           // If transition was skipped (already completed), the lifecycle service
           // won't send the Slack notification. Send it directly so feedback is always reported.
           if (result.skipped) {
-            runBackgroundTask(
-              () => slackNotificationService.notifyAppointmentCompleted(
-                appointment!.id,
-                appointment!.userName,
-                appointment!.therapistName,
-                submission.id,
-                feedbackData,
-              ),
-              { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-            );
+            notificationDispatcher.appointmentCompleted({
+              appointmentId: appointment!.id,
+              therapistName: appointment!.therapistName,
+              feedbackSubmissionId: submission.id,
+              feedbackData,
+            });
           }
         } catch (error) {
           // Log but don't fail the feedback submission.
           // Still send Slack notification so feedback isn't silently lost.
           logger.error({ error, appointmentId: appointment.id }, 'Failed to transition appointment to completed');
-          runBackgroundTask(
-            () => slackNotificationService.notifyAppointmentCompleted(
-              appointment!.id,
-              appointment!.userName,
-              appointment!.therapistName,
-              submission.id,
-              feedbackData,
-            ),
-            { name: 'slack-notify-feedback-received-fallback', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-          );
+          notificationDispatcher.appointmentCompleted({
+            appointmentId: appointment!.id,
+            therapistName: appointment!.therapistName,
+            feedbackSubmissionId: submission.id,
+            feedbackData,
+          });
         }
       }
 

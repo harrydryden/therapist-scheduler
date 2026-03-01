@@ -19,7 +19,7 @@
 
 import { logger } from '../utils/logger';
 import { circuitBreakerRegistry, CircuitBreakerError } from '../utils/circuit-breaker';
-import { withTimeout, DEFAULT_TIMEOUTS } from '../utils/timeout';
+import { DEFAULT_TIMEOUTS } from '../utils/timeout';
 import { cacheManager } from '../utils/redis';
 
 // Redis key for persisted notification queue
@@ -92,14 +92,6 @@ const SEVERITY_EMOJI: Record<AlertSeverity, string> = {
   medium: '⚠️',
   high: '🔶',
   critical: '🚨',
-};
-
-// Color mapping for severity (used in attachments if needed)
-const SEVERITY_COLOR: Record<AlertSeverity, string> = {
-  low: '#36a64f',    // green
-  medium: '#daa520', // goldenrod
-  high: '#ff8c00',   // dark orange
-  critical: '#dc3545', // red
 };
 
 /**
@@ -500,7 +492,6 @@ class SlackNotificationService {
    */
   async notifyAutoEscalation(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     stallDurationHours: number
   ): Promise<boolean> {
@@ -518,7 +509,6 @@ class SlackNotificationService {
    */
   async notifyThreadDivergence(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     divergenceType: string,
     description: string
@@ -540,7 +530,6 @@ class SlackNotificationService {
    */
   async notifyEmailBounce(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     bouncedEmail: string,
     bounceReason: string
@@ -562,7 +551,6 @@ class SlackNotificationService {
    */
   async notifyConversationStall(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     stallDurationHours: number,
     lastToolFailure?: string
@@ -587,7 +575,6 @@ class SlackNotificationService {
    */
   async notifyHumanReviewFlagged(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     reason: string
   ): Promise<boolean> {
@@ -609,7 +596,6 @@ class SlackNotificationService {
    */
   async notifyAppointmentCreated(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     userEmail: string
   ): Promise<boolean> {
@@ -627,7 +613,6 @@ class SlackNotificationService {
    */
   async notifyAppointmentConfirmed(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     confirmedDateTime: string
   ): Promise<boolean> {
@@ -646,7 +631,6 @@ class SlackNotificationService {
    */
   async notifyAppointmentCancelled(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     reason: string
   ): Promise<boolean> {
@@ -669,7 +653,6 @@ class SlackNotificationService {
    */
   async notifyAppointmentCompleted(
     appointmentId: string,
-    userName: string | null,
     therapistName: string,
     feedbackSubmissionId?: string,
     feedbackData?: Record<string, string>

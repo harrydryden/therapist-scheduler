@@ -8,7 +8,7 @@ import { JustinTimeService } from '../services/justin-time.service';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { notionUsersService } from '../services/notion-users.service';
-import { slackNotificationService } from '../services/slack-notification.service';
+import { notificationDispatcher } from '../services/notification-dispatcher.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { RATE_LIMITS } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -376,23 +376,12 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
         });
 
-        // Send Slack notification for new appointment request (non-blocking)
-        // Check notification settings first
-        getSettingValue<boolean>('notifications.slack.requested')
-          .then((enabled) => {
-            if (enabled) {
-              return slackNotificationService.notifyAppointmentCreated(
-                appointmentRequest.id,
-                userName,
-                therapistName,
-                userEmail
-              );
-            }
-            return false;
-          })
-          .catch((err) => {
-            logger.error({ err, requestId }, 'Failed to send Slack notification for new appointment (non-critical)');
-          });
+        // Send Slack notification for new appointment request (non-blocking, settings-checked)
+        notificationDispatcher.appointmentCreated({
+          appointmentId: appointmentRequest.id,
+          therapistName,
+          userEmail,
+        });
 
         // Trigger Justin Time agent asynchronously
         // The user gets a success response immediately - scheduling happens in background

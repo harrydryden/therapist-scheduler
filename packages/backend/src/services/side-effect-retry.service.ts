@@ -238,7 +238,6 @@ class SideEffectRetryService {
       case 'slack_notify_confirmed':
         await slackNotificationService.notifyAppointmentConfirmed(
           appointment.id,
-          appointment.userName,
           appointment.therapistName,
           appointment.confirmedDateTime || 'TBD'
         );
@@ -247,7 +246,6 @@ class SideEffectRetryService {
       case 'slack_notify_cancelled':
         await slackNotificationService.notifyAppointmentCancelled(
           appointment.id,
-          appointment.userName,
           appointment.therapistName,
           'System retry'
         );

@@ -8,7 +8,7 @@ import { prisma } from '../utils/database';
 import { emailProcessingService } from './email-processing.service';
 import { notionService } from './notion.service';
 import { auditEventService } from './audit-event.service';
-import { slackNotificationService } from './slack-notification.service';
+import { notificationDispatcher } from './notification-dispatcher.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { parseConversationState } from '../utils/json-parser';
@@ -384,24 +384,18 @@ export class JustinTimeService {
         const alertTitle = reasonLabels[specialHandling.reason || ''] || 'Email needs attention';
         const sender = emailClassification.isFromTherapist ? 'therapist' : 'client';
 
-        runBackgroundTask(
-          () => slackNotificationService.sendAlert({
-            title: alertTitle,
-            severity: specialHandling.reason === 'urgent' || specialHandling.reason === 'frustrated_user' ? 'high' : 'medium',
-            appointmentId: appointmentRequestId,
-            therapistName: appointmentRequest.therapistName,
-            details: `${sender === 'therapist' ? 'Therapist' : 'Client'} email flagged: ${specialHandling.reason}`,
-            additionalFields: {
-              'From': fromEmail,
-              'Sender': sender,
-              'Sentiment': emailClassification.sentiment || 'unknown',
-            },
-          }),
-          {
-            name: 'special-handling-slack-alert',
-            context: { appointmentRequestId, reason: specialHandling.reason },
-          }
-        );
+        notificationDispatcher.specialHandlingAlert({
+          appointmentId: appointmentRequestId,
+          therapistName: appointmentRequest.therapistName,
+          title: alertTitle,
+          severity: specialHandling.reason === 'urgent' || specialHandling.reason === 'frustrated_user' ? 'high' : 'medium',
+          details: `${sender === 'therapist' ? 'Therapist' : 'Client'} email flagged: ${specialHandling.reason}`,
+          additionalFields: {
+            'From': fromEmail,
+            'Sender': sender,
+            'Sentiment': emailClassification.sentiment || 'unknown',
+          },
+        });
       }
 
       // Track therapist response time if this is from the therapist
@@ -1711,12 +1705,11 @@ ${formatClassificationForPrompt(emailClassification)}`;
     );
 
     // Send Slack notification for human review flagged
-    await slackNotificationService.notifyHumanReviewFlagged(
-      context.appointmentRequestId,
-      context.userName,
-      context.therapistName,
-      params.reason
-    );
+    notificationDispatcher.humanReviewFlagged({
+      appointmentId: context.appointmentRequestId,
+      therapistName: context.therapistName,
+      reason: params.reason,
+    });
   }
 
   /**

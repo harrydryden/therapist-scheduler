@@ -12,7 +12,7 @@
 
 import { logger } from './logger';
 import { prisma } from './database';
-import { slackNotificationService } from '../services/slack-notification.service';
+import { notificationDispatcher } from '../services/notification-dispatcher.service';
 
 /**
  * Divergence types we can detect
@@ -597,13 +597,12 @@ export async function recordDivergenceAlert(
 
     // Send Slack notification for thread divergence
     if (appointment) {
-      await slackNotificationService.notifyThreadDivergence(
+      await notificationDispatcher.threadDivergence({
         appointmentId,
-        appointment.userName,
-        appointment.therapistName,
-        divergence.type,
-        divergence.description
-      );
+        therapistName: appointment.therapistName,
+        divergenceType: divergence.type,
+        description: divergence.description,
+      });
     }
   } catch (error) {
     // Don't fail the main operation if alert recording fails

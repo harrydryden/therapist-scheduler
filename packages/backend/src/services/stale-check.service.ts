@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { releaseLock, renewLock, acquireLock } from '../utils/redis-locks';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { slackNotificationService } from './slack-notification.service';
+import { notificationDispatcher } from './notification-dispatcher.service';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
 import { STALE_THRESHOLDS, STALL_DETECTION, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, INACTIVITY_THRESHOLDS } from '../constants';
@@ -592,13 +592,12 @@ class StaleCheckService {
             ? Math.round((Date.now() - apt.lastToolExecutedAt.getTime()) / (60 * 60 * 1000))
             : Math.round((Date.now() - (apt.lastActivityAt?.getTime() || Date.now())) / (60 * 60 * 1000));
 
-          await slackNotificationService.notifyConversationStall(
-            apt.id,
-            apt.userName,
-            apt.therapistName,
-            stallHours,
-            apt.lastToolFailureReason || undefined
-          );
+          await notificationDispatcher.conversationStall({
+            appointmentId: apt.id,
+            therapistName: apt.therapistName,
+            stallDurationHours: stallHours,
+            lastToolFailure: apt.lastToolFailureReason || undefined,
+          });
         }
       }
 
@@ -734,12 +733,11 @@ class StaleCheckService {
         );
 
         // Send Slack notification for auto-escalation
-        await slackNotificationService.notifyAutoEscalation(
-          appointment.id,
-          appointment.userName,
-          appointment.therapistName,
-          stallHours
-        );
+        await notificationDispatcher.autoEscalation({
+          appointmentId: appointment.id,
+          therapistName: appointment.therapistName,
+          stallDurationHours: stallHours,
+        });
 
         escalatedCount++;
       } catch (error) {

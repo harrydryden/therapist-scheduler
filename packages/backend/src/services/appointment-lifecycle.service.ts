@@ -28,17 +28,17 @@
 import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
-import { slackNotificationService } from './slack-notification.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { notionSyncManager } from './notion-sync-manager.service';
 import { notionService } from './notion.service';
 import { emailProcessingService } from './email-processing.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
-import { getSettingValue, getSettingValues } from './settings.service';
+import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { runBackgroundTask } from '../utils/background-task';
 import { sseService } from './sse.service';
+import { notificationDispatcher, type NotificationSettings } from './notification-dispatcher.service';
 
 // ============================================
 // Custom Errors for Lifecycle Transitions
@@ -161,43 +161,7 @@ export interface TransitionResult {
   warning?: string;
 }
 
-// Notification settings type
-export interface NotificationSettings {
-  slack: {
-    requested: boolean;
-    confirmed: boolean;
-    completed: boolean;
-    cancelled: boolean;
-    escalation: boolean;
-  };
-  email: {
-    clientConfirmation: boolean;
-    therapistConfirmation: boolean;
-    sessionReminder: boolean;
-    feedbackForm: boolean;
-    clientCancellation: boolean;
-    therapistCancellation: boolean;
-  };
-}
-
-// Default notification settings
-const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
-  slack: {
-    requested: true,
-    confirmed: true,
-    completed: true,
-    cancelled: true,
-    escalation: true,
-  },
-  email: {
-    clientConfirmation: true,
-    therapistConfirmation: true,
-    sessionReminder: true,
-    feedbackForm: true,
-    clientCancellation: true,
-    therapistCancellation: true,
-  },
-};
+// NotificationSettings type is now imported from notification-dispatcher.service.ts
 
 // ============================================
 // Service Implementation
@@ -205,50 +169,11 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
 
 class AppointmentLifecycleService {
   /**
-   * Get notification settings from admin settings
-   * OPTIMIZATION: Fetch all settings in parallel instead of sequentially
+   * Get notification settings from admin settings.
+   * Delegates to the centralized notification dispatcher.
    */
   private async getNotificationSettings(): Promise<NotificationSettings> {
-    try {
-      // Single batch DB query instead of 11 individual calls
-      const keys = [
-        'notifications.slack.requested',
-        'notifications.slack.confirmed',
-        'notifications.slack.completed',
-        'notifications.slack.cancelled',
-        'notifications.slack.escalation',
-        'notifications.email.clientConfirmation',
-        'notifications.email.therapistConfirmation',
-        'notifications.email.sessionReminder',
-        'notifications.email.feedbackForm',
-        'notifications.email.clientCancellation',
-        'notifications.email.therapistCancellation',
-      ] as const;
-
-      const settingsMap = await getSettingValues<boolean>([...keys]);
-      const get = (key: typeof keys[number], fallback: boolean) =>
-        settingsMap.get(key) ?? fallback;
-
-      return {
-        slack: {
-          requested: get('notifications.slack.requested', DEFAULT_NOTIFICATION_SETTINGS.slack.requested),
-          confirmed: get('notifications.slack.confirmed', DEFAULT_NOTIFICATION_SETTINGS.slack.confirmed),
-          completed: get('notifications.slack.completed', DEFAULT_NOTIFICATION_SETTINGS.slack.completed),
-          cancelled: get('notifications.slack.cancelled', DEFAULT_NOTIFICATION_SETTINGS.slack.cancelled),
-          escalation: get('notifications.slack.escalation', DEFAULT_NOTIFICATION_SETTINGS.slack.escalation),
-        },
-        email: {
-          clientConfirmation: get('notifications.email.clientConfirmation', DEFAULT_NOTIFICATION_SETTINGS.email.clientConfirmation),
-          therapistConfirmation: get('notifications.email.therapistConfirmation', DEFAULT_NOTIFICATION_SETTINGS.email.therapistConfirmation),
-          sessionReminder: get('notifications.email.sessionReminder', DEFAULT_NOTIFICATION_SETTINGS.email.sessionReminder),
-          feedbackForm: get('notifications.email.feedbackForm', DEFAULT_NOTIFICATION_SETTINGS.email.feedbackForm),
-          clientCancellation: get('notifications.email.clientCancellation', DEFAULT_NOTIFICATION_SETTINGS.email.clientCancellation),
-          therapistCancellation: get('notifications.email.therapistCancellation', DEFAULT_NOTIFICATION_SETTINGS.email.therapistCancellation),
-        },
-      };
-    } catch {
-      return DEFAULT_NOTIFICATION_SETTINGS;
-    }
+    return notificationDispatcher.getNotificationSettings();
   }
 
   /**
@@ -659,23 +584,12 @@ class AppointmentLifecycleService {
     // Get notification settings
     const settings = await this.getNotificationSettings();
 
-    // Send Slack notification (non-blocking, tracked)
-    if (settings.slack.confirmed) {
-      runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentConfirmed(
-          appointmentId,
-          appointment.userName,
-          appointment.therapistName,
-          confirmedDateTime
-        ),
-        {
-          name: 'slack-notify-confirmed',
-          context: logContext,
-          retry: true,
-          maxRetries: 2,
-        }
-      );
-    }
+    // Send Slack notification (non-blocking, settings-checked by dispatcher)
+    notificationDispatcher.appointmentConfirmed({
+      appointmentId,
+      therapistName: appointment.therapistName,
+      confirmedDateTime,
+    });
 
     // Send confirmation emails (non-blocking, tracked)
     if (sendEmails) {
@@ -1149,28 +1063,14 @@ class AppointmentLifecycleService {
       }
     );
 
-    // Get notification settings and send Slack notification (non-blocking, tracked)
-    // Always notify when feedback is attached (the team needs to see feedback scores
-    // regardless of the generic completed-notification toggle). For non-feedback
-    // completions (e.g. admin-triggered), respect the admin setting.
-    const settings = await this.getNotificationSettings();
-    if (feedbackSubmissionId || settings.slack.completed) {
-      runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentCompleted(
-          appointmentId,
-          appointment.userName,
-          appointment.therapistName,
-          feedbackSubmissionId,
-          feedbackData
-        ),
-        {
-          name: 'slack-notify-completed',
-          context: logContext,
-          retry: true,
-          maxRetries: 2,
-        }
-      );
-    }
+    // Send Slack notification (non-blocking, settings-checked by dispatcher)
+    // Dispatcher always sends when feedback is attached
+    notificationDispatcher.appointmentCompleted({
+      appointmentId,
+      therapistName: appointment.therapistName,
+      feedbackSubmissionId,
+      feedbackData,
+    });
 
     const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.COMPLETED };
     this.notifyTransition(transition, appointmentId, source);
@@ -1406,25 +1306,13 @@ class AppointmentLifecycleService {
       }
     }
 
-    // Get notification settings and send Slack notification (non-blocking, tracked)
+    // Send Slack notification (non-blocking, settings-checked by dispatcher)
     const settings = await this.getNotificationSettings();
-    if (settings.slack.cancelled) {
-      runBackgroundTask(
-        () => slackNotificationService.sendAlert({
-          title: 'Appointment Cancelled',
-          severity: 'medium',
-          appointmentId,
-          therapistName: appointment.therapistName,
-          details: `Cancelled by ${cancelledBy}. Reason: ${reason}`,
-        }),
-        {
-          name: 'slack-notify-cancelled',
-          context: logContext,
-          retry: true,
-          maxRetries: 2,
-        }
-      );
-    }
+    notificationDispatcher.appointmentCancelled({
+      appointmentId,
+      therapistName: appointment.therapistName,
+      reason: `Cancelled by ${cancelledBy}. Reason: ${reason}`,
+    });
 
     // Send cancellation emails (non-blocking, tracked)
     const therapistFirstName = (appointment.therapistName || 'your therapist').split(' ')[0];
