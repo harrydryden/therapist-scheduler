@@ -837,8 +837,13 @@ ${formatClassificationForPrompt(emailClassification)}`;
           );
           // FIX RSA-1: Determine checkpoint action based on recipient
           emailSentTo = normalizedTo === context.therapistEmail.toLowerCase() ? 'therapist' : 'user';
-          // Note: We don't set a specific checkpointAction for send_email because
-          // the appropriate action depends on conversation context (initial vs follow-up)
+          // Set checkpoint action based on recipient so the conversation stage
+          // is properly tracked. Without this, the checkpoint is never initialized
+          // after startScheduling (only send_email is called), leaving the stage
+          // as undefined and breaking stage-aware recovery and prompt guidance.
+          checkpointAction = emailSentTo === 'therapist'
+            ? 'sent_initial_email_to_therapist'
+            : 'sent_availability_to_user';
           break;
         }
 

@@ -754,26 +754,44 @@ class StaleCheckService {
   }
 
   /**
-   * Recover missed replies from stale threads.
+   * Recover missed replies from threads.
    *
-   * When a conversation goes stale while in 'contacted' or 'negotiating' status,
-   * the therapist may have replied but the reply was missed due to:
+   * When a conversation is in 'contacted' or 'negotiating' status,
+   * the therapist (or client) may have replied but the reply was missed due to:
    * - Lost push notification (server restart, network issue)
-   * - Reply arriving after the 1-day polling window expired
+   * - Reply arriving after the polling window expired
+   * - Email marked as read in Gmail (by admin, mobile notification, etc.)
+   *   before the polling service could detect it as unread
    *
-   * This method checks the Gmail threads associated with stale appointments
-   * for any unread messages that were never processed.
+   * This method checks the Gmail threads associated with waiting appointments
+   * for any messages that were never processed by the application.
+   *
+   * Unlike the polling fallback (which relies on is:unread and newer_than:3d),
+   * this method cross-references thread messages against the processedGmailMessage
+   * database table — the authoritative source of truth for processing state.
+   * This means it can recover emails that were read in Gmail but never processed.
+   *
+   * Recovery runs on two tiers:
+   * - Tier 1: Appointments inactive for 1+ hour (quick recovery for missed push notifications)
+   * - Tier 2: Stale appointments (48h+ inactive, already flagged by the isStale check)
    */
   private async recoverMissedReplies(checkId: string): Promise<number> {
     try {
-      // Find stale appointments that have a therapist thread ID to check
-      // Only check 'contacted' and 'negotiating' - these are awaiting replies
-      const staleWithThreads = await prisma.appointmentRequest.findMany({
+      // Recovery threshold: check appointments with no activity for 1+ hour.
+      // This catches missed push notifications much faster than the 48h stale flag.
+      // The processedGmailMessage DB check in checkThreadForUnprocessedReplies
+      // ensures we don't reprocess already-handled messages, so running this
+      // more frequently is safe (at worst it makes a few extra Gmail API calls).
+      const replyRecoveryThreshold = new Date(Date.now() - 1 * 60 * 60 * 1000); // 1 hour
+
+      // Find appointments awaiting replies that have a thread ID to check.
+      // Includes both stale (48h+) and recently-inactive (1h+) appointments.
+      const awaitingReply = await prisma.appointmentRequest.findMany({
         where: {
-          isStale: true,
           status: { in: ['contacted', 'negotiating'] },
           therapistGmailThreadId: { not: null },
           humanControlEnabled: false, // Don't interfere with human-controlled appointments
+          lastActivityAt: { lt: replyRecoveryThreshold }, // No activity for 1+ hour
         },
         select: {
           id: true,
@@ -785,18 +803,18 @@ class StaleCheckService {
         take: 10, // Limit batch size to avoid Gmail rate limits
       });
 
-      if (staleWithThreads.length === 0) {
+      if (awaitingReply.length === 0) {
         return 0;
       }
 
       logger.info(
-        { checkId, count: staleWithThreads.length },
-        'Checking stale threads for missed replies'
+        { checkId, count: awaitingReply.length },
+        'Checking threads for missed replies (1h+ inactive appointments)'
       );
 
       let totalRecovered = 0;
 
-      for (const appointment of staleWithThreads) {
+      for (const appointment of awaitingReply) {
         try {
           // Check the therapist thread for unprocessed messages
           if (appointment.therapistGmailThreadId) {

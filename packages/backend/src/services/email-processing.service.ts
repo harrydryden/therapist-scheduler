@@ -710,6 +710,15 @@ export class EmailProcessingService {
 
   /**
    * Poll for new emails (fallback when push isn't available)
+   *
+   * Uses two passes:
+   * 1. Unread emails (fast path - most common case)
+   * 2. All recent inbox emails regardless of read status (catches emails
+   *    that were read by admin/mobile but never processed by the application)
+   *
+   * The processMessage() deduplication (Redis ZSET + DB check) ensures
+   * already-processed messages are skipped cheaply, so the broader query
+   * in pass 2 only adds minimal overhead.
    */
   async pollForNewEmails(traceId: string): Promise<{ processed: number }> {
     logger.info({ traceId }, 'Polling for new emails');
@@ -722,21 +731,40 @@ export class EmailProcessingService {
     }
 
     try {
-      // Search for recent unread emails that are replies
-      // Use 3-day window to recover emails missed by push notifications.
-      // The is:unread filter ensures already-processed emails (marked read) are excluded,
-      // and maxResults caps the batch size, so the wider window is safe.
-      const response = await this.gmail.users.messages.list({
+      let processed = 0;
+
+      // Pass 1: Unread emails (fast path - handles the common case efficiently)
+      const unreadResponse = await this.gmail.users.messages.list({
         userId: 'me',
         q: 'is:unread in:inbox newer_than:3d',
         maxResults: 20,
       });
 
-      const messages = response.data.messages || [];
-      let processed = 0;
+      const unreadMessages = unreadResponse.data.messages || [];
+      const processedIds = new Set<string>();
 
-      for (const message of messages) {
+      for (const message of unreadMessages) {
         if (message.id) {
+          processedIds.add(message.id);
+          const wasProcessed = await this.processMessage(message.id, traceId);
+          if (wasProcessed) processed++;
+        }
+      }
+
+      // Pass 2: All recent inbox emails (catches emails read by admin/mobile
+      // but never processed by the application). Uses a shorter window (1d)
+      // since the stale recovery handles older messages via thread checking.
+      // The processMessage dedup ensures this doesn't reprocess pass 1 results.
+      const allRecentResponse = await this.gmail.users.messages.list({
+        userId: 'me',
+        q: 'in:inbox newer_than:1d',
+        maxResults: 20,
+      });
+
+      const allRecentMessages = allRecentResponse.data.messages || [];
+
+      for (const message of allRecentMessages) {
+        if (message.id && !processedIds.has(message.id)) {
           const wasProcessed = await this.processMessage(message.id, traceId);
           if (wasProcessed) processed++;
         }
