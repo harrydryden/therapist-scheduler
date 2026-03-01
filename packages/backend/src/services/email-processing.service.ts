@@ -4,6 +4,11 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { DEFAULT_TIMEOUTS, TimeoutError } from '../utils/timeout';
+import {
+  decodeHtmlEntities,
+  stripHtml,
+  encodeEmailHeader,
+} from '../utils/email-encoding';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS, CircuitBreakerError } from '../utils/circuit-breaker';
 // FIX #5: Lazy import to break circular dependency:
 // justin-time.service → appointment-lifecycle.service → email-processing.service → justin-time.service
@@ -1411,9 +1416,9 @@ export class EmailProcessingService {
         const mimeType = message.payload.mimeType || '';
         const rawBody = this.decodeEmailBody(message.payload.body.data, mimeType);
         if (mimeType.includes('text/html')) {
-          body = this.stripHtml(rawBody);
+          body = stripHtml(rawBody);
         } else {
-          body = this.decodeHtmlEntities(rawBody);
+          body = decodeHtmlEntities(rawBody);
         }
       } else if (message.payload.parts) {
         // Multipart message - try plain text first
@@ -1424,7 +1429,7 @@ export class EmailProcessingService {
           // Decode with charset detection and clean up HTML entities
           const contentType = textPart.mimeType || 'text/plain; charset=utf-8';
           const rawBody = this.decodeEmailBody(textPart.body.data, contentType);
-          body = this.decodeHtmlEntities(rawBody);
+          body = decodeHtmlEntities(rawBody);
         } else {
           // Fall back to HTML if no plain text available
           const htmlPart = message.payload.parts.find(
@@ -1433,7 +1438,7 @@ export class EmailProcessingService {
           if (htmlPart?.body?.data) {
             const contentType = htmlPart.mimeType || 'text/html; charset=utf-8';
             const rawBody = this.decodeEmailBody(htmlPart.body.data, contentType);
-            body = this.stripHtml(rawBody);
+            body = stripHtml(rawBody);
             logger.debug({ messageId: message.id }, 'Extracted body from HTML part (no plain text available)');
           }
         }
@@ -1551,61 +1556,6 @@ export class EmailProcessingService {
         return Buffer.from(base64Data, 'base64').toString('utf-8');
       }
     }
-  }
-
-  /**
-   * Decode common HTML entities to their character equivalents
-   * Some email clients include HTML entities even in plain text parts
-   *
-   * IMPORTANT: Order matters - specific entities first, then numeric
-   * This prevents double-decoding of escaped numeric entities like &amp;#123;
-   */
-  private decodeHtmlEntities(text: string): string {
-    return text
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#39;/g, "'")
-      .replace(/&#x27;/g, "'")
-      .replace(/&ndash;/g, '\u2013')  // en-dash
-      .replace(/&mdash;/g, '\u2014')  // em-dash
-      .replace(/&hellip;/g, '\u2026') // horizontal ellipsis
-      .replace(/&lsquo;/g, '\u2018')  // left single quote
-      .replace(/&rsquo;/g, '\u2019')  // right single quote
-      .replace(/&ldquo;/g, '\u201C')  // left double quote
-      .replace(/&rdquo;/g, '\u201D')  // right double quote
-      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-  }
-
-  /**
-   * Strip HTML tags from content and convert to plain text
-   * Preserves paragraph structure by converting block elements to newlines
-   */
-  private stripHtml(html: string): string {
-    const stripped = html
-      // Remove script and style blocks entirely
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      // Convert block elements to newlines for structure
-      .replace(/<\/p>/gi, '\n\n')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/div>/gi, '\n')
-      .replace(/<\/li>/gi, '\n')
-      .replace(/<\/tr>/gi, '\n')
-      .replace(/<\/h[1-6]>/gi, '\n\n')
-      // Remove all remaining HTML tags
-      .replace(/<[^>]+>/g, '')
-      // Normalize whitespace (preserve intentional line breaks)
-      .replace(/[ \t]+/g, ' ')           // Collapse horizontal whitespace
-      .replace(/ *\n */g, '\n')          // Trim spaces around newlines
-      .replace(/\n{3,}/g, '\n\n')        // Collapse excessive newlines
-      .trim();
-
-    return this.decodeHtmlEntities(stripped);
   }
 
   /**
@@ -1962,30 +1912,6 @@ export class EmailProcessingService {
   }
 
   /**
-   * Encode email header value for non-ASCII characters using RFC 2047 (MIME encoded-word)
-   * Uses Base64 encoding (B) which is more reliable than quoted-printable (Q)
-   */
-  private encodeHeaderValue(value: string): string {
-    // Check if the value contains any non-ASCII characters
-    if (!/[^\x20-\x7E]/.test(value)) {
-      return value; // ASCII-only, no encoding needed
-    }
-    // Use RFC 2047 Base64 encoding for non-ASCII
-    return `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`;
-  }
-
-  /**
-   * Normalize line endings to CRLF as required by email RFC 5322
-   */
-  private normalizeLineEndings(text: string): string {
-    return text
-      .replace(/\r\n/g, '\n')  // First normalize all to LF
-      .replace(/\r/g, '\n')    // Handle standalone CR
-      .split('\n')
-      .join('\r\n');           // Convert all to CRLF
-  }
-
-  /**
    * Convert plain text email body to simple HTML for proper mobile rendering.
    * This prevents awkward mid-sentence line breaks on narrow screens by allowing
    * the email client to reflow text properly.
@@ -2156,7 +2082,7 @@ ${htmlParts.join('\n')}
     }
 
     // Encode subject if it contains non-ASCII characters (RFC 2047)
-    const encodedSubject = this.encodeHeaderValue(params.subject);
+    const encodedSubject = encodeEmailHeader(params.subject);
 
     // Convert plain text body to simple HTML for proper text reflow on mobile
     // This prevents awkward mid-sentence line breaks on narrow screens

@@ -83,9 +83,3 @@ export function reportError(error: Error, errorInfo?: ErrorInfo): void {
   });
 }
 
-/**
- * Report a message (non-exception) for monitoring
- */
-export function reportMessage(message: string, level?: 'info' | 'warning' | 'error'): void {
-  activeReporter.captureMessage(message, level);
-}

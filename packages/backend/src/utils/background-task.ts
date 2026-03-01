@@ -72,13 +72,6 @@ export function getAllTaskMetrics(): Record<string, TaskMetrics> {
   return result;
 }
 
-/**
- * Reset metrics (useful for testing)
- */
-export function resetTaskMetrics(): void {
-  taskMetrics.clear();
-}
-
 function getOrCreateMetrics(taskName: string): TaskMetrics {
   let metrics = taskMetrics.get(taskName);
   if (!metrics) {
@@ -304,57 +297,3 @@ export function runBackgroundTask(
   });
 }
 
-/**
- * Execute multiple background tasks in parallel
- * Useful when you need to fire off several notifications at once
- */
-export function runBackgroundTasks(
-  tasks: Array<{
-    task: () => Promise<unknown>;
-    options: BackgroundTaskOptions;
-  }>
-): void {
-  for (const { task, options } of tasks) {
-    runBackgroundTask(task, options);
-  }
-}
-
-/**
- * Create a tracked version of an async function for background execution
- *
- * @example
- * const notifySlack = createBackgroundTask(
- *   'slack-notify',
- *   async (message: string) => slackService.notify(message)
- * );
- *
- * // Later, use it as fire-and-forget
- * notifySlack('Hello world');
- */
-export function createBackgroundTask<TArgs extends unknown[]>(
-  name: string,
-  fn: (...args: TArgs) => Promise<unknown>,
-  defaultOptions?: Partial<Omit<BackgroundTaskOptions, 'name'>>
-): (...args: TArgs) => void {
-  return (...args: TArgs) => {
-    runBackgroundTask(
-      () => fn(...args),
-      { name, ...defaultOptions }
-    );
-  };
-}
-
-/**
- * Wrap an existing promise to track it as a background task
- * Use when you already have a promise but want tracking
- *
- * @example
- * const promise = someAsyncOperation();
- * trackBackgroundPromise(promise, { name: 'some-operation' });
- */
-export function trackBackgroundPromise(
-  promise: Promise<unknown>,
-  options: BackgroundTaskOptions
-): void {
-  runBackgroundTask(() => promise, options);
-}

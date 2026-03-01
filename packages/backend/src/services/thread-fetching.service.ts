@@ -3,6 +3,11 @@ import { OAuth2Client } from 'google-auth-library';
 import { logger } from '../utils/logger';
 import { EMAIL, THREAD_LIMITS } from '../constants';
 import {
+  decodeHtmlEntities,
+  stripHtml,
+  truncateText,
+} from '../utils/email-encoding';
+import {
   loadGmailCredentials,
   createOAuth2Client,
   acquireTokenRefreshLock,
@@ -317,7 +322,7 @@ export class ThreadFetchingService {
       lines.push(`Subject: ${escapeContextMarkers(msg.subject)}`);
       lines.push('');
       // Escape body content to prevent context marker confusion
-      lines.push(escapeContextMarkers(this.truncateBody(msg.body)));
+      lines.push(escapeContextMarkers(truncateText(msg.body)));
       lines.push('');
     }
 
@@ -363,9 +368,9 @@ export class ThreadFetchingService {
         const contentType = message.payload.mimeType || 'text/plain; charset=utf-8';
         const rawBody = this.decodeEmailBody(message.payload.body.data, contentType);
         if (contentType.includes('text/html')) {
-          body = this.stripHtml(rawBody);
+          body = stripHtml(rawBody);
         } else {
-          body = this.decodeHtmlEntities(rawBody);
+          body = decodeHtmlEntities(rawBody);
         }
       } else if (message.payload?.parts) {
         // Try to find plain text part first
@@ -376,7 +381,7 @@ export class ThreadFetchingService {
           // Decode with charset detection and clean up HTML entities
           const contentType = textPart.mimeType || 'text/plain; charset=utf-8';
           const rawBody = this.decodeEmailBody(textPart.body.data, contentType);
-          body = this.decodeHtmlEntities(rawBody);
+          body = decodeHtmlEntities(rawBody);
         } else {
           // Fall back to HTML if no plain text
           const htmlPart = message.payload.parts.find(
@@ -385,7 +390,7 @@ export class ThreadFetchingService {
           if (htmlPart?.body?.data) {
             const contentType = htmlPart.mimeType || 'text/html; charset=utf-8';
             const rawBody = this.decodeEmailBody(htmlPart.body.data, contentType);
-            body = this.stripHtml(rawBody);
+            body = stripHtml(rawBody);
           }
         }
       }
@@ -474,84 +479,6 @@ export class ThreadFetchingService {
         return Buffer.from(base64Data, 'base64').toString('utf-8');
       }
     }
-  }
-
-  /**
-   * Decode common HTML entities to their character equivalents
-   * Applies to both plain text and HTML-stripped content
-   *
-   * IMPORTANT: Order matters - specific entities first, then numeric
-   * This prevents double-decoding of escaped numeric entities like &amp;#123;
-   */
-  private decodeHtmlEntities(text: string): string {
-    return text
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&apos;/g, "'")
-      .replace(/&#39;/g, "'")
-      .replace(/&#x27;/g, "'")
-      .replace(/&ndash;/g, '\u2013')  // en-dash
-      .replace(/&mdash;/g, '\u2014')  // em-dash
-      .replace(/&hellip;/g, '\u2026') // horizontal ellipsis
-      .replace(/&lsquo;/g, '\u2018')  // left single quote
-      .replace(/&rsquo;/g, '\u2019')  // right single quote
-      .replace(/&ldquo;/g, '\u201C')  // left double quote
-      .replace(/&rdquo;/g, '\u201D')  // right double quote
-      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
-      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-  }
-
-  /**
-   * Strip HTML tags from content and convert to plain text
-   * Preserves paragraph structure by converting block elements to newlines
-   */
-  private stripHtml(html: string): string {
-    const stripped = html
-      // Remove script and style blocks entirely
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-      // Convert block elements to newlines for structure
-      .replace(/<\/p>/gi, '\n\n')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/div>/gi, '\n')
-      .replace(/<\/li>/gi, '\n')
-      .replace(/<\/tr>/gi, '\n')
-      .replace(/<\/h[1-6]>/gi, '\n\n')
-      // Remove all remaining HTML tags
-      .replace(/<[^>]+>/g, '')
-      // Normalize whitespace (preserve intentional line breaks)
-      .replace(/[ \t]+/g, ' ')           // Collapse horizontal whitespace
-      .replace(/ *\n */g, '\n')          // Trim spaces around newlines
-      .replace(/\n{3,}/g, '\n\n')        // Collapse excessive newlines
-      .trim();
-
-    return this.decodeHtmlEntities(stripped);
-  }
-
-  /**
-   * Truncate very long email bodies to prevent context overflow
-   * Keeps first and last portions for context
-   */
-  private truncateBody(body: string, maxLength: number = 3000): string {
-    if (body.length <= maxLength) {
-      return body;
-    }
-
-    // Calculate how much space the indicator will take
-    const removedChars = body.length - maxLength;
-    const indicator = `\n\n[... MESSAGE TRUNCATED - ${removedChars} characters removed ...]\n\n`;
-
-    // Account for indicator length when calculating available space
-    const availableLength = maxLength - indicator.length;
-    const halfLength = Math.floor(availableLength / 2);
-
-    const start = body.substring(0, halfLength);
-    const end = body.substring(body.length - halfLength);
-
-    return `${start}${indicator}${end}`;
   }
 
   /**

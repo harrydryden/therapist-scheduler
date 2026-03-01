@@ -37,50 +37,6 @@ function isSerializationError(error: unknown): boolean {
   );
 }
 
-/**
- * Calculate hours elapsed between two timestamps using UTC milliseconds.
- *
- * IMPORTANT: JavaScript Date.getTime() returns UTC milliseconds, which are NOT
- * affected by DST transitions. This means a 36-hour freeze is always exactly
- * 36 hours of elapsed time, regardless of timezone changes.
- *
- * The previous implementation incorrectly applied a 1-hour tolerance that
- * effectively made a 36-hour freeze only 35 hours. This has been removed
- * since UTC calculations are inherently DST-safe.
- *
- * @param fromTimestamp - Earlier timestamp (e.g., activity time)
- * @param toTimestamp - Later timestamp (e.g., now) - defaults to Date.now()
- * @returns Hours elapsed (precise UTC-based calculation)
- */
-function getHoursSince(
-  fromTimestamp: Date,
-  toTimestamp: Date = new Date()
-): number {
-  // getTime() returns UTC milliseconds - not affected by DST
-  // 36 hours in milliseconds is always 36 * 60 * 60 * 1000, regardless of timezone
-  return (toTimestamp.getTime() - fromTimestamp.getTime()) / (1000 * 60 * 60);
-}
-
-/**
- * Check if enough hours have passed.
- *
- * Uses exact UTC-based comparison. No DST tolerance needed because
- * Date.getTime() returns UTC milliseconds which are not affected by
- * daylight saving transitions.
- *
- * @param hoursSince - Actual hours elapsed (from getHoursSince)
- * @param thresholdHours - The threshold to compare against
- * @returns true if hours >= threshold
- */
-function hasThresholdPassed(
-  hoursSince: number,
-  thresholdHours: number
-): boolean {
-  // Direct comparison - no tolerance needed for UTC calculations
-  // A 36-hour threshold means exactly 36 hours of elapsed time
-  return hoursSince >= thresholdHours;
-}
-
 export interface TherapistAvailabilityStatus {
   canAcceptNewRequests: boolean;
   // FIX L3: Added 'error_fallback' to distinguish error cases from normal availability
@@ -491,82 +447,6 @@ class TherapistBookingStatusService {
         result.set(id, await this.shouldTherapistBeFrozen(id));
       }
       return result;
-    }
-  }
-
-  /**
-   * Check for therapists with 2 threads both inactive for the threshold period
-   * Flags them for admin attention
-   *
-   * @deprecated Use checkAndHandleInactiveTherapists instead which combines flagging and auto-unfreeze
-   *
-   * OPTIMIZED: Uses atomic UPDATE with subquery to prevent race conditions
-   *
-   * Returns:
-   * - >= 0: Number of therapists flagged
-   * - -1: Query failed (error logged)
-   */
-  async checkAndFlagStaleTherapists(): Promise<number> {
-    // Use the unified inactivity threshold
-    const staleThresholdMs = THERAPIST_BOOKING.INACTIVITY_ALERT_HOURS * 60 * 60 * 1000;
-    const staleThreshold72h = new Date(Date.now() - staleThresholdMs);
-    const now = new Date();
-
-    try {
-      // Atomic update: Flag therapists where ALL active appointments are stale (72h)
-      // Uses NOT EXISTS to ensure no recent activity on any thread
-      //
-      // FIX B4: Removed overly strict NULL check that caused false negatives
-      // Previous logic blocked flagging if ANY appointment had null activity,
-      // which prevented flagging therapists with 2 stale threads where one was legacy data.
-      //
-      // New logic: Flag if NO active appointments have recent activity (>= 72h threshold)
-      // Appointments with null activity are treated as stale (conservative approach)
-      // This ensures admin gets alerted even for legacy data without activity tracking
-      const flaggedResult = await prisma.$executeRaw`
-        UPDATE therapist_booking_status tbs
-        SET admin_alert_at = ${now}, updated_at = ${now}
-        WHERE tbs.has_confirmed_booking = false
-          AND tbs.unique_request_count >= ${THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS}
-          AND tbs.admin_alert_at IS NULL
-          AND EXISTS (
-            SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_notion_id = tbs.id
-              AND ar.status IN ('pending', 'contacted', 'negotiating')
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_notion_id = tbs.id
-              AND ar.status IN ('pending', 'contacted', 'negotiating')
-              AND ar.last_activity_at IS NOT NULL
-              AND ar.last_activity_at >= ${staleThreshold72h}
-          )
-      `;
-
-      const count = Number(flaggedResult);
-
-      // Explicitly distinguish between "no stale therapists" and success with results
-      if (count > 0) {
-        logger.warn(
-          { flaggedCount: count, threshold: '72h' },
-          'Flagged therapists for admin attention due to stale threads'
-        );
-      } else {
-        logger.debug(
-          { threshold: '72h' },
-          'Stale therapist check completed - no therapists need flagging'
-        );
-      }
-
-      return count;
-    } catch (error) {
-      // CRITICAL: Distinguish between "query failed" and "no results"
-      // Return -1 to indicate error, caller can decide how to handle
-      logger.error(
-        { error, operation: 'checkAndFlagStaleTherapists', threshold: staleThreshold72h },
-        'FAILED to check stale therapists - admin alerts may be missed'
-      );
-      return -1;
     }
   }
 

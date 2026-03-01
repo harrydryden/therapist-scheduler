@@ -30,39 +30,11 @@ export const AUDIENCE_BADGE_COLORS: Record<string, string> = {
   both: 'bg-spill-teal-100 text-spill-teal-600',
 } as const;
 
-// Priority level colors
-export const PRIORITY_COLORS: Record<string, string> = {
-  low: 'bg-spill-grey-100 text-spill-grey-600',
-  medium: 'bg-spill-yellow-100 text-spill-yellow-600',
-  high: 'bg-spill-red-200 text-spill-red-600',
-  urgent: 'bg-spill-red-400 text-spill-white',
-} as const;
-
-// Common badge styles for labels/tags
-export const TAG_COLORS = {
-  default: 'bg-spill-grey-100 text-spill-grey-600',
-  custom: 'bg-spill-blue-100 text-spill-blue-800',
-  inactive: 'bg-spill-grey-200 text-spill-grey-600',
-  warning: 'bg-spill-yellow-200 text-spill-yellow-600',
-  success: 'bg-spill-teal-100 text-spill-teal-600',
-  error: 'bg-spill-red-100 text-spill-red-600',
-  info: 'bg-spill-blue-100 text-spill-blue-800',
-  human: 'bg-spill-yellow-400 text-spill-grey-600',
-  stale: 'bg-spill-red-100 text-spill-red-600',
-} as const;
-
 // Health status colors (traffic light system)
 export const HEALTH_STATUS_COLORS: Record<string, string> = {
   green: 'bg-spill-teal-400',
   yellow: 'bg-spill-yellow-400',
   red: 'bg-spill-red-400',
-} as const;
-
-// Health status badge colors (with text)
-export const HEALTH_BADGE_COLORS: Record<string, string> = {
-  green: 'bg-spill-teal-100 text-spill-teal-600',
-  yellow: 'bg-spill-yellow-100 text-spill-yellow-600',
-  red: 'bg-spill-red-100 text-spill-red-600',
 } as const;
 
 // Conversation stage labels (human-readable)
@@ -91,11 +63,6 @@ export function getAudienceColor(audience: string): string {
 // Utility function to get health status color with fallback
 export function getHealthColor(status: string): string {
   return HEALTH_STATUS_COLORS[status] || HEALTH_STATUS_COLORS.green;
-}
-
-// Utility function to get health badge color with fallback
-export function getHealthBadgeColor(status: string): string {
-  return HEALTH_BADGE_COLORS[status] || HEALTH_BADGE_COLORS.green;
 }
 
 // Utility function to get stage label with fallback
