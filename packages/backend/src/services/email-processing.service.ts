@@ -1877,18 +1877,42 @@ export class EmailProcessingService {
       const messages = threadResponse.data.messages || [];
       let processed = 0;
 
+      // FIX: Collect all non-SENT message IDs from the thread, then cross-reference
+      // against the processedGmailMessage table to find truly unprocessed messages.
+      // Previously this only checked the UNREAD label, which misses replies that were
+      // read in Gmail (by admin, mobile notification, etc.) but never processed by
+      // the application. The database is the source of truth for processing state,
+      // not Gmail's UNREAD label.
+      const candidateMessages: Array<{ id: string; labels: string[] }> = [];
       for (const message of messages) {
         if (!message.id) continue;
 
-        // Only process messages that have the UNREAD label (not yet processed)
         const labels = message.labelIds || [];
-        if (!labels.includes('UNREAD')) continue;
 
         // Skip messages in SENT (our outgoing emails)
         if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
 
+        candidateMessages.push({ id: message.id, labels });
+      }
+
+      if (candidateMessages.length === 0) {
+        return 0;
+      }
+
+      // Batch-check which messages have already been processed using the database
+      // as the authoritative source of truth (not Gmail labels)
+      const alreadyProcessed = await prisma.processedGmailMessage.findMany({
+        where: { id: { in: candidateMessages.map((m) => m.id) } },
+        select: { id: true },
+      });
+      const processedIds = new Set(alreadyProcessed.map((p) => p.id));
+
+      for (const message of candidateMessages) {
+        // Skip messages already processed by our system
+        if (processedIds.has(message.id)) continue;
+
         logger.info(
-          { traceId, threadId, messageId: message.id },
+          { traceId, threadId, messageId: message.id, hadUnreadLabel: message.labels.includes('UNREAD') },
           'Found unprocessed message in stale thread - attempting recovery'
         );
 
