@@ -1910,6 +1910,162 @@ export class EmailProcessingService {
   }
 
   /**
+   * Preview which messages in a thread are unprocessed vs already processed.
+   * Used by the admin UI to show a dry-run before triggering reprocessing.
+   */
+  async previewThreadMessages(
+    threadId: string,
+    traceId: string
+  ): Promise<{
+    messages: Array<{
+      messageId: string;
+      from: string;
+      subject: string;
+      date: string;
+      status: 'processed' | 'unprocessed';
+      snippet: string;
+    }>;
+  }> {
+    if (!this.gmail) {
+      await this.initializeGmailClient();
+      if (!this.gmail) {
+        throw new Error('Gmail client not initialized');
+      }
+    }
+
+    // Fetch thread with full format to get headers for preview
+    const threadResponse = await this.gmail.users.threads.get({
+      userId: 'me',
+      id: threadId,
+      format: 'metadata',
+      metadataHeaders: ['From', 'Subject', 'Date'],
+    });
+
+    const gmailMessages = threadResponse.data.messages || [];
+    if (gmailMessages.length === 0) {
+      return { messages: [] };
+    }
+
+    // Collect inbound messages (skip SENT-only)
+    const inboundMessages: Array<{ id: string; labels: string[]; headers: Record<string, string>; snippet: string }> = [];
+    for (const message of gmailMessages) {
+      if (!message.id) continue;
+      const labels = message.labelIds || [];
+      if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
+
+      const headers: Record<string, string> = {};
+      for (const h of message.payload?.headers || []) {
+        if (h.name && h.value) headers[h.name.toLowerCase()] = h.value;
+      }
+      inboundMessages.push({
+        id: message.id,
+        labels,
+        headers,
+        snippet: message.snippet || '',
+      });
+    }
+
+    if (inboundMessages.length === 0) {
+      return { messages: [] };
+    }
+
+    // Check which are already processed
+    const alreadyProcessed = await prisma.processedGmailMessage.findMany({
+      where: { id: { in: inboundMessages.map((m) => m.id) } },
+      select: { id: true },
+    });
+    const processedIds = new Set(alreadyProcessed.map((p) => p.id));
+
+    const messages = inboundMessages.map((m) => ({
+      messageId: m.id,
+      from: m.headers['from'] || 'Unknown',
+      subject: m.headers['subject'] || '(no subject)',
+      date: m.headers['date'] || '',
+      status: processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const,
+      snippet: m.snippet.substring(0, 120),
+    }));
+
+    logger.info(
+      { traceId, threadId, total: messages.length, unprocessed: messages.filter(m => m.status === 'unprocessed').length },
+      'Thread preview generated'
+    );
+
+    return { messages };
+  }
+
+  /**
+   * Reprocess a Gmail thread safely with two modes:
+   *
+   * 1. Safe mode (default, forceMessageIds empty/undefined):
+   *    Only processes messages that were NEVER processed. This is safe because
+   *    it delegates to checkThreadForUnprocessedReplies without clearing anything.
+   *    Use this for recovering genuinely missed messages.
+   *
+   * 2. Force mode (forceMessageIds provided):
+   *    Clears processed records ONLY for the specified message IDs, then reprocesses.
+   *    Use this for messages that were partially processed or erroneously marked as
+   *    handled. The admin must explicitly select which messages to force-reprocess
+   *    via the preview UI.
+   *
+   * This design prevents the dangerous scenario of blindly reprocessing all messages,
+   * which would cause duplicate emails, duplicate conversation state entries, and
+   * duplicate side effects through the JustinTime AI agent pipeline.
+   */
+  async reprocessThread(
+    threadId: string,
+    traceId: string,
+    forceMessageIds?: string[]
+  ): Promise<{ cleared: number; reprocessed: number }> {
+    if (!this.gmail) {
+      await this.initializeGmailClient();
+      if (!this.gmail) {
+        throw new Error('Gmail client not initialized');
+      }
+    }
+
+    // If force-reprocessing specific messages, clear only those records
+    let cleared = 0;
+    if (forceMessageIds && forceMessageIds.length > 0) {
+      logger.info(
+        { traceId, threadId, forceMessageIds },
+        'Force-clearing processed records for specific messages'
+      );
+
+      // Clear from database
+      const { count: dbCleared } = await prisma.processedGmailMessage.deleteMany({
+        where: { id: { in: forceMessageIds } },
+      });
+      cleared = dbCleared;
+
+      // Clear from Redis (best effort)
+      for (const messageId of forceMessageIds) {
+        try {
+          await redis.zrem(PROCESSED_MESSAGES_KEY, messageId);
+          // Also clear any lingering locks
+          await redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`);
+        } catch {
+          // Redis failure is non-fatal
+        }
+      }
+
+      logger.info(
+        { traceId, threadId, dbCleared, forceCount: forceMessageIds.length },
+        'Cleared processed records for force-reprocessed messages'
+      );
+    }
+
+    // Now run standard thread recovery — processes only messages NOT in processedGmailMessage
+    const reprocessed = await this.checkThreadForUnprocessedReplies(threadId, traceId);
+
+    logger.info(
+      { traceId, threadId, cleared, reprocessed },
+      'Thread reprocessing complete'
+    );
+
+    return { cleared, reprocessed };
+  }
+
+  /**
    * Set up Gmail push notifications (watch)
    */
   async setupPushNotifications(topicName: string): Promise<{ historyId: string; expiration: string }> {

@@ -590,6 +590,16 @@ export class CacheManager {
     }
   }
 
+  async zrem(key: string, member: string): Promise<number> {
+    if (!this.redis) return 0;
+    try {
+      return await this.redis.zrem(key, member);
+    } catch (err) {
+      logger.warn({ err, key }, 'Redis zrem error');
+      return 0;
+    }
+  }
+
   async zremrangebyscore(key: string, min: string | number, max: string | number): Promise<number> {
     if (!this.redis) return 0;
     try {
@@ -889,6 +899,7 @@ export const redis = {
   // ZSET methods for per-item TTL tracking
   zadd: (key: string, score: number, member: string) => cacheManager.zadd(key, score, member),
   zscore: (key: string, member: string) => cacheManager.zscore(key, member),
+  zrem: (key: string, member: string) => cacheManager.zrem(key, member),
   zremrangebyscore: (key: string, min: string | number, max: string | number) => cacheManager.zremrangebyscore(key, min, max),
   // List operations (for write-ahead log / queue support)
   rpush: (key: string, value: string) => cacheManager.rpush(key, value),

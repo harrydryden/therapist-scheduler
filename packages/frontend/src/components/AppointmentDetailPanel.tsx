@@ -7,7 +7,10 @@ import {
   sendAdminMessage,
   deleteAppointment,
   updateAppointment,
+  previewReprocessThread,
+  reprocessThread,
 } from '../api/client';
+import type { ReprocessPreviewResult, ReprocessThreadResult } from '../api/client';
 import type { AppointmentDetail } from '../types';
 import { getAdminId } from '../utils/admin-id';
 import DetailHeader from './detail-panel/DetailHeader';
@@ -38,12 +41,16 @@ export default function AppointmentDetailPanel({
   const [editConfirmedDateTime, setEditConfirmedDateTime] = useState('');
   const [editWarning, setEditWarning] = useState<string | null>(null);
   const editWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [reprocessPreview, setReprocessPreview] = useState<ReprocessPreviewResult | null>(null);
+  const [reprocessResult, setReprocessResult] = useState<ReprocessThreadResult | null>(null);
 
   // Reset state when switching appointments
   useEffect(() => {
     setMutationError(null);
     setShowEditPanel(false);
     setEditWarning(null);
+    setReprocessPreview(null);
+    setReprocessResult(null);
   }, [selectedAppointment]);
 
   // Sync edit form state when appointment detail loads
@@ -180,6 +187,34 @@ export default function AppointmentDetailPanel({
     },
   });
 
+  const previewReprocessMutation = useMutation({
+    mutationFn: (id: string) => previewReprocessThread(id),
+    onMutate: () => { setMutationError(null); setReprocessResult(null); },
+    onSuccess: (data) => {
+      setReprocessPreview(data);
+      setMutationError(null);
+    },
+    onError: (error) => {
+      setMutationError(error instanceof Error ? error.message : 'Failed to preview thread');
+    },
+  });
+
+  const reprocessThreadMutation = useMutation({
+    mutationFn: ({ id, forceMessageIds }: { id: string; forceMessageIds?: string[] }) =>
+      reprocessThread(id, forceMessageIds),
+    onMutate: () => { setMutationError(null); },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
+      queryClient.invalidateQueries({ queryKey: ['appointments'] });
+      setReprocessPreview(null);
+      setReprocessResult(data);
+      setMutationError(null);
+    },
+    onError: (error) => {
+      setMutationError(error instanceof Error ? error.message : 'Failed to reprocess thread');
+    },
+  });
+
   if (!selectedAppointment) {
     return (
       <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
@@ -232,6 +267,12 @@ export default function AppointmentDetailPanel({
             releaseControlMutation={releaseControlMutation}
             updateAppointmentMutation={updateAppointmentMutation}
             sendMessageMutation={sendMessageMutation}
+            previewReprocessMutation={previewReprocessMutation}
+            reprocessThreadMutation={reprocessThreadMutation}
+            reprocessPreview={reprocessPreview}
+            reprocessResult={reprocessResult}
+            onDismissReprocessPreview={() => setReprocessPreview(null)}
+            onDismissReprocessResult={() => setReprocessResult(null)}
             showEditPanel={showEditPanel}
             onShowEditPanel={setShowEditPanel}
             editStatus={editStatus}
