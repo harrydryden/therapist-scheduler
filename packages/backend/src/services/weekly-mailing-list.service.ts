@@ -24,7 +24,7 @@ import { notionUsersService, NotionUser } from './notion-users.service';
 import { notionService } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { emailProcessingService } from './email-processing.service';
-import { getSettingValue } from './settings.service';
+import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { WEEKLY_MAILING } from '../constants';
@@ -321,9 +321,15 @@ class WeeklyMailingListService {
    * Check if current time matches the configured send day and hour
    */
   private async shouldSendNow(): Promise<boolean> {
-    const sendDay = await getSettingValue<number>('weeklyMailing.sendDay');
-    const sendHour = await getSettingValue<number>('weeklyMailing.sendHour');
-    const timezone = await getSettingValue<string>('general.timezone');
+    // Batch fetch schedule settings in a single query
+    const settingsMap = await getSettingValues([
+      'weeklyMailing.sendDay',
+      'weeklyMailing.sendHour',
+      'general.timezone',
+    ]);
+    const sendDay = settingsMap.get('weeklyMailing.sendDay') as number;
+    const sendHour = settingsMap.get('weeklyMailing.sendHour') as number;
+    const timezone = settingsMap.get('general.timezone') as string;
 
     // Get current time in configured timezone
     const now = new Date();
@@ -445,10 +451,15 @@ class WeeklyMailingListService {
    * Send weekly email to a single user
    */
   private async sendWeeklyEmail(user: NotionUser): Promise<void> {
-    // Get templates and settings
-    const subjectTemplate = await getSettingValue<string>('email.weeklyMailingSubject');
-    const bodyTemplate = await getSettingValue<string>('email.weeklyMailingBody');
-    const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
+    // Batch fetch all needed settings in a single query
+    const settingsMap = await getSettingValues<string>([
+      'email.weeklyMailingSubject',
+      'email.weeklyMailingBody',
+      'weeklyMailing.webAppUrl',
+    ]);
+    const subjectTemplate = settingsMap.get('email.weeklyMailingSubject')!;
+    const bodyTemplate = settingsMap.get('email.weeklyMailingBody')!;
+    const webAppUrl = settingsMap.get('weeklyMailing.webAppUrl')!;
 
     // Generate unsubscribe URL using configured backend URL
     const unsubscribeUrl = generateUnsubscribeUrl(user.email, config.backendUrl);

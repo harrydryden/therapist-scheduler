@@ -7,7 +7,7 @@ import { redis } from '../utils/redis';
 import { logger } from '../utils/logger';
 import { RATE_LIMITS, HEADERS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
-import { getSettingValue } from '../services/settings.service';
+import { getSettingValues } from '../services/settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { verifyWebhookSecret } from '../middleware/auth';
@@ -142,10 +142,15 @@ export async function adminRoutes(fastify: FastifyInstance) {
       logger.info({ requestId, email, name }, 'Sending test weekly mailing email');
 
       try {
-        // Get templates and settings
-        const subjectTemplate = await getSettingValue<string>('email.weeklyMailingSubject');
-        const bodyTemplate = await getSettingValue<string>('email.weeklyMailingBody');
-        const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
+        // Batch fetch all needed settings in a single query
+        const settingsMap = await getSettingValues<string>([
+          'email.weeklyMailingSubject',
+          'email.weeklyMailingBody',
+          'weeklyMailing.webAppUrl',
+        ]);
+        const subjectTemplate = settingsMap.get('email.weeklyMailingSubject')!;
+        const bodyTemplate = settingsMap.get('email.weeklyMailingBody')!;
+        const webAppUrl = settingsMap.get('weeklyMailing.webAppUrl')!;
 
         // Generate unsubscribe URL
         const unsubscribeUrl = generateUnsubscribeUrl(email, config.backendUrl);
