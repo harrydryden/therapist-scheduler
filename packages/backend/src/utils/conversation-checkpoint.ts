@@ -78,7 +78,7 @@ const VALID_TRANSITIONS: Record<ConversationStage, ConversationStage[]> = {
   cancelled: [], // Terminal state
   stalled: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'cancelled', 'chased'],
   chased: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'confirmed', 'cancelled', 'closure_recommended'], // Chase can reactivate or lead to closure
-  closure_recommended: ['cancelled', 'awaiting_therapist_availability', 'awaiting_user_slot_selection'], // Admin can cancel or reactivate
+  closure_recommended: ['cancelled', 'awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'chased'], // Admin can cancel, reactivate, or new chase cycle after dismiss
 };
 
 /**
