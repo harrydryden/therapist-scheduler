@@ -139,6 +139,18 @@ model AppointmentRequest {
   // Auto-escalation tracking (Edge Case #7)
   autoEscalatedAt DateTime? @map("auto_escalated_at")
 
+  // Chase follow-up tracking (Thread Lifecycle)
+  // Agent sends one chase email to the non-responding party before recommending closure
+  chaseSentAt        DateTime? @map("chase_sent_at")        // When the chase email was sent
+  chaseSentTo        String?   @map("chase_sent_to")        // 'user' or 'therapist'
+  chaseTargetEmail   String?   @map("chase_target_email")   // Email address chased
+
+  // Closure recommendation tracking
+  // After chase goes unanswered, system recommends admin close the thread
+  closureRecommendedAt          DateTime? @map("closure_recommended_at")
+  closureRecommendedReason      String?   @map("closure_recommended_reason")
+  closureRecommendationActioned Boolean   @default(false) @map("closure_recommendation_actioned")
+
   // Relation to pending emails
   pendingEmails PendingEmail[]
 
@@ -178,6 +190,8 @@ model AppointmentRequest {
   @@index([idempotencyKey, createdAt]) // For idempotency key lookups
   @@index([userId]) // For user lookup queries
   @@index([therapistId]) // For therapist lookup queries
+  @@index([status, chaseSentAt]) // For chase follow-up queries
+  @@index([closureRecommendedAt]) // For closure recommendation dashboard
   @@map("appointment_requests")
 }
 

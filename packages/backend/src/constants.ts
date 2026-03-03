@@ -129,6 +129,18 @@ export const POST_BOOKING = {
   SESSION_REMINDER_HOURS_BEFORE: 4, // Hours before session to send reminder (Edge Case #6)
 } as const;
 
+// Chase follow-up and closure recommendation settings
+export const CHASE_FOLLOWUP = {
+  // Send a chase email after this many hours of inactivity on a stale thread
+  CHASE_AFTER_STALE_HOURS: 72,
+  // Recommend closure to admin if no response after this many hours post-chase
+  CLOSURE_RECOMMENDATION_HOURS: 48,
+  // Maximum conversations to chase per cycle (to avoid email rate limiting)
+  MAX_CHASE_BATCH_SIZE: 10,
+  // Maximum conversations to recommend closure per cycle
+  MAX_CLOSURE_BATCH_SIZE: 20,
+} as const;
+
 // Conversation state limits (to prevent unbounded growth)
 export const CONVERSATION_LIMITS = {
   // Max messages in conversation state (keeps last N pairs)

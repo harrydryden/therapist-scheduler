@@ -160,6 +160,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               threadDivergenceAcknowledged: true,
               conversationStallAlertAt: true,
               conversationStallAcknowledged: true,
+              // Chase & closure recommendation fields
+              chaseSentAt: true,
+              chaseSentTo: true,
+              closureRecommendedAt: true,
+              closureRecommendedReason: true,
+              closureRecommendationActioned: true,
             },
           }),
           prisma.appointmentRequest.count({ where }),
@@ -233,6 +239,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             isStalled,
             hasThreadDivergence,
             hasToolFailure,
+            // Chase & closure recommendation data
+            chaseSentAt: apt.chaseSentAt,
+            chaseSentTo: apt.chaseSentTo,
+            closureRecommendedAt: apt.closureRecommendedAt,
+            closureRecommendedReason: apt.closureRecommendedReason,
+            closureRecommendationActioned: apt.closureRecommendationActioned,
           };
         });
 
@@ -344,6 +356,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
             humanControlReason: appointment.humanControlReason,
+            // Chase & closure recommendation
+            chaseSentAt: appointment.chaseSentAt,
+            chaseSentTo: appointment.chaseSentTo,
+            closureRecommendedAt: appointment.closureRecommendedAt,
+            closureRecommendedReason: appointment.closureRecommendedReason,
+            closureRecommendationActioned: appointment.closureRecommendationActioned,
           },
         });
       } catch (err) {
@@ -1478,6 +1496,123 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         return reply.status(500).send({
           success: false,
           error: 'Failed to fetch appointments',
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/dashboard/appointments/:id/action-closure
+   * Admin actions a closure recommendation: either accepts (cancels) or dismisses it
+   */
+  fastify.post(
+    '/api/admin/dashboard/appointments/:id/action-closure',
+    {
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: 60000,
+        },
+      },
+    },
+    async (request: FastifyRequest<{
+      Params: { id: string };
+      Body: { action: 'cancel' | 'dismiss' };
+    }>, reply: FastifyReply) => {
+      const requestId = request.id;
+      const { id } = request.params;
+      const body = (request.body || {}) as { action?: string };
+      const action = body.action;
+      const adminId = `admin:${request.ip || 'unknown'}`;
+
+      if (!action || !['cancel', 'dismiss'].includes(action)) {
+        return reply.status(400).send({
+          success: false,
+          error: 'action must be "cancel" or "dismiss"',
+        });
+      }
+
+      logger.info(
+        { requestId, appointmentId: id, action, adminId },
+        'Admin actioning closure recommendation'
+      );
+
+      try {
+        const appointment = await prisma.appointmentRequest.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+            closureRecommendedAt: true,
+            closureRecommendationActioned: true,
+          },
+        });
+
+        if (!appointment) {
+          return reply.status(404).send({ success: false, error: 'Appointment not found' });
+        }
+
+        if (!appointment.closureRecommendedAt) {
+          return reply.status(400).send({
+            success: false,
+            error: 'No closure recommendation exists for this appointment',
+          });
+        }
+
+        if (appointment.closureRecommendationActioned) {
+          return reply.status(400).send({
+            success: false,
+            error: 'Closure recommendation already actioned',
+          });
+        }
+
+        if (action === 'cancel') {
+          // Cancel the appointment via lifecycle service
+          await appointmentLifecycleService.transitionToCancelled({
+            appointmentId: id,
+            reason: 'Closed on admin review: chase follow-up went unanswered',
+            cancelledBy: 'admin',
+            source: 'admin',
+            adminId,
+          });
+
+          // Mark recommendation as actioned
+          await prisma.appointmentRequest.update({
+            where: { id },
+            data: { closureRecommendationActioned: true },
+          });
+
+          logger.info(
+            { requestId, appointmentId: id, adminId },
+            'Admin accepted closure recommendation - appointment cancelled'
+          );
+        } else {
+          // Dismiss: just mark as actioned, clear the recommendation
+          await prisma.appointmentRequest.update({
+            where: { id },
+            data: {
+              closureRecommendationActioned: true,
+              // Reset chase fields so a new cycle can begin if needed
+              chaseSentAt: null,
+              chaseSentTo: null,
+              chaseTargetEmail: null,
+              closureRecommendedAt: null,
+              closureRecommendedReason: null,
+            },
+          });
+
+          logger.info(
+            { requestId, appointmentId: id, adminId },
+            'Admin dismissed closure recommendation - chase cycle reset'
+          );
+        }
+
+        return reply.send({ success: true, action });
+      } catch (err) {
+        logger.error({ err, requestId, appointmentId: id }, 'Failed to action closure recommendation');
+        return reply.status(500).send({
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to action closure',
         });
       }
     }

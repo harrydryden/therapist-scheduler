@@ -48,6 +48,8 @@ export const STAGE_LABELS: Record<string, string> = {
   rescheduling: 'Rescheduling',
   cancelled: 'Cancelled',
   stalled: 'Stalled',
+  chased: 'Chase Sent',
+  closure_recommended: 'Closure Recommended',
 } as const;
 
 // Utility function to get status color with fallback

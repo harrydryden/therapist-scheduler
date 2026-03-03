@@ -600,6 +600,48 @@ class SlackNotificationService {
     });
   }
 
+  /**
+   * Alert when a chase follow-up email is sent to a non-responding party
+   */
+  async notifyChaseFollowUp(
+    appointmentId: string,
+    userName: string | null,
+    therapistName: string,
+    chasedParty: string,
+    inactiveHours: number
+  ): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Chase Follow-up Sent',
+      severity: 'medium',
+      appointmentId,
+      therapistName,
+      details: `Chased *${chasedParty}* after *${inactiveHours}h* of inactivity. One follow-up sent — if no response, closure will be recommended.`,
+    });
+  }
+
+  /**
+   * Alert when the system recommends closing a thread (chase went unanswered)
+   */
+  async notifyClosureRecommendation(
+    appointmentId: string,
+    userName: string | null,
+    therapistName: string,
+    unresponsiveParty: string,
+    inactiveHours: number,
+    reason: string
+  ): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Closure Recommended',
+      severity: 'high',
+      appointmentId,
+      therapistName,
+      details: `Chase to *${unresponsiveParty}* went unanswered (*${inactiveHours}h* inactive). Recommend cancelling this appointment.`,
+      additionalFields: {
+        'Action needed': 'Review and cancel or take control',
+      },
+    });
+  }
+
   // ============================================
   // Appointment Lifecycle Notifications
   // ============================================

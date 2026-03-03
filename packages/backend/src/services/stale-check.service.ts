@@ -5,7 +5,7 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
-import { STALE_THRESHOLDS, STALL_DETECTION, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, INACTIVITY_THRESHOLDS } from '../constants';
+import { STALE_THRESHOLDS, STALL_DETECTION, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, INACTIVITY_THRESHOLDS, CHASE_FOLLOWUP } from '../constants';
 import { getSettingValue } from './settings.service';
 
 // Convert hours to milliseconds (used for isStale flag - visual indicator only)
@@ -658,6 +658,27 @@ class StaleCheckService {
           'Auto-escalated stalled conversations to human control'
         );
       }
+
+      // Chase follow-up: send one follow-up email to non-responding party
+      const chaseEnabled = await getSettingValue<boolean>('chase.enabled');
+      if (chaseEnabled) {
+        const chasedCount = await this.sendChaseFollowUps(checkId);
+        if (chasedCount > 0) {
+          logger.info(
+            { checkId, chasedCount },
+            'Sent chase follow-up emails to non-responding parties'
+          );
+        }
+
+        // Closure recommendation: recommend admin close threads where chase went unanswered
+        const closureCount = await this.recommendClosures(checkId);
+        if (closureCount > 0) {
+          logger.info(
+            { checkId, closureCount },
+            'Recommended closures for unresponsive threads'
+          );
+        }
+      }
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to run stale check');
     }
@@ -869,6 +890,339 @@ class StaleCheckService {
       return totalRecovered;
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to run stale thread recovery');
+      return 0;
+    }
+  }
+
+  /**
+   * Send chase follow-up emails to the non-responding party.
+   *
+   * When a conversation has been stale for a configurable period (default 72h),
+   * and no chase has been sent yet, determine who hasn't responded and send
+   * them a single follow-up email. The checkpoint stage tells us who we're
+   * waiting for:
+   *
+   * - awaiting_therapist_availability / awaiting_therapist_confirmation → chase therapist
+   * - awaiting_user_slot_selection → chase user
+   * - initial_contact (no checkpoint) → chase based on who was last emailed
+   *
+   * Only one chase is ever sent per thread. If it goes unanswered, the system
+   * will later recommend closure to the admin.
+   */
+  private async sendChaseFollowUps(checkId: string): Promise<number> {
+    try {
+      const chaseAfterHours = await getSettingValue<number>('chase.afterStaleHours');
+      const chaseThreshold = new Date(Date.now() - chaseAfterHours * 60 * 60 * 1000);
+
+      // Find stale conversations that haven't been chased yet
+      const candidates = await prisma.appointmentRequest.findMany({
+        where: {
+          status: { in: ['pending', 'contacted', 'negotiating'] },
+          lastActivityAt: { lt: chaseThreshold },
+          chaseSentAt: null, // Never chased
+          humanControlEnabled: false, // Don't chase while under human control
+          closureRecommendedAt: null, // Not already recommended for closure
+        },
+        select: {
+          id: true,
+          userName: true,
+          userEmail: true,
+          therapistName: true,
+          therapistEmail: true,
+          checkpointStage: true,
+          gmailThreadId: true,
+          therapistGmailThreadId: true,
+          lastActivityAt: true,
+          conversationState: true,
+        },
+        take: CHASE_FOLLOWUP.MAX_CHASE_BATCH_SIZE,
+      });
+
+      if (candidates.length === 0) {
+        return 0;
+      }
+
+      let chasedCount = 0;
+
+      for (const appointment of candidates) {
+        try {
+          // Determine who to chase based on checkpoint stage
+          const chaseTarget = this.determineChaseTarget(appointment);
+          if (!chaseTarget) {
+            logger.debug(
+              { checkId, appointmentId: appointment.id },
+              'Cannot determine chase target - skipping'
+            );
+            continue;
+          }
+
+          const { target, email, threadId } = chaseTarget;
+          const therapistFirstName = (appointment.therapistName || 'there').split(' ')[0];
+          const clientFirstName = (appointment.userName || 'the client').split(' ')[0];
+
+          // Build the chase email using templates
+          let subject: string;
+          let body: string;
+
+          if (target === 'user') {
+            const { getEmailSubject, getEmailBody } = await import('../utils/email-templates');
+            subject = await getEmailSubject('chaseUser', {
+              therapistName: appointment.therapistName,
+            });
+            body = await getEmailBody('chaseUser', {
+              userName: appointment.userName || 'there',
+              therapistName: appointment.therapistName,
+            });
+          } else {
+            const { getEmailSubject, getEmailBody } = await import('../utils/email-templates');
+            subject = await getEmailSubject('chaseTherapist', {
+              clientFirstName,
+            });
+            body = await getEmailBody('chaseTherapist', {
+              therapistFirstName,
+              clientFirstName,
+            });
+          }
+
+          // Send the chase email on the existing thread
+          await emailProcessingService.sendEmail({
+            to: email,
+            subject,
+            body,
+            threadId: threadId || undefined,
+          });
+
+          // Record the chase
+          await prisma.appointmentRequest.update({
+            where: { id: appointment.id },
+            data: {
+              chaseSentAt: new Date(),
+              chaseSentTo: target,
+              chaseTargetEmail: email,
+              lastActivityAt: new Date(),
+              isStale: false,
+            },
+          });
+
+          // Send Slack notification
+          await slackNotificationService.notifyChaseFollowUp(
+            appointment.id,
+            appointment.userName,
+            appointment.therapistName,
+            target,
+            Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
+          );
+
+          logger.info(
+            {
+              checkId,
+              appointmentId: appointment.id,
+              target,
+              email,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+            },
+            `Sent chase follow-up email to ${target}`
+          );
+
+          chasedCount++;
+        } catch (error) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, error },
+            'Failed to send chase follow-up email'
+          );
+        }
+      }
+
+      return chasedCount;
+    } catch (error) {
+      logger.error({ checkId, error }, 'Failed to run chase follow-ups');
+      return 0;
+    }
+  }
+
+  /**
+   * Determine who to chase based on the conversation's checkpoint stage.
+   * Returns the target ('user' or 'therapist'), their email, and the thread ID
+   * to reply on.
+   */
+  private determineChaseTarget(appointment: {
+    checkpointStage: string | null;
+    userEmail: string;
+    therapistEmail: string;
+    gmailThreadId: string | null;
+    therapistGmailThreadId: string | null;
+    conversationState: unknown;
+  }): { target: 'user' | 'therapist'; email: string; threadId: string | null } | null {
+    const stage = appointment.checkpointStage;
+
+    // Stages where we're waiting on the therapist
+    if (
+      stage === 'awaiting_therapist_availability' ||
+      stage === 'awaiting_therapist_confirmation'
+    ) {
+      return {
+        target: 'therapist',
+        email: appointment.therapistEmail,
+        threadId: appointment.therapistGmailThreadId,
+      };
+    }
+
+    // Stages where we're waiting on the user
+    if (stage === 'awaiting_user_slot_selection') {
+      return {
+        target: 'user',
+        email: appointment.userEmail,
+        threadId: appointment.gmailThreadId,
+      };
+    }
+
+    // For initial_contact or stalled, try to infer from conversation state
+    // If we have a therapist thread but no user thread, we're likely waiting on therapist
+    // If we have both threads, check the last email sent
+    if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
+      // Try to determine from the conversation state's last email target
+      const state = appointment.conversationState as { checkpoint?: { context?: { lastEmailSentTo?: string } } } | null;
+      const lastEmailTo = state?.checkpoint?.context?.lastEmailSentTo;
+
+      if (lastEmailTo === 'therapist') {
+        return {
+          target: 'therapist',
+          email: appointment.therapistEmail,
+          threadId: appointment.therapistGmailThreadId,
+        };
+      }
+
+      if (lastEmailTo === 'user') {
+        return {
+          target: 'user',
+          email: appointment.userEmail,
+          threadId: appointment.gmailThreadId,
+        };
+      }
+
+      // Default: if therapist thread exists but conversation didn't progress, chase therapist
+      if (appointment.therapistGmailThreadId) {
+        return {
+          target: 'therapist',
+          email: appointment.therapistEmail,
+          threadId: appointment.therapistGmailThreadId,
+        };
+      }
+
+      // If only user thread, chase user
+      if (appointment.gmailThreadId) {
+        return {
+          target: 'user',
+          email: appointment.userEmail,
+          threadId: appointment.gmailThreadId,
+        };
+      }
+    }
+
+    // Cannot determine target (e.g., rescheduling, confirmed, or no threads)
+    return null;
+  }
+
+  /**
+   * Recommend closure for threads where the chase follow-up went unanswered.
+   *
+   * After a configurable period (default 48h) following a chase email with no
+   * response, the system flags the thread for admin review with a recommendation
+   * to cancel/close. The admin can then action or dismiss the recommendation.
+   *
+   * This ensures every conversation has a path to conclusion rather than
+   * lingering indefinitely in an active state.
+   */
+  private async recommendClosures(checkId: string): Promise<number> {
+    try {
+      const closureHours = await getSettingValue<number>('chase.closureRecommendationHours');
+      const closureThreshold = new Date(Date.now() - closureHours * 60 * 60 * 1000);
+
+      // Find conversations where chase was sent but no response received
+      const candidates = await prisma.appointmentRequest.findMany({
+        where: {
+          status: { in: ['pending', 'contacted', 'negotiating'] },
+          chaseSentAt: { lt: closureThreshold }, // Chase sent > threshold ago
+          closureRecommendedAt: null, // Not already recommended
+          // Ensure no activity since the chase was sent (no response received)
+          lastActivityAt: { lt: closureThreshold },
+        },
+        select: {
+          id: true,
+          userName: true,
+          userEmail: true,
+          therapistName: true,
+          chaseSentTo: true,
+          chaseSentAt: true,
+          lastActivityAt: true,
+          status: true,
+        },
+        take: CHASE_FOLLOWUP.MAX_CLOSURE_BATCH_SIZE,
+      });
+
+      if (candidates.length === 0) {
+        return 0;
+      }
+
+      let closureCount = 0;
+
+      for (const appointment of candidates) {
+        try {
+          const inactiveHours = Math.round(
+            (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
+          );
+          const chasedParty = appointment.chaseSentTo === 'therapist'
+            ? appointment.therapistName
+            : (appointment.userName || appointment.userEmail);
+
+          const reason = `No response from ${appointment.chaseSentTo} (${chasedParty}) after chase follow-up sent ${Math.round(
+            (Date.now() - (appointment.chaseSentAt?.getTime() || 0)) / (60 * 60 * 1000)
+          )}h ago. Total inactivity: ${inactiveHours}h.`;
+
+          await prisma.appointmentRequest.update({
+            where: { id: appointment.id },
+            data: {
+              closureRecommendedAt: new Date(),
+              closureRecommendedReason: reason,
+              closureRecommendationActioned: false,
+            },
+          });
+
+          // Send Slack notification recommending closure
+          await slackNotificationService.notifyClosureRecommendation(
+            appointment.id,
+            appointment.userName,
+            appointment.therapistName,
+            appointment.chaseSentTo || 'unknown',
+            inactiveHours,
+            reason
+          );
+
+          logger.info(
+            {
+              checkId,
+              appointmentId: appointment.id,
+              chaseSentTo: appointment.chaseSentTo,
+              inactiveHours,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+            },
+            'Recommended closure for unresponsive thread'
+          );
+
+          closureCount++;
+        } catch (error) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, error },
+            'Failed to recommend closure for appointment'
+          );
+        }
+      }
+
+      return closureCount;
+    } catch (error) {
+      logger.error({ checkId, error }, 'Failed to run closure recommendations');
       return 0;
     }
   }
