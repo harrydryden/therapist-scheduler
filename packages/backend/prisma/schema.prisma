@@ -123,6 +123,10 @@ model AppointmentRequest {
   conversationStallAlertAt      DateTime? @map("conversation_stall_alert_at")
   conversationStallAcknowledged Boolean   @default(false) @map("conversation_stall_acknowledged")
 
+  // Invalid date alert tracking (confirmed appointments with unparseable dates)
+  invalidDateAlertAt           DateTime? @map("invalid_date_alert_at")
+  invalidDateAcknowledged      Boolean   @default(false) @map("invalid_date_acknowledged")
+
   // Thread divergence tracking (FIX R3: alert when threads diverge critically)
   threadDivergedAt             DateTime? @map("thread_diverged_at")
   threadDivergenceDetails      String?   @map("thread_divergence_details")
@@ -184,6 +188,7 @@ model AppointmentRequest {
   @@index([therapistEmail]) // For email matching queries
   @@index([initialMessageId]) // For In-Reply-To/References header matching (Priority 2)
   @@index([status, confirmedDateTimeParsed]) // For follow-up queries with status filter
+  @@index([invalidDateAlertAt]) // For invalid date alert dashboard
   @@index([conversationStallAlertAt]) // For admin alert dashboard
   @@index([lastToolExecutedAt]) // For stall detection queries
   @@index([status, reminderSentAt, confirmedDateTimeParsed]) // For reminder queries

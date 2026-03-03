@@ -559,7 +559,7 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
    * Acknowledge all alerts of a specific type
    */
   fastify.post<{
-    Body: { type: 'thread_divergence' | 'conversation_stall' | 'tool_failure' | 'therapist_alert' };
+    Body: { type: 'thread_divergence' | 'conversation_stall' | 'tool_failure' | 'therapist_alert' | 'invalid_date' };
   }>('/api/admin/alerts/acknowledge-all', async (request, reply) => {
     const requestId = request.id;
     const { type } = request.body || {};
