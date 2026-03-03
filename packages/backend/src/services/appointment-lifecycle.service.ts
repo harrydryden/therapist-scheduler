@@ -527,6 +527,10 @@ class AppointmentLifecycleService {
       // Always clear rescheduling flags when confirming
       reschedulingInProgress: false,
       reschedulingInitiatedBy: null,
+      // Flag invalid/unparseable dates for admin attention
+      // Clear the alert if the date is now valid (e.g. after reschedule with a good date)
+      invalidDateAlertAt: (!confirmedDateTimeParsed && confirmedDateTime) ? new Date() : null,
+      invalidDateAcknowledged: (!confirmedDateTimeParsed && confirmedDateTime) ? false : false,
     };
 
     // Handle reschedule-specific fields
@@ -628,6 +632,14 @@ class AppointmentLifecycleService {
       { ...logContext, isReschedule, confirmedDateTime },
       isReschedule ? 'Appointment rescheduled' : 'Appointment confirmed'
     );
+
+    // Log invalid date alert if the confirmed datetime could not be parsed
+    if (!confirmedDateTimeParsed && confirmedDateTime) {
+      logger.warn(
+        { ...logContext, confirmedDateTime },
+        'Invalid date alert raised - confirmed datetime could not be parsed'
+      );
+    }
 
     // Mark therapist as confirmed (freezes for other bookings)
     if (appointment.therapistNotionId) {
