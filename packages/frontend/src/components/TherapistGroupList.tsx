@@ -194,6 +194,16 @@ function AppointmentRowContent({
             Tool Error
           </span>
         )}
+        {apt.chaseSentAt && !apt.closureRecommendedAt && (
+          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-800">
+            Chased {apt.chaseSentTo}
+          </span>
+        )}
+        {apt.closureRecommendedAt && !apt.closureRecommendationActioned && (
+          <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-red-200 text-red-900 font-semibold">
+            Close?
+          </span>
+        )}
       </div>
       <div className="flex gap-3 text-xs text-slate-500 pl-4">
         <span>{apt.messageCount} msgs</span>

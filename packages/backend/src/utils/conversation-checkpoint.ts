@@ -21,7 +21,9 @@ export type ConversationStage =
   | 'confirmed'                 // Booking complete
   | 'rescheduling'              // Rescheduling in progress
   | 'cancelled'                 // Cancelled
-  | 'stalled';                  // No progress for extended period
+  | 'stalled'                   // No progress for extended period
+  | 'chased'                    // Follow-up chase sent, awaiting response
+  | 'closure_recommended';      // Chase unanswered, admin should close
 
 /**
  * Actions that can be taken in the conversation
@@ -40,7 +42,9 @@ export type ConversationAction =
   | 'received_cancellation_request'
   | 'processed_cancellation'
   | 'received_reschedule_request'
-  | 'processed_reschedule';
+  | 'processed_reschedule'
+  | 'sent_chase_followup'
+  | 'closure_recommended_to_admin';
 
 /**
  * Checkpoint data structure
@@ -64,15 +68,17 @@ export interface ConversationCheckpoint {
  * Stage transition rules - what stages can transition to what
  */
 const VALID_TRANSITIONS: Record<ConversationStage, ConversationStage[]> = {
-  initial_contact: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'cancelled', 'stalled'],
-  awaiting_therapist_availability: ['awaiting_user_slot_selection', 'cancelled', 'stalled'],
-  awaiting_user_slot_selection: ['awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling'],
-  awaiting_therapist_confirmation: ['awaiting_user_slot_selection', 'awaiting_meeting_link', 'confirmed', 'cancelled', 'stalled'],
-  awaiting_meeting_link: ['confirmed', 'rescheduling', 'cancelled', 'stalled'],
+  initial_contact: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased'],
+  awaiting_therapist_availability: ['awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased'],
+  awaiting_user_slot_selection: ['awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling', 'chased'],
+  awaiting_therapist_confirmation: ['awaiting_user_slot_selection', 'awaiting_meeting_link', 'confirmed', 'cancelled', 'stalled', 'chased'],
+  awaiting_meeting_link: ['confirmed', 'rescheduling', 'cancelled', 'stalled', 'chased'],
   confirmed: ['rescheduling', 'cancelled'],
-  rescheduling: ['awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'confirmed', 'cancelled', 'stalled'],
+  rescheduling: ['awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'confirmed', 'cancelled', 'stalled', 'chased'],
   cancelled: [], // Terminal state
-  stalled: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'cancelled'],
+  stalled: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'cancelled', 'chased'],
+  chased: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'confirmed', 'cancelled', 'closure_recommended'], // Chase can reactivate or lead to closure
+  closure_recommended: ['cancelled', 'awaiting_therapist_availability', 'awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'chased'], // Admin can cancel, reactivate, or new chase cycle after dismiss
 };
 
 /**
@@ -88,6 +94,8 @@ const STAGE_DESCRIPTIONS: Record<ConversationStage, string> = {
   rescheduling: 'Rescheduling in progress',
   cancelled: 'Booking cancelled',
   stalled: 'Conversation has stalled - needs attention',
+  chased: 'Chase follow-up sent, awaiting response',
+  closure_recommended: 'Recommended for closure - admin action needed',
 };
 
 /**
@@ -103,6 +111,8 @@ const RECOVERY_MESSAGES: Record<ConversationStage, string> = {
   rescheduling: "I'm following up on the rescheduling request. Do you have a new preferred time?",
   cancelled: '', // No recovery needed
   stalled: "I noticed our conversation stalled. Would you still like help scheduling your session?",
+  chased: '', // Chase already sent - waiting for response
+  closure_recommended: '', // Admin action needed - no automated message
 };
 
 /**
@@ -154,6 +164,8 @@ export function stageFromAction(action: ConversationAction): ConversationStage {
     processed_cancellation: 'cancelled',
     received_reschedule_request: 'rescheduling',
     processed_reschedule: 'awaiting_user_slot_selection',
+    sent_chase_followup: 'chased',
+    closure_recommended_to_admin: 'closure_recommended',
   };
 
   return actionToStage[action] || 'initial_contact';
@@ -278,6 +290,15 @@ const VALID_ACTIONS_PER_STAGE: Record<ConversationStage, string[]> = {
     'Send follow-up message to re-engage',
     'Consider flagging for human review if no response',
   ],
+  chased: [
+    'Awaiting response to chase follow-up email',
+    'If response received, resume normal flow',
+    'If no response, system will recommend closure',
+  ],
+  closure_recommended: [
+    'Admin should review and cancel appointment',
+    'Or admin can take control and manually re-engage',
+  ],
 };
 
 /**
@@ -302,7 +323,12 @@ export function needsRecovery(
   checkpoint: ConversationCheckpoint,
   staleThresholdHours: number = 48
 ): boolean {
-  if (checkpoint.stage === 'confirmed' || checkpoint.stage === 'cancelled') {
+  if (
+    checkpoint.stage === 'confirmed' ||
+    checkpoint.stage === 'cancelled' ||
+    checkpoint.stage === 'chased' ||
+    checkpoint.stage === 'closure_recommended'
+  ) {
     return false;
   }
 
@@ -367,6 +393,8 @@ export const STAGE_COMPLETION_PERCENTAGE: Record<ConversationStage, number> = {
   rescheduling: 50,
   cancelled: 0,
   stalled: 0,
+  chased: 0,
+  closure_recommended: 0,
 };
 
 export function calculateMetrics(

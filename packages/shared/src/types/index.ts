@@ -108,7 +108,9 @@ export type ConversationStage =
   | 'confirmed'
   | 'rescheduling'
   | 'cancelled'
-  | 'stalled';
+  | 'stalled'
+  | 'chased'
+  | 'closure_recommended';
 
 export type HealthStatus = 'green' | 'yellow' | 'red';
 
@@ -143,6 +145,12 @@ export interface AppointmentListItem {
   isStalled: boolean;
   hasThreadDivergence: boolean;
   hasToolFailure: boolean;
+  // Chase & closure recommendation
+  chaseSentAt: string | null;
+  chaseSentTo: string | null;
+  closureRecommendedAt: string | null;
+  closureRecommendedReason: string | null;
+  closureRecommendationActioned: boolean;
 }
 
 export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCount'> {

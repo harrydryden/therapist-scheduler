@@ -25,6 +25,7 @@ import {
   DATA_RETENTION,
   APP_DEFAULTS,
   STALL_DETECTION,
+  CHASE_FOLLOWUP,
 } from '../constants';
 
 // ============================================
@@ -583,6 +584,88 @@ Justin
 
 ---
 You're receiving this because you've indicated you are interested in free therapy. To unsubscribe from these reminders, simply reply to this email asking to be removed.`,
+  },
+
+  // === CHASE FOLLOW-UP EMAIL TEMPLATES ===
+  'email.chaseUserSubject': {
+    category: 'emailTemplates',
+    label: 'Chase User - Subject',
+    description: 'Subject line for follow-up to unresponsive user. Variables: {therapistName}',
+    valueType: 'string',
+    defaultValue: 'Spill - Are you still looking to book with {therapistName}?',
+  },
+  'email.chaseUserBody': {
+    category: 'emailTemplates',
+    label: 'Chase User - Body',
+    description: 'Email body for follow-up chase to unresponsive user. Variables: {userName}, {therapistName}',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+I just wanted to check in - are you still interested in booking a session with {therapistName}?
+
+If your circumstances have changed or you'd prefer a different therapist, just let me know and I can help.
+
+If I don't hear back I'll close this request, but you're always welcome to book again at any time.
+
+Best wishes,
+
+Justin`,
+  },
+  'email.chaseTherapistSubject': {
+    category: 'emailTemplates',
+    label: 'Chase Therapist - Subject',
+    description: 'Subject line for follow-up to unresponsive therapist. Variables: {clientFirstName}',
+    valueType: 'string',
+    defaultValue: 'Spill - Following up on scheduling with {clientFirstName}',
+  },
+  'email.chaseTherapistBody': {
+    category: 'emailTemplates',
+    label: 'Chase Therapist - Body',
+    description: 'Email body for follow-up chase to unresponsive therapist. Variables: {therapistFirstName}, {clientFirstName}',
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Just following up on the session request from {clientFirstName}. Are you still able to see them?
+
+If you could share your availability or let me know if anything has changed, that would be great.
+
+Best wishes,
+
+Justin`,
+  },
+
+  // === CHASE FOLLOW-UP SETTINGS ===
+  'chase.afterStaleHours': {
+    category: 'notifications',
+    label: 'Chase After Stale (hours)',
+    description: 'Send a follow-up chase email to the non-responding party after this many hours of inactivity',
+    valueType: 'number',
+    minValue: 24,
+    maxValue: 336,
+    defaultValue: CHASE_FOLLOWUP.CHASE_AFTER_STALE_HOURS,
+  },
+  'chase.closureRecommendationHours': {
+    category: 'notifications',
+    label: 'Closure Recommendation (hours)',
+    description: 'Recommend admin close the thread if no response after this many hours post-chase',
+    valueType: 'number',
+    minValue: 24,
+    maxValue: 336,
+    defaultValue: CHASE_FOLLOWUP.CLOSURE_RECOMMENDATION_HOURS,
+  },
+  'chase.enabled': {
+    category: 'notifications',
+    label: 'Enable Chase Follow-ups',
+    description: 'Enable automatic chase emails to unresponsive users/therapists',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
+  'chase.autoCompleteFeedback': {
+    category: 'notifications',
+    label: 'Auto-Complete Unanswered Feedback',
+    description: 'Automatically mark feedback_requested appointments as completed if no feedback received after the reminder goes unanswered',
+    valueType: 'boolean',
+    defaultValue: true,
   },
 
   // === NOTIFICATION SETTINGS ===

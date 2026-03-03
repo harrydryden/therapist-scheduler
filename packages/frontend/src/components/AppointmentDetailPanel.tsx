@@ -9,12 +9,14 @@ import {
   updateAppointment,
   previewReprocessThread,
   reprocessThread,
+  actionClosure,
 } from '../api/client';
 import type { ReprocessPreviewResult, ReprocessThreadResult } from '../api/client';
 import type { AppointmentDetail } from '../types';
 import { getAdminId } from '../utils/admin-id';
 import DetailHeader from './detail-panel/DetailHeader';
 import HumanControlSection from './detail-panel/HumanControlSection';
+import ClosureRecommendationSection from './detail-panel/ClosureRecommendationSection';
 import DeleteSection from './detail-panel/DeleteSection';
 import ConversationSection from './detail-panel/ConversationSection';
 import AppointmentDetailSkeleton from './skeletons/AppointmentDetailSkeleton';
@@ -258,6 +260,19 @@ export default function AppointmentDetailPanel({
       }>
         <div className="h-full flex flex-col">
           <DetailHeader appointment={appointmentDetail} />
+
+          <ClosureRecommendationSection
+            appointment={appointmentDetail}
+            onAction={async (action) => {
+              await actionClosure(appointmentDetail.id, action);
+              queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
+              queryClient.invalidateQueries({ queryKey: ['appointments'] });
+              queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+              if (action === 'cancel') {
+                onClearSelection();
+              }
+            }}
+          />
 
           <HumanControlSection
             appointment={appointmentDetail}

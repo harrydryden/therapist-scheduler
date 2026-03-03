@@ -861,3 +861,20 @@ export async function resetSlackCircuit(): Promise<{
   }
   return response.data;
 }
+
+export async function actionClosure(
+  appointmentId: string,
+  action: 'cancel' | 'dismiss'
+): Promise<{ success: boolean; action: string }> {
+  const response = await fetchAdminApi<{ success: boolean; action: string }>(
+    `/admin/dashboard/appointments/${appointmentId}/action-closure`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    }
+  );
+  if (!response.data) {
+    throw new Error('Failed to action closure recommendation');
+  }
+  return response.data;
+}
