@@ -7,6 +7,8 @@ import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
 import { STALE_THRESHOLDS, STALL_DETECTION, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, INACTIVITY_THRESHOLDS, CHASE_FOLLOWUP } from '../constants';
 import { getSettingValue } from './settings.service';
+import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { appointmentLifecycleService } from './appointment-lifecycle.service';
 
 // Convert hours to milliseconds (used for isStale flag - visual indicator only)
 const STALE_THRESHOLD_MS = STALE_THRESHOLDS.MARK_STALE_HOURS * 60 * 60 * 1000;
@@ -679,6 +681,19 @@ class StaleCheckService {
           );
         }
       }
+
+      // Auto-complete feedback_requested dead-ends (separate from chase enabled toggle)
+      const autoCompleteFeedback = await getSettingValue<boolean>('chase.autoCompleteFeedback');
+      if (!autoCompleteFeedback) {
+        logger.debug({ checkId }, 'Feedback auto-completion disabled - skipping');
+      }
+      const feedbackCompleted = autoCompleteFeedback ? await this.autoCompleteFeedbackDeadEnds(checkId) : 0;
+      if (feedbackCompleted > 0) {
+        logger.info(
+          { checkId, feedbackCompleted },
+          'Auto-completed feedback_requested appointments with no response'
+        );
+      }
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to run stale check');
     }
@@ -902,24 +917,40 @@ class StaleCheckService {
    * them a single follow-up email. The checkpoint stage tells us who we're
    * waiting for:
    *
-   * - awaiting_therapist_availability / awaiting_therapist_confirmation → chase therapist
+   * - awaiting_therapist_availability / awaiting_therapist_confirmation / awaiting_meeting_link → chase therapist
    * - awaiting_user_slot_selection → chase user
-   * - initial_contact (no checkpoint) → chase based on who was last emailed
+   * - initial_contact / stalled / no checkpoint → infer from conversation state or thread existence
    *
    * Only one chase is ever sent per thread. If it goes unanswered, the system
    * will later recommend closure to the admin.
+   *
+   * Uses the same sentinel pattern as post-booking follow-ups to prevent
+   * duplicate sends on process crash: null → epoch (sending) → actual timestamp.
    */
   private async sendChaseFollowUps(checkId: string): Promise<number> {
     try {
       const chaseAfterHours = await getSettingValue<number>('chase.afterStaleHours');
       const chaseThreshold = new Date(Date.now() - chaseAfterHours * 60 * 60 * 1000);
 
+      // Clean up stuck sentinels from crashed processes (>2 min old)
+      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+      const stuckReset = await prisma.appointmentRequest.updateMany({
+        where: {
+          chaseSentAt: new Date(0),
+          updatedAt: { lt: twoMinutesAgo },
+        },
+        data: { chaseSentAt: null },
+      });
+      if (stuckReset.count > 0) {
+        logger.warn({ checkId, resetCount: stuckReset.count }, 'Reset stuck chase sentinels');
+      }
+
       // Find stale conversations that haven't been chased yet
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           status: { in: ['pending', 'contacted', 'negotiating'] },
           lastActivityAt: { lt: chaseThreshold },
-          chaseSentAt: null, // Never chased
+          chaseSentAt: null, // Never chased (and not currently being sent)
           humanControlEnabled: false, // Don't chase while under human control
           closureRecommendedAt: null, // Not already recommended for closure
         },
@@ -957,79 +988,120 @@ class StaleCheckService {
           }
 
           const { target, email, threadId } = chaseTarget;
-          const therapistFirstName = (appointment.therapistName || 'there').split(' ')[0];
-          const clientFirstName = (appointment.userName || 'the client').split(' ')[0];
 
-          // Build the chase email using templates
-          let subject: string;
-          let body: string;
+          // OPTIMISTIC LOCKING: claim this appointment with a sentinel
+          const lockResult = await prisma.appointmentRequest.updateMany({
+            where: {
+              id: appointment.id,
+              chaseSentAt: null, // Only if still unclaimed
+            },
+            data: {
+              chaseSentAt: new Date(0), // Sentinel: epoch = "sending"
+            },
+          });
 
-          if (target === 'user') {
-            const { getEmailSubject, getEmailBody } = await import('../utils/email-templates');
-            subject = await getEmailSubject('chaseUser', {
-              therapistName: appointment.therapistName,
-            });
-            body = await getEmailBody('chaseUser', {
-              userName: appointment.userName || 'there',
-              therapistName: appointment.therapistName,
-            });
-          } else {
-            const { getEmailSubject, getEmailBody } = await import('../utils/email-templates');
-            subject = await getEmailSubject('chaseTherapist', {
-              clientFirstName,
-            });
-            body = await getEmailBody('chaseTherapist', {
-              therapistFirstName,
-              clientFirstName,
-            });
+          if (lockResult.count === 0) {
+            // Another process claimed it
+            continue;
           }
 
-          // Send the chase email on the existing thread
-          await emailProcessingService.sendEmail({
-            to: email,
-            subject,
-            body,
-            threadId: threadId || undefined,
-          });
+          try {
+            const therapistFirstName = (appointment.therapistName || 'there').split(' ')[0];
+            const clientFirstName = (appointment.userName || 'the client').split(' ')[0];
 
-          // Record the chase
-          await prisma.appointmentRequest.update({
-            where: { id: appointment.id },
-            data: {
-              chaseSentAt: new Date(),
-              chaseSentTo: target,
-              chaseTargetEmail: email,
-              lastActivityAt: new Date(),
-              isStale: false,
-            },
-          });
+            // Build the chase email using templates
+            let subject: string;
+            let body: string;
 
-          // Send Slack notification
-          await slackNotificationService.notifyChaseFollowUp(
-            appointment.id,
-            appointment.userName,
-            appointment.therapistName,
-            target,
-            Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
-          );
+            if (target === 'user') {
+              subject = await getEmailSubject('chaseUser', {
+                therapistName: appointment.therapistName,
+              });
+              body = await getEmailBody('chaseUser', {
+                userName: appointment.userName || 'there',
+                therapistName: appointment.therapistName,
+              });
+            } else {
+              subject = await getEmailSubject('chaseTherapist', {
+                clientFirstName,
+              });
+              body = await getEmailBody('chaseTherapist', {
+                therapistFirstName,
+                clientFirstName,
+              });
+            }
 
-          logger.info(
-            {
-              checkId,
-              appointmentId: appointment.id,
-              target,
-              email,
-              userName: appointment.userName,
-              therapistName: appointment.therapistName,
-            },
-            `Sent chase follow-up email to ${target}`
-          );
+            // Send the chase email on the existing thread
+            await emailProcessingService.sendEmail({
+              to: email,
+              subject,
+              body,
+              threadId: threadId || undefined,
+            });
 
-          chasedCount++;
+            const now = new Date();
+
+            // Atomic update: verify sentinel still ours, then record chase
+            const updateResult = await prisma.appointmentRequest.updateMany({
+              where: {
+                id: appointment.id,
+                chaseSentAt: new Date(0), // Must still be our sentinel
+              },
+              data: {
+                chaseSentAt: now,
+                chaseSentTo: target,
+                chaseTargetEmail: email,
+                checkpointStage: 'chased',
+                lastActivityAt: now,
+                isStale: false,
+              },
+            });
+
+            if (updateResult.count === 0) {
+              logger.error(
+                { checkId, appointmentId: appointment.id },
+                'ALERT: Chase email sent but sentinel update failed - possible duplicate'
+              );
+            } else {
+              // Send Slack notification
+              await slackNotificationService.notifyChaseFollowUp(
+                appointment.id,
+                appointment.userName,
+                appointment.therapistName,
+                target,
+                Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
+              );
+
+              logger.info(
+                {
+                  checkId,
+                  appointmentId: appointment.id,
+                  target,
+                  email,
+                  userName: appointment.userName,
+                  therapistName: appointment.therapistName,
+                },
+                `Sent chase follow-up email to ${target}`
+              );
+
+              chasedCount++;
+            }
+          } catch (error) {
+            // On failure, reset sentinel to null so it can be retried
+            await prisma.appointmentRequest.update({
+              where: { id: appointment.id },
+              data: { chaseSentAt: null },
+            });
+
+            logger.error(
+              { checkId, appointmentId: appointment.id, error },
+              'Failed to send chase follow-up email - will retry next cycle'
+            );
+          }
         } catch (error) {
           logger.error(
             { checkId, appointmentId: appointment.id, error },
-            'Failed to send chase follow-up email'
+            'Failed to process chase follow-up for appointment'
           );
         }
       }
@@ -1059,7 +1131,8 @@ class StaleCheckService {
     // Stages where we're waiting on the therapist
     if (
       stage === 'awaiting_therapist_availability' ||
-      stage === 'awaiting_therapist_confirmation'
+      stage === 'awaiting_therapist_confirmation' ||
+      stage === 'awaiting_meeting_link' // Therapist needs to send the meeting link
     ) {
       return {
         target: 'therapist',
@@ -1077,11 +1150,9 @@ class StaleCheckService {
       };
     }
 
-    // For initial_contact or stalled, try to infer from conversation state
-    // If we have a therapist thread but no user thread, we're likely waiting on therapist
-    // If we have both threads, check the last email sent
+    // For initial_contact, stalled, or no checkpoint, infer from context
     if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
-      // Try to determine from the conversation state's last email target
+      // Check the conversation state for who was last emailed
       const state = appointment.conversationState as { checkpoint?: { context?: { lastEmailSentTo?: string } } } | null;
       const lastEmailTo = state?.checkpoint?.context?.lastEmailSentTo;
 
@@ -1143,7 +1214,10 @@ class StaleCheckService {
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           status: { in: ['pending', 'contacted', 'negotiating'] },
-          chaseSentAt: { lt: closureThreshold }, // Chase sent > threshold ago
+          chaseSentAt: {
+            gt: new Date(0), // Exclude null and sentinels (in-flight sends)
+            lt: closureThreshold, // Chase sent > threshold ago
+          },
           closureRecommendedAt: null, // Not already recommended
           // Ensure no activity since the chase was sent (no response received)
           lastActivityAt: { lt: closureThreshold },
@@ -1186,6 +1260,7 @@ class StaleCheckService {
               closureRecommendedAt: new Date(),
               closureRecommendedReason: reason,
               closureRecommendationActioned: false,
+              checkpointStage: 'closure_recommended',
             },
           });
 
@@ -1223,6 +1298,74 @@ class StaleCheckService {
       return closureCount;
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to run closure recommendations');
+      return 0;
+    }
+  }
+
+  /**
+   * Auto-complete feedback_requested appointments where the feedback reminder
+   * went unanswered.
+   *
+   * After the feedback reminder is sent and a configurable period passes with
+   * no feedback submission, the appointment is automatically completed. This
+   * prevents feedback_requested from being a dead-end state.
+   */
+  private async autoCompleteFeedbackDeadEnds(checkId: string): Promise<number> {
+    try {
+      // Use the same delay as the chase closure recommendation (default 48h after reminder)
+      const closureHours = await getSettingValue<number>('chase.closureRecommendationHours');
+      const threshold = new Date(Date.now() - closureHours * 60 * 60 * 1000);
+
+      // Find feedback_requested appointments where reminder was sent but no feedback received
+      // feedbackReminderSentAt must be: not null, not epoch sentinel, and older than threshold
+      const candidates = await prisma.appointmentRequest.findMany({
+        where: {
+          status: 'feedback_requested',
+          feedbackReminderSentAt: {
+            gt: new Date(0), // Excludes both null and epoch sentinel
+            lt: threshold, // Reminder sent > threshold ago
+          },
+        },
+        select: {
+          id: true,
+          userName: true,
+          therapistName: true,
+        },
+        take: CHASE_FOLLOWUP.MAX_CLOSURE_BATCH_SIZE,
+      });
+
+      if (candidates.length === 0) {
+        return 0;
+      }
+
+      let completedCount = 0;
+
+      for (const appointment of candidates) {
+        try {
+          const result = await appointmentLifecycleService.transitionToCompleted({
+            appointmentId: appointment.id,
+            source: 'system',
+            note: 'Auto-completed: no feedback received after reminder',
+          });
+
+          if (result.success) {
+            completedCount++;
+            logger.info(
+              { checkId, appointmentId: appointment.id, userName: appointment.userName },
+              'Auto-completed feedback_requested appointment (no feedback after reminder)'
+            );
+          }
+        } catch (error) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, error },
+            'Failed to auto-complete feedback_requested appointment'
+          );
+        }
+      }
+
+      return completedCount;
+    } catch (error) {
+      logger.error({ checkId, error }, 'Failed to run feedback dead-end auto-completion');
       return 0;
     }
   }

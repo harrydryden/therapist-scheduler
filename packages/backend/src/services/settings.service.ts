@@ -660,6 +660,13 @@ Justin`,
     valueType: 'boolean',
     defaultValue: true,
   },
+  'chase.autoCompleteFeedback': {
+    category: 'notifications',
+    label: 'Auto-Complete Unanswered Feedback',
+    description: 'Automatically mark feedback_requested appointments as completed if no feedback received after the reminder goes unanswered',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
 
   // === NOTIFICATION SETTINGS ===
   // Slack notifications
