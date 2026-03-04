@@ -14,7 +14,7 @@ import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { getSettingValue } from '../services/settings.service';
 import { verifyWebhookSecret } from '../middleware/auth';
-import { parseConversationState } from '../utils/json-parser';
+import { parseConversationState, parseTherapistAvailability } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
@@ -351,7 +351,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             therapistName: appointment.therapistName,
             therapistEmail: appointment.therapistEmail,
             therapistNotionId: appointment.therapistNotionId,
-            therapistAvailability: appointment.therapistAvailability,
+            therapistAvailability: parseTherapistAvailability(appointment.therapistAvailability),
             status: appointment.status,
             trackingCode: appointment.trackingCode,
             confirmedAt: appointment.confirmedAt,
