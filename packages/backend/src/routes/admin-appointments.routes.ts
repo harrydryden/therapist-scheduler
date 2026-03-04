@@ -332,6 +332,42 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         }
 
+        // FIX: Compute health/checkpoint fields so detail endpoint matches
+        // the AppointmentDetail type (extends AppointmentListItem).
+        // Previously these were only computed by the list endpoint, causing the
+        // detail panel to receive undefined for healthStatus, checkpointStage, etc.
+        const checkpointStage = (appointment.checkpointStage as ConversationStage) || null;
+        let checkpointProgress = 0;
+        if (checkpointStage) {
+          try {
+            checkpointProgress = STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0;
+          } catch {
+            // ignore
+          }
+        }
+
+        const healthInput: AppointmentForHealth = {
+          id: appointment.id,
+          status: appointment.status,
+          lastActivityAt: appointment.lastActivityAt || appointment.updatedAt,
+          lastToolExecutedAt: appointment.lastToolExecutedAt,
+          lastToolExecutionFailed: appointment.lastToolExecutionFailed,
+          lastToolFailureReason: appointment.lastToolFailureReason,
+          threadDivergedAt: appointment.threadDivergedAt,
+          threadDivergenceDetails: appointment.threadDivergenceDetails,
+          threadDivergenceAcknowledged: appointment.threadDivergenceAcknowledged,
+          conversationStallAlertAt: appointment.conversationStallAlertAt,
+          conversationStallAcknowledged: appointment.conversationStallAcknowledged,
+          humanControlEnabled: appointment.humanControlEnabled,
+          isStale: appointment.isStale,
+        };
+        const health = calculateConversationHealth(healthInput);
+        const isStalled = health.factors.some(
+          (f) => f.name === 'Progress' && f.status === 'red'
+        );
+        const hasThreadDivergence = !!(appointment.threadDivergedAt && !appointment.threadDivergenceAcknowledged);
+        const hasToolFailure = appointment.lastToolExecutionFailed;
+
         return reply.send({
           success: true,
           data: {
@@ -356,6 +392,16 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
             humanControlReason: appointment.humanControlReason,
+            // Fields required by AppointmentDetail (via AppointmentListItem)
+            lastActivityAt: appointment.lastActivityAt,
+            isStale: appointment.isStale,
+            checkpointStage,
+            checkpointProgress,
+            healthStatus: health.status,
+            healthScore: health.score,
+            isStalled,
+            hasThreadDivergence,
+            hasToolFailure,
             // Chase & closure recommendation
             chaseSentAt: appointment.chaseSentAt,
             chaseSentTo: appointment.chaseSentTo,

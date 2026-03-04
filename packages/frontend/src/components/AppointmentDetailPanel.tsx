@@ -249,7 +249,7 @@ export default function AppointmentDetailPanel({
   if (!appointmentDetail) return null;
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-y-auto">
       <ErrorBoundary fallback={
         <div className="p-8 text-center text-red-500">
           <p className="font-medium mb-2">Failed to render appointment details</p>
@@ -258,7 +258,7 @@ export default function AppointmentDetailPanel({
           </button>
         </div>
       }>
-        <div className="h-full flex flex-col">
+        <div className="flex flex-col">
           <DetailHeader appointment={appointmentDetail} />
 
           <ClosureRecommendationSection

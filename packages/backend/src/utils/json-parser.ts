@@ -23,7 +23,10 @@ const conversationMessageSchema = z.object({
 });
 
 const conversationStateSchema = z.object({
-  systemPrompt: z.string(),
+  // FIX: systemPrompt is optional — FIX #20 stores it as '' and
+  // storeConversationState allows omitting it, so stored JSON may lack the field.
+  // Default to '' when missing so downstream code always sees a string.
+  systemPrompt: z.string().optional().default(''),
   messages: z.array(conversationMessageSchema),
 });
 
@@ -172,11 +175,14 @@ export function parseConversationState(
   );
 
   // Fallback: try to salvage partial data with loose validation
+  // FIX: Accept missing/null systemPrompt since FIX #20 stores it as '' and
+  // the storeConversationState signature allows systemPrompt?: string, meaning
+  // it can be omitted from the stored JSON. Only messages array is required.
   if (typeof parsed === 'object' && parsed !== null) {
     const state = parsed as Record<string, unknown>;
-    if (typeof state.systemPrompt === 'string' && Array.isArray(state.messages)) {
+    if (Array.isArray(state.messages)) {
       return {
-        systemPrompt: state.systemPrompt,
+        systemPrompt: typeof state.systemPrompt === 'string' ? state.systemPrompt : '',
         messages: state.messages.map((m: unknown) => {
           const msg = m as Record<string, unknown>;
           return {
