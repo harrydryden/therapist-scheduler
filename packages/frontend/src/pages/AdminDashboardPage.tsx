@@ -66,6 +66,7 @@ export default function AdminDashboardPage() {
   const {
     data: appointmentDetail,
     isLoading: loadingDetail,
+    error: detailError,
   } = useQuery({
     queryKey: ['appointment', selectedAppointment],
     queryFn: () => getAppointmentDetail(selectedAppointment!),
@@ -218,6 +219,7 @@ export default function AdminDashboardPage() {
             selectedAppointment={selectedAppointment}
             appointmentDetail={appointmentDetail}
             loadingDetail={loadingDetail}
+            detailError={detailError}
             onClearSelection={() => setSelectedAppointment(null)}
           />
         </div>
