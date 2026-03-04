@@ -268,16 +268,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlReason: true,
             lastActivityAt: true,
             isStale: true,
-            checkpointStage: true,
-            // Health-related fields
-            lastToolExecutedAt: true,
-            lastToolExecutionFailed: true,
-            lastToolFailureReason: true,
-            threadDivergedAt: true,
-            threadDivergenceDetails: true,
-            threadDivergenceAcknowledged: true,
-            conversationStallAlertAt: true,
-            conversationStallAcknowledged: true,
             // Chase & closure recommendation fields
             chaseSentAt: true,
             chaseSentTo: true,
@@ -335,13 +325,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         }
 
-        // Compute health/checkpoint fields to match AppointmentDetail type
-        const checkpointStage = (appointment.checkpointStage as ConversationStage) || null;
-        const checkpointProgress = checkpointStage
-          ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
-          : 0;
-        const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(appointment));
-
         return reply.send({
           success: true,
           data: {
@@ -366,12 +349,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
             humanControlReason: appointment.humanControlReason,
-            // Fields required by AppointmentDetail (via AppointmentListItem)
             lastActivityAt: appointment.lastActivityAt,
             isStale: appointment.isStale,
-            checkpointStage,
-            checkpointProgress,
-            ...healthMeta,
             // Chase & closure recommendation
             chaseSentAt: appointment.chaseSentAt,
             chaseSentTo: appointment.chaseSentTo,
