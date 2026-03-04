@@ -249,7 +249,7 @@ export default function AppointmentDetailPanel({
   if (!appointmentDetail) return null;
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-y-auto">
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
       <ErrorBoundary fallback={
         <div className="p-8 text-center text-red-500">
           <p className="font-medium mb-2">Failed to render appointment details</p>

@@ -26,7 +26,7 @@ const conversationStateSchema = z.object({
   // FIX: systemPrompt is optional — FIX #20 stores it as '' and
   // storeConversationState allows omitting it, so stored JSON may lack the field.
   // Default to '' when missing so downstream code always sees a string.
-  systemPrompt: z.string().optional().default(''),
+  systemPrompt: z.string().nullish().transform(v => v ?? ''),
   messages: z.array(conversationMessageSchema),
 });
 
