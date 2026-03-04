@@ -153,7 +153,11 @@ export interface AppointmentListItem {
   closureRecommendationActioned: boolean;
 }
 
-export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCount'> {
+export interface AppointmentDetail extends Omit<AppointmentListItem,
+  | 'messageCount'
+  | 'checkpointStage' | 'checkpointProgress'
+  | 'healthStatus' | 'healthScore' | 'isStalled' | 'hasThreadDivergence' | 'hasToolFailure'
+> {
   conversation: {
     latestMessages: Array<{
       role: 'user' | 'assistant' | 'admin';

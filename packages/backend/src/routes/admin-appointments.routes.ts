@@ -14,7 +14,7 @@ import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { getSettingValue } from '../services/settings.service';
 import { verifyWebhookSecret } from '../middleware/auth';
-import { parseConversationState } from '../utils/json-parser';
+import { parseConversationState, parseTherapistAvailability } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
@@ -244,6 +244,37 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       try {
         const appointment = await prisma.appointmentRequest.findUnique({
           where: { id },
+          select: {
+            id: true,
+            trackingCode: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            therapistEmail: true,
+            therapistNotionId: true,
+            therapistAvailability: true,
+            status: true,
+            confirmedAt: true,
+            confirmedDateTime: true,
+            notes: true,
+            createdAt: true,
+            updatedAt: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+            conversationState: true,
+            humanControlEnabled: true,
+            humanControlTakenBy: true,
+            humanControlTakenAt: true,
+            humanControlReason: true,
+            lastActivityAt: true,
+            isStale: true,
+            // Chase & closure recommendation fields
+            chaseSentAt: true,
+            chaseSentTo: true,
+            closureRecommendedAt: true,
+            closureRecommendedReason: true,
+            closureRecommendationActioned: true,
+          },
         });
 
         if (!appointment) {
@@ -294,13 +325,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         }
 
-        // Compute health/checkpoint fields to match AppointmentDetail type
-        const checkpointStage = (appointment.checkpointStage as ConversationStage) || null;
-        const checkpointProgress = checkpointStage
-          ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
-          : 0;
-        const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(appointment));
-
         return reply.send({
           success: true,
           data: {
@@ -310,7 +334,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             therapistName: appointment.therapistName,
             therapistEmail: appointment.therapistEmail,
             therapistNotionId: appointment.therapistNotionId,
-            therapistAvailability: appointment.therapistAvailability,
+            therapistAvailability: parseTherapistAvailability(appointment.therapistAvailability),
             status: appointment.status,
             trackingCode: appointment.trackingCode,
             confirmedAt: appointment.confirmedAt,
@@ -325,12 +349,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
             humanControlReason: appointment.humanControlReason,
-            // Fields required by AppointmentDetail (via AppointmentListItem)
             lastActivityAt: appointment.lastActivityAt,
             isStale: appointment.isStale,
-            checkpointStage,
-            checkpointProgress,
-            ...healthMeta,
             // Chase & closure recommendation
             chaseSentAt: appointment.chaseSentAt,
             chaseSentTo: appointment.chaseSentTo,
