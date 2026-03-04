@@ -18,7 +18,7 @@ import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
-import { calculateConversationHealth, AppointmentForHealth } from '../services/conversation-health.service';
+import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
@@ -173,44 +173,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
         // FIX #21: Use denormalized columns directly — no need to parse the full blob
         const appointmentsWithMeta = appointments.map((apt) => {
-          const messageCount = apt.messageCount;
           const checkpointStage = (apt.checkpointStage as ConversationStage) || null;
-          let checkpointProgress = 0;
+          const checkpointProgress = checkpointStage
+            ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
+            : 0;
 
-          if (checkpointStage) {
-            try {
-              checkpointProgress = STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0;
-            } catch (err) {
-              logger.debug({ err, appointmentId: apt.id }, 'Failed to parse checkpoint from conversation state');
-            }
-          }
-
-          // Calculate health status
-          const healthInput: AppointmentForHealth = {
-            id: apt.id,
-            status: apt.status,
-            lastActivityAt: apt.lastActivityAt || apt.updatedAt,
-            lastToolExecutedAt: apt.lastToolExecutedAt,
-            lastToolExecutionFailed: apt.lastToolExecutionFailed,
-            lastToolFailureReason: apt.lastToolFailureReason,
-            threadDivergedAt: apt.threadDivergedAt,
-            threadDivergenceDetails: apt.threadDivergenceDetails,
-            threadDivergenceAcknowledged: apt.threadDivergenceAcknowledged,
-            conversationStallAlertAt: apt.conversationStallAlertAt,
-            conversationStallAcknowledged: apt.conversationStallAcknowledged,
-            humanControlEnabled: apt.humanControlEnabled,
-            isStale: apt.isStale,
-          };
-          const health = calculateConversationHealth(healthInput);
-
-          // Determine if stalled (activity but no tool execution > threshold)
-          const isStalled = health.factors.some(
-            (f) => f.name === 'Progress' && f.status === 'red'
-          );
-
-          // Check for thread divergence and tool failure flags
-          const hasThreadDivergence = !!(apt.threadDivergedAt && !apt.threadDivergenceAcknowledged);
-          const hasToolFailure = apt.lastToolExecutionFailed;
+          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt));
 
           return {
             id: apt.id,
@@ -220,25 +188,19 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             therapistEmail: apt.therapistEmail,
             therapistNotionId: apt.therapistNotionId,
             status: apt.status,
-            messageCount,
+            messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
             confirmedDateTime: apt.confirmedDateTime,
-            notes: apt.notes, // Separate field, not conflated with confirmedDateTime
+            notes: apt.notes,
             createdAt: apt.createdAt,
             updatedAt: apt.updatedAt,
             humanControlEnabled: apt.humanControlEnabled,
             humanControlTakenBy: apt.humanControlTakenBy,
             lastActivityAt: apt.lastActivityAt,
             isStale: apt.isStale,
-            // Checkpoint data
             checkpointStage,
             checkpointProgress,
-            // Health data
-            healthStatus: health.status,
-            healthScore: health.score,
-            isStalled,
-            hasThreadDivergence,
-            hasToolFailure,
+            ...healthMeta,
             // Chase & closure recommendation data
             chaseSentAt: apt.chaseSentAt,
             chaseSentTo: apt.chaseSentTo,
@@ -332,6 +294,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         }
 
+        // Compute health/checkpoint fields to match AppointmentDetail type
+        const checkpointStage = (appointment.checkpointStage as ConversationStage) || null;
+        const checkpointProgress = checkpointStage
+          ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
+          : 0;
+        const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(appointment));
+
         return reply.send({
           success: true,
           data: {
@@ -356,6 +325,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
             humanControlReason: appointment.humanControlReason,
+            // Fields required by AppointmentDetail (via AppointmentListItem)
+            lastActivityAt: appointment.lastActivityAt,
+            isStale: appointment.isStale,
+            checkpointStage,
+            checkpointProgress,
+            ...healthMeta,
             // Chase & closure recommendation
             chaseSentAt: appointment.chaseSentAt,
             chaseSentTo: appointment.chaseSentTo,
@@ -1417,40 +1392,11 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         ]);
 
         const appointmentsWithMeta = appointments.map((apt) => {
-          const messageCount = apt.messageCount;
           const checkpointStage = (apt.checkpointStage as ConversationStage) || null;
-          let checkpointProgress = 0;
-
-          if (checkpointStage) {
-            try {
-              checkpointProgress = STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0;
-            } catch (err) {
-              logger.debug({ err, appointmentId: apt.id }, 'Failed to parse checkpoint');
-            }
-          }
-
-          const healthInput: AppointmentForHealth = {
-            id: apt.id,
-            status: apt.status,
-            lastActivityAt: apt.lastActivityAt || apt.updatedAt,
-            lastToolExecutedAt: apt.lastToolExecutedAt,
-            lastToolExecutionFailed: apt.lastToolExecutionFailed,
-            lastToolFailureReason: apt.lastToolFailureReason,
-            threadDivergedAt: apt.threadDivergedAt,
-            threadDivergenceDetails: apt.threadDivergenceDetails,
-            threadDivergenceAcknowledged: apt.threadDivergenceAcknowledged,
-            conversationStallAlertAt: apt.conversationStallAlertAt,
-            conversationStallAcknowledged: apt.conversationStallAcknowledged,
-            humanControlEnabled: apt.humanControlEnabled,
-            isStale: apt.isStale,
-          };
-          const health = calculateConversationHealth(healthInput);
-
-          const isStalled = health.factors.some(
-            (f) => f.name === 'Progress' && f.status === 'red'
-          );
-          const hasThreadDivergence = !!(apt.threadDivergedAt && !apt.threadDivergenceAcknowledged);
-          const hasToolFailure = apt.lastToolExecutionFailed;
+          const checkpointProgress = checkpointStage
+            ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
+            : 0;
+          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt));
 
           return {
             id: apt.id,
@@ -1461,7 +1407,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             therapistEmail: apt.therapistEmail,
             therapistNotionId: apt.therapistNotionId,
             status: apt.status,
-            messageCount,
+            messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
             confirmedDateTime: apt.confirmedDateTime,
             notes: apt.notes,
@@ -1473,11 +1419,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             isStale: apt.isStale,
             checkpointStage,
             checkpointProgress,
-            healthStatus: health.status,
-            healthScore: health.score,
-            isStalled,
-            hasThreadDivergence,
-            hasToolFailure,
+            ...healthMeta,
           };
         });
 

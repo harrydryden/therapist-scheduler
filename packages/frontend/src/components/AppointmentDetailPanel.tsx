@@ -258,7 +258,7 @@ export default function AppointmentDetailPanel({
           </button>
         </div>
       }>
-        <div className="h-full flex flex-col">
+        <div className="flex flex-col">
           <DetailHeader appointment={appointmentDetail} />
 
           <ClosureRecommendationSection

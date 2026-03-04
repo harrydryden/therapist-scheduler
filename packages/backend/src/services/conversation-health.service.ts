@@ -453,3 +453,58 @@ export function calculateHealthStats(healthResults: ConversationHealth[]): Healt
 
   return stats;
 }
+
+/**
+ * Map a Prisma appointment record to the AppointmentForHealth input shape.
+ * Extracts and normalises the fields needed by calculateConversationHealth.
+ */
+export function toAppointmentForHealth(apt: {
+  id: string;
+  status: string;
+  lastActivityAt: Date | null;
+  updatedAt: Date;
+  lastToolExecutedAt: Date | null;
+  lastToolExecutionFailed: boolean;
+  lastToolFailureReason: string | null;
+  threadDivergedAt: Date | null;
+  threadDivergenceDetails: string | null;
+  threadDivergenceAcknowledged: boolean;
+  conversationStallAlertAt: Date | null;
+  conversationStallAcknowledged: boolean;
+  humanControlEnabled: boolean;
+  isStale: boolean;
+}): AppointmentForHealth {
+  return {
+    id: apt.id,
+    status: apt.status,
+    lastActivityAt: apt.lastActivityAt || apt.updatedAt,
+    lastToolExecutedAt: apt.lastToolExecutedAt,
+    lastToolExecutionFailed: apt.lastToolExecutionFailed,
+    lastToolFailureReason: apt.lastToolFailureReason,
+    threadDivergedAt: apt.threadDivergedAt,
+    threadDivergenceDetails: apt.threadDivergenceDetails,
+    threadDivergenceAcknowledged: apt.threadDivergenceAcknowledged,
+    conversationStallAlertAt: apt.conversationStallAlertAt,
+    conversationStallAcknowledged: apt.conversationStallAcknowledged,
+    humanControlEnabled: apt.humanControlEnabled,
+    isStale: apt.isStale,
+  };
+}
+
+/**
+ * Compute health status + derived boolean flags for an appointment.
+ * Used by admin list and detail endpoints to produce the AppointmentListItem shape.
+ */
+export function computeAppointmentHealthMeta(apt: AppointmentForHealth & {
+  threadDivergedAt: Date | null;
+  threadDivergenceAcknowledged: boolean;
+}) {
+  const health = calculateConversationHealth(apt);
+  return {
+    healthStatus: health.status as HealthStatus,
+    healthScore: health.score,
+    isStalled: health.factors.some(f => f.name === 'Progress' && f.status === 'red'),
+    hasThreadDivergence: !!(apt.threadDivergedAt && !apt.threadDivergenceAcknowledged),
+    hasToolFailure: apt.lastToolExecutionFailed,
+  };
+}
