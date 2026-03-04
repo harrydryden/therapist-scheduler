@@ -244,6 +244,47 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       try {
         const appointment = await prisma.appointmentRequest.findUnique({
           where: { id },
+          select: {
+            id: true,
+            trackingCode: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            therapistEmail: true,
+            therapistNotionId: true,
+            therapistAvailability: true,
+            status: true,
+            confirmedAt: true,
+            confirmedDateTime: true,
+            notes: true,
+            createdAt: true,
+            updatedAt: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+            conversationState: true,
+            humanControlEnabled: true,
+            humanControlTakenBy: true,
+            humanControlTakenAt: true,
+            humanControlReason: true,
+            lastActivityAt: true,
+            isStale: true,
+            checkpointStage: true,
+            // Health-related fields
+            lastToolExecutedAt: true,
+            lastToolExecutionFailed: true,
+            lastToolFailureReason: true,
+            threadDivergedAt: true,
+            threadDivergenceDetails: true,
+            threadDivergenceAcknowledged: true,
+            conversationStallAlertAt: true,
+            conversationStallAcknowledged: true,
+            // Chase & closure recommendation fields
+            chaseSentAt: true,
+            chaseSentTo: true,
+            closureRecommendedAt: true,
+            closureRecommendedReason: true,
+            closureRecommendationActioned: true,
+          },
         });
 
         if (!appointment) {
