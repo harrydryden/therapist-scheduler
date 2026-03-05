@@ -1656,8 +1656,9 @@ class AppointmentLifecycleService {
    * Force-update an appointment's status and/or confirmedDateTime, bypassing state machine
    * validation. Used by the admin appointments page where admins need unrestricted control.
    *
-   * Still performs: audit trail, SSE notification, confirmedAt timestamp management.
-   * Does NOT perform: emails, Slack, therapist booking status, Notion sync.
+   * Always performs: audit trail, SSE notification, confirmedAt timestamp management,
+   * therapist booking status updates, Notion sync (data consistency).
+   * Optionally performs: emails, Slack (controlled by skipNotifications, default true).
    */
   async adminForceUpdate(
     appointmentId: string,
@@ -1667,14 +1668,26 @@ class AppointmentLifecycleService {
       confirmedDateTimeParsed?: Date | null;
       adminId: string;
       reason?: string;
+      skipNotifications?: boolean;
     }
   ): Promise<TransitionResult> {
     const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason } = options;
+    const skipNotifications = options.skipNotifications ?? true;
     const logContext = { appointmentId, adminId };
 
     const appointment = await prisma.appointmentRequest.findUnique({
       where: { id: appointmentId },
-      select: { id: true, status: true, confirmedDateTime: true, confirmedAt: true },
+      select: {
+        id: true,
+        status: true,
+        confirmedDateTime: true,
+        confirmedAt: true,
+        userName: true,
+        userEmail: true,
+        therapistName: true,
+        therapistEmail: true,
+        therapistNotionId: true,
+      },
     });
 
     if (!appointment) {
@@ -1731,12 +1744,162 @@ class AppointmentLifecycleService {
       sseService.emitStatusChange(appointmentId, previousStatus, effectiveNewStatus, 'admin');
     }
 
+    // --- Data-consistency side effects (always run when status changes) ---
+    if (statusChanging && appointment.therapistNotionId) {
+      await this.runAdminForceUpdateSideEffects(
+        appointmentId,
+        appointment,
+        previousStatus,
+        effectiveNewStatus as AppointmentStatus,
+        logContext,
+        skipNotifications,
+        confirmedDateTime ?? appointment.confirmedDateTime,
+      );
+    }
+
     logger.info(
-      { ...logContext, previousStatus, newStatus: effectiveNewStatus, confirmedDateTime, reason },
+      { ...logContext, previousStatus, newStatus: effectiveNewStatus, confirmedDateTime, reason, skipNotifications },
       'Appointment force-updated by admin (state machine bypassed)'
     );
 
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
+  }
+
+  /**
+   * Run data-consistency side effects for admin force updates.
+   * Ensures therapist booking status and Notion stay in sync regardless of
+   * whether the status change went through the normal state machine.
+   */
+  private async runAdminForceUpdateSideEffects(
+    appointmentId: string,
+    appointment: {
+      therapistNotionId: string | null;
+      therapistName: string | null;
+      userName: string | null;
+      userEmail: string;
+      therapistEmail: string | null;
+    },
+    previousStatus: AppointmentStatus,
+    newStatus: AppointmentStatus,
+    logContext: Record<string, unknown>,
+    skipNotifications: boolean,
+    confirmedDateTime: string | null | undefined,
+  ): Promise<void> {
+    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED;
+    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED;
+    const nowCompleted = newStatus === APPOINTMENT_STATUS.COMPLETED;
+    const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
+
+    // --- Therapist booking status ---
+    if (appointment.therapistNotionId) {
+      try {
+        if (nowConfirmed && !wasConfirmed) {
+          // Entering confirmed: freeze therapist for other bookings
+          await therapistBookingStatusService.markConfirmed(
+            appointment.therapistNotionId,
+            appointment.therapistName
+          );
+        } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
+          // Leaving confirmed via completion/cancellation: unfreeze therapist
+          await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);
+        }
+
+        if (nowCompleted || nowCancelled) {
+          await therapistBookingStatusService.recalculateUniqueRequestCount(
+            appointment.therapistNotionId
+          );
+        }
+
+        // For completed: conditionally deactivate therapist if no other active appointments
+        if (nowCompleted) {
+          const otherActiveAppointments = await prisma.appointmentRequest.count({
+            where: {
+              therapistNotionId: appointment.therapistNotionId,
+              id: { not: appointmentId },
+              status: {
+                in: [
+                  APPOINTMENT_STATUS.PENDING,
+                  APPOINTMENT_STATUS.CONTACTED,
+                  APPOINTMENT_STATUS.NEGOTIATING,
+                  APPOINTMENT_STATUS.CONFIRMED,
+                  APPOINTMENT_STATUS.SESSION_HELD,
+                  APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+                ],
+              },
+            },
+          });
+
+          if (otherActiveAppointments === 0) {
+            await notionService.updateTherapistActive(appointment.therapistNotionId, false);
+            logger.info(
+              { ...logContext, therapistNotionId: appointment.therapistNotionId },
+              'Marked therapist as inactive after admin force-completed last appointment'
+            );
+          }
+        }
+
+        // Sync therapist to Notion
+        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
+      } catch (err) {
+        logger.error(
+          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
+          'Failed to update therapist status after admin force update (non-fatal)'
+        );
+      }
+    }
+
+    // --- Notion user sync (non-blocking) ---
+    runBackgroundTask(
+      () => notionSyncManager.syncSingleUser(appointment.userEmail),
+      {
+        name: 'user-sync-admin-force-update',
+        context: { ...logContext, userEmail: appointment.userEmail },
+        retry: true,
+        maxRetries: 2,
+      }
+    );
+
+    // --- Optional notifications (Slack only — emails are intentionally skipped
+    //     for admin overrides since the admin is making the change consciously) ---
+    if (!skipNotifications) {
+      const settings = await this.getNotificationSettings();
+
+      if (nowConfirmed && settings.slack.confirmed) {
+        runBackgroundTask(
+          () => slackNotificationService.notifyAppointmentConfirmed(
+            appointmentId,
+            appointment.userName || 'Unknown',
+            appointment.therapistName || 'Unknown',
+            confirmedDateTime || 'TBD'
+          ),
+          { name: 'slack-notify-admin-confirmed', context: logContext, retry: true, maxRetries: 2 }
+        );
+      }
+
+      if (nowCompleted && settings.slack.completed) {
+        runBackgroundTask(
+          () => slackNotificationService.notifyAppointmentCompleted(
+            appointmentId,
+            appointment.userName || 'Unknown',
+            appointment.therapistName || 'Unknown',
+          ),
+          { name: 'slack-notify-admin-completed', context: logContext, retry: true, maxRetries: 2 }
+        );
+      }
+
+      if (nowCancelled && settings.slack.cancelled) {
+        runBackgroundTask(
+          () => slackNotificationService.sendAlert({
+            title: 'Appointment Cancelled (Admin Override)',
+            severity: 'medium',
+            appointmentId,
+            therapistName: appointment.therapistName || 'Unknown',
+            details: `Client: ${appointment.userName || 'Unknown'}. Cancelled via admin override.`,
+          }),
+          { name: 'slack-notify-admin-cancelled', context: logContext, retry: true, maxRetries: 2 }
+        );
+      }
+    }
   }
 }
 
