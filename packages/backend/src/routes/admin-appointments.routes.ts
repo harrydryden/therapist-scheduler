@@ -1602,7 +1602,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment from admin page');
-        return reply.status(500).send({ success: false, error: 'Failed to update appointment' });
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        return reply.status(500).send({ success: false, error: `Failed to update appointment: ${message}` });
       }
     }
   );
