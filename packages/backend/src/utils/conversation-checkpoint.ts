@@ -340,6 +340,58 @@ export function needsRecovery(
 }
 
 /**
+ * Stage progression order for the normal booking flow.
+ * Used to prevent send_email from regressing the checkpoint stage
+ * when sending courtesy/follow-up emails (e.g., confirming to the therapist
+ * that availability was forwarded to the user).
+ */
+const STAGE_PROGRESS_ORDER: Record<ConversationStage, number> = {
+  initial_contact: 0,
+  awaiting_therapist_availability: 1,
+  awaiting_user_slot_selection: 2,
+  awaiting_therapist_confirmation: 3,
+  awaiting_meeting_link: 4,
+  confirmed: 5,
+  // Non-linear states — can transition to any stage, so never block
+  stalled: -1,
+  chased: -1,
+  closure_recommended: -1,
+  rescheduling: -1,
+  cancelled: 99, // Terminal
+};
+
+/**
+ * Check if transitioning from currentStage to newStage would regress
+ * the booking flow. Used by the tool loop to prevent send_email from
+ * accidentally resetting the conversation stage backward when sending
+ * courtesy or follow-up emails.
+ *
+ * Example: After forwarding therapist availability to the user (stage =
+ * awaiting_user_slot_selection), sending a "thanks, I've forwarded your
+ * dates" email to the therapist should NOT regress the stage back to
+ * awaiting_therapist_availability.
+ */
+export function wouldRegress(
+  currentStage: ConversationStage,
+  newStage: ConversationStage
+): boolean {
+  const currentOrder = STAGE_PROGRESS_ORDER[currentStage];
+  const newOrder = STAGE_PROGRESS_ORDER[newStage];
+
+  // Non-linear states can transition to anything
+  if (currentOrder < 0) return false;
+
+  // Terminal state can't be regressed from
+  if (currentOrder === 99) return true;
+
+  // Transitions to non-linear states are never regressions
+  if (newOrder < 0) return false;
+
+  // It's a regression if the new stage is behind the current stage
+  return newOrder < currentOrder;
+}
+
+/**
  * Get admin handoff summary
  */
 export function getAdminSummary(checkpoint: ConversationCheckpoint): string {

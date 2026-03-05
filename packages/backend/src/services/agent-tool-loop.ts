@@ -28,7 +28,10 @@ import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circui
 import {
   type ConversationCheckpoint,
   type ConversationAction,
+  type ConversationStage,
   updateCheckpoint,
+  stageFromAction,
+  wouldRegress,
 } from '../utils/conversation-checkpoint';
 import type { ToolExecutionResult, SchedulingContext } from './justin-time.service';
 import type { ConversationState } from '../types';
@@ -291,23 +294,66 @@ export async function runToolLoop(
           // Update checkpoint after successful tool execution
           if (result.checkpointAction) {
             const currentCheckpoint = conversationState.checkpoint;
-            const updatedCheckpoint = updateCheckpoint(
-              currentCheckpoint || null,
-              result.checkpointAction,
-              null,
-              result.emailSentTo ? { lastEmailSentTo: result.emailSentTo } : undefined
-            );
-            conversationState.checkpoint = updatedCheckpoint;
+            const newStage = stageFromAction(result.checkpointAction);
 
-            logger.info(
-              {
-                traceId,
-                appointmentRequestId: context.appointmentRequestId,
-                action: result.checkpointAction,
-                newStage: updatedCheckpoint.stage,
-              },
-              `${logContext} - Checkpoint updated after tool execution`
-            );
+            // Prevent send_email from regressing the checkpoint stage.
+            // The send_email tool always maps to one of two early-stage actions
+            // (sent_initial_email_to_therapist → awaiting_therapist_availability,
+            //  sent_availability_to_user → awaiting_user_slot_selection).
+            // This is correct for initial emails, but courtesy/follow-up emails
+            // (e.g., "Thanks, I've forwarded your dates to the client") should
+            // NOT reset the stage backward. Without this guard, a follow-up email
+            // to the therapist after forwarding availability to the user would
+            // regress the stage from awaiting_user_slot_selection back to
+            // awaiting_therapist_availability, causing the chaser to chase the
+            // wrong party.
+            const isRegression = currentCheckpoint &&
+              result.toolName === 'send_email' &&
+              wouldRegress(currentCheckpoint.stage as ConversationStage, newStage);
+
+            if (isRegression) {
+              // Don't change the stage, but still update lastEmailSentTo context
+              // so the fallback chase logic has accurate tracking
+              if (result.emailSentTo) {
+                conversationState.checkpoint = {
+                  ...currentCheckpoint!,
+                  context: {
+                    ...currentCheckpoint!.context,
+                    lastEmailSentTo: result.emailSentTo,
+                  },
+                };
+              }
+
+              logger.info(
+                {
+                  traceId,
+                  appointmentRequestId: context.appointmentRequestId,
+                  currentStage: currentCheckpoint!.stage,
+                  blockedStage: newStage,
+                  action: result.checkpointAction,
+                  emailSentTo: result.emailSentTo,
+                },
+                `${logContext} - Blocked checkpoint regression from send_email, updated context only`
+              );
+            } else {
+              const updatedCheckpoint = updateCheckpoint(
+                currentCheckpoint || null,
+                result.checkpointAction,
+                null,
+                result.emailSentTo ? { lastEmailSentTo: result.emailSentTo } : undefined
+              );
+              conversationState.checkpoint = updatedCheckpoint;
+
+              logger.info(
+                {
+                  traceId,
+                  appointmentRequestId: context.appointmentRequestId,
+                  action: result.checkpointAction,
+                  newStage: updatedCheckpoint.stage,
+                },
+                `${logContext} - Checkpoint updated after tool execution`
+              );
+            }
           }
         }
 

@@ -27,6 +27,7 @@ import {
   isValidTransition,
   stageFromAction,
   needsRecovery,
+  wouldRegress,
   type ConversationStage,
   type ConversationCheckpoint,
 } from '../utils/conversation-checkpoint';
@@ -280,6 +281,205 @@ describe('Chase target determination', () => {
       });
       expect(result).toBeNull();
     });
+  });
+});
+
+// ============================================
+// Stage regression prevention (wouldRegress)
+// ============================================
+
+describe('wouldRegress - checkpoint stage regression detection', () => {
+  describe('normal booking flow regressions', () => {
+    it('detects regression from awaiting_user_slot_selection to awaiting_therapist_availability', () => {
+      // This is the specific bug: courtesy email to therapist after forwarding
+      // availability to user should not regress the stage
+      expect(wouldRegress('awaiting_user_slot_selection', 'awaiting_therapist_availability')).toBe(true);
+    });
+
+    it('detects regression from awaiting_therapist_confirmation to awaiting_therapist_availability', () => {
+      expect(wouldRegress('awaiting_therapist_confirmation', 'awaiting_therapist_availability')).toBe(true);
+    });
+
+    it('detects regression from awaiting_meeting_link to awaiting_user_slot_selection', () => {
+      expect(wouldRegress('awaiting_meeting_link', 'awaiting_user_slot_selection')).toBe(true);
+    });
+
+    it('detects regression from confirmed to any earlier stage', () => {
+      expect(wouldRegress('confirmed', 'awaiting_therapist_availability')).toBe(true);
+      expect(wouldRegress('confirmed', 'awaiting_user_slot_selection')).toBe(true);
+      expect(wouldRegress('confirmed', 'awaiting_meeting_link')).toBe(true);
+    });
+  });
+
+  describe('valid forward progressions', () => {
+    it('allows progression from initial_contact to awaiting_therapist_availability', () => {
+      expect(wouldRegress('initial_contact', 'awaiting_therapist_availability')).toBe(false);
+    });
+
+    it('allows progression from awaiting_therapist_availability to awaiting_user_slot_selection', () => {
+      expect(wouldRegress('awaiting_therapist_availability', 'awaiting_user_slot_selection')).toBe(false);
+    });
+
+    it('allows same-stage transitions', () => {
+      expect(wouldRegress('awaiting_user_slot_selection', 'awaiting_user_slot_selection')).toBe(false);
+    });
+  });
+
+  describe('non-linear states', () => {
+    it('never blocks transitions from stalled', () => {
+      expect(wouldRegress('stalled', 'awaiting_therapist_availability')).toBe(false);
+      expect(wouldRegress('stalled', 'initial_contact')).toBe(false);
+    });
+
+    it('never blocks transitions from chased', () => {
+      expect(wouldRegress('chased', 'awaiting_therapist_availability')).toBe(false);
+      expect(wouldRegress('chased', 'awaiting_user_slot_selection')).toBe(false);
+    });
+
+    it('never blocks transitions from rescheduling', () => {
+      expect(wouldRegress('rescheduling', 'awaiting_therapist_availability')).toBe(false);
+      expect(wouldRegress('rescheduling', 'awaiting_user_slot_selection')).toBe(false);
+    });
+
+    it('never blocks transitions to non-linear states', () => {
+      expect(wouldRegress('awaiting_user_slot_selection', 'stalled')).toBe(false);
+      expect(wouldRegress('awaiting_user_slot_selection', 'chased')).toBe(false);
+      expect(wouldRegress('confirmed', 'rescheduling')).toBe(false);
+    });
+
+    it('always blocks transitions from cancelled (terminal)', () => {
+      expect(wouldRegress('cancelled', 'initial_contact')).toBe(true);
+      expect(wouldRegress('cancelled', 'awaiting_therapist_availability')).toBe(true);
+    });
+  });
+});
+
+// ============================================
+// Chase target with courtesy email scenario
+// ============================================
+
+describe('Chase target after courtesy email (regression bug scenario)', () => {
+  /**
+   * Reproduces the bug where sending a courtesy email to the therapist
+   * ("Thanks, I've forwarded your dates") after forwarding availability
+   * to the user would regress the stage from awaiting_user_slot_selection
+   * back to awaiting_therapist_availability, causing the chaser to chase
+   * the therapist instead of the user.
+   */
+  function determineChaseTarget(appointment: {
+    checkpointStage: string | null;
+    userEmail: string;
+    therapistEmail: string;
+    gmailThreadId: string | null;
+    therapistGmailThreadId: string | null;
+    conversationState: unknown;
+  }): { target: 'user' | 'therapist'; email: string; threadId: string | null } | null {
+    const stage = appointment.checkpointStage;
+
+    if (
+      stage === 'awaiting_therapist_availability' ||
+      stage === 'awaiting_therapist_confirmation' ||
+      stage === 'awaiting_meeting_link'
+    ) {
+      return {
+        target: 'therapist',
+        email: appointment.therapistEmail,
+        threadId: appointment.therapistGmailThreadId,
+      };
+    }
+
+    if (stage === 'awaiting_user_slot_selection') {
+      return {
+        target: 'user',
+        email: appointment.userEmail,
+        threadId: appointment.gmailThreadId,
+      };
+    }
+
+    if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
+      const state = appointment.conversationState as { checkpoint?: { context?: { lastEmailSentTo?: string } } } | null;
+      const lastEmailTo = state?.checkpoint?.context?.lastEmailSentTo;
+
+      if (lastEmailTo === 'therapist') {
+        return { target: 'therapist', email: appointment.therapistEmail, threadId: appointment.therapistGmailThreadId };
+      }
+      if (lastEmailTo === 'user') {
+        return { target: 'user', email: appointment.userEmail, threadId: appointment.gmailThreadId };
+      }
+      if (appointment.therapistGmailThreadId) {
+        return { target: 'therapist', email: appointment.therapistEmail, threadId: appointment.therapistGmailThreadId };
+      }
+      if (appointment.gmailThreadId) {
+        return { target: 'user', email: appointment.userEmail, threadId: appointment.gmailThreadId };
+      }
+    }
+
+    return null;
+  }
+
+  it('chases the user (not therapist) when stage is correctly preserved at awaiting_user_slot_selection', () => {
+    // Scenario: Therapist (Karin) provided dates, system forwarded to user (Calvin),
+    // then sent a courtesy email back to therapist. With the regression fix,
+    // the stage should remain at awaiting_user_slot_selection.
+
+    // Simulate the checkpoint progression WITH regression prevention:
+    // 1. Initial email to therapist
+    let cp = updateCheckpoint(null, 'sent_initial_email_to_therapist', null, { lastEmailSentTo: 'therapist' });
+    expect(cp.stage).toBe('awaiting_therapist_availability');
+
+    // 2. Therapist provides availability → send to user
+    cp = updateCheckpoint(cp, 'sent_availability_to_user', null, { lastEmailSentTo: 'user' });
+    expect(cp.stage).toBe('awaiting_user_slot_selection');
+
+    // 3. Courtesy email to therapist — WITH regression prevention, stage stays
+    const courtesyEmailStage = stageFromAction('sent_initial_email_to_therapist');
+    expect(wouldRegress(cp.stage, courtesyEmailStage)).toBe(true);
+    // So we only update the context, not the stage:
+    cp = { ...cp, context: { ...cp.context, lastEmailSentTo: 'therapist' } };
+    expect(cp.stage).toBe('awaiting_user_slot_selection'); // Stage preserved!
+
+    // 4. Chase should target the USER (Calvin), not the therapist (Karin)
+    const result = determineChaseTarget({
+      checkpointStage: cp.stage,
+      userEmail: 'calvin@example.com',
+      therapistEmail: 'karin@example.com',
+      gmailThreadId: 'thread-client',
+      therapistGmailThreadId: 'thread-therapist',
+      conversationState: { checkpoint: cp },
+    });
+
+    expect(result).toEqual({
+      target: 'user',
+      email: 'calvin@example.com',
+      threadId: 'thread-client',
+    });
+  });
+
+  it('WITHOUT regression prevention, chaser would incorrectly target the therapist', () => {
+    // This demonstrates the bug BEFORE the fix
+
+    // 1. Initial email to therapist
+    let cp = updateCheckpoint(null, 'sent_initial_email_to_therapist', null, { lastEmailSentTo: 'therapist' });
+
+    // 2. Send availability to user
+    cp = updateCheckpoint(cp, 'sent_availability_to_user', null, { lastEmailSentTo: 'user' });
+    expect(cp.stage).toBe('awaiting_user_slot_selection');
+
+    // 3. Courtesy email to therapist — WITHOUT regression prevention, stage regresses
+    cp = updateCheckpoint(cp, 'sent_initial_email_to_therapist', null, { lastEmailSentTo: 'therapist' });
+    expect(cp.stage).toBe('awaiting_therapist_availability'); // BUG: stage regressed!
+
+    // 4. Chase would incorrectly target the therapist
+    const result = determineChaseTarget({
+      checkpointStage: cp.stage,
+      userEmail: 'calvin@example.com',
+      therapistEmail: 'karin@example.com',
+      gmailThreadId: 'thread-client',
+      therapistGmailThreadId: 'thread-therapist',
+      conversationState: { checkpoint: cp },
+    });
+
+    expect(result?.target).toBe('therapist'); // Wrong! Should be 'user'
   });
 });
 
