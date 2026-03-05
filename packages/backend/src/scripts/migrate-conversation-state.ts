@@ -157,6 +157,7 @@ async function migrateConversationStates() {
         data: {
           conversationState: updatedState as object,
         },
+        select: { id: true },
       });
 
       logger.info(

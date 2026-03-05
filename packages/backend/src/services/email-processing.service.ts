@@ -1278,6 +1278,7 @@ export class EmailProcessingService {
           data: {
             notes: `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n${(await prisma.appointmentRequest.findUnique({ where: { id: appointmentRequest.id }, select: { notes: true } }))?.notes || ''}`,
           },
+          select: { id: true },
         });
 
         // Mark as needing manual review but don't process automatically
@@ -2608,6 +2609,7 @@ ${htmlParts.join('\n')}
                   conversationStallAlertAt: new Date(),
                   conversationStallAcknowledged: false,
                 },
+                select: { id: true },
               });
 
               logger.warn(

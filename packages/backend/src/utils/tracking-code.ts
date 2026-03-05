@@ -246,6 +246,7 @@ export async function backfillMissingTrackingCodes(): Promise<{
         await tx.appointmentRequest.update({
           where: { id: appointment.id },
           data: { trackingCode: newCode },
+          select: { id: true },
         });
 
         updated++;
@@ -316,6 +317,7 @@ export async function fixDuplicateTrackingCodes(): Promise<{
           await tx.appointmentRequest.update({
             where: { id: appointment.id },
             data: { trackingCode: newCode },
+            select: { id: true },
           });
 
           fixed++;
@@ -385,6 +387,7 @@ export async function migrateLegacyTrackingCodes(): Promise<{
         await tx.appointmentRequest.update({
           where: { id: appointment.id },
           data: { trackingCode: newCode },
+          select: { id: true },
         });
 
         migrated++;

@@ -429,6 +429,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                   notes: `[SYSTEM ERROR] Initial scheduling failed at ${new Date().toISOString()}: ${err?.message || 'Unknown error'}. Retry queued.`,
                   isStale: true, // Flag for admin attention
                 },
+                select: { id: true },
               });
 
               // FIX B6: Queue a retry via BullMQ (falls back to DB-only if Redis unavailable)

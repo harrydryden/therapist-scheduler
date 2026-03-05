@@ -323,6 +323,7 @@ export async function linkAppointmentsToEntities(): Promise<{
             userId: user?.id || undefined,
             therapistId: therapist?.id || undefined,
           },
+          select: { id: true },
         });
         linked++;
       }
