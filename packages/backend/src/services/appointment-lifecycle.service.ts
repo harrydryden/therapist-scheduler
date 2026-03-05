@@ -41,6 +41,23 @@ import { runBackgroundTask } from '../utils/background-task';
 import { sseService } from './sse.service';
 
 // ============================================
+// Lifecycle status ordering (for detecting backwards transitions)
+// ============================================
+
+const LIFECYCLE_STATUS_ORDER: readonly AppointmentStatus[] = [
+  APPOINTMENT_STATUS.PENDING,
+  APPOINTMENT_STATUS.CONTACTED,
+  APPOINTMENT_STATUS.NEGOTIATING,
+  APPOINTMENT_STATUS.CONFIRMED,
+  APPOINTMENT_STATUS.SESSION_HELD,
+  APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+  APPOINTMENT_STATUS.COMPLETED,
+] as const;
+
+const CONFIRMED_IDX = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.CONFIRMED);
+const FEEDBACK_IDX = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.FEEDBACK_REQUESTED);
+
+// ============================================
 // Custom Errors for Lifecycle Transitions
 // ============================================
 
@@ -1717,30 +1734,19 @@ class AppointmentLifecycleService {
       // Reset follow-up sentinel fields when moving backwards past the stage they guard.
       // Without this, automated services (post-booking follow-up) would skip re-sending
       // emails because the sentinel is already set from the first pass through the lifecycle.
-      const statusOrder: AppointmentStatus[] = [
-        APPOINTMENT_STATUS.PENDING,
-        APPOINTMENT_STATUS.CONTACTED,
-        APPOINTMENT_STATUS.NEGOTIATING,
-        APPOINTMENT_STATUS.CONFIRMED,
-        APPOINTMENT_STATUS.SESSION_HELD,
-        APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-        APPOINTMENT_STATUS.COMPLETED,
-      ];
-      const prevIdx = statusOrder.indexOf(previousStatus);
-      const newIdx = statusOrder.indexOf(newStatus);
+      const prevIdx = LIFECYCLE_STATUS_ORDER.indexOf(previousStatus);
+      const newIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
       const movingBackwards = newIdx >= 0 && prevIdx >= 0 && newIdx < prevIdx;
 
       if (movingBackwards) {
-        // Moving back past confirmed → reset post-confirmation emails
-        const confirmedIdx = statusOrder.indexOf(APPOINTMENT_STATUS.CONFIRMED);
-        if (newIdx <= confirmedIdx && prevIdx > confirmedIdx) {
+        // Moving back to confirmed or earlier, from past confirmed → reset post-confirmation emails
+        if (newIdx <= CONFIRMED_IDX && prevIdx > CONFIRMED_IDX) {
           updateData.meetingLinkCheckSentAt = null;
           updateData.reminderSentAt = null;
         }
 
-        // Moving back past feedback_requested → reset feedback emails
-        const feedbackIdx = statusOrder.indexOf(APPOINTMENT_STATUS.FEEDBACK_REQUESTED);
-        if (newIdx < feedbackIdx && prevIdx >= feedbackIdx) {
+        // Moving back before feedback_requested, from at-or-past it → reset feedback emails
+        if (newIdx < FEEDBACK_IDX && prevIdx >= FEEDBACK_IDX) {
           updateData.feedbackFormSentAt = null;
           updateData.feedbackReminderSentAt = null;
         }
