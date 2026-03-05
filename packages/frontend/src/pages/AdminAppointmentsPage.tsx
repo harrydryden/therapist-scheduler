@@ -622,6 +622,7 @@ function AppointmentsTable() {
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const limit = 20;
   const queryClient = useQueryClient();
 
@@ -653,13 +654,16 @@ function AppointmentsTable() {
   const updateMutation = useMutation({
     mutationFn: ({ id, ...rest }: { id: string; status?: string; confirmedDateTime?: string | null; adminId: string }) =>
       updateAdminAppointment(id, rest),
-    onMutate: () => {},
+    onMutate: () => {
+      setUpdateError(null);
+    },
     onSuccess: () => {
       setSavingId(null);
       queryClient.invalidateQueries({ queryKey: ['admin-all-appointments'] });
     },
-    onError: () => {
+    onError: (error) => {
       setSavingId(null);
+      setUpdateError(error instanceof Error ? error.message : 'Failed to update appointment');
     },
   });
 
@@ -738,6 +742,22 @@ function AppointmentsTable() {
           </div>
         </div>
       </div>
+
+      {/* Update error banner */}
+      {updateError && (
+        <div className="mx-6 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+          <p className="text-sm text-red-800">{updateError}</p>
+          <button
+            type="button"
+            onClick={() => setUpdateError(null)}
+            className="text-red-400 hover:text-red-600 ml-3"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Table */}
       {isLoading ? (

@@ -1520,6 +1520,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             id: true,
             status: true,
             confirmedDateTime: true,
+            confirmedAt: true,
           },
         });
 
@@ -1560,29 +1561,30 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           }
         }
 
-        // Use lifecycle service for status changes
+        // Admin page bypasses strict state machine — directly update status and/or date.
+        // This allows admins to set any status regardless of the current state.
+        const updateData: Record<string, unknown> = {
+          updatedAt: new Date(),
+          lastActivityAt: new Date(),
+        };
+
         if (newStatus && newStatus !== previousStatus) {
-          await appointmentLifecycleService.updateStatus(
-            id,
-            newStatus as AppointmentStatus,
-            {
-              source: 'admin',
-              adminId,
-              reason,
-              confirmedDateTime: effectiveConfirmedDateTime || undefined,
-              confirmedDateTimeParsed,
-              sendEmails: false,
-            }
-          );
-        } else if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
-          // Only confirmedDateTime changed
+          updateData.status = newStatus;
+          if (newStatus === 'confirmed' && !appointment.confirmedAt) {
+            updateData.confirmedAt = new Date();
+          }
+        }
+
+        if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
+          updateData.confirmedDateTime = confirmedDateTime;
+          updateData.confirmedDateTimeParsed = confirmedDateTimeParsed;
+        }
+
+        // Only write if there's something to update beyond timestamps
+        if (updateData.status || updateData.confirmedDateTime !== undefined) {
           await prisma.appointmentRequest.update({
             where: { id },
-            data: {
-              confirmedDateTime,
-              confirmedDateTimeParsed,
-              updatedAt: new Date(),
-            },
+            data: updateData,
           });
         }
 
