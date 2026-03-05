@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  // Force Prisma Client regeneration after invalid_date_alert_at column removal
 }
 
 datasource db {
