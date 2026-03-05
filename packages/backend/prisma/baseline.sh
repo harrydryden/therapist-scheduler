@@ -16,6 +16,17 @@ fi
 
 echo "prisma migrate deploy failed — attempting baseline..."
 
+# First, check for and resolve any failed migrations so they can be re-applied.
+# Failed migrations block all subsequent migrate deploy attempts.
+echo "Checking for failed migrations..."
+for dir in prisma/migrations/*/; do
+  migration=$(basename "$dir")
+  case "$migration" in migration_lock.toml) continue;; esac
+
+  # Try to mark failed migrations as rolled-back so they can be re-applied
+  npx prisma migrate resolve --rolled-back "$migration" 2>/dev/null || true
+done
+
 # Only resolve migrations that predate this baseline fix.
 # New migrations added AFTER the baseline should be applied normally
 # by the final migrate deploy, not marked as already applied.
