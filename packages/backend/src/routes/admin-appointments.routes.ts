@@ -1560,31 +1560,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           }
         }
 
-        // Use lifecycle service for status changes
-        if (newStatus && newStatus !== previousStatus) {
-          await appointmentLifecycleService.updateStatus(
-            id,
-            newStatus as AppointmentStatus,
-            {
-              source: 'admin',
-              adminId,
-              reason,
-              confirmedDateTime: effectiveConfirmedDateTime || undefined,
-              confirmedDateTimeParsed,
-              sendEmails: false,
-            }
-          );
-        } else if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
-          // Only confirmedDateTime changed
-          await prisma.appointmentRequest.update({
-            where: { id },
-            data: {
-              confirmedDateTime,
-              confirmedDateTimeParsed,
-              updatedAt: new Date(),
-            },
-          });
-        }
+        // Use lifecycle service's force update — bypasses state machine validation
+        // but still records audit trail and emits SSE notifications.
+        await appointmentLifecycleService.adminForceUpdate(id, {
+          newStatus: newStatus as AppointmentStatus | undefined,
+          confirmedDateTime,
+          confirmedDateTimeParsed,
+          adminId,
+          reason,
+        });
 
         const updated = await prisma.appointmentRequest.findUnique({
           where: { id },
@@ -1617,12 +1601,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           },
         });
       } catch (err) {
-        if (err instanceof InvalidTransitionError) {
-          return reply.status(400).send({ success: false, error: err.message });
-        }
-        if (err instanceof ConcurrentModificationError) {
-          return reply.status(409).send({ success: false, error: err.message });
-        }
         logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment from admin page');
         return reply.status(500).send({ success: false, error: 'Failed to update appointment' });
       }
