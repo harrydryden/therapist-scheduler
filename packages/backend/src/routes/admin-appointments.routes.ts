@@ -141,6 +141,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               status: true,
               confirmedAt: true,
               confirmedDateTime: true,
+              confirmedDateTimeParsed: true,
               notes: true,
               // FIX #21: Use denormalized columns instead of loading full conversationState blob
               messageCount: true,
@@ -191,6 +192,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
             confirmedDateTime: apt.confirmedDateTime,
+            confirmedDateTimeParsed: apt.confirmedDateTimeParsed,
             notes: apt.notes,
             createdAt: apt.createdAt,
             updatedAt: apt.updatedAt,
@@ -1389,6 +1391,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               status: true,
               confirmedAt: true,
               confirmedDateTime: true,
+              confirmedDateTimeParsed: true,
               notes: true,
               messageCount: true,
               checkpointStage: true,
@@ -1430,6 +1433,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
             confirmedDateTime: apt.confirmedDateTime,
+            confirmedDateTimeParsed: apt.confirmedDateTimeParsed,
             notes: apt.notes,
             createdAt: apt.createdAt,
             updatedAt: apt.updatedAt,
@@ -1459,6 +1463,168 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           success: false,
           error: 'Failed to fetch appointments',
         });
+      }
+    }
+  );
+
+  /**
+   * PATCH /api/admin/appointments/:id
+   * Update appointment status and/or confirmedDateTime from the admin appointments page.
+   * Unlike the dashboard PATCH endpoint, this does NOT require human control.
+   */
+  const adminUpdateSchema = z.object({
+    status: z.enum([
+      'pending',
+      'contacted',
+      'negotiating',
+      'confirmed',
+      'session_held',
+      'feedback_requested',
+      'completed',
+      'cancelled',
+    ]).optional(),
+    confirmedDateTime: z.string().nullable().optional(),
+    adminId: z.string().min(1),
+    reason: z.string().optional(),
+  });
+
+  fastify.patch<{ Params: { id: string } }>(
+    '/api/admin/appointments/:id',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const { id } = request.params;
+      const requestId = request.id;
+
+      const validation = adminUpdateSchema.safeParse(request.body);
+      if (!validation.success) {
+        return reply.status(400).send({
+          success: false,
+          error: 'Invalid request body',
+          details: validation.error.errors,
+        });
+      }
+
+      const { status: newStatus, confirmedDateTime, adminId, reason } = validation.data;
+
+      try {
+        const appointment = await prisma.appointmentRequest.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+            confirmedDateTime: true,
+          },
+        });
+
+        if (!appointment) {
+          return reply.status(404).send({
+            success: false,
+            error: 'Appointment not found',
+          });
+        }
+
+        // Validate: if setting status to confirmed, confirmedDateTime is required
+        const effectiveConfirmedDateTime = confirmedDateTime ?? appointment.confirmedDateTime;
+        if (newStatus === 'confirmed' && !effectiveConfirmedDateTime) {
+          return reply.status(400).send({
+            success: false,
+            error: 'confirmedDateTime is required when setting status to confirmed',
+          });
+        }
+
+        const previousStatus = appointment.status;
+        let warning: string | undefined;
+
+        if (newStatus && newStatus !== previousStatus) {
+          if (previousStatus === 'cancelled' && newStatus !== 'cancelled') {
+            warning = `Restored cancelled appointment to ${newStatus}. Verify this is intentional.`;
+          }
+        }
+
+        // Parse confirmedDateTime if provided as ISO string
+        let confirmedDateTimeParsed: Date | null = null;
+        if (confirmedDateTime) {
+          // First try as ISO string (from datetime-local input), then fall back to natural language
+          const isoDate = new Date(confirmedDateTime);
+          if (!isNaN(isoDate.getTime())) {
+            confirmedDateTimeParsed = isoDate;
+          } else {
+            confirmedDateTimeParsed = parseConfirmedDateTime(confirmedDateTime);
+          }
+        }
+
+        // Use lifecycle service for status changes
+        if (newStatus && newStatus !== previousStatus) {
+          await appointmentLifecycleService.updateStatus(
+            id,
+            newStatus as AppointmentStatus,
+            {
+              source: 'admin',
+              adminId,
+              reason,
+              confirmedDateTime: effectiveConfirmedDateTime || undefined,
+              confirmedDateTimeParsed,
+              sendEmails: false,
+            }
+          );
+        } else if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
+          // Only confirmedDateTime changed
+          await prisma.appointmentRequest.update({
+            where: { id },
+            data: {
+              confirmedDateTime,
+              confirmedDateTimeParsed,
+              updatedAt: new Date(),
+            },
+          });
+        }
+
+        const updated = await prisma.appointmentRequest.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+            confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
+            confirmedAt: true,
+            updatedAt: true,
+          },
+        });
+
+        logger.info(
+          { requestId, appointmentId: id, adminId, previousStatus, newStatus: updated?.status, confirmedDateTime: updated?.confirmedDateTime, reason },
+          'Appointment updated by admin from appointments page'
+        );
+
+        return reply.send({
+          success: true,
+          data: {
+            id: updated?.id,
+            status: updated?.status,
+            confirmedDateTime: updated?.confirmedDateTime,
+            confirmedDateTimeParsed: updated?.confirmedDateTimeParsed,
+            confirmedAt: updated?.confirmedAt,
+            updatedAt: updated?.updatedAt,
+            previousStatus,
+            warning,
+          },
+        });
+      } catch (err) {
+        if (err instanceof InvalidTransitionError) {
+          return reply.status(400).send({ success: false, error: err.message });
+        }
+        if (err instanceof ConcurrentModificationError) {
+          return reply.status(409).send({ success: false, error: err.message });
+        }
+        logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment from admin page');
+        return reply.status(500).send({ success: false, error: 'Failed to update appointment' });
       }
     }
   );

@@ -784,6 +784,38 @@ export async function getAllAppointments(filters: {
   };
 }
 
+export async function updateAdminAppointment(
+  appointmentId: string,
+  data: { status?: string; confirmedDateTime?: string | null; adminId: string; reason?: string }
+): Promise<{
+  id: string;
+  status: string;
+  confirmedDateTime: string | null;
+  confirmedDateTimeParsed: string | null;
+  confirmedAt: string | null;
+  updatedAt: string;
+  previousStatus?: string;
+  warning?: string;
+}> {
+  const response = await fetchAdminApi<{
+    id: string;
+    status: string;
+    confirmedDateTime: string | null;
+    confirmedDateTimeParsed: string | null;
+    confirmedAt: string | null;
+    updatedAt: string;
+    previousStatus?: string;
+    warning?: string;
+  }>(`/admin/appointments/${appointmentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+  if (!response.data) {
+    throw new Error('Failed to update appointment');
+  }
+  return response.data;
+}
+
 export async function createAdminAppointment(
   data: CreateAdminAppointmentRequest
 ): Promise<CreateAdminAppointmentResponse> {
