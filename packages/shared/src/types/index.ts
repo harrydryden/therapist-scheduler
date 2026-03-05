@@ -130,6 +130,7 @@ export interface AppointmentListItem {
   messageCount: number;
   confirmedAt: string | null;
   confirmedDateTime: string | null;
+  confirmedDateTimeParsed: string | null;
   createdAt: string;
   updatedAt: string;
   humanControlEnabled: boolean;

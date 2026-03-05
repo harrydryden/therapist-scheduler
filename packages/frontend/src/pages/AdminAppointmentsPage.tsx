@@ -1,15 +1,17 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   getAdminUsers,
   getAdminTherapists,
   getAllAppointments,
   createAdminAppointment,
+  updateAdminAppointment,
 } from '../api/client';
 import type {
   AdminUser,
   AdminTherapist,
   AdminAppointmentStage,
+  AppointmentStatus,
 } from '../types';
 
 // Status badge colors (same as existing dashboard)
@@ -43,6 +45,17 @@ const STAGE_OPTIONS: { value: AdminAppointmentStage; label: string }[] = [
 
 const ACTIVE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'];
 
+const ALL_STATUSES: AppointmentStatus[] = [
+  'pending',
+  'contacted',
+  'negotiating',
+  'confirmed',
+  'session_held',
+  'feedback_requested',
+  'completed',
+  'cancelled',
+];
+
 function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[status] || 'bg-slate-100 text-slate-600'}`}>
@@ -54,7 +67,9 @@ function StatusBadge({ status }: { status: string }) {
 function formatDateTime(dateStr: string | null): string {
   if (!dateStr) return '-';
   try {
-    return new Date(dateStr).toLocaleString('en-GB', {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return 'Invalid Date';
+    return d.toLocaleString('en-GB', {
       day: '2-digit',
       month: 'short',
       year: 'numeric',
@@ -64,6 +79,191 @@ function formatDateTime(dateStr: string | null): string {
   } catch {
     return dateStr;
   }
+}
+
+/**
+ * Format a Date or ISO string to datetime-local input value (YYYY-MM-DDTHH:mm)
+ */
+function toDatetimeLocalValue(dateStr: string | null): string {
+  if (!dateStr) return '';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return '';
+  }
+}
+
+// ============================================
+// Editable Status Dropdown
+// ============================================
+
+function EditableStatus({
+  appointmentId,
+  currentStatus,
+  onSave,
+  isSaving,
+}: {
+  appointmentId: string;
+  currentStatus: string;
+  onSave: (appointmentId: string, newStatus: string) => void;
+  isSaving: boolean;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsEditing(false);
+      }
+    }
+    if (isEditing) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isEditing]);
+
+  if (!isEditing) {
+    return (
+      <button
+        type="button"
+        onClick={() => setIsEditing(true)}
+        className="group flex items-center gap-1"
+        title="Click to change status"
+      >
+        <StatusBadge status={currentStatus} />
+        <svg className="w-3 h-3 text-slate-300 group-hover:text-slate-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+    );
+  }
+
+  return (
+    <div ref={dropdownRef} className="relative">
+      <select
+        value={currentStatus}
+        onChange={(e) => {
+          onSave(appointmentId, e.target.value);
+          setIsEditing(false);
+        }}
+        disabled={isSaving}
+        className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+        autoFocus
+      >
+        {ALL_STATUSES.map((s) => (
+          <option key={s} value={s}>
+            {STATUS_LABELS[s] || s}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// ============================================
+// Editable Date Cell
+// ============================================
+
+function EditableDate({
+  appointmentId,
+  confirmedDateTimeParsed,
+  confirmedDateTime,
+  onSave,
+  isSaving,
+}: {
+  appointmentId: string;
+  confirmedDateTimeParsed: string | null;
+  confirmedDateTime: string | null;
+  onSave: (appointmentId: string, newDateTime: string) => void;
+  isSaving: boolean;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [value, setValue] = useState('');
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const displayDate = confirmedDateTimeParsed || confirmedDateTime;
+  const displayFormatted = confirmedDateTimeParsed
+    ? formatDateTime(confirmedDateTimeParsed)
+    : confirmedDateTime
+      ? formatDateTime(confirmedDateTime)
+      : '-';
+  const isInvalid = confirmedDateTime && !confirmedDateTimeParsed && formatDateTime(confirmedDateTime) === 'Invalid Date';
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsEditing(false);
+      }
+    }
+    if (isEditing) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isEditing]);
+
+  if (!isEditing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setValue(toDatetimeLocalValue(displayDate));
+          setIsEditing(true);
+        }}
+        className="group flex items-center gap-1 text-left"
+        title="Click to edit date"
+      >
+        <span className={isInvalid ? 'text-red-500' : 'text-slate-600'}>
+          {displayFormatted}
+        </span>
+        <svg className="w-3 h-3 text-slate-300 group-hover:text-slate-500 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+        </svg>
+      </button>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="flex items-center gap-1">
+      <input
+        type="datetime-local"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        disabled={isSaving}
+        className="text-xs border border-slate-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+        autoFocus
+      />
+      <button
+        type="button"
+        onClick={() => {
+          if (value) {
+            onSave(appointmentId, new Date(value).toISOString());
+          }
+          setIsEditing(false);
+        }}
+        disabled={isSaving || !value}
+        className="p-1 text-green-600 hover:text-green-800 disabled:opacity-50"
+        title="Save"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        onClick={() => setIsEditing(false)}
+        className="p-1 text-slate-400 hover:text-slate-600"
+        title="Cancel"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  );
 }
 
 // ============================================
@@ -421,7 +621,9 @@ function AppointmentsTable() {
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
+  const [savingId, setSavingId] = useState<string | null>(null);
   const limit = 20;
+  const queryClient = useQueryClient();
 
   const statusFilter = useMemo(() => {
     const statuses = [...ACTIVE_STATUSES];
@@ -447,6 +649,29 @@ function AppointmentsTable() {
 
   const appointments = data?.data || [];
   const pagination = data?.pagination;
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, ...rest }: { id: string; status?: string; confirmedDateTime?: string | null; adminId: string }) =>
+      updateAdminAppointment(id, rest),
+    onMutate: () => {},
+    onSuccess: () => {
+      setSavingId(null);
+      queryClient.invalidateQueries({ queryKey: ['admin-all-appointments'] });
+    },
+    onError: () => {
+      setSavingId(null);
+    },
+  });
+
+  const handleStatusChange = useCallback((appointmentId: string, newStatus: string) => {
+    setSavingId(appointmentId);
+    updateMutation.mutate({ id: appointmentId, status: newStatus, adminId: 'admin' });
+  }, [updateMutation]);
+
+  const handleDateChange = useCallback((appointmentId: string, newDateTime: string) => {
+    setSavingId(appointmentId);
+    updateMutation.mutate({ id: appointmentId, confirmedDateTime: newDateTime, adminId: 'admin' });
+  }, [updateMutation]);
 
   const handleSort = useCallback((column: string) => {
     if (sortBy === column) {
@@ -560,7 +785,12 @@ function AppointmentsTable() {
                   className="border-b border-slate-50 hover:bg-slate-50 transition-colors"
                 >
                   <td className="px-4 py-3">
-                    <StatusBadge status={apt.status} />
+                    <EditableStatus
+                      appointmentId={apt.id}
+                      currentStatus={apt.status}
+                      onSave={handleStatusChange}
+                      isSaving={savingId === apt.id && updateMutation.isPending}
+                    />
                   </td>
                   <td className="px-4 py-3">
                     <div className="font-medium text-slate-900 truncate max-w-[180px]">{apt.userName || '-'}</div>
@@ -569,8 +799,14 @@ function AppointmentsTable() {
                   <td className="px-4 py-3">
                     <div className="text-slate-900 truncate max-w-[160px]">{apt.therapistName}</div>
                   </td>
-                  <td className="px-4 py-3 text-slate-600">
-                    {formatDateTime(apt.confirmedDateTime)}
+                  <td className="px-4 py-3">
+                    <EditableDate
+                      appointmentId={apt.id}
+                      confirmedDateTimeParsed={apt.confirmedDateTimeParsed}
+                      confirmedDateTime={apt.confirmedDateTime}
+                      onSave={handleDateChange}
+                      isSaving={savingId === apt.id && updateMutation.isPending}
+                    />
                   </td>
                   <td className="px-4 py-3">
                     {apt.trackingCode ? (
