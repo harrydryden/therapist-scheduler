@@ -1520,7 +1520,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             id: true,
             status: true,
             confirmedDateTime: true,
-            confirmedAt: true,
           },
         });
 
@@ -1561,32 +1560,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           }
         }
 
-        // Admin page bypasses strict state machine — directly update status and/or date.
-        // This allows admins to set any status regardless of the current state.
-        const updateData: Record<string, unknown> = {
-          updatedAt: new Date(),
-          lastActivityAt: new Date(),
-        };
-
-        if (newStatus && newStatus !== previousStatus) {
-          updateData.status = newStatus;
-          if (newStatus === 'confirmed' && !appointment.confirmedAt) {
-            updateData.confirmedAt = new Date();
-          }
-        }
-
-        if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
-          updateData.confirmedDateTime = confirmedDateTime;
-          updateData.confirmedDateTimeParsed = confirmedDateTimeParsed;
-        }
-
-        // Only write if there's something to update beyond timestamps
-        if (updateData.status || updateData.confirmedDateTime !== undefined) {
-          await prisma.appointmentRequest.update({
-            where: { id },
-            data: updateData,
-          });
-        }
+        // Use lifecycle service's force update — bypasses state machine validation
+        // but still records audit trail and emits SSE notifications.
+        await appointmentLifecycleService.adminForceUpdate(id, {
+          newStatus: newStatus as AppointmentStatus | undefined,
+          confirmedDateTime,
+          confirmedDateTimeParsed,
+          adminId,
+          reason,
+        });
 
         const updated = await prisma.appointmentRequest.findUnique({
           where: { id },
@@ -1619,12 +1601,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           },
         });
       } catch (err) {
-        if (err instanceof InvalidTransitionError) {
-          return reply.status(400).send({ success: false, error: err.message });
-        }
-        if (err instanceof ConcurrentModificationError) {
-          return reply.status(409).send({ success: false, error: err.message });
-        }
         logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment from admin page');
         return reply.status(500).send({ success: false, error: 'Failed to update appointment' });
       }

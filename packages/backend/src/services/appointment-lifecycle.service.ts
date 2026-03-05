@@ -1651,6 +1651,93 @@ class AppointmentLifecycleService {
 
     return result;
   }
+
+  /**
+   * Force-update an appointment's status and/or confirmedDateTime, bypassing state machine
+   * validation. Used by the admin appointments page where admins need unrestricted control.
+   *
+   * Still performs: audit trail, SSE notification, confirmedAt timestamp management.
+   * Does NOT perform: emails, Slack, therapist booking status, Notion sync.
+   */
+  async adminForceUpdate(
+    appointmentId: string,
+    options: {
+      newStatus?: AppointmentStatus;
+      confirmedDateTime?: string | null;
+      confirmedDateTimeParsed?: Date | null;
+      adminId: string;
+      reason?: string;
+    }
+  ): Promise<TransitionResult> {
+    const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason } = options;
+    const logContext = { appointmentId, adminId };
+
+    const appointment = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { id: true, status: true, confirmedDateTime: true, confirmedAt: true },
+    });
+
+    if (!appointment) {
+      throw new AppointmentNotFoundError(appointmentId);
+    }
+
+    const previousStatus = appointment.status as AppointmentStatus;
+    const statusChanging = newStatus && newStatus !== previousStatus;
+    const dateChanging = confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime;
+
+    if (!statusChanging && !dateChanging) {
+      return { success: true, previousStatus, newStatus: previousStatus, skipped: true };
+    }
+
+    // Build typed update data
+    const updateData: Parameters<typeof prisma.appointmentRequest.update>[0]['data'] = {
+      updatedAt: new Date(),
+      lastActivityAt: new Date(),
+    };
+
+    if (statusChanging) {
+      updateData.status = newStatus;
+      if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
+        updateData.confirmedAt = new Date();
+      }
+    }
+
+    if (dateChanging) {
+      updateData.confirmedDateTime = confirmedDateTime;
+      updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
+    }
+
+    await prisma.appointmentRequest.update({
+      where: { id: appointmentId },
+      data: updateData,
+    });
+
+    // Audit trail
+    const effectiveNewStatus = newStatus || previousStatus;
+    const auditParts: string[] = [];
+    if (statusChanging) {
+      auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
+    }
+    if (dateChanging) {
+      auditParts.push(`Date/time updated: ${appointment.confirmedDateTime || 'none'} → ${confirmedDateTime || 'none'}`);
+    }
+    if (reason) {
+      auditParts.push(`Reason: ${reason}`);
+    }
+    await this.addAuditMessage(appointmentId, 'admin', auditParts.join('. '), adminId);
+
+    // SSE notification
+    if (statusChanging) {
+      sseService.emitStatusChange(appointmentId, previousStatus, effectiveNewStatus, 'admin');
+    }
+
+    logger.info(
+      { ...logContext, previousStatus, newStatus: effectiveNewStatus, confirmedDateTime, reason },
+      'Appointment force-updated by admin (state machine bypassed)'
+    );
+
+    return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
+  }
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();
