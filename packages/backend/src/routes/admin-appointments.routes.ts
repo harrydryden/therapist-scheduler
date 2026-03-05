@@ -442,6 +442,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenAt: new Date(),
             humanControlReason: reason || null,
           },
+          select: { id: true },
         });
 
         logger.info(
@@ -508,6 +509,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             await prisma.appointmentRequest.update({
               where: { id },
               data: { conversationState: stateJson, ...meta },
+              select: { id: true },
             });
           }
         }
@@ -518,6 +520,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlEnabled: false,
             // Keep history: don't clear humanControlTakenBy/At
           },
+          select: { id: true },
         });
 
         logger.info({ requestId, appointmentId: id }, 'Human control released for appointment');
@@ -777,6 +780,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               confirmedDateTimeParsed,
               updatedAt: new Date(),
             },
+            select: { id: true },
           });
         }
 
@@ -935,6 +939,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
                 updatedAt: new Date(),
                 ...meta,
               },
+              select: { id: true },
             });
           }
         }
@@ -1687,6 +1692,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           await prisma.appointmentRequest.update({
             where: { id },
             data: { closureRecommendationActioned: true },
+            select: { id: true },
           });
 
           logger.info(
@@ -1719,6 +1725,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
                 ? originalStage
                 : null,
             },
+            select: { id: true },
           });
 
           logger.info(
