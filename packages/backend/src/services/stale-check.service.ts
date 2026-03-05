@@ -756,6 +756,7 @@ class StaleCheckService {
             humanControlReason: `Auto-escalated: Stalled for ${stallHours}h with no agent progress. User: ${appointment.userName || appointment.userEmail}, Therapist: ${appointment.therapistName}`,
             autoEscalatedAt: new Date(),
           },
+          select: { id: true },
         });
 
         logger.warn(
@@ -1091,6 +1092,7 @@ class StaleCheckService {
             await prisma.appointmentRequest.update({
               where: { id: appointment.id },
               data: { chaseSentAt: null },
+              select: { id: true },
             });
 
             logger.error(
@@ -1262,6 +1264,7 @@ class StaleCheckService {
               closureRecommendationActioned: false,
               checkpointStage: 'closure_recommended',
             },
+            select: { id: true },
           });
 
           // Send Slack notification recommending closure
@@ -1381,6 +1384,7 @@ class StaleCheckService {
           lastActivityAt: new Date(),
           isStale: false, // Reset stale flag on activity
         },
+        select: { id: true },
       });
     } catch (error) {
       logger.warn({ error, appointmentRequestId }, 'Failed to record activity for appointment');

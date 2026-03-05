@@ -588,6 +588,7 @@ export async function recordDivergenceAlert(
         }),
         threadDivergenceAcknowledged: false,
       },
+      select: { id: true },
     });
 
     logger.info(

@@ -366,6 +366,7 @@ class EmailQueueService {
           conversationStallAlertAt: now,
           conversationStallAcknowledged: false,
         },
+        select: { id: true },
       });
     }
   }

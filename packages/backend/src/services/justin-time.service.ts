@@ -284,6 +284,7 @@ export class JustinTimeService {
           status: 'contacted',
           updatedAt: new Date(),
         },
+        select: { id: true },
       });
 
       return {
@@ -698,6 +699,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
             reschedulingInitiatedBy: fromEmail,
             previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
           },
+          select: { id: true },
         });
         logger.info(
           { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail },
@@ -958,6 +960,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
           lastToolExecutionFailed: true,
           lastToolFailureReason: errorMsg.slice(0, 500), // Limit length
         },
+        select: { id: true },
       });
 
       return { success: false, toolName: name, error: errorMsg };
@@ -1700,6 +1703,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
         humanControlTakenAt: new Date(),
         humanControlReason: controlReason,
       },
+      select: { id: true },
     });
 
     logger.info(
@@ -1781,6 +1785,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
           messageCount,
           checkpointStage,
         },
+        select: { id: true },
       });
     }
   }
@@ -1860,6 +1865,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
         await prisma.appointmentRequest.update({
           where: { id: appointmentRequestId },
           data: { notes: newNotes },
+          select: { id: true },
         });
         logger.info(
           { traceId: this.traceId, appointmentRequestId },

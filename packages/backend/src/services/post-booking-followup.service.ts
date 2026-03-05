@@ -299,6 +299,7 @@ class PostBookingFollowupService {
           await prisma.appointmentRequest.update({
             where: { id: appointment.id },
             data: { confirmedDateTimeParsed: parsedDate },
+            select: { id: true },
           });
           // Clear any previous failure count on success
           this.parseFailures.delete(appointment.id);
@@ -504,6 +505,7 @@ class PostBookingFollowupService {
                 data: {
                   notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: sessionReminder emails sent but tracking update failed - review for duplicates`,
                 },
+                select: { id: true },
               });
             } catch {
               // Ignore - already logged main issue
@@ -531,6 +533,7 @@ class PostBookingFollowupService {
                 data: {
                   notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: Session reminder failed for ${failedRecipient} - manual follow-up may be needed`,
                 },
+                select: { id: true },
               });
             } catch {
               // Ignore - already logged main issue
@@ -541,6 +544,7 @@ class PostBookingFollowupService {
           await prisma.appointmentRequest.update({
             where: { id: appointment.id },
             data: { reminderSentAt: null },
+            select: { id: true },
           });
           logger.error(
             { checkId, appointmentId: appointment.id },
@@ -552,6 +556,7 @@ class PostBookingFollowupService {
         await prisma.appointmentRequest.update({
           where: { id: appointment.id },
           data: { reminderSentAt: null },
+          select: { id: true },
         });
 
         logger.error(
@@ -693,6 +698,7 @@ class PostBookingFollowupService {
               data: {
                 notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: meetingLinkCheck email sent but tracking update failed - review for duplicates`,
               },
+              select: { id: true },
             });
           } catch {
             // Ignore error - already logged the main issue
@@ -709,6 +715,7 @@ class PostBookingFollowupService {
         await prisma.appointmentRequest.update({
           where: { id: appointment.id },
           data: { meetingLinkCheckSentAt: null },
+          select: { id: true },
         });
 
         logger.error(
@@ -844,6 +851,7 @@ class PostBookingFollowupService {
               data: {
                 notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: feedbackForm email sent but tracking update failed - review for duplicates`,
               },
+              select: { id: true },
             });
           } catch {
             // Ignore - already logged main issue
@@ -873,6 +881,7 @@ class PostBookingFollowupService {
         await prisma.appointmentRequest.update({
           where: { id: appointment.id },
           data: { feedbackFormSentAt: null },
+          select: { id: true },
         });
 
         logger.error(
@@ -1128,6 +1137,7 @@ class PostBookingFollowupService {
         await prisma.appointmentRequest.update({
           where: { id: appointment.id },
           data: { feedbackReminderSentAt: null },
+          select: { id: true },
         });
 
         logger.error(

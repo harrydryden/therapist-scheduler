@@ -221,6 +221,7 @@ export async function handleBounce(
           `Auto-cancelled at ${new Date().toISOString()}.`,
         isStale: false, // Clear stale flag since we've handled it
       },
+      select: { id: true },
     });
 
     logger.info(
