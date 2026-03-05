@@ -45,7 +45,7 @@ class AdminNotificationService {
     const alerts: AdminAlert[] = [];
 
     // Fetch all alert types in parallel (independent queries)
-    const [divergenceAlerts, stallAlerts, therapistAlerts, invalidDateAlerts] = await Promise.all([
+    const [divergenceAlerts, stallAlerts, therapistAlerts] = await Promise.all([
       // Thread divergence alerts (FIX R3)
       prisma.appointmentRequest.findMany({
         where: {
@@ -92,22 +92,6 @@ class AdminNotificationService {
           uniqueRequestCount: true,
         },
         orderBy: { adminAlertAt: 'desc' },
-      }),
-      // Invalid date alerts (confirmed appointments with unparseable dates)
-      prisma.appointmentRequest.findMany({
-        where: {
-          invalidDateAlertAt: { not: null },
-          invalidDateAcknowledged: false,
-        },
-        select: {
-          id: true,
-          userName: true,
-          therapistName: true,
-          invalidDateAlertAt: true,
-          confirmedDateTime: true,
-          status: true,
-        },
-        orderBy: { invalidDateAlertAt: 'desc' },
       }),
     ]);
 
@@ -173,21 +157,6 @@ class AdminNotificationService {
       });
     }
 
-    for (const apt of invalidDateAlerts) {
-      alerts.push({
-        id: `invaliddate-${apt.id}`,
-        type: 'invalid_date',
-        appointmentId: apt.id,
-        severity: 'high',
-        title: `Invalid appointment date: ${apt.userName || 'Unknown'} / ${apt.therapistName}`,
-        details: apt.confirmedDateTime
-          ? `Confirmed date "${apt.confirmedDateTime}" could not be parsed to a valid date`
-          : 'Appointment confirmed without a parseable date',
-        createdAt: apt.invalidDateAlertAt!,
-        acknowledged: false,
-      });
-    }
-
     // Sort by creation date, most recent first
     return alerts.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
@@ -227,13 +196,6 @@ class AdminNotificationService {
           select: { id: true },
         });
         break;
-      case 'invaliddate':
-        await prisma.appointmentRequest.update({
-          where: { id },
-          data: { invalidDateAcknowledged: true },
-          select: { id: true },
-        });
-        break;
       default:
         throw new Error(`Unknown alert type: ${type}`);
     }
@@ -245,7 +207,7 @@ class AdminNotificationService {
    * Get count of unacknowledged alerts (for dashboard badge)
    */
   async getAlertCount(): Promise<number> {
-    const [divergence, stall, therapist, invalidDate] = await Promise.all([
+    const [divergence, stall, therapist] = await Promise.all([
       prisma.appointmentRequest.count({
         where: { threadDivergedAt: { not: null }, threadDivergenceAcknowledged: false },
       }),
@@ -255,12 +217,9 @@ class AdminNotificationService {
       prisma.therapistBookingStatus.count({
         where: { adminAlertAt: { not: null }, adminAlertAcknowledged: false },
       }),
-      prisma.appointmentRequest.count({
-        where: { invalidDateAlertAt: { not: null }, invalidDateAcknowledged: false },
-      }),
     ]);
 
-    return divergence + stall + therapist + invalidDate;
+    return divergence + stall + therapist;
   }
 
   /**
@@ -299,13 +258,6 @@ class AdminNotificationService {
           data: { adminAlertAcknowledged: true },
         });
         count = therapistResult.count;
-        break;
-      case 'invalid_date':
-        const invalidDateResult = await prisma.appointmentRequest.updateMany({
-          where: { invalidDateAlertAt: { not: null }, invalidDateAcknowledged: false },
-          data: { invalidDateAcknowledged: true },
-        });
-        count = invalidDateResult.count;
         break;
     }
 
