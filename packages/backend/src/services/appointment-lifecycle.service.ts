@@ -1713,6 +1713,38 @@ class AppointmentLifecycleService {
       if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
         updateData.confirmedAt = new Date();
       }
+
+      // Reset follow-up sentinel fields when moving backwards past the stage they guard.
+      // Without this, automated services (post-booking follow-up) would skip re-sending
+      // emails because the sentinel is already set from the first pass through the lifecycle.
+      const statusOrder: AppointmentStatus[] = [
+        APPOINTMENT_STATUS.PENDING,
+        APPOINTMENT_STATUS.CONTACTED,
+        APPOINTMENT_STATUS.NEGOTIATING,
+        APPOINTMENT_STATUS.CONFIRMED,
+        APPOINTMENT_STATUS.SESSION_HELD,
+        APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+        APPOINTMENT_STATUS.COMPLETED,
+      ];
+      const prevIdx = statusOrder.indexOf(previousStatus);
+      const newIdx = statusOrder.indexOf(newStatus);
+      const movingBackwards = newIdx >= 0 && prevIdx >= 0 && newIdx < prevIdx;
+
+      if (movingBackwards) {
+        // Moving back past confirmed → reset post-confirmation emails
+        const confirmedIdx = statusOrder.indexOf(APPOINTMENT_STATUS.CONFIRMED);
+        if (newIdx <= confirmedIdx && prevIdx > confirmedIdx) {
+          updateData.meetingLinkCheckSentAt = null;
+          updateData.reminderSentAt = null;
+        }
+
+        // Moving back past feedback_requested → reset feedback emails
+        const feedbackIdx = statusOrder.indexOf(APPOINTMENT_STATUS.FEEDBACK_REQUESTED);
+        if (newIdx < feedbackIdx && prevIdx >= feedbackIdx) {
+          updateData.feedbackFormSentAt = null;
+          updateData.feedbackReminderSentAt = null;
+        }
+      }
     }
 
     if (dateChanging) {
@@ -1730,6 +1762,9 @@ class AppointmentLifecycleService {
     const auditParts: string[] = [];
     if (statusChanging) {
       auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
+      if (updateData.feedbackFormSentAt === null || updateData.meetingLinkCheckSentAt === null) {
+        auditParts.push('Follow-up email flags reset (moved backwards in lifecycle)');
+      }
     }
     if (dateChanging) {
       auditParts.push(`Date/time updated: ${appointment.confirmedDateTime || 'none'} → ${confirmedDateTime || 'none'}`);
