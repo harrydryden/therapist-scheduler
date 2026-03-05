@@ -210,24 +210,28 @@ class AdminNotificationService {
         await prisma.appointmentRequest.update({
           where: { id },
           data: { threadDivergenceAcknowledged: true },
+          select: { id: true },
         });
         break;
       case 'stall':
         await prisma.appointmentRequest.update({
           where: { id },
           data: { conversationStallAcknowledged: true },
+          select: { id: true },
         });
         break;
       case 'therapist':
         await prisma.therapistBookingStatus.update({
           where: { id },
           data: { adminAlertAcknowledged: true },
+          select: { id: true },
         });
         break;
       case 'invaliddate':
         await prisma.appointmentRequest.update({
           where: { id },
           data: { invalidDateAcknowledged: true },
+          select: { id: true },
         });
         break;
       default:

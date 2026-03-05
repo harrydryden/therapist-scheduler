@@ -1058,6 +1058,7 @@ class AppointmentLifecycleService {
           notes: updatedNotes,
           updatedAt: new Date(),
         },
+        select: { id: true },
       });
 
       // Create audit log within transaction for atomicity
@@ -1341,6 +1342,7 @@ class AppointmentLifecycleService {
           notes: updatedNotes,
           updatedAt: new Date(),
         },
+        select: { id: true },
       });
 
       // Create audit log within transaction for atomicity
@@ -1761,6 +1763,7 @@ class AppointmentLifecycleService {
     await prisma.appointmentRequest.update({
       where: { id: appointmentId },
       data: updateData,
+      select: { id: true }, // Minimal select to avoid RETURNING columns that may not exist in DB yet
     });
 
     // Audit trail
