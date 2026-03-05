@@ -544,10 +544,6 @@ class AppointmentLifecycleService {
       // Always clear rescheduling flags when confirming
       reschedulingInProgress: false,
       reschedulingInitiatedBy: null,
-      // Flag invalid/unparseable dates for admin attention
-      // Clear the alert if the date is now valid (e.g. after reschedule with a good date)
-      invalidDateAlertAt: (!confirmedDateTimeParsed && confirmedDateTime) ? new Date() : null,
-      invalidDateAcknowledged: (!confirmedDateTimeParsed && confirmedDateTime) ? false : false,
     };
 
     // Handle reschedule-specific fields
