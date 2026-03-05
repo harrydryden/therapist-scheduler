@@ -458,7 +458,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             id: appointment.id,
             humanControlEnabled: true,
             humanControlTakenBy: adminId,
-            humanControlTakenAt: appointment.humanControlTakenAt,
+            humanControlTakenAt: new Date(),
           },
         });
       } catch (err) {
