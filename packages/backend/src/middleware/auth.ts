@@ -47,6 +47,39 @@ const AUTH_RATE_LIMIT = {
 // If you have multiple load balancers, increase this value
 const TRUSTED_PROXY_DEPTH = parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10);
 
+// In-memory fallback rate limiter for when Redis is unavailable
+const inMemoryAttempts = new Map<string, { count: number; firstAttempt: number }>();
+
+function checkInMemoryRateLimit(ip: string): { allowed: boolean } {
+  const now = Date.now();
+  const entry = inMemoryAttempts.get(ip);
+
+  // Clean up expired entries periodically (every 100 checks)
+  if (inMemoryAttempts.size > 100) {
+    for (const [key, val] of inMemoryAttempts) {
+      if (now - val.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
+        inMemoryAttempts.delete(key);
+      }
+    }
+  }
+
+  if (!entry || now - entry.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
+    return { allowed: true };
+  }
+
+  return { allowed: entry.count < AUTH_RATE_LIMIT.MAX_FAILED_ATTEMPTS };
+}
+
+function recordInMemoryAttempt(ip: string): void {
+  const now = Date.now();
+  const entry = inMemoryAttempts.get(ip);
+  if (!entry || now - entry.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
+    inMemoryAttempts.set(ip, { count: 1, firstAttempt: now });
+  } else {
+    entry.count++;
+  }
+}
+
 /**
  * Get client IP for rate limiting
  * FIX L5: Only trust the nth-from-right IP in X-Forwarded-For chain
@@ -92,11 +125,9 @@ async function checkAuthRateLimit(ip: string): Promise<{ allowed: boolean; retry
 
     return { allowed: true };
   } catch (err) {
-    // FIX #15: Log at error level when brute force protection is unavailable.
-    // Failing open is the pragmatic choice (don't lock out admins when Redis is down),
-    // but this should trigger an operational alert.
-    logger.error({ err, ip }, 'AUTH RATE LIMIT UNAVAILABLE - brute force protection disabled. Fix Redis connection.');
-    return { allowed: true };
+    // Redis unavailable — fall back to in-memory rate limiting
+    logger.error({ err, ip }, 'Redis unavailable for auth rate limiting - using in-memory fallback');
+    return checkInMemoryRateLimit(ip);
   }
 }
 
@@ -123,7 +154,8 @@ async function recordFailedAttempt(ip: string): Promise<void> {
       logger.warn({ ip, attempts }, 'Auth rate limit exceeded - IP locked out');
     }
   } catch (err) {
-    logger.warn({ err, ip }, 'Failed to record auth attempt');
+    logger.warn({ err, ip }, 'Failed to record auth attempt to Redis - using in-memory fallback');
+    recordInMemoryAttempt(ip);
   }
 }
 

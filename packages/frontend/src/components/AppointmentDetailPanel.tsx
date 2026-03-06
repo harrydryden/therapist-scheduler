@@ -57,13 +57,13 @@ export default function AppointmentDetailPanel({
     setReprocessResult(null);
   }, [selectedAppointment]);
 
-  // Sync edit form state when appointment detail loads
+  // Sync edit form state when appointment detail loads, but not while editing
   useEffect(() => {
-    if (appointmentDetail) {
+    if (appointmentDetail && !showEditPanel) {
       setEditStatus(appointmentDetail.status);
       setEditConfirmedDateTime(appointmentDetail.confirmedDateTime || '');
     }
-  }, [appointmentDetail]);
+  }, [appointmentDetail, showEditPanel]);
 
   // Clear editWarning timeout on unmount
   useEffect(() => {

@@ -439,6 +439,40 @@ class StaleCheckService {
         );
       }
 
+      // 6. Log orphaned appointments (missing User/Therapist links) for visibility
+      const orphanedCount = await prisma.appointmentRequest.count({
+        where: {
+          OR: [
+            { userId: null },
+            { therapistId: null },
+          ],
+          status: { notIn: ['cancelled', 'completed'] },
+        },
+      });
+      if (orphanedCount > 0) {
+        logger.warn(
+          { cleanupId, orphanedCount },
+          'Active appointments with missing User/Therapist links detected — consider backfilling'
+        );
+      }
+
+      // 7. Clean up old completed WeeklyMailingInquiry records (30 days)
+      const inquiryThreshold = new Date(
+        now.getTime() - 30 * 24 * 60 * 60 * 1000
+      );
+      const deletedInquiries = await prisma.weeklyMailingInquiry.deleteMany({
+        where: {
+          status: { in: ['completed', 'closed'] },
+          updatedAt: { lt: inquiryThreshold },
+        },
+      });
+      if (deletedInquiries.count > 0) {
+        logger.info(
+          { cleanupId, deletedCount: deletedInquiries.count },
+          'Deleted old completed weekly mailing inquiries'
+        );
+      }
+
       logger.info(
         {
           cleanupId,
@@ -447,6 +481,8 @@ class StaleCheckService {
           processedMessagesDeleted,
           abandonedEmailsDeleted,
           unmatchedAttemptsDeleted: deletedUnmatched.count,
+          weeklyMailingInquiriesDeleted: deletedInquiries.count,
+          orphanedAppointments: orphanedCount,
         },
         'Data retention cleanup completed'
       );
@@ -683,11 +719,13 @@ class StaleCheckService {
       }
 
       // Auto-complete feedback_requested dead-ends (separate from chase enabled toggle)
+      let feedbackCompleted = 0;
       const autoCompleteFeedback = await getSettingValue<boolean>('chase.autoCompleteFeedback');
-      if (!autoCompleteFeedback) {
+      if (autoCompleteFeedback) {
+        feedbackCompleted = await this.autoCompleteFeedbackDeadEnds(checkId);
+      } else {
         logger.debug({ checkId }, 'Feedback auto-completion disabled - skipping');
       }
-      const feedbackCompleted = autoCompleteFeedback ? await this.autoCompleteFeedbackDeadEnds(checkId) : 0;
       if (feedbackCompleted > 0) {
         logger.info(
           { checkId, feedbackCompleted },

@@ -29,21 +29,35 @@ import type {
 import { API_BASE, getAdminSecret, clearAdminSecret } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
 
+// Known API error detail shapes — avoids catch-all index signature
+interface ThreadLimitDetails {
+  maxAllowed: number;
+  activeCount: number;
+}
+
+interface ValidationErrorDetails {
+  field?: string;
+  reason?: string;
+}
+
+export type ApiErrorDetails = ThreadLimitDetails | ValidationErrorDetails | Record<string, unknown>;
+
 // Custom error class to carry API error details
 export class ApiError extends Error {
   code?: string;
-  details?: {
-    maxAllowed?: number;
-    activeCount?: number;
-    activeTherapists?: string[];
-    [key: string]: unknown;
-  };
+  details?: ApiErrorDetails;
 
-  constructor(message: string, code?: string, details?: ApiError['details']) {
+  constructor(message: string, code?: string, details?: ApiErrorDetails) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.details = details;
+  }
+
+  /** Type guard: check if this is a thread limit error with known detail shape */
+  isThreadLimit(): this is ApiError & { details: ThreadLimitDetails } {
+    return this.code === 'USER_THREAD_LIMIT' && this.details != null &&
+      'maxAllowed' in this.details && 'activeCount' in this.details;
   }
 }
 

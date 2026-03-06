@@ -53,6 +53,9 @@ export interface Therapist {
 
 const CACHE_TTL = 300; // 5 minutes for general data
 // FIX M3: Shorter cache for availability-critical data to reduce staleness
+// NOTE: A therapist who removes availability in Notion could still receive bookings
+// for up to 60s. The booking route provides a secondary guard via
+// therapistBookingStatusService.checkAvailability() which is cache-independent.
 const CACHE_TTL_AVAILABILITY = 60; // 1 minute for therapist availability
 const CACHE_KEY_ALL = 'therapists:all';
 const CACHE_KEY_SINGLE = 'therapists:single:';

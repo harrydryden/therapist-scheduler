@@ -499,24 +499,26 @@ export class EmailProcessingService {
       'set history ID in Redis'
     );
 
-    // Write to database (durable, fallback) — fire and forget to avoid slowing the hot path
-    prisma.systemSetting.upsert({
-      where: { id: HISTORY_ID_SETTING_KEY },
-      create: {
-        id: HISTORY_ID_SETTING_KEY,
-        value: JSON.stringify(historyId),
-        category: 'gmail',
-        label: 'Last Gmail History ID',
-        description: 'Durable checkpoint for Gmail push notification sync. Do not edit manually.',
-        valueType: 'number',
-        defaultValue: JSON.stringify(0),
-      },
-      update: {
-        value: JSON.stringify(historyId),
-      },
-    }).catch((err: unknown) => {
+    // Write to database (durable fallback) — awaited to ensure checkpoint persistence
+    try {
+      await prisma.systemSetting.upsert({
+        where: { id: HISTORY_ID_SETTING_KEY },
+        create: {
+          id: HISTORY_ID_SETTING_KEY,
+          value: JSON.stringify(historyId),
+          category: 'gmail',
+          label: 'Last Gmail History ID',
+          description: 'Durable checkpoint for Gmail push notification sync. Do not edit manually.',
+          valueType: 'number',
+          defaultValue: JSON.stringify(0),
+        },
+        update: {
+          value: JSON.stringify(historyId),
+        },
+      });
+    } catch (err: unknown) {
       logger.warn({ err, historyId }, 'Failed to persist history ID to database (non-critical)');
-    });
+    }
   }
 
   /**

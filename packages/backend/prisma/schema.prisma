@@ -67,6 +67,9 @@ model AppointmentRequest {
   status                String @default("pending")
 
   // Links to User and Therapist entities (for data management)
+  // NOTE: Optional for backwards compatibility with records created before User/Therapist
+  // entities existed. All new appointments set these via getOrCreateUser/getOrCreateTherapist.
+  // Orphaned records (null userId/therapistId) are logged during retention cleanup.
   userId      String? @map("user_id")
   therapistId String? @map("therapist_id")
   user        User?      @relation(fields: [userId], references: [id])
@@ -173,7 +176,9 @@ model AppointmentRequest {
   // FIX #18: Consolidated indexes — removed standalone low-cardinality boolean indexes
   // (isStale, humanControlEnabled) which provide no selectivity benefit.
   // Kept compound indexes that are actually queried.
-  @@index([status])
+  // NOTE: @@index([status]) removed — redundant as a prefix of all compound indexes below
+  //       (status,lastActivityAt), (status,isStale), (status,confirmedDateTimeParsed), etc.
+  //       PostgreSQL uses the leftmost prefix of compound indexes for single-column queries.
   @@index([gmailThreadId])
   @@index([therapistGmailThreadId])
   @@index([userEmail])
@@ -252,7 +257,7 @@ model TherapistBookingStatus {
   adminAlertAcknowledged Boolean   @default(false) @map("admin_alert_acknowledged")
 
   @@index([hasConfirmedBooking])
-  @@index([frozenUntil])
+  // frozenUntil index removed — legacy field no longer queried, was pure write overhead
   @@index([adminAlertAt])
   @@map("therapist_booking_status")
 }

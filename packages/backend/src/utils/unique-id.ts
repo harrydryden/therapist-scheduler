@@ -10,6 +10,7 @@
  * - Not sequential (to prevent enumeration)
  */
 
+import { randomInt } from 'crypto';
 import { prisma } from './database';
 import { logger } from './logger';
 
@@ -21,7 +22,7 @@ const MAX_ID = 9999999999;
  * Generate a random 10-digit ID
  */
 function generateRandomId(): string {
-  const id = Math.floor(Math.random() * (MAX_ID - MIN_ID + 1)) + MIN_ID;
+  const id = randomInt(MIN_ID, MAX_ID + 1);
   return id.toString();
 }
 
@@ -49,10 +50,8 @@ export async function generateUniqueUserId(): Promise<string> {
     logger.debug({ odId: candidateId, attempt }, 'User ID collision, retrying');
   }
 
-  // Fallback: use timestamp-based ID if random keeps colliding
-  const fallbackId = (Date.now() % (MAX_ID - MIN_ID + 1) + MIN_ID).toString();
-  logger.warn({ odId: fallbackId }, 'Used fallback timestamp-based user ID');
-  return fallbackId;
+  // 10 consecutive collisions in a 9B ID space indicates a systemic problem
+  throw new Error('Failed to generate unique user ID after 10 attempts');
 }
 
 /**
@@ -79,10 +78,8 @@ export async function generateUniqueTherapistId(): Promise<string> {
     logger.debug({ odId: candidateId, attempt }, 'Therapist ID collision, retrying');
   }
 
-  // Fallback: use timestamp-based ID if random keeps colliding
-  const fallbackId = (Date.now() % (MAX_ID - MIN_ID + 1) + MIN_ID).toString();
-  logger.warn({ odId: fallbackId }, 'Used fallback timestamp-based therapist ID');
-  return fallbackId;
+  // 10 consecutive collisions in a 9B ID space indicates a systemic problem
+  throw new Error('Failed to generate unique therapist ID after 10 attempts');
 }
 
 /**
@@ -113,21 +110,31 @@ export async function getOrCreateUser(
   }
 
   // Create new user with unique ID
+  // Catch P2002 (unique constraint violation) to handle concurrent creation race
   const odId = await generateUniqueUserId();
-  const newUser = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      name: name || null,
-      odId,
-    },
-  });
+  try {
+    const newUser = await prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        name: name || null,
+        odId,
+      },
+    });
 
-  logger.info(
-    { userId: newUser.id, odId: newUser.odId, email: normalizedEmail },
-    'Created new user with unique ID'
-  );
+    logger.info(
+      { userId: newUser.id, odId: newUser.odId, email: normalizedEmail },
+      'Created new user with unique ID'
+    );
 
-  return newUser;
+    return newUser;
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      logger.debug({ email: normalizedEmail }, 'User created concurrently, fetching existing');
+      const raced = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+      if (raced) return raced;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -159,22 +166,32 @@ export async function getOrCreateTherapist(
   }
 
   // Create new therapist with unique ID
+  // Catch P2002 (unique constraint violation) to handle concurrent creation race
   const odId = await generateUniqueTherapistId();
-  const newTherapist = await prisma.therapist.create({
-    data: {
-      notionId,
-      email: normalizedEmail,
-      name,
-      odId,
-    },
-  });
+  try {
+    const newTherapist = await prisma.therapist.create({
+      data: {
+        notionId,
+        email: normalizedEmail,
+        name,
+        odId,
+      },
+    });
 
-  logger.info(
-    { therapistId: newTherapist.id, odId: newTherapist.odId, notionId, email: normalizedEmail },
-    'Created new therapist with unique ID'
-  );
+    logger.info(
+      { therapistId: newTherapist.id, odId: newTherapist.odId, notionId, email: normalizedEmail },
+      'Created new therapist with unique ID'
+    );
 
-  return newTherapist;
+    return newTherapist;
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      logger.debug({ notionId }, 'Therapist created concurrently, fetching existing');
+      const raced = await prisma.therapist.findUnique({ where: { notionId } });
+      if (raced) return raced;
+    }
+    throw err;
+  }
 }
 
 /**

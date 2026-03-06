@@ -18,7 +18,7 @@ interface BookingFormProps {
 export default function BookingForm({ therapist }: BookingFormProps) {
   const [submitted, setSubmitted] = useState(false);
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit } = useBookingForm({
+  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
     onSuccess: () => setSubmitted(true),
@@ -95,8 +95,11 @@ export default function BookingForm({ therapist }: BookingFormProps) {
           onChange={(e) => setEmail(e.target.value)}
           placeholder="you@example.com"
           required
-          className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-colors"
+          className={`w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-colors ${showEmailError ? 'border-red-300' : 'border-gray-300'}`}
         />
+        {showEmailError && (
+          <p className="mt-1 text-xs text-red-600">Please enter a valid email address</p>
+        )}
       </div>
 
       {mutation.isError && isThreadLimitError(mutation.error) && (
@@ -108,13 +111,8 @@ export default function BookingForm({ therapist }: BookingFormProps) {
             <div>
               <h4 className="font-medium text-amber-800">Active Request Limit Reached</h4>
               <p className="text-sm text-amber-700 mt-1">
-                You currently have {mutation.error.details?.activeCount || 2} active appointment requests with:
+                You currently have {(mutation.error.details as Record<string, unknown>)?.activeCount as number || 2} active appointment requests.
               </p>
-              <ul className="text-sm text-amber-700 mt-2 list-disc list-inside">
-                {mutation.error.details?.activeTherapists?.map((name: string, idx: number) => (
-                  <li key={idx}>{name}</li>
-                ))}
-              </ul>
               <p className="text-sm text-amber-700 mt-2">
                 Please wait for one of your current requests to be confirmed or cancelled before requesting another therapist. Check your email for updates from {APP.COORDINATOR_NAME}.
               </p>

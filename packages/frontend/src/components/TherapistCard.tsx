@@ -263,7 +263,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
 const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit } = useBookingForm({
+  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
   });
@@ -393,10 +393,13 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="Your email"
-                className="w-full px-4 py-3 text-sm border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none transition-all"
+                className={`w-full px-4 py-3 text-sm border rounded-xl focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none transition-all ${showEmailError ? 'border-red-300' : 'border-slate-200'}`}
                 disabled={mutation.isPending}
                 required
               />
+              {showEmailError && (
+                <p className="mt-1 text-xs text-red-600">Please enter a valid email address</p>
+              )}
             </div>
             <button
               type="submit"

@@ -210,7 +210,9 @@ export const DATA_RETENTION = {
   // How long to keep confirmed/completed appointments before archiving (days)
   COMPLETED_RETENTION_DAYS: 365,
   // How long to keep processed Gmail messages in dedup table (days)
-  PROCESSED_MESSAGE_RETENTION_DAYS: 30,
+  // Reduced from 30 to 7 — messages older than 7 days won't be reprocessed,
+  // and this table can grow significantly during Redis outages (database fallback)
+  PROCESSED_MESSAGE_RETENTION_DAYS: 7,
   // How long to keep abandoned pending emails (days)
   ABANDONED_EMAIL_RETENTION_DAYS: 30,
   // Batch size for cleanup operations (to avoid long transactions)

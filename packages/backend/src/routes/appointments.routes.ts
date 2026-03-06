@@ -511,7 +511,6 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             details: {
               maxAllowed,
               activeCount: activeTherapists.length,
-              activeTherapists,
             },
           });
         }

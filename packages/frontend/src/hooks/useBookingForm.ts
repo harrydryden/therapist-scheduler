@@ -6,6 +6,13 @@ import type { AppointmentRequest } from '../types';
 // FIX #38: Shared booking form hook extracted from BookingForm.tsx and TherapistCard.tsx
 // to eliminate duplicated firstName, email, mutation, and handleSubmit logic.
 
+// Basic email validation — catches common typos before server round-trip
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isValidEmail(email: string): boolean {
+  return EMAIL_REGEX.test(email);
+}
+
 interface UseBookingFormOptions {
   therapistNotionId: string;
   therapistName?: string;
@@ -21,19 +28,24 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess }: 
     onSuccess,
   });
 
+  const emailValid = isValidEmail(email.trim());
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firstName.trim() || !email.trim()) return;
+    if (!firstName.trim() || !emailValid) return;
 
     mutation.mutate({
       userName: firstName.trim(),
-      userEmail: email,
+      userEmail: email.trim(),
       therapistNotionId,
       therapistName,
     });
   };
 
-  const canSubmit = firstName.trim().length > 0 && email.trim().length > 0 && !mutation.isPending;
+  const canSubmit = firstName.trim().length > 0 && emailValid && !mutation.isPending;
+
+  // Show validation hint only after user has typed something
+  const showEmailError = email.trim().length > 0 && !emailValid;
 
   return {
     firstName,
@@ -43,5 +55,6 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess }: 
     mutation,
     handleSubmit,
     canSubmit,
+    showEmailError,
   };
 }

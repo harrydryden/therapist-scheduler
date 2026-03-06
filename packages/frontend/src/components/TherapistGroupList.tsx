@@ -382,7 +382,7 @@ export default memo(function TherapistGroupList({
           rowCount={flatRows.length}
           rowHeight={getRowHeight}
           rowProps={rowProps}
-          overscanCount={5}
+          overscanCount={3}
           style={{ height: 600 }}
         />
       ) : (
