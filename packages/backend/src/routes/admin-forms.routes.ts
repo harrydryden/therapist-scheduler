@@ -157,10 +157,12 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         });
       }
 
-      // If config has empty questions OR still has the initial seed (questionsVersion 0),
-      // replace with the correct default questions
+      // If config has empty questions or still has the old question set (pre-v2),
+      // replace with the new conditional questions
       const questions = config.questions as unknown[];
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
+      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
+      const hasNewQuestions = questionIds.includes('met_goals');
+      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
       if (needsDefaults) {
         config = await prisma.feedbackFormConfig.update({
           where: { id: 'default' },
