@@ -1754,6 +1754,20 @@ class AppointmentLifecycleService {
     if (dateChanging) {
       updateData.confirmedDateTime = confirmedDateTime;
       updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
+
+      // When clearing the date on a confirmed appointment, mark as rescheduling
+      const isConfirmedStatus = (newStatus || previousStatus) === APPOINTMENT_STATUS.CONFIRMED;
+      if (!confirmedDateTime && isConfirmedStatus && appointment.confirmedDateTime) {
+        updateData.reschedulingInProgress = true;
+        updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
+        updateData.reschedulingInitiatedBy = `admin:${adminId}`;
+      }
+
+      // When setting a new date, clear the rescheduling flag
+      if (confirmedDateTime && isConfirmedStatus) {
+        updateData.reschedulingInProgress = false;
+        updateData.reschedulingInitiatedBy = null;
+      }
     }
 
     await prisma.appointmentRequest.update({
