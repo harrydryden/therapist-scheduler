@@ -10,7 +10,7 @@
 
 The codebase is well-architected with many defensive patterns already in place (circuit breakers, optimistic locking, audit trails, graceful shutdown). However, several **critical bugs**, **race conditions**, and **refactor opportunities** remain. This review categorizes findings by severity and provides actionable recommendations.
 
-**Critical/High:** 8 issues
+**Critical/High:** 12 issues
 **Medium:** 7 issues
 **Low/Informational:** 6 issues
 
@@ -313,6 +313,61 @@ Marked as "Legacy field, kept for compatibility" but still has an index on it (`
 
 ---
 
+## ADDITIONAL CRITICAL — From Route & Utility Audit
+
+### 22. User/Therapist Creation: TOCTOU Race Condition
+
+**File:** `packages/backend/src/utils/unique-id.ts:92-178`
+
+**Bug:** `getOrCreateUser()` and `getOrCreateTherapist()` use a find-then-create pattern **without a transaction**. Two concurrent requests for the same new user email will both find no existing record, both generate IDs, and both attempt `prisma.user.create()` — causing a unique constraint violation crash.
+
+**Fix:** Use `prisma.user.upsert()` or wrap in a transaction with a catch for `P2002` (unique constraint violation):
+```typescript
+try {
+  return await prisma.user.create({ data: { email, name, odId } });
+} catch (err: any) {
+  if (err?.code === 'P2002') {
+    return await prisma.user.findUnique({ where: { email } });
+  }
+  throw err;
+}
+```
+
+---
+
+### 23. ID Generation Fallback: Timestamp Collision
+
+**File:** `packages/backend/src/utils/unique-id.ts:52-55`
+
+**Bug:** After 10 failed random ID attempts, the fallback uses `Date.now() % range`. Two calls in the same millisecond produce the **same fallback ID**, which combined with finding #22 creates a guaranteed collision. The fallback also doesn't check for existing IDs.
+
+**Fix:** Use `crypto.randomUUID()` as the fallback, or at minimum add a uniqueness check on the fallback value.
+
+---
+
+### 24. Information Disclosure: Therapist Names in Error Response
+
+**File:** `packages/backend/src/routes/appointments.routes.ts:514`
+
+**Bug:** When a user hits their thread limit, the error response includes `activeTherapists` (line 514) — an array of therapist names they have active requests with. This leaks PII to the client.
+
+**Fix:** Remove `activeTherapists` from the error response details, or replace with a count:
+```typescript
+details: { maxAllowed, activeCount: activeTherapists.length }
+```
+
+---
+
+### 25. Auth Brute Force Protection Fails Open
+
+**File:** `packages/backend/src/middleware/auth.ts:94-100`
+
+**Issue:** When Redis is unavailable, `checkAuthRateLimit()` returns `{ allowed: true }` — allowing unlimited authentication attempts. While failing open is pragmatic for admin access, it completely disables brute force protection during Redis outages.
+
+**Recommendation:** At minimum, implement an in-memory fallback rate limiter (even a simple Map with TTL) so brute force protection degrades gracefully rather than disappearing entirely.
+
+---
+
 ## Refactoring Opportunities
 
 ### R1. Consolidate Status/Stage Mappings
@@ -358,10 +413,14 @@ Multiple background services (`PostBookingFollowupService`, `StaleCheckService`,
 ## Recommended Priority Order
 
 1. **Fix #1** — Email bounce race condition (data corruption risk)
-2. **Fix #3** — Silent error swallowing in inactive therapist check (ops blindness)
-3. **Fix #4** — SSE stale closure (admin UX broken after re-auth)
-4. **Fix #5** — Status color divergence (visual inconsistency)
-5. **Fix #6** — Edit panel override by SSE updates (data loss during editing)
-6. **Fix #2** — Sentinel cleanup performance (4 queries → concurrent)
-7. **Fix #7** — History ID persistence resilience
-8. **Fix #10** — Boolean logic confusion in stale check
+2. **Fix #22** — User/Therapist TOCTOU race condition (unique constraint crash)
+3. **Fix #24** — Therapist name leakage in error response (PII exposure)
+4. **Fix #3** — Silent error swallowing in inactive therapist check (ops blindness)
+5. **Fix #4** — SSE stale closure (admin UX broken after re-auth)
+6. **Fix #6** — Edit panel override by SSE updates (data loss during editing)
+7. **Fix #23** — ID generation fallback collision (data integrity)
+8. **Fix #25** — Brute force protection fails open (security)
+9. **Fix #5** — Status color divergence (visual inconsistency)
+10. **Fix #2** — Sentinel cleanup performance (4 queries → concurrent)
+11. **Fix #7** — History ID persistence resilience
+12. **Fix #10** — Boolean logic confusion in stale check
