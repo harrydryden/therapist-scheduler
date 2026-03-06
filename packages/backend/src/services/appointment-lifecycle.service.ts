@@ -1755,8 +1755,10 @@ class AppointmentLifecycleService {
       updateData.confirmedDateTime = confirmedDateTime;
       updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
 
-      // When clearing the date on an appointment, mark as rescheduling
-      if (!confirmedDateTime && appointment.confirmedDateTime) {
+      // When clearing the date on an active appointment, mark as rescheduling
+      const effectiveStatus = newStatus || previousStatus;
+      const isActiveStatus = effectiveStatus !== APPOINTMENT_STATUS.COMPLETED && effectiveStatus !== APPOINTMENT_STATUS.CANCELLED;
+      if (!confirmedDateTime && isActiveStatus && appointment.confirmedDateTime) {
         updateData.reschedulingInProgress = true;
         updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
         updateData.reschedulingInitiatedBy = `admin:${adminId}`;
