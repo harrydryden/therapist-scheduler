@@ -395,7 +395,6 @@ export class JustinTimeService {
             additionalFields: {
               'From': fromEmail,
               'Sender': sender,
-              'Sentiment': emailClassification.sentiment || 'unknown',
             },
           }),
           {

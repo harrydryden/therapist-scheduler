@@ -682,17 +682,24 @@ export class EmailProcessingService {
         return;
       }
 
-      // Process each new message
-      // Individual messages have their own deduplication via processMessage
+      // Collect unique messageIds first — Gmail history can contain the same
+      // messageId in multiple history records (e.g. messageAdded + labelAdded).
+      // Deduplicating here avoids unnecessary Redis lock round-trips in processMessage.
+      const seenMessageIds = new Set<string>();
       for (const historyRecord of history.data.history) {
         if (historyRecord.messagesAdded) {
           for (const messageAdded of historyRecord.messagesAdded) {
             const messageId = messageAdded.message?.id;
             if (messageId) {
-              await this.processMessage(messageId, traceId);
+              seenMessageIds.add(messageId);
             }
           }
         }
+      }
+
+      // Process each unique message
+      for (const messageId of seenMessageIds) {
+        await this.processMessage(messageId, traceId);
       }
 
       // Update to the actual latest history ID from the API response
