@@ -58,9 +58,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         return reply.status(404).send({ error: 'Feedback form not available' });
       }
 
-      // Auto-populate if questions are empty or still the initial seed (version 0)
+      // Auto-populate if questions are empty or still have the old question set
       const questions = config.questions as unknown[];
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
+      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
+      const hasNewQuestions = questionIds.includes('met_goals');
+      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
       if (needsDefaults) {
         const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
         config = await prisma.feedbackFormConfig.update({
@@ -119,9 +121,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           return reply.status(404).send({ error: 'Feedback form not available' });
         }
 
-        // Auto-populate if questions are empty or still the initial seed (version 0)
+        // Auto-populate if questions are empty or still have the old question set
         const questions = config.questions as unknown[];
-        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
+        const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
+        const hasNewQuestions = questionIds.includes('met_goals');
+        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
         if (needsDefaults) {
           const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
           config = await prisma.feedbackFormConfig.update({
