@@ -412,15 +412,40 @@ Multiple background services (`PostBookingFollowupService`, `StaleCheckService`,
 
 ## Recommended Priority Order
 
-1. **Fix #1** — Email bounce race condition (data corruption risk)
-2. **Fix #22** — User/Therapist TOCTOU race condition (unique constraint crash)
-3. **Fix #24** — Therapist name leakage in error response (PII exposure)
-4. **Fix #3** — Silent error swallowing in inactive therapist check (ops blindness)
-5. **Fix #4** — SSE stale closure (admin UX broken after re-auth)
-6. **Fix #6** — Edit panel override by SSE updates (data loss during editing)
-7. **Fix #23** — ID generation fallback collision (data integrity)
-8. **Fix #25** — Brute force protection fails open (security)
-9. **Fix #5** — Status color divergence (visual inconsistency)
-10. **Fix #2** — Sentinel cleanup performance (4 queries → concurrent)
-11. **Fix #7** — History ID persistence resilience
-12. **Fix #10** — Boolean logic confusion in stale check
+1. **Fix #1** — Email bounce race condition (data corruption risk) ✅ FIXED
+2. **Fix #22** — User/Therapist TOCTOU race condition (unique constraint crash) ✅ FIXED
+3. **Fix #24** — Therapist name leakage in error response (PII exposure) ✅ FIXED
+4. **Fix #3** — Silent error swallowing in inactive therapist check (ops blindness) ✅ FIXED
+5. **Fix #4** — SSE stale closure (admin UX broken after re-auth) ✅ FIXED
+6. **Fix #6** — Edit panel override by SSE updates (data loss during editing) ✅ FIXED
+7. **Fix #23** — ID generation fallback collision (data integrity) ✅ FIXED
+8. **Fix #25** — Brute force protection fails open (security) ✅ FIXED
+9. **Fix #5** — Status color divergence (visual inconsistency) ✅ FIXED
+10. **Fix #2** — Sentinel cleanup performance (4 queries → concurrent) ✅ FIXED
+11. **Fix #7** — History ID persistence resilience ✅ FIXED
+12. **Fix #10** — Boolean logic confusion in stale check ✅ FIXED
+
+---
+
+## Resolution Status — Remaining Findings (Batch 2)
+
+13. **Fix #8** — Serializable transactions: Documented tradeoff; kept Serializable (adequate for traffic levels)
+14. **Fix #9** — formatDateTime: Extracted to `frontend/src/utils/date-format.ts`, removed duplication
+15. **Fix #11** — Redundant `@@index([status])`: Removed from schema
+16. **Fix #12** — SSE secret in query string: Documented accepted risk + TODO for cookie migration
+17. **Fix #13** — Optional User/Therapist relations: Documented + added orphan detection in retention cleanup
+18. **Fix #14** — Email validation: Added programmatic email validation to `useBookingForm` hook
+19. **Fix #15** — ApiError.details: Replaced catch-all index signature with discriminated union types
+20. **Fix #16** — Type divergence: Renamed backend types to `InternalAppointmentListItem`/`InternalAppointmentDetail`
+21. **Fix #17** — ProcessedGmailMessage bloat: Reduced retention from 30 to 7 days
+22. **Fix #18** — Notion availability cache: Documented secondary validation via booking status service
+23. **Fix #19** — Virtual list overscan: Reduced from 5 to 3
+24. **Fix #20** — WeeklyMailingInquiry cleanup: Added to retention cleanup (30-day completed records)
+25. **Fix #21** — Legacy frozenUntil index: Removed from schema
+
+### Refactoring
+
+- **R1** — Status color consolidation: ✅ Done (batch 1, Fix #5)
+- **R2** — Date formatting utility: ✅ Extracted to `frontend/src/utils/date-format.ts`
+- **R3** — Sentinel cleanup concurrency: ✅ Done (batch 1, Fix #2)
+- **R4** — Background service base class: ✅ Created `backend/src/utils/periodic-service.ts`

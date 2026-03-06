@@ -147,6 +147,11 @@ class TherapistBookingStatusService {
    * IMPORTANT: Uses transaction with serializable isolation to prevent race condition
    * where concurrent requests could result in incorrect uniqueRequestCount.
    *
+   * TRADEOFF: Serializable isolation can cascade under high concurrency. An alternative
+   * is RepeatableRead + SELECT ... FOR UPDATE (row-level locks), which provides equivalent
+   * guarantees with less contention. Kept as Serializable since current traffic levels
+   * are well within the retry budget (3 retries, 50-500ms backoff).
+   *
    * @param tx - Optional transaction client for atomic operations
    */
   async recordNewRequest(

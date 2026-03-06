@@ -79,11 +79,13 @@ export interface PaginatedResponse<T> extends ApiSuccessResponse<T> {
 // ============================================
 // Backend-internal appointment types
 // (Use Date objects internally; serialized to string in API responses)
+// NOTE: Named with "Internal" suffix to avoid shadowing the shared
+// AppointmentListItem type (which uses string dates for API serialization).
 // ============================================
 
 import { AppointmentStatus } from '../constants';
 
-export interface AppointmentListItem {
+export interface InternalAppointmentListItem {
   id: string;
   userName: string | null;
   userEmail: string;
@@ -100,7 +102,10 @@ export interface AppointmentListItem {
   humanControlTakenBy: string | null;
 }
 
-export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCount'> {
+/** @deprecated Use InternalAppointmentListItem — kept for backwards compatibility */
+export type AppointmentListItem = InternalAppointmentListItem;
+
+export interface InternalAppointmentDetail extends Omit<InternalAppointmentListItem, 'messageCount'> {
   conversation: ConversationState | null;
   therapistAvailability: import('@therapist-scheduler/shared').TherapistAvailability | null;
   notes: string | null;
@@ -108,6 +113,9 @@ export interface AppointmentDetail extends Omit<AppointmentListItem, 'messageCou
   humanControlTakenAt: Date | null;
   humanControlReason: string | null;
 }
+
+/** @deprecated Use InternalAppointmentDetail — kept for backwards compatibility */
+export type AppointmentDetail = InternalAppointmentDetail;
 
 // ============================================
 // Backend-internal email types

@@ -439,6 +439,40 @@ class StaleCheckService {
         );
       }
 
+      // 6. Log orphaned appointments (missing User/Therapist links) for visibility
+      const orphanedCount = await prisma.appointmentRequest.count({
+        where: {
+          OR: [
+            { userId: null },
+            { therapistId: null },
+          ],
+          status: { notIn: ['cancelled', 'completed'] },
+        },
+      });
+      if (orphanedCount > 0) {
+        logger.warn(
+          { cleanupId, orphanedCount },
+          'Active appointments with missing User/Therapist links detected — consider backfilling'
+        );
+      }
+
+      // 7. Clean up old completed WeeklyMailingInquiry records (30 days)
+      const inquiryThreshold = new Date(
+        now.getTime() - 30 * 24 * 60 * 60 * 1000
+      );
+      const deletedInquiries = await prisma.weeklyMailingInquiry.deleteMany({
+        where: {
+          status: { in: ['completed', 'closed'] },
+          updatedAt: { lt: inquiryThreshold },
+        },
+      });
+      if (deletedInquiries.count > 0) {
+        logger.info(
+          { cleanupId, deletedCount: deletedInquiries.count },
+          'Deleted old completed weekly mailing inquiries'
+        );
+      }
+
       logger.info(
         {
           cleanupId,
@@ -447,6 +481,8 @@ class StaleCheckService {
           processedMessagesDeleted,
           abandonedEmailsDeleted,
           unmatchedAttemptsDeleted: deletedUnmatched.count,
+          weeklyMailingInquiriesDeleted: deletedInquiries.count,
+          orphanedAppointments: orphanedCount,
         },
         'Data retention cleanup completed'
       );

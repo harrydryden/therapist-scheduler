@@ -14,6 +14,7 @@ import type {
   AppointmentStatus,
 } from '../types';
 import { getStatusColor } from '../config/color-mappings';
+import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Pending',
@@ -51,38 +52,6 @@ function StatusBadge({ status }: { status: string }) {
       {STATUS_LABELS[status] || status}
     </span>
   );
-}
-
-function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return '-';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return 'Invalid Date';
-    return d.toLocaleString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return dateStr;
-  }
-}
-
-/**
- * Format a Date or ISO string to datetime-local input value (YYYY-MM-DDTHH:mm)
- */
-function toDatetimeLocalValue(dateStr: string | null): string {
-  if (!dateStr) return '';
-  try {
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return '';
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  } catch {
-    return '';
-  }
 }
 
 // ============================================
