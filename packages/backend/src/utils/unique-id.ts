@@ -113,21 +113,31 @@ export async function getOrCreateUser(
   }
 
   // Create new user with unique ID
+  // Catch P2002 (unique constraint violation) to handle concurrent creation race
   const odId = await generateUniqueUserId();
-  const newUser = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      name: name || null,
-      odId,
-    },
-  });
+  try {
+    const newUser = await prisma.user.create({
+      data: {
+        email: normalizedEmail,
+        name: name || null,
+        odId,
+      },
+    });
 
-  logger.info(
-    { userId: newUser.id, odId: newUser.odId, email: normalizedEmail },
-    'Created new user with unique ID'
-  );
+    logger.info(
+      { userId: newUser.id, odId: newUser.odId, email: normalizedEmail },
+      'Created new user with unique ID'
+    );
 
-  return newUser;
+    return newUser;
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      logger.debug({ email: normalizedEmail }, 'User created concurrently, fetching existing');
+      const raced = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+      if (raced) return raced;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -159,22 +169,32 @@ export async function getOrCreateTherapist(
   }
 
   // Create new therapist with unique ID
+  // Catch P2002 (unique constraint violation) to handle concurrent creation race
   const odId = await generateUniqueTherapistId();
-  const newTherapist = await prisma.therapist.create({
-    data: {
-      notionId,
-      email: normalizedEmail,
-      name,
-      odId,
-    },
-  });
+  try {
+    const newTherapist = await prisma.therapist.create({
+      data: {
+        notionId,
+        email: normalizedEmail,
+        name,
+        odId,
+      },
+    });
 
-  logger.info(
-    { therapistId: newTherapist.id, odId: newTherapist.odId, notionId, email: normalizedEmail },
-    'Created new therapist with unique ID'
-  );
+    logger.info(
+      { therapistId: newTherapist.id, odId: newTherapist.odId, notionId, email: normalizedEmail },
+      'Created new therapist with unique ID'
+    );
 
-  return newTherapist;
+    return newTherapist;
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      logger.debug({ notionId }, 'Therapist created concurrently, fetching existing');
+      const raced = await prisma.therapist.findUnique({ where: { notionId } });
+      if (raced) return raced;
+    }
+    throw err;
+  }
 }
 
 /**

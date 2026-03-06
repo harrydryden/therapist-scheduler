@@ -212,8 +212,13 @@ export async function handleBounce(
     result.appointmentId = appointment.id;
 
     // Update the appointment with bounce information
-    await prisma.appointmentRequest.update({
-      where: { id: appointment.id },
+    // Use updateMany with status precondition to prevent race condition where
+    // appointment gets confirmed between our read and this write
+    const updated = await prisma.appointmentRequest.updateMany({
+      where: {
+        id: appointment.id,
+        status: { notIn: ['cancelled', 'confirmed'] },
+      },
       data: {
         status: 'cancelled',
         notes: `[BOUNCE] Email delivery failed: ${bounceInfo.reason || bounceInfo.bounceType}. ` +
@@ -221,8 +226,16 @@ export async function handleBounce(
           `Auto-cancelled at ${new Date().toISOString()}.`,
         isStale: false, // Clear stale flag since we've handled it
       },
-      select: { id: true },
     });
+
+    if (updated.count === 0) {
+      logger.warn(
+        { traceId, appointmentId: appointment.id },
+        'Bounce detected but appointment already confirmed/cancelled - skipping cancellation'
+      );
+      result.error = 'Appointment status changed before bounce could be applied';
+      return result;
+    }
 
     logger.info(
       { traceId, appointmentId: appointment.id },

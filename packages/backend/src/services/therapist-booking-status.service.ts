@@ -581,7 +581,7 @@ class TherapistBookingStatusService {
         { error, operation: 'checkAndHandleInactiveTherapists' },
         'Failed to handle inactive therapists'
       );
-      return { flaggedCount: -1, unfrozenCount: 0 };
+      throw error;
     }
   }
 
