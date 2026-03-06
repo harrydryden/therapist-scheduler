@@ -167,6 +167,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               closureRecommendedAt: true,
               closureRecommendedReason: true,
               closureRecommendationActioned: true,
+              reschedulingInProgress: true,
             },
           }),
           prisma.appointmentRequest.count({ where }),
@@ -209,6 +210,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             closureRecommendedAt: apt.closureRecommendedAt,
             closureRecommendedReason: apt.closureRecommendedReason,
             closureRecommendationActioned: apt.closureRecommendationActioned,
+            reschedulingInProgress: apt.reschedulingInProgress,
           };
         });
 
@@ -772,15 +774,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             logger.debug({ requestId, appointmentId: id, newStatus }, 'Status transition skipped (idempotent)');
           }
         } else if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
-          // Only confirmedDateTime changed, not status
-          await prisma.appointmentRequest.update({
-            where: { id },
-            data: {
-              confirmedDateTime,
-              confirmedDateTimeParsed,
-              updatedAt: new Date(),
-            },
-            select: { id: true },
+          // Only confirmedDateTime changed, not status — use adminForceUpdate for consistency
+          // (handles rescheduling flags, audit trail, SSE notifications)
+          await appointmentLifecycleService.adminForceUpdate(id, {
+            confirmedDateTime,
+            confirmedDateTimeParsed,
+            adminId,
+            reason: reason || 'Date/time updated',
           });
         }
 
@@ -1414,6 +1414,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               threadDivergenceAcknowledged: true,
               conversationStallAlertAt: true,
               conversationStallAcknowledged: true,
+              reschedulingInProgress: true,
             },
           }),
           prisma.appointmentRequest.count({ where }),
@@ -1446,6 +1447,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             humanControlTakenBy: apt.humanControlTakenBy,
             lastActivityAt: apt.lastActivityAt,
             isStale: apt.isStale,
+            reschedulingInProgress: apt.reschedulingInProgress,
             checkpointStage,
             checkpointProgress,
             ...healthMeta,

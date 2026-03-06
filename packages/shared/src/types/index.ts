@@ -152,6 +152,7 @@ export interface AppointmentListItem {
   closureRecommendedAt: string | null;
   closureRecommendedReason: string | null;
   closureRecommendationActioned: boolean;
+  reschedulingInProgress: boolean;
 }
 
 export interface AppointmentDetail extends Omit<AppointmentListItem,

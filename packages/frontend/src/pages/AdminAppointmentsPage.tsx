@@ -173,13 +173,19 @@ function EditableDate({
   confirmedDateTimeParsed,
   confirmedDateTime,
   onSave,
+  onClearDate,
   isSaving,
+  status,
+  reschedulingInProgress,
 }: {
   appointmentId: string;
   confirmedDateTimeParsed: string | null;
   confirmedDateTime: string | null;
   onSave: (appointmentId: string, newDateTime: string) => void;
+  onClearDate: (appointmentId: string) => void;
   isSaving: boolean;
+  status: string;
+  reschedulingInProgress?: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [value, setValue] = useState('');
@@ -206,23 +212,62 @@ function EditableDate({
   }, [isEditing]);
 
   if (!isEditing) {
+    // Show rescheduling badge when confirmed + reschedulingInProgress
+    if (reschedulingInProgress && status === 'confirmed' && !confirmedDateTime) {
+      return (
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
+            Rescheduling
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setValue('');
+              setIsEditing(true);
+            }}
+            className="p-0.5 text-slate-400 hover:text-slate-600"
+            title="Set new date"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+            </svg>
+          </button>
+        </div>
+      );
+    }
+
     return (
-      <button
-        type="button"
-        onClick={() => {
-          setValue(toDatetimeLocalValue(displayDate));
-          setIsEditing(true);
-        }}
-        className="group flex items-center gap-1 text-left"
-        title="Click to edit date"
-      >
-        <span className={isInvalid ? 'text-red-500' : 'text-slate-600'}>
-          {displayFormatted}
-        </span>
-        <svg className="w-3 h-3 text-slate-300 group-hover:text-slate-500 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-        </svg>
-      </button>
+      <div className="group flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => {
+            setValue(toDatetimeLocalValue(displayDate));
+            setIsEditing(true);
+          }}
+          className="flex items-center gap-1 text-left"
+          title="Click to edit date"
+        >
+          <span className={isInvalid ? 'text-red-500' : 'text-slate-600'}>
+            {displayFormatted}
+          </span>
+          <svg className="w-3 h-3 text-slate-300 group-hover:text-slate-500 transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+          </svg>
+        </button>
+        {confirmedDateTime && status === 'confirmed' && (
+          <button
+            type="button"
+            onClick={() => onClearDate(appointmentId)}
+            disabled={isSaving}
+            className="p-0.5 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+            title="Clear date (mark for rescheduling)"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        )}
+      </div>
     );
   }
 
@@ -677,6 +722,12 @@ function AppointmentsTable() {
     updateMutation.mutate({ id: appointmentId, confirmedDateTime: newDateTime, adminId: 'admin' });
   }, [updateMutation]);
 
+  const handleClearDate = useCallback((appointmentId: string) => {
+    if (!confirm('Clear the confirmed date? This will mark the appointment for rescheduling.')) return;
+    setSavingId(appointmentId);
+    updateMutation.mutate({ id: appointmentId, confirmedDateTime: null, adminId: 'admin' });
+  }, [updateMutation]);
+
   const handleSort = useCallback((column: string) => {
     if (sortBy === column) {
       setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc');
@@ -825,7 +876,10 @@ function AppointmentsTable() {
                       confirmedDateTimeParsed={apt.confirmedDateTimeParsed}
                       confirmedDateTime={apt.confirmedDateTime}
                       onSave={handleDateChange}
+                      onClearDate={handleClearDate}
                       isSaving={savingId === apt.id && updateMutation.isPending}
+                      status={apt.status}
+                      reschedulingInProgress={apt.reschedulingInProgress}
                     />
                   </td>
                   <td className="px-4 py-3">
