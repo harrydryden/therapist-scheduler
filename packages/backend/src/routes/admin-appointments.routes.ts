@@ -36,7 +36,7 @@ const listAllAppointmentsSchema = z.object({
 // Query params schema for listing appointments
 const listAppointmentsSchema = z.object({
   status: z
-    .enum(['pending', 'contacted', 'negotiating', 'confirmed', 'cancelled', 'all'])
+    .enum(['pending', 'contacted', 'negotiating', 'confirmed', 'confirmed_pending', 'cancelled', 'all'])
     .optional(),
   therapistId: z.string().optional(),
   dateFrom: z.string().optional(),
@@ -65,6 +65,7 @@ const updateAppointmentSchema = z.object({
     'contacted',
     'negotiating',
     'confirmed',
+    'confirmed_pending',
     'session_held',
     'feedback_requested',
     'completed',
@@ -1483,6 +1484,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       'contacted',
       'negotiating',
       'confirmed',
+      'confirmed_pending',
       'session_held',
       'feedback_requested',
       'completed',

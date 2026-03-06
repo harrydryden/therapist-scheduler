@@ -1203,7 +1203,7 @@ export class EmailProcessingService {
             { userEmail: email.from },
             { therapistEmail: email.from },
           ],
-          status: { in: ['pending', 'contacted', 'negotiating', 'confirmed'] },
+          status: { in: ['pending', 'contacted', 'negotiating', 'confirmed', 'confirmed_pending'] },
         },
         select: {
           id: true,

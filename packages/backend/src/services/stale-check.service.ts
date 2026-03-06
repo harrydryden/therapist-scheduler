@@ -333,7 +333,7 @@ class StaleCheckService {
       const completedCount = await prisma.$transaction(async (tx) => {
         const toDelete = await tx.appointmentRequest.findMany({
           where: {
-            status: { in: ['confirmed', 'completed', 'session_held', 'feedback_requested'] },
+            status: { in: ['confirmed', 'confirmed_pending', 'completed', 'session_held', 'feedback_requested'] },
             updatedAt: { lt: completedThreshold },
           },
           select: { id: true },

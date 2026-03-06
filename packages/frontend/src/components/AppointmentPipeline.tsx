@@ -10,7 +10,7 @@ export default memo(function AppointmentPipeline({ stats, appointments }: Appoin
   const healthData = useMemo(() => {
     if (!appointments || appointments.length === 0) return null;
     const activeAppointments = appointments.filter(
-      (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
+      (apt) => !['confirmed', 'confirmed_pending', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
     );
     const healthCounts = activeAppointments.reduce(
       (acc, apt) => {
@@ -70,8 +70,8 @@ export default memo(function AppointmentPipeline({ stats, appointments }: Appoin
             <div className="flex-1 min-w-0">
               <div className="bg-green-50 p-4 h-full border-y border-green-200">
                 <p className="text-xs font-medium text-green-600 uppercase tracking-wide mb-1">Confirmed</p>
-                <p className="text-3xl font-bold text-green-700">{stats.byStatus.confirmed || 0}</p>
-                <p className="text-xs text-green-600 mt-1">Session booked</p>
+                <p className="text-3xl font-bold text-green-700">{(stats.byStatus.confirmed || 0) + (stats.byStatus.confirmed_pending || 0)}</p>
+                <p className="text-xs text-green-600 mt-1">{stats.byStatus.confirmed_pending ? `${stats.byStatus.confirmed_pending} pending rearrangement` : 'Session booked'}</p>
               </div>
             </div>
             <div className="flex items-center text-slate-300">&rarr;</div>

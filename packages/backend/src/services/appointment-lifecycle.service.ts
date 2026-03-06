@@ -49,6 +49,7 @@ const LIFECYCLE_STATUS_ORDER: readonly AppointmentStatus[] = [
   APPOINTMENT_STATUS.CONTACTED,
   APPOINTMENT_STATUS.NEGOTIATING,
   APPOINTMENT_STATUS.CONFIRMED,
+  APPOINTMENT_STATUS.CONFIRMED_PENDING,
   APPOINTMENT_STATUS.SESSION_HELD,
   APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
   APPOINTMENT_STATUS.COMPLETED,
@@ -1754,6 +1755,17 @@ class AppointmentLifecycleService {
     if (dateChanging) {
       updateData.confirmedDateTime = confirmedDateTime;
       updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
+
+      // Auto-transition between confirmed and confirmed_pending based on date presence:
+      // - Setting a date on a confirmed_pending appointment → move to confirmed
+      // - Clearing a date on a confirmed appointment → move to confirmed_pending
+      if (!statusChanging) {
+        if (confirmedDateTime && previousStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING) {
+          updateData.status = APPOINTMENT_STATUS.CONFIRMED;
+        } else if (!confirmedDateTime && previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
+          updateData.status = APPOINTMENT_STATUS.CONFIRMED_PENDING;
+        }
+      }
     }
 
     await prisma.appointmentRequest.update({
@@ -1763,13 +1775,17 @@ class AppointmentLifecycleService {
     });
 
     // Audit trail
-    const effectiveNewStatus = newStatus || previousStatus;
+    const autoTransitioned = updateData.status && !statusChanging;
+    const effectiveNewStatus = (updateData.status as AppointmentStatus) || newStatus || previousStatus;
     const auditParts: string[] = [];
     if (statusChanging) {
       auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
       if (updateData.feedbackFormSentAt === null || updateData.meetingLinkCheckSentAt === null) {
         auditParts.push('Follow-up email flags reset (moved backwards in lifecycle)');
       }
+    }
+    if (autoTransitioned) {
+      auditParts.push(`Status auto-transitioned: ${previousStatus} → ${updateData.status} (date ${confirmedDateTime ? 'set' : 'cleared'})`);
     }
     if (dateChanging) {
       auditParts.push(`Date/time updated: ${appointment.confirmedDateTime || 'none'} → ${confirmedDateTime || 'none'}`);
@@ -1780,12 +1796,12 @@ class AppointmentLifecycleService {
     await this.addAuditMessage(appointmentId, 'admin', auditParts.join('. '), adminId);
 
     // SSE notification
-    if (statusChanging) {
+    if (statusChanging || autoTransitioned) {
       sseService.emitStatusChange(appointmentId, previousStatus, effectiveNewStatus, 'admin');
     }
 
     // --- Data-consistency side effects (always run when status changes) ---
-    if (statusChanging && appointment.therapistNotionId) {
+    if ((statusChanging || autoTransitioned) && appointment.therapistNotionId) {
       await this.runAdminForceUpdateSideEffects(
         appointmentId,
         appointment,

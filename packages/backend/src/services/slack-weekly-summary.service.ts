@@ -165,7 +165,7 @@ class SlackWeeklySummaryService {
     // Count needing attention (stalled + diverged + human flagged)
     const needingAttention = await prisma.appointmentRequest.count({
       where: {
-        status: { in: ['pending', 'contacted', 'negotiating', 'confirmed'] },
+        status: { in: ['pending', 'contacted', 'negotiating', 'confirmed', 'confirmed_pending'] },
         OR: [
           { conversationStallAlertAt: { not: null }, conversationStallAcknowledged: false },
           { threadDivergedAt: { not: null }, threadDivergenceAcknowledged: false },
