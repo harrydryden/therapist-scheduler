@@ -13,18 +13,7 @@ import type {
   AdminAppointmentStage,
   AppointmentStatus,
 } from '../types';
-
-// Status badge colors (same as existing dashboard)
-const STATUS_COLORS: Record<string, string> = {
-  pending: 'bg-yellow-100 text-yellow-800',
-  contacted: 'bg-blue-100 text-blue-800',
-  negotiating: 'bg-purple-100 text-purple-800',
-  confirmed: 'bg-green-100 text-green-800',
-  session_held: 'bg-teal-100 text-teal-800',
-  feedback_requested: 'bg-orange-100 text-orange-800',
-  completed: 'bg-slate-100 text-slate-600',
-  cancelled: 'bg-red-100 text-red-800',
-};
+import { getStatusColor } from '../config/color-mappings';
 
 const STATUS_LABELS: Record<string, string> = {
   pending: 'Pending',
@@ -58,7 +47,7 @@ const ALL_STATUSES: AppointmentStatus[] = [
 
 function StatusBadge({ status }: { status: string }) {
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[status] || 'bg-slate-100 text-slate-600'}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
       {STATUS_LABELS[status] || status}
     </span>
   );

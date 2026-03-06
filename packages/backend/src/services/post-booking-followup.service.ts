@@ -159,76 +159,37 @@ class PostBookingFollowupService {
     const epochDate = new Date(0);
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
 
-    // Reset meeting link check sentinels
-    const meetingLinkReset = await prisma.appointmentRequest.updateMany({
-      where: {
-        meetingLinkCheckSentAt: epochDate,
-        updatedAt: { lt: twoMinutesAgo }, // Only if stuck for >2 minutes
-      },
-      data: {
-        meetingLinkCheckSentAt: null,
-      },
-    });
+    // All 4 sentinel resets are independent — run concurrently
+    const [meetingLinkReset, feedbackReset, reminderReset, feedbackReminderReset] = await Promise.all([
+      prisma.appointmentRequest.updateMany({
+        where: { meetingLinkCheckSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
+        data: { meetingLinkCheckSentAt: null },
+      }),
+      prisma.appointmentRequest.updateMany({
+        where: { feedbackFormSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
+        data: { feedbackFormSentAt: null },
+      }),
+      prisma.appointmentRequest.updateMany({
+        where: { reminderSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
+        data: { reminderSentAt: null },
+      }),
+      prisma.appointmentRequest.updateMany({
+        where: { feedbackReminderSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
+        data: { feedbackReminderSentAt: null },
+      }),
+    ]);
 
     if (meetingLinkReset.count > 0) {
-      logger.warn(
-        { checkId, resetCount: meetingLinkReset.count },
-        'Reset stuck meeting link check sentinels'
-      );
+      logger.warn({ checkId, resetCount: meetingLinkReset.count }, 'Reset stuck meeting link check sentinels');
     }
-
-    // Reset feedback form sentinels
-    const feedbackReset = await prisma.appointmentRequest.updateMany({
-      where: {
-        feedbackFormSentAt: epochDate,
-        updatedAt: { lt: twoMinutesAgo }, // Only if stuck for >2 minutes
-      },
-      data: {
-        feedbackFormSentAt: null,
-      },
-    });
-
     if (feedbackReset.count > 0) {
-      logger.warn(
-        { checkId, resetCount: feedbackReset.count },
-        'Reset stuck feedback form sentinels'
-      );
+      logger.warn({ checkId, resetCount: feedbackReset.count }, 'Reset stuck feedback form sentinels');
     }
-
-    // Reset session reminder sentinels
-    const reminderReset = await prisma.appointmentRequest.updateMany({
-      where: {
-        reminderSentAt: epochDate,
-        updatedAt: { lt: twoMinutesAgo }, // Only if stuck for >2 minutes
-      },
-      data: {
-        reminderSentAt: null,
-      },
-    });
-
     if (reminderReset.count > 0) {
-      logger.warn(
-        { checkId, resetCount: reminderReset.count },
-        'Reset stuck session reminder sentinels'
-      );
+      logger.warn({ checkId, resetCount: reminderReset.count }, 'Reset stuck session reminder sentinels');
     }
-
-    // Reset feedback reminder sentinels
-    const feedbackReminderReset = await prisma.appointmentRequest.updateMany({
-      where: {
-        feedbackReminderSentAt: epochDate,
-        updatedAt: { lt: twoMinutesAgo }, // Only if stuck for >2 minutes
-      },
-      data: {
-        feedbackReminderSentAt: null,
-      },
-    });
-
     if (feedbackReminderReset.count > 0) {
-      logger.warn(
-        { checkId, resetCount: feedbackReminderReset.count },
-        'Reset stuck feedback reminder sentinels'
-      );
+      logger.warn({ checkId, resetCount: feedbackReminderReset.count }, 'Reset stuck feedback reminder sentinels');
     }
   }
 

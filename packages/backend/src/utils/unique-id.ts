@@ -10,6 +10,7 @@
  * - Not sequential (to prevent enumeration)
  */
 
+import { randomInt } from 'crypto';
 import { prisma } from './database';
 import { logger } from './logger';
 
@@ -21,7 +22,7 @@ const MAX_ID = 9999999999;
  * Generate a random 10-digit ID
  */
 function generateRandomId(): string {
-  const id = Math.floor(Math.random() * (MAX_ID - MIN_ID + 1)) + MIN_ID;
+  const id = randomInt(MIN_ID, MAX_ID + 1);
   return id.toString();
 }
 
@@ -49,10 +50,8 @@ export async function generateUniqueUserId(): Promise<string> {
     logger.debug({ odId: candidateId, attempt }, 'User ID collision, retrying');
   }
 
-  // Fallback: use timestamp-based ID if random keeps colliding
-  const fallbackId = (Date.now() % (MAX_ID - MIN_ID + 1) + MIN_ID).toString();
-  logger.warn({ odId: fallbackId }, 'Used fallback timestamp-based user ID');
-  return fallbackId;
+  // 10 consecutive collisions in a 9B ID space indicates a systemic problem
+  throw new Error('Failed to generate unique user ID after 10 attempts');
 }
 
 /**
@@ -79,10 +78,8 @@ export async function generateUniqueTherapistId(): Promise<string> {
     logger.debug({ odId: candidateId, attempt }, 'Therapist ID collision, retrying');
   }
 
-  // Fallback: use timestamp-based ID if random keeps colliding
-  const fallbackId = (Date.now() % (MAX_ID - MIN_ID + 1) + MIN_ID).toString();
-  logger.warn({ odId: fallbackId }, 'Used fallback timestamp-based therapist ID');
-  return fallbackId;
+  // 10 consecutive collisions in a 9B ID space indicates a systemic problem
+  throw new Error('Failed to generate unique therapist ID after 10 attempts');
 }
 
 /**

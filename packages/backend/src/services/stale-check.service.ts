@@ -683,11 +683,13 @@ class StaleCheckService {
       }
 
       // Auto-complete feedback_requested dead-ends (separate from chase enabled toggle)
+      let feedbackCompleted = 0;
       const autoCompleteFeedback = await getSettingValue<boolean>('chase.autoCompleteFeedback');
-      if (!autoCompleteFeedback) {
+      if (autoCompleteFeedback) {
+        feedbackCompleted = await this.autoCompleteFeedbackDeadEnds(checkId);
+      } else {
         logger.debug({ checkId }, 'Feedback auto-completion disabled - skipping');
       }
-      const feedbackCompleted = autoCompleteFeedback ? await this.autoCompleteFeedbackDeadEnds(checkId) : 0;
       if (feedbackCompleted > 0) {
         logger.info(
           { checkId, feedbackCompleted },

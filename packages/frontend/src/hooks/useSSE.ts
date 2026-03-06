@@ -24,16 +24,19 @@ export function useSSE() {
   const reconnectAttemptsRef = useRef(0);
 
   useEffect(() => {
-    const secret = getAdminSecret();
-    if (!secret) return; // Not authenticated yet
+    if (!getAdminSecret()) return; // Not authenticated yet
 
     function connect() {
+      // Get fresh secret on each reconnect to pick up re-authentication
+      const currentSecret = getAdminSecret();
+      if (!currentSecret) return;
+
       // Clean up previous connection
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
 
-      const url = `${API_BASE}/admin/dashboard/events?secret=${encodeURIComponent(secret)}`;
+      const url = `${API_BASE}/admin/dashboard/events?secret=${encodeURIComponent(currentSecret)}`;
       const es = new EventSource(url);
       eventSourceRef.current = es;
 
