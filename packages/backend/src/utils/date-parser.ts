@@ -338,6 +338,21 @@ export function isInPast(date: Date): boolean {
   return date < new Date();
 }
 
+/** Minimum hours in the future an appointment must be to allow booking */
+export const MIN_BOOKING_LEAD_HOURS = 4;
+
+/**
+ * Check if a datetime is too soon (or in the past) to book.
+ * Appointments must be at least MIN_BOOKING_LEAD_HOURS in the future.
+ *
+ * @param date - The proposed appointment date
+ * @returns True if the date is less than MIN_BOOKING_LEAD_HOURS from now (i.e. too soon / past)
+ */
+export function isTooSoonToBook(date: Date): boolean {
+  const minBookingTime = new Date(Date.now() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
+  return date < minBookingTime;
+}
+
 /**
  * Check if a datetime is within a certain number of hours from now
  *

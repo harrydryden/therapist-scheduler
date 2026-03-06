@@ -13,7 +13,7 @@ import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
-import { parseConfirmedDateTime, areDatetimesEqual } from '../utils/date-parser';
+import { parseConfirmedDateTime, areDatetimesEqual, isTooSoonToBook, MIN_BOOKING_LEAD_HOURS } from '../utils/date-parser';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS, EMAIL } from '../constants';
@@ -1387,6 +1387,16 @@ ${formatClassificationForPrompt(emailClassification)}`;
         { confirmedDateTime },
         'confirmed_datetime has time but no date - relying on conversation context'
       );
+    }
+
+    // FIX: Reject appointments that are in the past or too soon (< 4 hours from now)
+    const parsedDate = parseConfirmedDateTime(confirmedDateTime);
+    if (parsedDate && isTooSoonToBook(parsedDate)) {
+      logger.warn(
+        { confirmedDateTime, parsed: parsedDate.toISOString() },
+        'Rejected confirmed_datetime: appointment is in the past or less than 4 hours from now'
+      );
+      return `confirmed_datetime "${confirmedDateTime}" is in the past or less than ${MIN_BOOKING_LEAD_HOURS} hours from now. Please suggest a time that is at least ${MIN_BOOKING_LEAD_HOURS} hours in the future.`;
     }
 
     return null; // Valid

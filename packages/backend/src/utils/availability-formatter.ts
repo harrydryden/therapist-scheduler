@@ -168,8 +168,9 @@ function generateSlots(
   const slots: Date[] = [];
   const now = new Date();
 
-  // Buffer: don't show slots starting in less than 2 hours
-  const minStartTime = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+  // Buffer: don't show slots starting in less than 4 hours
+  // (increased from 2h to prevent suggesting near-past/imminent slots)
+  const minStartTime = new Date(now.getTime() + 4 * 60 * 60 * 1000);
 
   // Generate slots for the next N weeks
   const endDate = new Date(referenceDate);

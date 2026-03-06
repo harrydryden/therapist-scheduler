@@ -19,6 +19,8 @@ import {
   areDatetimesEqual,
   isInPast,
   isWithinHours,
+  isTooSoonToBook,
+  MIN_BOOKING_LEAD_HOURS,
 } from '../utils/date-parser';
 
 describe('parseConfirmedDateTime', () => {
@@ -209,6 +211,38 @@ describe('isInPast', () => {
   it('returns false for future dates', () => {
     const futureDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
     expect(isInPast(futureDate)).toBe(false);
+  });
+});
+
+describe('isTooSoonToBook', () => {
+  it('returns true for past dates', () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    expect(isTooSoonToBook(yesterday)).toBe(true);
+  });
+
+  it('returns true for dates less than MIN_BOOKING_LEAD_HOURS from now', () => {
+    const twoHoursFromNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    expect(isTooSoonToBook(twoHoursFromNow)).toBe(true);
+  });
+
+  it('returns true for dates exactly at the boundary', () => {
+    // Exactly MIN_BOOKING_LEAD_HOURS from now (minus 1ms to be before the threshold)
+    const justBefore = new Date(Date.now() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000 - 1);
+    expect(isTooSoonToBook(justBefore)).toBe(true);
+  });
+
+  it('returns false for dates more than MIN_BOOKING_LEAD_HOURS from now', () => {
+    const fiveHoursFromNow = new Date(Date.now() + 5 * 60 * 60 * 1000);
+    expect(isTooSoonToBook(fiveHoursFromNow)).toBe(false);
+  });
+
+  it('returns false for dates far in the future', () => {
+    const nextWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    expect(isTooSoonToBook(nextWeek)).toBe(false);
+  });
+
+  it('has MIN_BOOKING_LEAD_HOURS set to 4', () => {
+    expect(MIN_BOOKING_LEAD_HOURS).toBe(4);
   });
 });
 
