@@ -485,6 +485,7 @@ class AppointmentLifecycleService {
       APPOINTMENT_STATUS.CONTACTED,
       APPOINTMENT_STATUS.NEGOTIATING,
       APPOINTMENT_STATUS.CONFIRMED, // Reschedule
+      APPOINTMENT_STATUS.CONFIRMED_PENDING, // Rearrangement — setting a new date
     ];
 
     // Get current appointment state with all needed fields
@@ -1133,6 +1134,7 @@ class AppointmentLifecycleService {
                 APPOINTMENT_STATUS.CONTACTED,
                 APPOINTMENT_STATUS.NEGOTIATING,
                 APPOINTMENT_STATUS.CONFIRMED,
+                APPOINTMENT_STATUS.CONFIRMED_PENDING,
                 APPOINTMENT_STATUS.SESSION_HELD,
                 APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
               ],
@@ -1323,7 +1325,7 @@ class AppointmentLifecycleService {
         throw new InvalidTransitionError(appointment.status, 'cancelled');
       }
 
-      const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED;
+      const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED || appointment.status === APPOINTMENT_STATUS.CONFIRMED_PENDING;
 
       // Build updated notes - prepend cancellation info while preserving history
       const cancellationNote = `[CANCELLED ${new Date().toISOString()}] Reason: ${reason}. Cancelled by: ${cancelledBy}`;
@@ -1841,8 +1843,8 @@ class AppointmentLifecycleService {
     skipNotifications: boolean,
     confirmedDateTime: string | null | undefined,
   ): Promise<void> {
-    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED;
-    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED;
+    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED || previousStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING;
+    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED || newStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING;
     const nowCompleted = newStatus === APPOINTMENT_STATUS.COMPLETED;
     const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
 

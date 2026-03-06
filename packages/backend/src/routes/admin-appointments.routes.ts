@@ -603,14 +603,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         }
 
         // Don't allow deleting confirmed appointments unless force flag is set
-        if (appointment.status === 'confirmed' && !forceDeleteConfirmed) {
+        if ((appointment.status === 'confirmed' || appointment.status === 'confirmed_pending') && !forceDeleteConfirmed) {
           return reply.status(400).send({
             success: false,
             error: 'Cannot delete confirmed appointments. Use forceDeleteConfirmed: true if the appointment did not actually take place.',
           });
         }
 
-        const wasConfirmed = appointment.status === 'confirmed';
+        const wasConfirmed = appointment.status === 'confirmed' || appointment.status === 'confirmed_pending';
 
         // Delete the appointment (PendingEmails will cascade delete)
         await prisma.appointmentRequest.delete({
