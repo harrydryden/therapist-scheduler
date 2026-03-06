@@ -17,14 +17,20 @@
  * Optional: Set SLACK_WEBHOOK_URL_URGENT for critical alerts to a different channel
  */
 
+import { createHash } from 'crypto';
 import { logger } from '../utils/logger';
 import { circuitBreakerRegistry, CircuitBreakerError } from '../utils/circuit-breaker';
-import { withTimeout, DEFAULT_TIMEOUTS } from '../utils/timeout';
+import { DEFAULT_TIMEOUTS } from '../utils/timeout';
 import { cacheManager } from '../utils/redis';
 
 // Redis key for persisted notification queue
 const SLACK_QUEUE_KEY = 'slack:notification:queue';
 const SLACK_QUEUE_TTL = 86400; // 24 hours
+
+// Notification deduplication: suppress identical alerts within this window (seconds).
+// Covers race conditions from Pub/Sub re-delivery, push+poll overlap, and queue retry
+// after a Slack webhook timeout where the message was actually delivered.
+const NOTIFICATION_DEDUP_TTL_SECONDS = 120;
 
 // Slack circuit breaker configuration
 const SLACK_CIRCUIT_CONFIG = {
@@ -92,14 +98,6 @@ const SEVERITY_EMOJI: Record<AlertSeverity, string> = {
   medium: '⚠️',
   high: '🔶',
   critical: '🚨',
-};
-
-// Color mapping for severity (used in attachments if needed)
-const SEVERITY_COLOR: Record<AlertSeverity, string> = {
-  low: '#36a64f',    // green
-  medium: '#daa520', // goldenrod
-  high: '#ff8c00',   // dark orange
-  critical: '#dc3545', // red
 };
 
 /**
@@ -396,6 +394,38 @@ class SlackNotificationService {
   }
 
   /**
+   * Check whether an identical alert was recently sent and, if not, mark it as sent.
+   * Returns true when this is a duplicate that should be suppressed.
+   *
+   * The dedup key is a SHA-256 hash of the alert's title + appointmentId + details,
+   * which are the fields that uniquely identify the "same" notification. Severity
+   * and additional fields are intentionally excluded so that minor presentation
+   * changes don't bypass dedup.
+   */
+  private async isDuplicateAlert(options: SlackAlertOptions): Promise<boolean> {
+    try {
+      const raw = `${options.title}|${options.appointmentId || ''}|${options.details}`;
+      const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+      const key = `slack:dedup:${hash}`;
+
+      // SET NX returns 'OK' only when the key didn't exist
+      const result = await cacheManager.setNX(key, '1', NOTIFICATION_DEDUP_TTL_SECONDS);
+      if (result === 'EXISTS') {
+        logger.info(
+          { title: options.title, appointmentId: options.appointmentId },
+          'Suppressed duplicate Slack notification'
+        );
+        return true;
+      }
+      return false;
+    } catch (err) {
+      // Redis failure should never block a real notification
+      logger.warn({ err }, 'Notification dedup check failed - allowing through');
+      return false;
+    }
+  }
+
+  /**
    * Send a generic alert notification
    */
   async sendAlert(options: SlackAlertOptions): Promise<boolean> {
@@ -409,6 +439,11 @@ class SlackNotificationService {
       emoji: customEmoji,
       fallbackSuffix,
     } = options;
+
+    // Deduplicate: suppress if an identical alert was sent recently
+    if (await this.isDuplicateAlert(options)) {
+      return true; // Treat as "sent" to avoid upstream retry
+    }
 
     const emoji = customEmoji || SEVERITY_EMOJI[severity];
     const useUrgent = severity === 'critical' || severity === 'high';
