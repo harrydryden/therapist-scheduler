@@ -259,7 +259,7 @@ function EditableDate({
             type="button"
             onClick={() => onClearDate(appointmentId)}
             disabled={isSaving}
-            className="p-0.5 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+            className="p-0.5 text-slate-400 hover:text-red-500 transition-colors disabled:opacity-50"
             title="Clear date (mark for rescheduling)"
           >
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
