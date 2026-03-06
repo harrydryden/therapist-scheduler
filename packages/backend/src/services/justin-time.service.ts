@@ -1419,6 +1419,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
         status: true,
         confirmedDateTime: true,
         humanControlEnabled: true,
+        reschedulingInProgress: true,
       },
     });
 
@@ -1452,11 +1453,11 @@ ${formatClassificationForPrompt(emailClassification)}`;
       return;
     }
 
-    const isReschedule = existing?.status === 'confirmed' && existing?.confirmedDateTime;
+    const isReschedule = existing?.status === 'confirmed' && (existing?.confirmedDateTime || existing?.reschedulingInProgress);
 
     // Define allowed statuses that can transition to confirmed
     // - For new confirmations: pending, contacted, negotiating
-    // - For reschedules: confirmed (with different datetime - already checked above)
+    // - For reschedules: confirmed (with different datetime, or rescheduling after admin cleared date)
     const allowedFromStatuses: AppointmentStatus[] = isReschedule
       ? [APPOINTMENT_STATUS.CONFIRMED]
       : [APPOINTMENT_STATUS.PENDING, APPOINTMENT_STATUS.CONTACTED, APPOINTMENT_STATUS.NEGOTIATING];
