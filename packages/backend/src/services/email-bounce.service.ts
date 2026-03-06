@@ -183,7 +183,7 @@ export async function handleBounce(
             { gmailThreadId: originalEmail.threadId },
             { therapistGmailThreadId: originalEmail.threadId },
           ],
-          status: { notIn: ['cancelled', 'confirmed', 'confirmed_pending'] },
+          status: { notIn: ['cancelled', 'confirmed'] },
         },
         select: { id: true, therapistNotionId: true },
       });
@@ -193,7 +193,7 @@ export async function handleBounce(
       appointment = await prisma.appointmentRequest.findFirst({
         where: {
           userEmail: bounceInfo.originalRecipient.toLowerCase(),
-          status: { notIn: ['cancelled', 'confirmed', 'confirmed_pending'] },
+          status: { notIn: ['cancelled', 'confirmed'] },
         },
         orderBy: { createdAt: 'desc' },
         select: { id: true, therapistNotionId: true },

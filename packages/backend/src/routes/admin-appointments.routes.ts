@@ -36,7 +36,7 @@ const listAllAppointmentsSchema = z.object({
 // Query params schema for listing appointments
 const listAppointmentsSchema = z.object({
   status: z
-    .enum(['pending', 'contacted', 'negotiating', 'confirmed', 'confirmed_pending', 'cancelled', 'all'])
+    .enum(['pending', 'contacted', 'negotiating', 'confirmed', 'cancelled', 'all'])
     .optional(),
   therapistId: z.string().optional(),
   dateFrom: z.string().optional(),
@@ -65,7 +65,6 @@ const updateAppointmentSchema = z.object({
     'contacted',
     'negotiating',
     'confirmed',
-    'confirmed_pending',
     'session_held',
     'feedback_requested',
     'completed',
@@ -603,14 +602,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         }
 
         // Don't allow deleting confirmed appointments unless force flag is set
-        if ((appointment.status === 'confirmed' || appointment.status === 'confirmed_pending') && !forceDeleteConfirmed) {
+        if (appointment.status === 'confirmed' && !forceDeleteConfirmed) {
           return reply.status(400).send({
             success: false,
             error: 'Cannot delete confirmed appointments. Use forceDeleteConfirmed: true if the appointment did not actually take place.',
           });
         }
 
-        const wasConfirmed = appointment.status === 'confirmed' || appointment.status === 'confirmed_pending';
+        const wasConfirmed = appointment.status === 'confirmed';
 
         // Delete the appointment (PendingEmails will cascade delete)
         await prisma.appointmentRequest.delete({
@@ -1484,7 +1483,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       'contacted',
       'negotiating',
       'confirmed',
-      'confirmed_pending',
       'session_held',
       'feedback_requested',
       'completed',

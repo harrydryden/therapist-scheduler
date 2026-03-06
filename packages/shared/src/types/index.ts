@@ -83,7 +83,6 @@ export type AppointmentStatus =
   | 'contacted'
   | 'negotiating'
   | 'confirmed'
-  | 'confirmed_pending'
   | 'session_held'
   | 'feedback_requested'
   | 'completed'
@@ -94,7 +93,6 @@ export const APPOINTMENT_STATUS = {
   CONTACTED: 'contacted' as AppointmentStatus,
   NEGOTIATING: 'negotiating' as AppointmentStatus,
   CONFIRMED: 'confirmed' as AppointmentStatus,
-  CONFIRMED_PENDING: 'confirmed_pending' as AppointmentStatus,
   SESSION_HELD: 'session_held' as AppointmentStatus,
   FEEDBACK_REQUESTED: 'feedback_requested' as AppointmentStatus,
   COMPLETED: 'completed' as AppointmentStatus,

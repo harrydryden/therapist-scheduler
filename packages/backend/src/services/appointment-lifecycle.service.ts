@@ -49,7 +49,6 @@ const LIFECYCLE_STATUS_ORDER: readonly AppointmentStatus[] = [
   APPOINTMENT_STATUS.CONTACTED,
   APPOINTMENT_STATUS.NEGOTIATING,
   APPOINTMENT_STATUS.CONFIRMED,
-  APPOINTMENT_STATUS.CONFIRMED_PENDING,
   APPOINTMENT_STATUS.SESSION_HELD,
   APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
   APPOINTMENT_STATUS.COMPLETED,
@@ -485,7 +484,6 @@ class AppointmentLifecycleService {
       APPOINTMENT_STATUS.CONTACTED,
       APPOINTMENT_STATUS.NEGOTIATING,
       APPOINTMENT_STATUS.CONFIRMED, // Reschedule
-      APPOINTMENT_STATUS.CONFIRMED_PENDING, // Rearrangement — setting a new date
     ];
 
     // Get current appointment state with all needed fields
@@ -1134,7 +1132,6 @@ class AppointmentLifecycleService {
                 APPOINTMENT_STATUS.CONTACTED,
                 APPOINTMENT_STATUS.NEGOTIATING,
                 APPOINTMENT_STATUS.CONFIRMED,
-                APPOINTMENT_STATUS.CONFIRMED_PENDING,
                 APPOINTMENT_STATUS.SESSION_HELD,
                 APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
               ],
@@ -1325,7 +1322,7 @@ class AppointmentLifecycleService {
         throw new InvalidTransitionError(appointment.status, 'cancelled');
       }
 
-      const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED || appointment.status === APPOINTMENT_STATUS.CONFIRMED_PENDING;
+      const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED;
 
       // Build updated notes - prepend cancellation info while preserving history
       const cancellationNote = `[CANCELLED ${new Date().toISOString()}] Reason: ${reason}. Cancelled by: ${cancelledBy}`;
@@ -1757,17 +1754,6 @@ class AppointmentLifecycleService {
     if (dateChanging) {
       updateData.confirmedDateTime = confirmedDateTime;
       updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
-
-      // Auto-transition between confirmed and confirmed_pending based on date presence:
-      // - Setting a date on a confirmed_pending appointment → move to confirmed
-      // - Clearing a date on a confirmed appointment → move to confirmed_pending
-      if (!statusChanging) {
-        if (confirmedDateTime && previousStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING) {
-          updateData.status = APPOINTMENT_STATUS.CONFIRMED;
-        } else if (!confirmedDateTime && previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
-          updateData.status = APPOINTMENT_STATUS.CONFIRMED_PENDING;
-        }
-      }
     }
 
     await prisma.appointmentRequest.update({
@@ -1777,17 +1763,13 @@ class AppointmentLifecycleService {
     });
 
     // Audit trail
-    const autoTransitioned = updateData.status && !statusChanging;
-    const effectiveNewStatus = (updateData.status as AppointmentStatus) || newStatus || previousStatus;
+    const effectiveNewStatus = newStatus || previousStatus;
     const auditParts: string[] = [];
     if (statusChanging) {
       auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
       if (updateData.feedbackFormSentAt === null || updateData.meetingLinkCheckSentAt === null) {
         auditParts.push('Follow-up email flags reset (moved backwards in lifecycle)');
       }
-    }
-    if (autoTransitioned) {
-      auditParts.push(`Status auto-transitioned: ${previousStatus} → ${updateData.status} (date ${confirmedDateTime ? 'set' : 'cleared'})`);
     }
     if (dateChanging) {
       auditParts.push(`Date/time updated: ${appointment.confirmedDateTime || 'none'} → ${confirmedDateTime || 'none'}`);
@@ -1798,12 +1780,12 @@ class AppointmentLifecycleService {
     await this.addAuditMessage(appointmentId, 'admin', auditParts.join('. '), adminId);
 
     // SSE notification
-    if (statusChanging || autoTransitioned) {
+    if (statusChanging) {
       sseService.emitStatusChange(appointmentId, previousStatus, effectiveNewStatus, 'admin');
     }
 
     // --- Data-consistency side effects (always run when status changes) ---
-    if ((statusChanging || autoTransitioned) && appointment.therapistNotionId) {
+    if (statusChanging && appointment.therapistNotionId) {
       await this.runAdminForceUpdateSideEffects(
         appointmentId,
         appointment,
@@ -1843,8 +1825,8 @@ class AppointmentLifecycleService {
     skipNotifications: boolean,
     confirmedDateTime: string | null | undefined,
   ): Promise<void> {
-    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED || previousStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING;
-    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED || newStatus === APPOINTMENT_STATUS.CONFIRMED_PENDING;
+    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED;
+    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED;
     const nowCompleted = newStatus === APPOINTMENT_STATUS.COMPLETED;
     const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
 
