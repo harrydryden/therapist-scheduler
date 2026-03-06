@@ -212,8 +212,8 @@ function EditableDate({
   }, [isEditing]);
 
   if (!isEditing) {
-    // Show rescheduling badge when confirmed + reschedulingInProgress
-    if (reschedulingInProgress && status === 'confirmed' && !confirmedDateTime) {
+    // Show rescheduling badge when reschedulingInProgress and no date
+    if (reschedulingInProgress && !confirmedDateTime) {
       return (
         <div className="flex items-center gap-1.5">
           <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
@@ -254,7 +254,7 @@ function EditableDate({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
           </svg>
         </button>
-        {confirmedDateTime && status === 'confirmed' && (
+        {confirmedDateTime && status !== 'completed' && status !== 'cancelled' && (
           <button
             type="button"
             onClick={() => onClearDate(appointmentId)}
