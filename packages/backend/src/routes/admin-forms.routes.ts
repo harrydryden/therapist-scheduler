@@ -34,6 +34,10 @@ const questionSchema = z.object({
   scaleMaxLabel: z.string().optional(),
   options: z.array(z.string()).optional(),
   followUpPlaceholder: z.string().optional(),
+  conditionalOn: z.object({
+    questionId: z.string().min(1),
+    values: z.array(z.string()).min(1),
+  }).optional(),
 });
 
 const updateFormConfigSchema = z.object({
@@ -52,77 +56,68 @@ const updateFormConfigSchema = z.object({
 // Default questions used when creating or migrating the form config
 export const DEFAULT_QUESTIONS = [
   {
-    id: 'comfortable',
-    type: 'choice_with_text',
-    question: 'Did you feel comfortable with them from the outset?',
-    helperText: 'Consider how they introduced themselves, their opening remarks, and the professionalism of their setup.',
+    id: 'met_goals',
+    type: 'choice',
+    question: 'Did this session meet your goals?',
     required: true,
     options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
   },
   {
-    id: 'session_structure',
-    type: 'choice_with_text',
-    question: 'Did they explain the session structure clearly?',
-    helperText: 'This includes explaining their therapeutic style, setting expectations for the session, and managing time.',
+    id: 'therapist_asked_goals',
+    type: 'choice',
+    question: 'Did the therapist ask what your goals were?',
     required: true,
     options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
+    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
+  },
+  {
+    id: 'goals_detail',
+    type: 'text',
+    question: 'Which goals, if any, were met, which goals, if any, were not met?',
+    required: true,
+    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
   },
   {
     id: 'felt_heard',
-    type: 'choice_with_text',
-    question: 'During the session, did you feel heard?',
-    helperText: 'Did you feel able to express your thoughts and concerns fully?',
+    type: 'choice',
+    question: 'Did you feel heard and understood?',
     required: true,
     options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
   },
   {
-    id: 'felt_understood',
-    type: 'choice_with_text',
-    question: 'Did you feel understood?',
-    helperText: 'For example: did they summarise accurately, offer helpful perspectives, and correctly identify your emotions and behaviours?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
-  },
-  {
-    id: 'provided_insights',
-    type: 'choice_with_text',
-    question: 'Did the session provide new insights, strategies, or a sense of resolution?',
-    helperText: 'Did you feel the session offered significant value?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
-  },
-  {
-    id: 'key_takeaways',
+    id: 'felt_heard_detail',
     type: 'text',
-    question: 'Please share the main things you took away from the session.',
+    question: 'Please tell us more about why you felt that way (eg anything your therapist said, did, non verbal cues, etc).',
     required: true,
+    conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] },
   },
   {
     id: 'would_book_again',
-    type: 'choice_with_text',
+    type: 'choice',
     question: 'Would you book another session with this therapist in the future?',
     required: true,
     options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
+  },
+  {
+    id: 'would_book_again_detail',
+    type: 'text',
+    question: 'Please tell us why you felt that way.',
+    required: true,
+    conditionalOn: { questionId: 'would_book_again', values: ['No', 'Unsure'] },
   },
   {
     id: 'would_recommend',
-    type: 'choice_with_text',
-    question: 'Based on this session, would you recommend Spill to someone else?',
+    type: 'choice',
+    question: 'Based on this session, would you recommend this therapist to a close friend?',
     required: true,
     options: ['Yes', 'No', 'Unsure'],
-    followUpPlaceholder: 'Any additional thoughts (optional)...',
   },
   {
-    id: 'improvement_suggestions',
+    id: 'would_recommend_detail',
     type: 'text',
-    question: 'Is there anything that could have made the session better?',
-    required: false,
+    question: 'Tell us why you would be hesitant to recommend this therapist to a close friend.',
+    required: true,
+    conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
   },
 ];
 
@@ -165,17 +160,17 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       // If config has empty questions OR still has the initial seed (questionsVersion 0),
       // replace with the correct default questions
       const questions = config.questions as unknown[];
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || config.questionsVersion === 0;
+      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
       if (needsDefaults) {
         config = await prisma.feedbackFormConfig.update({
           where: { id: 'default' },
           data: {
             questions: DEFAULT_QUESTIONS,
             requiresAuth: true,
-            questionsVersion: 1,
+            questionsVersion: 2,
           },
         });
-        logger.info('Populated feedback form config with default questions (v1)');
+        logger.info('Populated feedback form config with default questions (v2)');
       }
 
       return reply.send({ success: true, data: config });

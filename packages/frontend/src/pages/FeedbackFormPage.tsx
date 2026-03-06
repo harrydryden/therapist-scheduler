@@ -278,12 +278,44 @@ export default function FeedbackFormPage() {
     return () => controller.abort();
   }, [splCode]);
 
+  // Compute which questions are visible based on conditional logic
+  const visibleQuestions = formConfig
+    ? formConfig.questions.filter((q) => {
+        if (!q.conditionalOn) return true;
+        const parentVal = responses[q.conditionalOn.questionId];
+        if (typeof parentVal !== 'string') return false;
+        return q.conditionalOn.values.some(
+          (v) => v.toLowerCase() === parentVal.toLowerCase()
+        );
+      })
+    : [];
+
   // Handle response changes
   const handleResponseChange = (questionId: string, value: string | number) => {
-    setResponses((prev) => ({ ...prev, [questionId]: value }));
+    setResponses((prev) => {
+      const updated = { ...prev, [questionId]: value };
+
+      // When a parent answer changes, clear responses for conditional sub-questions
+      // whose condition is no longer met
+      if (formConfig && typeof value === 'string') {
+        for (const q of formConfig.questions) {
+          if (q.conditionalOn?.questionId === questionId) {
+            const conditionMet = q.conditionalOn.values.some(
+              (v) => v.toLowerCase() === value.toLowerCase()
+            );
+            if (!conditionMet) {
+              delete updated[q.id];
+              delete updated[`${q.id}_text`];
+            }
+          }
+        }
+      }
+
+      return updated;
+    });
   };
 
-  // Navigate to next question
+  // Navigate to next question (using visible question indices)
   const handleNext = () => {
     if (!formConfig) return;
 
@@ -292,17 +324,35 @@ export default function FeedbackFormPage() {
       return;
     }
 
-    if (currentQuestionIndex < formConfig.questions.length - 1) {
-      setCurrentQuestionIndex(currentQuestionIndex + 1);
+    // Find next visible question after the current one
+    const currentQ = formConfig.questions[currentQuestionIndex];
+    const currentVisibleIdx = currentQ ? visibleQuestions.findIndex((q) => q.id === currentQ.id) : -1;
+
+    if (currentVisibleIdx < visibleQuestions.length - 1) {
+      const nextVisibleQ = visibleQuestions[currentVisibleIdx + 1];
+      const nextRealIdx = formConfig.questions.findIndex((q) => q.id === nextVisibleQ.id);
+      setCurrentQuestionIndex(nextRealIdx);
     } else {
       handleSubmit();
     }
   };
 
-  // Navigate to previous question
+  // Navigate to previous question (using visible question indices)
   const handleBack = () => {
-    if (currentQuestionIndex > -1) {
-      setCurrentQuestionIndex(currentQuestionIndex - 1);
+    if (!formConfig || currentQuestionIndex <= 0) {
+      setCurrentQuestionIndex(-1);
+      return;
+    }
+
+    const currentQ = formConfig.questions[currentQuestionIndex];
+    const currentVisibleIdx = visibleQuestions.findIndex((q) => q.id === currentQ.id);
+
+    if (currentVisibleIdx <= 0) {
+      setCurrentQuestionIndex(-1);
+    } else {
+      const prevVisibleQ = visibleQuestions[currentVisibleIdx - 1];
+      const prevRealIdx = formConfig.questions.findIndex((q) => q.id === prevVisibleQ.id);
+      setCurrentQuestionIndex(prevRealIdx);
     }
   };
 
@@ -476,7 +526,9 @@ export default function FeedbackFormPage() {
 
   // Question screen
   const currentQuestion = formConfig.questions[currentQuestionIndex];
-  const progress = ((currentQuestionIndex + 1) / formConfig.questions.length) * 100;
+  const currentVisibleIndex = visibleQuestions.findIndex((q) => q.id === currentQuestion.id);
+  const progress = ((currentVisibleIndex + 1) / visibleQuestions.length) * 100;
+  const isLastVisible = currentVisibleIndex === visibleQuestions.length - 1;
   const canProceed = isCurrentQuestionAnswered();
 
   return (
@@ -485,7 +537,7 @@ export default function FeedbackFormPage() {
         {/* Progress bar */}
         <div className="mb-6">
           <div className="flex justify-between text-sm text-gray-500 mb-2">
-            <span>Question {currentQuestionIndex + 1} of {formConfig.questions.length}</span>
+            <span>Question {currentVisibleIndex + 1} of {visibleQuestions.length}</span>
           </div>
           <div
             role="progressbar"
@@ -586,7 +638,7 @@ export default function FeedbackFormPage() {
                 </svg>
                 Submitting...
               </span>
-            ) : currentQuestionIndex === formConfig.questions.length - 1 ? (
+            ) : isLastVisible ? (
               'Submit'
             ) : (
               'Next'
