@@ -93,22 +93,36 @@ async function getStats(): Promise<FeedbackStats> {
 
 function QuestionEditor({
   question,
+  allQuestions,
   onChange,
   onDelete,
 }: {
   question: FormQuestion;
+  allQuestions: FormQuestion[];
   onChange: (updated: FormQuestion) => void;
   onDelete: () => void;
 }) {
+  // Get other choice/choice_with_text questions that can be parents (exclude self and questions that depend on this one)
+  const potentialParents = allQuestions.filter(
+    (q) => q.id !== question.id && (q.type === 'choice' || q.type === 'choice_with_text')
+  );
+
   return (
-    <div className="border border-slate-200 rounded-lg p-4 bg-slate-50">
+    <div className={`border rounded-lg p-4 ${question.conditionalOn ? 'bg-amber-50 border-amber-200 ml-6' : 'bg-slate-50 border-slate-200'}`}>
       <div className="flex justify-between items-start mb-3">
-        <span className="text-xs font-medium text-slate-500 uppercase">
-          {question.type === 'text' && 'Text Input'}
-          {question.type === 'scale' && 'Rating Scale'}
-          {question.type === 'choice' && 'Multiple Choice'}
-          {question.type === 'choice_with_text' && 'Choice + Free Text'}
-        </span>
+        <div className="flex items-center gap-2">
+          {question.conditionalOn && (
+            <span className="text-xs font-medium text-amber-700 bg-amber-100 px-2 py-0.5 rounded">
+              Conditional
+            </span>
+          )}
+          <span className="text-xs font-medium text-slate-500 uppercase">
+            {question.type === 'text' && 'Text Input'}
+            {question.type === 'scale' && 'Rating Scale'}
+            {question.type === 'choice' && 'Multiple Choice'}
+            {question.type === 'choice_with_text' && 'Choice + Free Text'}
+          </span>
+        </div>
         <button
           onClick={onDelete}
           className="text-red-500 hover:text-red-700 text-sm"
@@ -252,6 +266,77 @@ function QuestionEditor({
             )}
           </div>
         )}
+
+        {/* Conditional Logic */}
+        {potentialParents.length > 0 && (
+          <div className="border-t border-slate-200 pt-3 mt-3">
+            <label className="flex items-center gap-2 mb-2">
+              <input
+                type="checkbox"
+                checked={!!question.conditionalOn}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    const parent = potentialParents[0];
+                    onChange({
+                      ...question,
+                      conditionalOn: {
+                        questionId: parent.id,
+                        values: ['No', 'Unsure'],
+                      },
+                    });
+                  } else {
+                    const { conditionalOn: _, ...rest } = question;
+                    onChange(rest as FormQuestion);
+                  }
+                }}
+                className="rounded border-slate-300"
+              />
+              <span className="text-sm text-slate-700">Only show conditionally</span>
+            </label>
+
+            {question.conditionalOn && (
+              <div className="space-y-2 ml-6">
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">When this question&apos;s answer is:</label>
+                  <select
+                    value={question.conditionalOn.questionId}
+                    onChange={(e) =>
+                      onChange({
+                        ...question,
+                        conditionalOn: { ...question.conditionalOn!, questionId: e.target.value },
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
+                  >
+                    {potentialParents.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.question || p.id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Trigger values (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={(question.conditionalOn.values || []).join(', ')}
+                    onChange={(e) =>
+                      onChange({
+                        ...question,
+                        conditionalOn: {
+                          ...question.conditionalOn!,
+                          values: e.target.value.split(',').map((v) => v.trim()).filter(Boolean),
+                        },
+                      })
+                    }
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"
+                    placeholder="No, Unsure"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -282,11 +367,23 @@ function StatsCard({
 function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
   const [screen, setScreen] = useState<'welcome' | 'questions' | 'thankyou'>('welcome');
   const [currentQ, setCurrentQ] = useState(0);
+  const [previewResponses, setPreviewResponses] = useState<Record<string, string>>({});
   const questions = config.questions || [];
+
+  // Compute visible questions based on preview responses
+  const visibleQuestions = questions.filter((q) => {
+    if (!q.conditionalOn) return true;
+    const parentVal = previewResponses[q.conditionalOn.questionId];
+    if (!parentVal) return false;
+    return q.conditionalOn.values.some(
+      (v) => v.toLowerCase() === parentVal.toLowerCase()
+    );
+  });
 
   const resetPreview = () => {
     setScreen('welcome');
     setCurrentQ(0);
+    setPreviewResponses({});
   };
 
   return (
@@ -325,50 +422,57 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
           )}
 
           {/* Question Screen */}
-          {screen === 'questions' && questions.length > 0 && (
+          {screen === 'questions' && visibleQuestions.length > 0 && (
             <div className="p-8">
               {/* Progress */}
               <div className="mb-6">
                 <div className="flex justify-between text-sm text-gray-500 mb-2">
-                  <span>Question {currentQ + 1} of {questions.length}</span>
+                  <span>Question {currentQ + 1} of {visibleQuestions.length}</span>
                 </div>
                 <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-primary-600 transition-all duration-300"
-                    style={{ width: `${((currentQ + 1) / questions.length) * 100}%` }}
+                    style={{ width: `${((currentQ + 1) / visibleQuestions.length) * 100}%` }}
                   />
                 </div>
               </div>
 
+              {/* Conditional indicator */}
+              {visibleQuestions[currentQ].conditionalOn && (
+                <div className="mb-3 text-xs text-amber-700 bg-amber-50 px-3 py-1.5 rounded-lg inline-block">
+                  Follow-up question
+                </div>
+              )}
+
               {/* Question */}
               <div className="mb-6">
                 <h3 className="text-xl font-semibold text-gray-900 mb-1">
-                  {questions[currentQ].question || '(No question text)'}
-                  {questions[currentQ].required && <span className="text-red-500 ml-1">*</span>}
+                  {visibleQuestions[currentQ].question || '(No question text)'}
+                  {visibleQuestions[currentQ].required && <span className="text-red-500 ml-1">*</span>}
                 </h3>
-                {questions[currentQ].helperText && (
-                  <p className="text-sm text-gray-500 italic mt-1">{questions[currentQ].helperText}</p>
+                {visibleQuestions[currentQ].helperText && (
+                  <p className="text-sm text-gray-500 italic mt-1">{visibleQuestions[currentQ].helperText}</p>
                 )}
               </div>
 
               {/* Input preview */}
               <div className="mb-8">
-                {questions[currentQ].type === 'text' && (
+                {visibleQuestions[currentQ].type === 'text' && (
                   <div className="w-full px-4 py-3 border border-gray-300 rounded-lg text-gray-400 bg-gray-50 min-h-[100px]">
                     Type your answer...
                   </div>
                 )}
 
-                {questions[currentQ].type === 'scale' && (
+                {visibleQuestions[currentQ].type === 'scale' && (
                   <div className="space-y-3">
                     <div className="flex justify-between text-sm text-gray-500">
-                      <span>{questions[currentQ].scaleMinLabel || questions[currentQ].scaleMin || 0}</span>
-                      <span>{questions[currentQ].scaleMaxLabel || questions[currentQ].scaleMax || 5}</span>
+                      <span>{visibleQuestions[currentQ].scaleMinLabel || visibleQuestions[currentQ].scaleMin || 0}</span>
+                      <span>{visibleQuestions[currentQ].scaleMaxLabel || visibleQuestions[currentQ].scaleMax || 5}</span>
                     </div>
                     <div className="flex justify-between gap-2">
                       {Array.from(
-                        { length: (questions[currentQ].scaleMax ?? 5) - (questions[currentQ].scaleMin ?? 0) + 1 },
-                        (_, i) => (questions[currentQ].scaleMin ?? 0) + i
+                        { length: (visibleQuestions[currentQ].scaleMax ?? 5) - (visibleQuestions[currentQ].scaleMin ?? 0) + 1 },
+                        (_, i) => (visibleQuestions[currentQ].scaleMin ?? 0) + i
                       ).map((num) => (
                         <div
                           key={num}
@@ -381,19 +485,29 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
                   </div>
                 )}
 
-                {(questions[currentQ].type === 'choice' || questions[currentQ].type === 'choice_with_text') && (
+                {(visibleQuestions[currentQ].type === 'choice' || visibleQuestions[currentQ].type === 'choice_with_text') && (
                   <div className="space-y-2">
-                    {(questions[currentQ].options || []).map((option) => (
-                      <div
+                    {(visibleQuestions[currentQ].options || []).map((option) => (
+                      <button
                         key={option}
-                        className="w-full py-3 px-4 rounded-lg font-medium text-left bg-gray-100 text-gray-700"
+                        onClick={() => {
+                          setPreviewResponses((prev) => ({
+                            ...prev,
+                            [visibleQuestions[currentQ].id]: option,
+                          }));
+                        }}
+                        className={`w-full py-3 px-4 rounded-lg font-medium text-left transition-all ${
+                          previewResponses[visibleQuestions[currentQ].id] === option
+                            ? 'bg-primary-600 text-white shadow-md'
+                            : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                        }`}
                       >
                         {option}
-                      </div>
+                      </button>
                     ))}
-                    {questions[currentQ].type === 'choice_with_text' && (
+                    {visibleQuestions[currentQ].type === 'choice_with_text' && (
                       <div className="mt-3 w-full px-4 py-3 border border-gray-300 rounded-lg text-gray-400 bg-gray-50">
-                        {questions[currentQ].followUpPlaceholder || 'Tell us more (optional)...'}
+                        {visibleQuestions[currentQ].followUpPlaceholder || 'Tell us more (optional)...'}
                       </div>
                     )}
                   </div>
@@ -412,7 +526,7 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
                 )}
                 <button
                   onClick={() => {
-                    if (currentQ < questions.length - 1) {
+                    if (currentQ < visibleQuestions.length - 1) {
                       setCurrentQ(currentQ + 1);
                     } else {
                       setScreen('thankyou');
@@ -420,13 +534,13 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
                   }}
                   className="flex-1 py-3 px-6 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
                 >
-                  {currentQ === questions.length - 1 ? 'Submit' : 'Next'}
+                  {currentQ === visibleQuestions.length - 1 ? 'Submit' : 'Next'}
                 </button>
               </div>
             </div>
           )}
 
-          {screen === 'questions' && questions.length === 0 && (
+          {screen === 'questions' && visibleQuestions.length === 0 && (
             <div className="p-8 text-center text-slate-500">
               No questions configured yet.
             </div>
@@ -819,6 +933,7 @@ export default function AdminFormsPage() {
                       <QuestionEditor
                         key={question.id}
                         question={question}
+                        allQuestions={editedConfig.questions || []}
                         onChange={(updated) => handleUpdateQuestion(index, updated)}
                         onDelete={() => handleDeleteQuestion(index)}
                       />

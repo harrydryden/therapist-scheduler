@@ -4,6 +4,7 @@
  * Covers:
  * - requiresExplanation: which choice answers need explanation text
  * - Server-side enforcement of requireExplanationFor config
+ * - Conditional question validation (conditionalOn)
  * - Edge cases: case-insensitivity, empty arrays, back-and-forth answers
  */
 
@@ -17,26 +18,56 @@ function requiresExplanation(value: string | null | undefined, requireExplanatio
   return requireExplanationFor.some((opt) => opt.toLowerCase() === lower);
 }
 
+interface TestQuestion {
+  id: string;
+  type: string;
+  question: string;
+  required?: boolean;
+  conditionalOn?: { questionId: string; values: string[] };
+}
+
 /**
  * Simulates the server-side validation loop from feedback-form.routes.ts
  * Returns an error message if validation fails, or null if valid.
  */
 function validateResponses(
   responses: Record<string, string | number>,
-  questions: Array<{ id: string; type: string; question: string; required?: boolean }>,
+  questions: TestQuestion[],
   requireExplanationFor: string[]
 ): string | null {
-  for (const q of questions) {
-    if (q.type !== 'choice_with_text') continue;
-    const choiceVal = responses[q.id];
-    if (typeof choiceVal !== 'string') continue;
-    const needsExplanation = requireExplanationFor.some(
-      (opt) => opt.toLowerCase() === choiceVal.toLowerCase()
+  const isConditionMet = (q: TestQuestion): boolean => {
+    if (!q.conditionalOn) return true;
+    const parentVal = responses[q.conditionalOn.questionId];
+    if (typeof parentVal !== 'string') return false;
+    return q.conditionalOn.values.some(
+      (v) => v.toLowerCase() === parentVal.toLowerCase()
     );
-    if (needsExplanation) {
-      const textVal = responses[`${q.id}_text`];
-      if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
-        return `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`;
+  };
+
+  for (const q of questions) {
+    // Skip conditional questions whose condition is not met
+    if (!isConditionMet(q)) continue;
+
+    // Validate required fields
+    if (q.required) {
+      const val = responses[q.id];
+      if (val === undefined || val === null || (typeof val === 'string' && !val.trim())) {
+        return `Please answer "${q.question}"`;
+      }
+    }
+
+    // For choice_with_text, enforce explanation text
+    if (q.type === 'choice_with_text') {
+      const choiceVal = responses[q.id];
+      if (typeof choiceVal !== 'string') continue;
+      const needsExplanation = requireExplanationFor.some(
+        (opt) => opt.toLowerCase() === choiceVal.toLowerCase()
+      );
+      if (needsExplanation) {
+        const textVal = responses[`${q.id}_text`];
+        if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
+          return `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`;
+        }
       }
     }
   }
@@ -100,9 +131,9 @@ describe('requiresExplanation', () => {
 });
 
 describe('validateResponses (server-side submission validation)', () => {
-  const questions = [
-    { id: 'comfortable', type: 'choice_with_text', question: 'Did you feel comfortable?' },
-    { id: 'heard', type: 'choice_with_text', question: 'Did you feel heard?' },
+  const questions: TestQuestion[] = [
+    { id: 'comfortable', type: 'choice_with_text', question: 'Did you feel comfortable?', required: true },
+    { id: 'heard', type: 'choice_with_text', question: 'Did you feel heard?', required: true },
     { id: 'takeaways', type: 'text', question: 'Key takeaways' },
   ];
   const defaultConfig = ['No', 'Unsure'];
@@ -122,8 +153,13 @@ describe('validateResponses (server-side submission validation)', () => {
   });
 
   it('fails when "No" is selected without explanation text', () => {
-    const responses = { comfortable: 'No', heard: 'Yes' };
-    const error = validateResponses(responses, questions, defaultConfig);
+    const responses = { comfortable: 'No', comfortable_text: 'reason', heard: 'Yes' };
+    // This should pass now since we provide text
+    expect(validateResponses(responses, questions, defaultConfig)).toBeNull();
+
+    // Without text it should fail
+    const responses2 = { comfortable: 'No', heard: 'Yes' };
+    const error = validateResponses(responses2, questions, defaultConfig);
     expect(error).toContain('comfortable');
     expect(error).toContain('No');
   });
@@ -144,19 +180,19 @@ describe('validateResponses (server-side submission validation)', () => {
     expect(validateResponses(responses, questions, defaultConfig)).not.toBeNull();
   });
 
-  it('skips non-choice_with_text questions', () => {
-    const responses = { takeaways: '' as string | number };
+  it('skips non-choice_with_text questions without required flag', () => {
+    const responses = { comfortable: 'Yes', heard: 'Yes', takeaways: '' as string | number };
     expect(validateResponses(responses, questions, defaultConfig)).toBeNull();
   });
 
-  it('skips questions without a response', () => {
-    const responses = {};
+  it('skips questions without a response when not required', () => {
+    // Only provide required fields
+    const responses = { comfortable: 'Yes', heard: 'Yes' };
     expect(validateResponses(responses, questions, defaultConfig)).toBeNull();
   });
 
   describe('back-and-forth answer changes', () => {
     it('validates final state, not history: "No" with text passes', () => {
-      // User selected No, typed explanation, went back, confirmed No
       const responses = {
         comfortable: 'No',
         comfortable_text: 'Changed my mind but still no.',
@@ -166,8 +202,6 @@ describe('validateResponses (server-side submission validation)', () => {
     });
 
     it('validates final state: "Yes" with stale text from prior "No" passes', () => {
-      // User selected No, typed explanation, went back, changed to Yes
-      // The stale text is still in responses but doesn't matter
       const responses = {
         comfortable: 'Yes',
         comfortable_text: 'This was from when I said No',
@@ -177,7 +211,6 @@ describe('validateResponses (server-side submission validation)', () => {
     });
 
     it('validates final state: "No" with cleared text fails', () => {
-      // User selected No, cleared the explanation
       const responses = {
         comfortable: 'No',
         comfortable_text: '',
@@ -204,5 +237,127 @@ describe('validateResponses (server-side submission validation)', () => {
       const responses = { comfortable: 'No', heard: 'Unsure' };
       expect(validateResponses(responses, questions, [])).toBeNull();
     });
+  });
+});
+
+describe('conditional question validation', () => {
+  const questions: TestQuestion[] = [
+    { id: 'met_goals', type: 'choice', question: 'Did this session meet your goals?', required: true },
+    {
+      id: 'goals_detail',
+      type: 'text',
+      question: 'Which goals were met/not met?',
+      required: true,
+      conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
+    },
+    { id: 'felt_heard', type: 'choice', question: 'Did you feel heard?', required: true },
+    {
+      id: 'felt_heard_detail',
+      type: 'text',
+      question: 'Tell us more about why.',
+      required: true,
+      conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] },
+    },
+  ];
+
+  it('skips conditional sub-questions when parent answer is "Yes"', () => {
+    const responses = { met_goals: 'Yes', felt_heard: 'Yes' };
+    expect(validateResponses(responses, questions, [])).toBeNull();
+  });
+
+  it('requires conditional sub-questions when parent answer is "No"', () => {
+    const responses = { met_goals: 'No', felt_heard: 'Yes' };
+    const error = validateResponses(responses, questions, []);
+    expect(error).toContain('goals');
+  });
+
+  it('requires conditional sub-questions when parent answer is "Unsure"', () => {
+    const responses = { met_goals: 'Unsure', felt_heard: 'Yes' };
+    const error = validateResponses(responses, questions, []);
+    expect(error).toContain('goals');
+  });
+
+  it('passes when conditional sub-questions are answered', () => {
+    const responses = {
+      met_goals: 'No',
+      goals_detail: 'None of my goals were met.',
+      felt_heard: 'Unsure',
+      felt_heard_detail: 'I felt like they weren\'t listening.',
+    };
+    expect(validateResponses(responses, questions, [])).toBeNull();
+  });
+
+  it('handles case-insensitive matching for trigger values', () => {
+    const responses = { met_goals: 'no', felt_heard: 'yes' };
+    const error = validateResponses(responses, questions, []);
+    // "no" should trigger the conditional, and goals_detail is missing
+    expect(error).toContain('goals');
+  });
+
+  it('skips conditional sub-questions when parent has no response', () => {
+    // Parent question not answered - sub-question condition is not met
+    const responses = { felt_heard: 'Yes' } as Record<string, string | number>;
+    // met_goals is required and missing
+    const error = validateResponses(responses, questions, []);
+    expect(error).toContain('goals?');
+  });
+
+  it('handles mixed: some parents trigger, some do not', () => {
+    const responses = {
+      met_goals: 'Yes',        // No sub-questions triggered
+      felt_heard: 'No',         // Sub-question triggered but not answered
+    };
+    const error = validateResponses(responses, questions, []);
+    expect(error).toContain('Tell us more');
+  });
+
+  it('passes full new question set (happy path - all Yes)', () => {
+    const fullQuestions: TestQuestion[] = [
+      { id: 'met_goals', type: 'choice', question: 'Did this session meet your goals?', required: true },
+      { id: 'therapist_asked_goals', type: 'choice', question: 'Did the therapist ask what your goals were?', required: true, conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] } },
+      { id: 'goals_detail', type: 'text', question: 'Which goals were met/not met?', required: true, conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] } },
+      { id: 'felt_heard', type: 'choice', question: 'Did you feel heard?', required: true },
+      { id: 'felt_heard_detail', type: 'text', question: 'Tell us more.', required: true, conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] } },
+      { id: 'would_book_again', type: 'choice', question: 'Would you book again?', required: true },
+      { id: 'would_book_again_detail', type: 'text', question: 'Why?', required: true, conditionalOn: { questionId: 'would_book_again', values: ['No', 'Unsure'] } },
+      { id: 'would_recommend', type: 'choice', question: 'Would you recommend?', required: true },
+      { id: 'would_recommend_detail', type: 'text', question: 'Why hesitant?', required: true, conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] } },
+    ];
+
+    // All "Yes" - only 4 questions need answers
+    const responses = {
+      met_goals: 'Yes',
+      felt_heard: 'Yes',
+      would_book_again: 'Yes',
+      would_recommend: 'Yes',
+    };
+    expect(validateResponses(responses, fullQuestions, [])).toBeNull();
+  });
+
+  it('passes full new question set (all No with details)', () => {
+    const fullQuestions: TestQuestion[] = [
+      { id: 'met_goals', type: 'choice', question: 'Did this session meet your goals?', required: true },
+      { id: 'therapist_asked_goals', type: 'choice', question: 'Did the therapist ask what your goals were?', required: true, conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] } },
+      { id: 'goals_detail', type: 'text', question: 'Which goals were met/not met?', required: true, conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] } },
+      { id: 'felt_heard', type: 'choice', question: 'Did you feel heard?', required: true },
+      { id: 'felt_heard_detail', type: 'text', question: 'Tell us more.', required: true, conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] } },
+      { id: 'would_book_again', type: 'choice', question: 'Would you book again?', required: true },
+      { id: 'would_book_again_detail', type: 'text', question: 'Why?', required: true, conditionalOn: { questionId: 'would_book_again', values: ['No', 'Unsure'] } },
+      { id: 'would_recommend', type: 'choice', question: 'Would you recommend?', required: true },
+      { id: 'would_recommend_detail', type: 'text', question: 'Why hesitant?', required: true, conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] } },
+    ];
+
+    const responses = {
+      met_goals: 'No',
+      therapist_asked_goals: 'No',
+      goals_detail: 'None of my goals were met.',
+      felt_heard: 'No',
+      felt_heard_detail: 'Therapist was distracted.',
+      would_book_again: 'No',
+      would_book_again_detail: 'Not a good fit.',
+      would_recommend: 'No',
+      would_recommend_detail: 'Would not recommend.',
+    };
+    expect(validateResponses(responses, fullQuestions, [])).toBeNull();
   });
 });

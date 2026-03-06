@@ -60,12 +60,12 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
 
       // Auto-populate if questions are empty or still the initial seed (version 0)
       const questions = config.questions as unknown[];
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || config.questionsVersion === 0;
+      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
       if (needsDefaults) {
         const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
         config = await prisma.feedbackFormConfig.update({
           where: { id: 'default' },
-          data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 1 },
+          data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
         });
       }
 
@@ -121,12 +121,12 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
 
         // Auto-populate if questions are empty or still the initial seed (version 0)
         const questions = config.questions as unknown[];
-        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || config.questionsVersion === 0;
+        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || (config.questionsVersion ?? 0) < 2;
         if (needsDefaults) {
           const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
           config = await prisma.feedbackFormConfig.update({
             where: { id: 'default' },
-            data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 1 },
+            data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
           });
         }
 
@@ -249,23 +249,49 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       });
       const formVersion = formConfig?.questionsVersion ?? 0;
 
-      // Server-side validation: enforce explanation text for configured answers
+      // Server-side validation: enforce required fields and explanation text
       const requireExplanationFor = (formConfig?.requireExplanationFor as string[]) ?? ['No', 'Unsure'];
       if (formConfig?.questions) {
         const questions = formConfig.questions as unknown as FormQuestion[];
-        for (const q of questions) {
-          if (q.type !== 'choice_with_text') continue;
-          const choiceVal = responses[q.id];
-          if (typeof choiceVal !== 'string') continue;
-          const needsExplanation = requireExplanationFor.some(
-            (opt) => opt.toLowerCase() === choiceVal.toLowerCase()
+
+        // Helper: check if a conditional question's condition is met
+        const isConditionMet = (q: FormQuestion): boolean => {
+          if (!q.conditionalOn) return true;
+          const parentVal = responses[q.conditionalOn.questionId];
+          if (typeof parentVal !== 'string') return false;
+          return q.conditionalOn.values.some(
+            (v) => v.toLowerCase() === parentVal.toLowerCase()
           );
-          if (needsExplanation) {
-            const textVal = responses[`${q.id}_text`];
-            if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
+        };
+
+        for (const q of questions) {
+          // Skip validation for conditional questions whose condition is not met
+          if (!isConditionMet(q)) continue;
+
+          // Validate required fields have a response
+          if (q.required) {
+            const val = responses[q.id];
+            if (val === undefined || val === null || (typeof val === 'string' && !val.trim())) {
               return reply.status(400).send({
-                error: `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`,
+                error: `Please answer "${q.question}"`,
               });
+            }
+          }
+
+          // For choice_with_text, enforce explanation text for configured answers
+          if (q.type === 'choice_with_text') {
+            const choiceVal = responses[q.id];
+            if (typeof choiceVal !== 'string') continue;
+            const needsExplanation = requireExplanationFor.some(
+              (opt) => opt.toLowerCase() === choiceVal.toLowerCase()
+            );
+            if (needsExplanation) {
+              const textVal = responses[`${q.id}_text`];
+              if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
+                return reply.status(400).send({
+                  error: `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`,
+                });
+              }
             }
           }
         }
