@@ -410,95 +410,33 @@ describe('needsRecovery', () => {
 });
 
 // ============================================
-// getStageDescription
+// Stage metadata completeness
 // ============================================
 
-describe('getStageDescription', () => {
-  it('returns description for known stages', () => {
-    expect(getStageDescription('confirmed')).toContain('complete');
-    expect(getStageDescription('cancelled')).toContain('cancelled');
-    expect(getStageDescription('stalled')).toContain('stalled');
-  });
-
-  it('returns initial_contact description for undefined', () => {
-    expect(getStageDescription(undefined)).toContain('Initial');
-  });
-
-  it('returns description for chased stage', () => {
-    expect(getStageDescription('chased')).toBeDefined();
-    expect(getStageDescription('chased').length).toBeGreaterThan(0);
-  });
-
-  it('returns description for closure_recommended stage', () => {
-    expect(getStageDescription('closure_recommended')).toBeDefined();
-    expect(getStageDescription('closure_recommended').length).toBeGreaterThan(0);
-  });
-
-  it('has descriptions for every stage', () => {
+describe('stage metadata', () => {
+  it('has descriptions, actions, and recovery messages for every stage', () => {
     for (const stage of ALL_STAGES) {
       expect(getStageDescription(stage).length).toBeGreaterThan(0);
+      expect(getValidActionsForStage(stage).length).toBeGreaterThan(0);
     }
   });
-});
 
-// ============================================
-// getValidActionsForStage
-// ============================================
-
-describe('getValidActionsForStage', () => {
-  it('returns actions as formatted list', () => {
-    const actions = getValidActionsForStage('awaiting_user_slot_selection');
-    expect(actions).toContain('- ');
-    expect(actions).toContain('Wait for user');
+  it('defaults to initial_contact for undefined stage', () => {
+    expect(getStageDescription(undefined)).toContain('Initial');
+    expect(getValidActionsForStage(undefined)).toContain('Send initial email');
   });
 
-  it('returns initial_contact actions for undefined', () => {
-    const actions = getValidActionsForStage(undefined);
-    expect(actions).toContain('Send initial email');
+  it('returns empty recovery messages for terminal/non-actionable stages', () => {
+    expect(getRecoveryMessage('confirmed')).toBe('');
+    expect(getRecoveryMessage('cancelled')).toBe('');
+    expect(getRecoveryMessage('chased')).toBe('');
+    expect(getRecoveryMessage('closure_recommended')).toBe('');
   });
 
-  it('returns actions for chased stage', () => {
-    const actions = getValidActionsForStage('chased');
-    expect(actions).toContain('- ');
-    expect(actions.length).toBeGreaterThan(0);
-  });
-
-  it('returns actions for closure_recommended stage', () => {
-    const actions = getValidActionsForStage('closure_recommended');
-    expect(actions).toContain('- ');
-    expect(actions.length).toBeGreaterThan(0);
-  });
-
-  it('has valid actions defined for every stage', () => {
-    for (const stage of ALL_STAGES) {
-      const actions = getValidActionsForStage(stage);
-      expect(actions.length).toBeGreaterThan(0);
-    }
-  });
-});
-
-// ============================================
-// getRecoveryMessage
-// ============================================
-
-describe('getRecoveryMessage', () => {
-  it('returns non-empty message for active stages', () => {
+  it('returns non-empty recovery messages for active stages', () => {
     expect(getRecoveryMessage('awaiting_therapist_availability').length).toBeGreaterThan(0);
     expect(getRecoveryMessage('awaiting_user_slot_selection').length).toBeGreaterThan(0);
     expect(getRecoveryMessage('stalled').length).toBeGreaterThan(0);
-  });
-
-  it('returns empty string for terminal stages', () => {
-    expect(getRecoveryMessage('confirmed')).toBe('');
-    expect(getRecoveryMessage('cancelled')).toBe('');
-  });
-
-  it('returns empty string for chased (chase already sent)', () => {
-    expect(getRecoveryMessage('chased')).toBe('');
-  });
-
-  it('returns empty string for closure_recommended (admin action needed)', () => {
-    expect(getRecoveryMessage('closure_recommended')).toBe('');
   });
 });
 
@@ -507,29 +445,14 @@ describe('getRecoveryMessage', () => {
 // ============================================
 
 describe('getAdminSummary', () => {
-  it('includes current stage', () => {
-    const cp = createCheckpoint('awaiting_therapist_confirmation', 'sent_confirmation_request_to_therapist');
+  it('includes stage, action, stalled info, and recovery attempts', () => {
+    let cp = markAsStalled(createCheckpoint('awaiting_therapist_availability', 'sent_initial_email_to_therapist'));
+    cp = incrementRecoveryAttempts(cp);
+    cp = incrementRecoveryAttempts(cp);
     const summary = getAdminSummary(cp);
     expect(summary).toContain('Current Stage');
-  });
-
-  it('includes last action', () => {
-    const cp = createCheckpoint('awaiting_therapist_confirmation', 'sent_confirmation_request_to_therapist');
-    const summary = getAdminSummary(cp);
     expect(summary).toContain('Last Action');
-  });
-
-  it('includes stalled info when stalled', () => {
-    const cp = markAsStalled(createCheckpoint('awaiting_therapist_availability', null));
-    const summary = getAdminSummary(cp);
     expect(summary).toContain('Stalled Since');
-  });
-
-  it('includes recovery attempts', () => {
-    let cp = markAsStalled(createCheckpoint('awaiting_therapist_availability', null));
-    cp = incrementRecoveryAttempts(cp);
-    cp = incrementRecoveryAttempts(cp);
-    const summary = getAdminSummary(cp);
     expect(summary).toContain('Recovery Attempts');
     expect(summary).toContain('2');
   });

@@ -134,14 +134,20 @@ describe('calculateMeetingLinkCheckTime', () => {
   });
 
   it('returns 4h before appointment when 24h after confirmation is too late', () => {
-    const confirmedAt = new Date('2025-02-01T10:00:00Z');
-    const appointmentTime = new Date('2025-02-02T06:00:00Z'); // Only 20h away
+    // Use future dates so the "4h before appointment" path is taken
+    // (not the "already past, return now" fallback)
+    const now = new Date();
+    const confirmedAt = new Date(now.getTime() - 2 * 60 * 60 * 1000); // 2h ago
+    const appointmentTime = new Date(now.getTime() + 10 * 60 * 60 * 1000); // 10h from now
+    // 24h after confirmation = 22h from now, which is AFTER appointment
+    // So it should use 4h before appointment = 6h from now
 
     const result = calculateMeetingLinkCheckTime(confirmedAt, appointmentTime);
-    const fourHoursBefore = new Date('2025-02-02T02:00:00Z');
+    const fourHoursBefore = new Date(appointmentTime.getTime() - 4 * 60 * 60 * 1000);
 
-    // Should be 4h before appointment, but may return now if already past
-    expect(result.getTime()).toBeLessThanOrEqual(appointmentTime.getTime());
+    // Should be 4h before appointment (which is in the future)
+    expect(result.getTime()).toBe(fourHoursBefore.getTime());
+    expect(result.getTime()).toBeLessThan(appointmentTime.getTime());
   });
 
   it('returns now or earlier when appointment is imminent (< 4h)', () => {

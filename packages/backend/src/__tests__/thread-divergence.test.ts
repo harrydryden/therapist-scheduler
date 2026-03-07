@@ -168,15 +168,16 @@ describe('detectThreadDivergence', () => {
 
   describe('therapist name mismatch detection', () => {
     it('detects mention of different therapist (critical)', () => {
+      // Use names without shared prefix so firstName matching is unambiguous
       const email = makeEmailContext({
-        body: 'I wanted to book a session with Dr. Jones, please.',
+        body: 'I wanted to book a session with Sarah Jones, please.',
       });
       const matchedAppointment = makeAppointmentContext({
-        therapistName: 'Dr. Smith',
+        therapistName: 'Emily Smith',
       });
       const otherAppointment = makeAppointmentContext({
         id: 'apt-2',
-        therapistName: 'Dr. Jones',
+        therapistName: 'Sarah Jones',
         therapistEmail: 'jones@example.com',
         gmailThreadId: 'thread-other',
       });
@@ -188,14 +189,14 @@ describe('detectThreadDivergence', () => {
 
     it('detects mention of both therapists (high severity)', () => {
       const email = makeEmailContext({
-        body: 'I have sessions with both Dr. Smith and Dr. Jones next week.',
+        body: 'I have sessions with both Emily Smith and Sarah Jones next week.',
       });
       const matchedAppointment = makeAppointmentContext({
-        therapistName: 'Dr. Smith',
+        therapistName: 'Emily Smith',
       });
       const otherAppointment = makeAppointmentContext({
         id: 'apt-2',
-        therapistName: 'Dr. Jones',
+        therapistName: 'Sarah Jones',
         therapistEmail: 'jones@example.com',
         gmailThreadId: 'thread-other',
       });
