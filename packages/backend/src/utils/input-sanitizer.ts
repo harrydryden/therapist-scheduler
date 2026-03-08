@@ -127,6 +127,7 @@ export function sanitizeName(name: string): string {
 
 /**
  * Sanitize email-related content (subject, body preview)
+ * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer for AI-bound content.
  */
 export function sanitizeEmailContent(content: string): string {
   return sanitizeString(content, {
@@ -140,6 +141,7 @@ export function sanitizeEmailContent(content: string): string {
 
 /**
  * Sanitize feedback/notes that might be displayed
+ * @deprecated Unused in production code. Use sanitizeString() directly with appropriate options.
  */
 export function sanitizeFeedback(feedback: string): string {
   return sanitizeString(feedback, {
@@ -152,7 +154,7 @@ export function sanitizeFeedback(feedback: string): string {
 
 /**
  * Sanitize content before sending to AI agent
- * More aggressive filtering for prompt injection
+ * @deprecated Unused in production code. Use checkForInjection() + wrapUntrustedContent() from content-sanitizer instead.
  */
 export function sanitizeForAI(content: string): string {
   return sanitizeString(content, {
@@ -196,7 +198,8 @@ export function sanitizeObject<T extends Record<string, unknown>>(
 
 /**
  * Check if a string contains potential prompt injection
- * Returns true if suspicious patterns are found
+ * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer instead,
+ * which provides Unicode normalization and detailed detection results.
  */
 export function detectPromptInjection(input: string): boolean {
   if (typeof input !== 'string') return false;
@@ -212,7 +215,7 @@ export function detectPromptInjection(input: string): boolean {
 
 /**
  * Escape HTML entities for safe display
- * Use this when you need to display user content in HTML context
+ * @deprecated Unused in production code. email-templates.ts has its own private escapeHtml.
  */
 export function escapeHtml(input: string): string {
   const htmlEntities: Record<string, string> = {

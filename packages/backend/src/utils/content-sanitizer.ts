@@ -225,6 +225,7 @@ ${content}
  * Sanitize and wrap email content for safe AI processing
  * Combines injection detection with content wrapping
  *
+ * @deprecated Unused in production code. Callers use checkForInjection() + wrapUntrustedContent() separately.
  * @param emailBody - The raw email body
  * @param senderEmail - Email of the sender (for logging)
  * @returns Sanitization result with wrapped content

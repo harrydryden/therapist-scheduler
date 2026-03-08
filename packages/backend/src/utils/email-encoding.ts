@@ -9,11 +9,7 @@
  * Quoted-printable encoding represents non-ASCII and special characters as =XX
  * where XX is the hexadecimal value. Soft line breaks are represented as =\r\n or =\n.
  *
- * This is important for email line break handling because:
- * - =0D represents CR (\r)
- * - =0A represents LF (\n)
- * - =3D represents the equals sign (=)
- * - Lines ending with = are soft breaks (continuation) and should be joined
+ * @deprecated Unused in production code. Gmail API returns base64-encoded bodies, not quoted-printable.
  */
 export function decodeQuotedPrintable(text: string): string {
   return text
@@ -94,6 +90,7 @@ export function encodeEmailHeader(value: string): string {
 
 /**
  * Normalize line endings to CRLF as required by email RFC 5322
+ * @deprecated Unused in production code. Gmail API handles line ending normalization.
  */
 export function normalizeLineEndings(text: string): string {
   return text

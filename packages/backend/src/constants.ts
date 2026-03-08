@@ -124,8 +124,6 @@ export {
   ACTIVE_STATUSES,
   PRE_BOOKING_STATUSES,
   POST_SESSION_STATUSES,
-  POST_BOOKING_STATUSES,
-  TERMINAL_STATUSES,
 } from '@therapist-scheduler/shared';
 
 // Post-booking follow-up settings
