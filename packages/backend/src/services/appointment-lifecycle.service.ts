@@ -1437,13 +1437,13 @@ class AppointmentLifecycleService {
     const settings = await this.getNotificationSettings();
     if (settings.slack.cancelled) {
       runBackgroundTask(
-        () => slackNotificationService.sendAlert({
-          title: 'Appointment Cancelled',
-          severity: 'medium',
+        () => slackNotificationService.notifyAppointmentCancelled(
           appointmentId,
-          therapistName: appointment.therapistName,
-          details: `Cancelled by ${cancelledBy}. Reason: ${reason}`,
-        }),
+          appointment.userName,
+          appointment.therapistName,
+          reason,
+          cancelledBy
+        ),
         {
           name: 'slack-notify-cancelled',
           context: logContext,
@@ -1944,13 +1944,13 @@ class AppointmentLifecycleService {
 
       if (nowCancelled && settings.slack.cancelled) {
         runBackgroundTask(
-          () => slackNotificationService.sendAlert({
-            title: 'Appointment Cancelled (Admin Override)',
-            severity: 'medium',
+          () => slackNotificationService.notifyAppointmentCancelled(
             appointmentId,
-            therapistName: appointment.therapistName || 'Unknown',
-            details: `Client: ${appointment.userName || 'Unknown'}. Cancelled via admin override.`,
-          }),
+            appointment.userName || 'Unknown',
+            appointment.therapistName || 'Unknown',
+            'Admin override',
+            'admin'
+          ),
           { name: 'slack-notify-admin-cancelled', context: logContext, retry: true, maxRetries: 2 }
         );
       }

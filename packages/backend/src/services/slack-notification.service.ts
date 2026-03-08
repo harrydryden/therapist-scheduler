@@ -725,14 +725,19 @@ class SlackNotificationService {
     appointmentId: string,
     userName: string | null,
     therapistName: string,
-    reason: string
+    reason: string,
+    cancelledBy?: string
   ): Promise<boolean> {
+    const details = cancelledBy
+      ? `Cancelled by ${cancelledBy}. Reason: ${reason}`
+      : `Reason: ${reason}`;
+
     return this.sendAlert({
       title: 'Appointment Cancelled',
       severity: 'medium',
       appointmentId,
       therapistName,
-      details: `Reason: ${reason}`,
+      details,
       emoji: '❌',
     });
   }
