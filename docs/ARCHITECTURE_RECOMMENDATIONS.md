@@ -1,6 +1,6 @@
-# Justin Time Scheduler - Architecture Evaluation & Recommendations
+# Therapist Scheduler — Architecture Evaluation & Recommendations
 
-**Date:** 2026-02-16
+**Date:** 2026-02-16 (updated 2026-03-08)
 **Purpose:** Scale infrastructure for ATS system processing hundreds of applications/month
 
 ---
@@ -70,7 +70,8 @@ The current architecture is well-designed for a **prototype/MVP stage** but has 
 |-------|--------|----------|
 | Manual deployments | Slow shipping, human error | 🔴 Critical |
 | No automated testing on deploy | Regressions reach production | 🔴 Critical |
-| Two separate git repos (frontend/backend) | Coordination overhead | 🟡 Medium |
+
+> **Update (2026-03):** The codebase has been consolidated into a monorepo (see `MONOREPO_MIGRATION.md`), resolving the previous two-repo coordination overhead. CI/CD pipeline setup remains outstanding.
 
 ### 4. Authentication
 
@@ -101,6 +102,8 @@ The current architecture is well-designed for a **prototype/MVP stage** but has 
 
 #### 1.1 Set Up CI/CD with GitHub Actions
 
+> **Status:** Not yet implemented.
+
 ```yaml
 # .github/workflows/deploy.yml
 name: Deploy
@@ -113,12 +116,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run backend tests
-        run: cd backend && npm ci && npm test
-      - name: Run frontend tests
-        run: cd frontend && npm ci && npm test
-      - name: Type check
-        run: cd backend && npm run typecheck
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck:all
+      - run: npm run lint:all
+      - run: npm run test:all
+      - run: npm run build
 
   deploy-backend:
     needs: test
@@ -145,21 +151,9 @@ jobs:
 
 **Why:** Automated testing + deployment = faster, safer shipping.
 
-#### 1.2 Consolidate to Monorepo
+#### ~~1.2 Consolidate to Monorepo~~ DONE
 
-```
-therapist-scheduler/
-├── .github/workflows/
-├── apps/
-│   ├── frontend/     (current frontend)
-│   └── backend/      (current backend)
-├── packages/
-│   └── shared/       (types, utils)
-├── package.json      (workspaces root)
-└── turbo.json        (build orchestration)
-```
-
-**Why:** Single repo = atomic commits, coordinated deploys, shared types.
+Completed in March 2026. The codebase now uses npm workspaces with `packages/shared`, `packages/frontend`, and `packages/backend`. See `MONOREPO_MIGRATION.md` for details.
 
 #### 1.3 Fix Admin Authentication
 
@@ -214,33 +208,25 @@ CREATE TABLE therapists (
 - Sub-millisecond reads vs 200ms+ Notion API
 - Proper joins for ATS queries
 
-#### 2.2 Add Proper Job Queue (BullMQ)
+#### 2.2 Expand Job Queue Usage (BullMQ)
 
-Replace interval-based polling with a proper job queue:
+> **Status:** Partially implemented. `EmailQueueService` already uses BullMQ for email sends with exponential backoff retries. Other background services (stale checks, Notion sync, email polling, followups) still use interval-based scheduling with distributed Redis locks.
+
+Remaining work — migrate interval-based services to BullMQ repeatable jobs:
 
 ```typescript
-// backend/src/queues/email.queue.ts
-import { Queue, Worker } from 'bullmq';
-
-export const emailQueue = new Queue('email', { connection: redis });
-
-// Instead of setInterval, schedule jobs:
-await emailQueue.add('poll-inbox', {}, {
-  repeat: { every: 180000 } // 3 min
-});
-
-await emailQueue.add('send-email', emailData, {
-  attempts: 5,
-  backoff: { type: 'exponential', delay: 60000 }
+// Example: migrate stale check from setInterval to BullMQ
+await staleCheckQueue.add('check-stale', {}, {
+  repeat: { every: 1800000 } // 30 min
 });
 ```
 
 **Why:**
-- Proper retry handling
-- Job prioritization
-- Separate worker processes
+- Unified retry/backoff across all background work
+- Job prioritization and rate limiting
+- Separate worker processes (enables Phase 3 service split)
 - Dashboard for monitoring (Bull Board)
-- Redis-backed persistence
+- Redis-backed persistence (jobs survive restarts)
 
 ---
 
@@ -370,16 +356,19 @@ Move from PDF text extraction to proper document storage:
 | **Gmail API** | ✅ Keep | Works well with Pub/Sub |
 | **Anthropic/Claude** | ✅ Keep | Best for agentic scheduling |
 | **Slack Webhooks** | ✅ Keep | Simple and reliable |
-| **No CI/CD** | 🔴 Add | GitHub Actions essential |
+| **No CI/CD** | 🔴 Add | GitHub Actions essential (monorepo now ready) |
 
 ---
 
 ## Recommended Roadmap
 
 ```
-Week 1-2:  CI/CD + Monorepo consolidation
-Week 3-4:  Admin auth fix + Sentry integration
-Week 5-8:  PostgreSQL migration for therapists + BullMQ
+✅ Done:    Monorepo consolidation (packages/shared, frontend, backend)
+✅ Done:    BullMQ email queue (EmailQueueService)
+✅ Done:    Forensic code review — 25 issues found and resolved
+Week 1-2:  CI/CD pipeline (GitHub Actions) + Admin auth fix
+Week 3-4:  Sentry integration + expand BullMQ to all background services
+Week 5-8:  PostgreSQL migration for therapists (Notion → read-only sync)
 Week 9-12: Worker separation + ATS data model
 ```
 
@@ -402,7 +391,7 @@ Week 9-12: Worker separation + ATS data model
 
 ## Immediate Actions
 
-1. **Create GitHub Actions workflow** for automated testing + deploy
-2. **Set up Sentry** for error tracking
-3. **Plan therapist data migration** from Notion → PostgreSQL
-4. **Fix admin authentication** (remove secret from bundle)
+1. **Create GitHub Actions workflow** for automated testing + deploy (monorepo scripts ready: `npm run test:all`, `npm run typecheck:all`, `npm run lint:all`, `npm run build`)
+2. **Fix admin authentication** (remove secret from frontend bundle, migrate to httpOnly cookies)
+3. **Set up Sentry** for error tracking
+4. **Plan therapist data migration** from Notion → PostgreSQL

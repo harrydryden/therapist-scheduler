@@ -1,8 +1,10 @@
 # Monorepo Migration Guide
 
-## Why Merge Into a Monorepo
+> **Status: COMPLETED.** This document is a historical record of the migration from two separate repositories into the current monorepo structure. The migration is fully complete — all steps below have been executed and verified.
 
-The frontend and backend are currently in separate repositories. This causes several problems:
+## Why We Merged Into a Monorepo
+
+The frontend and backend were previously in separate repositories. This caused several problems:
 
 1. **Duplicated types that have drifted** — Types like `AppointmentListItem`, `AppointmentDetail`, `KnowledgeEntry`, `PaginationInfo`, and `ApiResponse` are defined in both repos with subtle differences (e.g., `Date` vs `string` for date fields, different `ApiResponse` shapes).
 
@@ -206,12 +208,12 @@ jobs:
 
 ## Verification Checklist
 
-- [ ] `npm install` succeeds at the root
-- [ ] `npm run typecheck` passes (no type errors across all packages)
-- [ ] `npm run build` builds shared, then backend, then frontend
-- [ ] `npm test` passes backend tests
-- [ ] Frontend dev server starts with `npm run dev:frontend`
-- [ ] Backend dev server starts with `npm run dev:backend`
-- [ ] Docker build still works
-- [ ] Vercel deployment succeeds
-- [ ] Railway deployment succeeds
+- [x] `npm install` succeeds at the root
+- [x] `npm run typecheck:all` passes (no type errors across all packages)
+- [x] `npm run build` builds shared, then backend, then frontend
+- [x] `npm run test:all` passes backend tests
+- [x] Frontend dev server starts with `npm run dev:frontend`
+- [x] Backend dev server starts with `npm run dev:backend`
+- [x] Docker build still works
+- [x] Vercel deployment succeeds
+- [x] Railway deployment succeeds

@@ -48,7 +48,7 @@ services:
   postgres:
     image: postgres:15-alpine
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-deliberation}
+      - POSTGRES_DB=${POSTGRES_DB:-therapist_scheduling}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
     volumes:
