@@ -15,6 +15,7 @@ import { parseTherapistAvailability } from '../utils/json-parser';
 import { emailQueueService } from '../services/email-queue.service';
 import { validateEmail, checkForTypos } from '../utils/email-validator';
 import { getSettingValue, SettingKey } from '../services/settings.service';
+import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateTrackingCode } from '../utils/tracking-code';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 
@@ -376,22 +377,28 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
         });
 
-        // Send Slack notification for new appointment request (non-blocking)
-        // Check notification settings first
+        // Send Slack notification for new appointment request (non-blocking, respects settings)
         getSettingValue<boolean>('notifications.slack.requested')
           .then((enabled) => {
-            if (enabled) {
-              return slackNotificationService.notifyAppointmentCreated(
-                appointmentRequest.id,
-                userName,
-                therapistName,
-                userEmail
+            if (enabled !== false) {
+              runBackgroundTask(
+                () => slackNotificationService.notifyAppointmentCreated(
+                  appointmentRequest.id,
+                  userName,
+                  therapistName,
+                  userEmail
+                ),
+                {
+                  name: 'slack-notify-requested',
+                  context: { requestId, appointmentId: appointmentRequest.id },
+                  retry: true,
+                  maxRetries: 2,
+                }
               );
             }
-            return false;
           })
           .catch((err) => {
-            logger.error({ err, requestId }, 'Failed to send Slack notification for new appointment (non-critical)');
+            logger.error({ err, requestId }, 'Failed to check Slack notification settings (non-critical)');
           });
 
         // Trigger Justin Time agent asynchronously

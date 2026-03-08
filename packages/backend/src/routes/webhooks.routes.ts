@@ -8,6 +8,8 @@ import { JustinTimeService } from '../services/justin-time.service';
 import { notionService } from '../services/notion.service';
 import { notionUsersService } from '../services/notion-users.service';
 import { slackNotificationService } from '../services/slack-notification.service';
+import { runBackgroundTask } from '../utils/background-task';
+import { getSettingValue } from '../services/settings.service';
 import { adminAuthHook } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -111,15 +113,29 @@ export async function webhookRoutes(fastify: FastifyInstance) {
           'Appointment request created with tracking code'
         );
 
-        // Send Slack notification for new appointment (non-blocking)
-        slackNotificationService.notifyAppointmentCreated(
-          appointmentRequest.id,
-          userName,
-          therapistName,
-          userEmail
-        ).catch((err) => {
-          logger.error({ err, requestId }, 'Failed to send Slack notification for new appointment');
-        });
+        // Send Slack notification for new appointment (non-blocking, respects settings)
+        getSettingValue<boolean>('notifications.slack.requested')
+          .then((enabled) => {
+            if (enabled !== false) {
+              runBackgroundTask(
+                () => slackNotificationService.notifyAppointmentCreated(
+                  appointmentRequest.id,
+                  userName,
+                  therapistName,
+                  userEmail
+                ),
+                {
+                  name: 'slack-notify-requested',
+                  context: { requestId, appointmentId: appointmentRequest.id },
+                  retry: true,
+                  maxRetries: 2,
+                }
+              );
+            }
+          })
+          .catch((err) => {
+            logger.error({ err, requestId }, 'Failed to check Slack notification settings');
+          });
 
         // Ensure user exists in Notion users database (non-blocking)
         // This adds the user on their first booking request, not just after confirmation

@@ -369,10 +369,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       // This handles all side effects: Slack notification, Notion sync, audit trail
 
       // Build feedback data for Slack dynamically from form questions + responses.
-      // Each question maps to a single key-value pair. For choice_with_text, the
-      // follow-up explanation is merged inline (e.g. 'No — "reason"') rather than
-      // creating a separate "(Detail)" entry, which keeps messages compact and avoids
-      // duplicating the question label.
+      //
+      // Conditional sub-questions are handled specially for compact, coherent output:
+      //  - Text sub-questions merge inline with their parent answer using — "detail"
+      //  - Choice sub-questions render with a ↳ prefix for visual hierarchy
+      //  - Sub-questions whose parent condition is NOT met are filtered out
       //
       // Truncation limits are intentionally tight because these values are rendered
       // inline in a single Slack section block (3 000-char limit). The full,
@@ -382,22 +383,80 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       const FREE_TEXT_MAX = 100;
 
       const formQuestions = (formConfig?.questions as unknown as FormQuestion[]) || [];
+
+      // Helper: check if a conditional question's parent condition is met
+      const isSlackConditionMet = (q: FormQuestion): boolean => {
+        if (!q.conditionalOn) return true;
+        const parentVal = responses[q.conditionalOn.questionId];
+        if (typeof parentVal !== 'string') return false;
+        return q.conditionalOn.values.some(
+          (v) => v.toLowerCase() === parentVal.toLowerCase()
+        );
+      };
+
+      // Build a lookup of question IDs to their labels for parent-child merging
+      const questionById = new Map(formQuestions.map(q => [q.id, q]));
+
+      // Track which parent questions have had a text sub-answer merged inline
+      const mergedTextChildren = new Set<string>();
+
+      // First pass: identify conditional text sub-questions that should merge
+      // with their parent's answer (e.g. "No" → 'No — "detail text"')
+      for (const q of formQuestions) {
+        if (
+          q.type === 'text' &&
+          q.conditionalOn &&
+          isSlackConditionMet(q) &&
+          responses[q.id] != null &&
+          responses[q.id] !== ''
+        ) {
+          const parent = questionById.get(q.conditionalOn.questionId);
+          if (parent && (parent.type === 'choice' || parent.type === 'choice_with_text')) {
+            mergedTextChildren.add(q.id);
+          }
+        }
+      }
+
       const feedbackData: Record<string, string> = {};
       for (const q of formQuestions) {
         const val = responses[q.id];
         if (val == null || val === '') continue;
 
-        const label = q.question.length > LABEL_MAX ? q.question.slice(0, LABEL_MAX - 3) + '...' : q.question;
+        // Skip conditional questions whose parent condition is not met
+        if (!isSlackConditionMet(q)) continue;
+
+        // Skip text sub-questions that were merged into their parent
+        if (mergedTextChildren.has(q.id)) continue;
+
+        const isSubQuestion = !!q.conditionalOn;
+        const rawLabel = q.question.length > LABEL_MAX ? q.question.slice(0, LABEL_MAX - 3) + '...' : q.question;
+        // Prefix conditional choice sub-questions with ↳ for visual hierarchy
+        const label = isSubQuestion ? `↳ ${rawLabel}` : rawLabel;
 
         if (q.type === 'scale') {
           feedbackData[label] = `${val}/${q.scaleMax ?? 5}`;
         } else if (q.type === 'choice' || q.type === 'choice_with_text') {
           let answer = String(val);
+
+          // Merge inline choice_with_text explanations
           const textVal = responses[`${q.id}_text`];
           if (textVal && typeof textVal === 'string' && textVal.trim()) {
             const truncated = textVal.length > CHOICE_TEXT_MAX ? textVal.slice(0, CHOICE_TEXT_MAX - 3) + '...' : textVal;
             answer += ` — "${truncated}"`;
           }
+
+          // Merge conditional text sub-question answers inline with parent
+          if (!isSubQuestion) {
+            for (const child of formQuestions) {
+              if (mergedTextChildren.has(child.id) && child.conditionalOn?.questionId === q.id) {
+                const childVal = String(responses[child.id]);
+                const truncated = childVal.length > CHOICE_TEXT_MAX ? childVal.slice(0, CHOICE_TEXT_MAX - 3) + '...' : childVal;
+                answer += ` — "${truncated}"`;
+                break; // Only merge the first text child to keep compact
+              }
+            }
+          }
+
           feedbackData[label] = answer;
         } else if (q.type === 'text') {
           const strVal = String(val);
