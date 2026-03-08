@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react';
 import type { DashboardStats, AppointmentListItem, HealthStatus } from '../types';
+import { PRE_BOOKING_STATUSES } from '../types';
 
 interface AppointmentPipelineProps {
   stats: DashboardStats | undefined;
@@ -9,8 +10,9 @@ interface AppointmentPipelineProps {
 export default memo(function AppointmentPipeline({ stats, appointments }: AppointmentPipelineProps) {
   const healthData = useMemo(() => {
     if (!appointments || appointments.length === 0) return null;
+    const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
     const activeAppointments = appointments.filter(
-      (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
+      (apt) => preBookingStatuses.includes(apt.status)
     );
     const healthCounts = activeAppointments.reduce(
       (acc, apt) => {

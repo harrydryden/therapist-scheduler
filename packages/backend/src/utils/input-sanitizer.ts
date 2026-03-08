@@ -13,6 +13,7 @@
  */
 
 import { logger } from './logger';
+import { INJECTION_PATTERNS } from './content-sanitizer';
 
 export interface SanitizeOptions {
   /** Maximum length to truncate to */
@@ -37,21 +38,6 @@ const DEFAULT_OPTIONS: SanitizeOptions = {
   trim: true,
   normalizeUnicode: true,
 };
-
-// Patterns that might indicate prompt injection attempts
-const PROMPT_INJECTION_PATTERNS = [
-  /ignore\s+(all\s+)?previous\s+instructions/i,
-  /disregard\s+(all\s+)?prior\s+(instructions|context)/i,
-  /forget\s+(everything|all)\s+(you\s+)?know/i,
-  /you\s+are\s+now\s+a/i,
-  /act\s+as\s+(if\s+)?you\s+are/i,
-  /pretend\s+(to\s+be|you\s+are)/i,
-  /new\s+instructions:/i,
-  /system\s*:\s*/i,
-  /\[INST\]/i,
-  /<\|im_start\|>/i,
-  /<<SYS>>/i,
-];
 
 // HTML tag pattern
 const HTML_TAG_PATTERN = /<[^>]*>/g;
@@ -102,7 +88,7 @@ export function sanitizeString(input: string, options: SanitizeOptions = {}): st
 
   // 6. Strip prompt injection patterns (for AI context)
   if (opts.stripPromptInjection) {
-    for (const pattern of PROMPT_INJECTION_PATTERNS) {
+    for (const pattern of INJECTION_PATTERNS) {
       if (pattern.test(result)) {
         logger.warn(
           { pattern: pattern.toString(), inputLength: input.length },
@@ -141,6 +127,7 @@ export function sanitizeName(name: string): string {
 
 /**
  * Sanitize email-related content (subject, body preview)
+ * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer for AI-bound content.
  */
 export function sanitizeEmailContent(content: string): string {
   return sanitizeString(content, {
@@ -154,6 +141,7 @@ export function sanitizeEmailContent(content: string): string {
 
 /**
  * Sanitize feedback/notes that might be displayed
+ * @deprecated Unused in production code. Use sanitizeString() directly with appropriate options.
  */
 export function sanitizeFeedback(feedback: string): string {
   return sanitizeString(feedback, {
@@ -166,7 +154,7 @@ export function sanitizeFeedback(feedback: string): string {
 
 /**
  * Sanitize content before sending to AI agent
- * More aggressive filtering for prompt injection
+ * @deprecated Unused in production code. Use checkForInjection() + wrapUntrustedContent() from content-sanitizer instead.
  */
 export function sanitizeForAI(content: string): string {
   return sanitizeString(content, {
@@ -210,12 +198,13 @@ export function sanitizeObject<T extends Record<string, unknown>>(
 
 /**
  * Check if a string contains potential prompt injection
- * Returns true if suspicious patterns are found
+ * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer instead,
+ * which provides Unicode normalization and detailed detection results.
  */
 export function detectPromptInjection(input: string): boolean {
   if (typeof input !== 'string') return false;
 
-  for (const pattern of PROMPT_INJECTION_PATTERNS) {
+  for (const pattern of INJECTION_PATTERNS) {
     if (pattern.test(input)) {
       return true;
     }
@@ -226,7 +215,7 @@ export function detectPromptInjection(input: string): boolean {
 
 /**
  * Escape HTML entities for safe display
- * Use this when you need to display user content in HTML context
+ * @deprecated Unused in production code. email-templates.ts has its own private escapeHtml.
  */
 export function escapeHtml(input: string): string {
   const htmlEntities: Record<string, string> = {

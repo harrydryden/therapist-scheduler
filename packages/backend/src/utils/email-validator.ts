@@ -284,7 +284,7 @@ export async function validateEmail(
 
 /**
  * Quick validation for API routes - returns simple boolean
- * Use validateEmail() for detailed validation with suggestions
+ * @deprecated Unused in production code. Callers use validateEmail() directly for richer error info.
  */
 export async function isValidEmail(email: string): Promise<boolean> {
   const result = await validateEmail(email, {

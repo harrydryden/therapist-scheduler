@@ -160,36 +160,29 @@ class PostBookingFollowupService {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
 
     // All 4 sentinel resets are independent — run concurrently
-    const [meetingLinkReset, feedbackReset, reminderReset, feedbackReminderReset] = await Promise.all([
-      prisma.appointmentRequest.updateMany({
-        where: { meetingLinkCheckSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
-        data: { meetingLinkCheckSentAt: null },
-      }),
-      prisma.appointmentRequest.updateMany({
-        where: { feedbackFormSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
-        data: { feedbackFormSentAt: null },
-      }),
-      prisma.appointmentRequest.updateMany({
-        where: { reminderSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
-        data: { reminderSentAt: null },
-      }),
-      prisma.appointmentRequest.updateMany({
-        where: { feedbackReminderSentAt: epochDate, updatedAt: { lt: twoMinutesAgo } },
-        data: { feedbackReminderSentAt: null },
-      }),
-    ]);
+    const sentinelFields = [
+      { field: 'meetingLinkCheckSentAt', label: 'meeting link check' },
+      { field: 'feedbackFormSentAt', label: 'feedback form' },
+      { field: 'reminderSentAt', label: 'session reminder' },
+      { field: 'feedbackReminderSentAt', label: 'feedback reminder' },
+    ] as const;
 
-    if (meetingLinkReset.count > 0) {
-      logger.warn({ checkId, resetCount: meetingLinkReset.count }, 'Reset stuck meeting link check sentinels');
-    }
-    if (feedbackReset.count > 0) {
-      logger.warn({ checkId, resetCount: feedbackReset.count }, 'Reset stuck feedback form sentinels');
-    }
-    if (reminderReset.count > 0) {
-      logger.warn({ checkId, resetCount: reminderReset.count }, 'Reset stuck session reminder sentinels');
-    }
-    if (feedbackReminderReset.count > 0) {
-      logger.warn({ checkId, resetCount: feedbackReminderReset.count }, 'Reset stuck feedback reminder sentinels');
+    const results = await Promise.all(
+      sentinelFields.map(({ field }) =>
+        prisma.appointmentRequest.updateMany({
+          where: { [field]: epochDate, updatedAt: { lt: twoMinutesAgo } },
+          data: { [field]: null },
+        })
+      )
+    );
+
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].count > 0) {
+        logger.warn(
+          { checkId, resetCount: results[i].count },
+          `Reset stuck ${sentinelFields[i].label} sentinels`
+        );
+      }
     }
   }
 

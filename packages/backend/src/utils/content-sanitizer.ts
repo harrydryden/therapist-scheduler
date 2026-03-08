@@ -75,9 +75,10 @@ function normalizeUnicode(text: string): string {
 
 /**
  * Common prompt injection patterns
- * These patterns attempt to manipulate AI behavior
+ * These patterns attempt to manipulate AI behavior.
+ * Exported for reuse by input-sanitizer.ts to avoid pattern duplication.
  */
-const INJECTION_PATTERNS = [
+export const INJECTION_PATTERNS = [
   // Direct instruction attempts
   /ignore\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?|guidelines?)/i,
   /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions?|prompts?|rules?|guidelines?)/i,
@@ -108,7 +109,9 @@ const INJECTION_PATTERNS = [
   /\[\s*SYSTEM\s*\]/i,
   /\[\s*ADMIN\s*\]/i,
   /\[\s*ASSISTANT\s*\]/i,
+  /\[\s*INST\s*\]/i,
   /<\s*system\s*>/i,
+  /<\|im_start\|>/i,
   /<<\s*SYS\s*>>/i,
 
   // Hidden instruction attempts
@@ -222,6 +225,7 @@ ${content}
  * Sanitize and wrap email content for safe AI processing
  * Combines injection detection with content wrapping
  *
+ * @deprecated Unused in production code. Callers use checkForInjection() + wrapUntrustedContent() separately.
  * @param emailBody - The raw email body
  * @param senderEmail - Email of the sender (for logging)
  * @returns Sanitization result with wrapped content
