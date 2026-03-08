@@ -117,7 +117,16 @@ export const PAGINATION = {
 
 // AppointmentStatus type and APPOINTMENT_STATUS lookup — from shared package
 export type { AppointmentStatus } from '@therapist-scheduler/shared';
-export { APPOINTMENT_STATUS } from '@therapist-scheduler/shared';
+export {
+  APPOINTMENT_STATUS,
+  STATUS_LABELS,
+  ALL_STATUSES,
+  ACTIVE_STATUSES,
+  PRE_BOOKING_STATUSES,
+  POST_SESSION_STATUSES,
+  POST_BOOKING_STATUSES,
+  TERMINAL_STATUSES,
+} from '@therapist-scheduler/shared';
 
 // Post-booking follow-up settings
 export const POST_BOOKING = {

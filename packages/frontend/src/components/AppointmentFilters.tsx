@@ -1,4 +1,5 @@
 import type { AppointmentFilters as AppointmentFiltersType, AppointmentListItem } from '../types';
+import { PRE_BOOKING_STATUSES, POST_SESSION_STATUSES } from '../types';
 
 interface AppointmentFiltersProps {
   filters: AppointmentFiltersType;
@@ -22,16 +23,19 @@ export default function AppointmentFilters({
   onQuickFilterChange,
 }: AppointmentFiltersProps) {
   const data = appointments || [];
+  const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
+  const postSessionStatuses = POST_SESSION_STATUSES as readonly string[];
+
   const activeAppointments = data.filter(
-    (apt) => !['confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'].includes(apt.status)
+    (apt) => preBookingStatuses.includes(apt.status)
   );
   const redCount = activeAppointments.filter((apt) => apt.healthStatus === 'red').length;
   const humanCount = data.filter((apt) => apt.humanControlEnabled).length;
 
   // Lifecycle stage counts
-  const activeCount = data.filter((apt) => ['pending', 'contacted', 'negotiating'].includes(apt.status)).length;
+  const activeCount = activeAppointments.length;
   const confirmedCount = data.filter((apt) => apt.status === 'confirmed').length;
-  const postSessionCount = data.filter((apt) => ['session_held', 'feedback_requested', 'completed'].includes(apt.status)).length;
+  const postSessionCount = data.filter((apt) => postSessionStatuses.includes(apt.status)).length;
 
   // Determine current filter based on state
   let currentFilter: FilterValue = 'all';

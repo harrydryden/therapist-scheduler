@@ -11,21 +11,14 @@ import type {
   AdminUser,
   AdminTherapist,
   AdminAppointmentStage,
-  AppointmentStatus,
+} from '../types';
+import {
+  STATUS_LABELS,
+  ALL_STATUSES,
+  ACTIVE_STATUSES,
 } from '../types';
 import { getStatusColor } from '../config/color-mappings';
 import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: 'Pending',
-  contacted: 'Contacted',
-  negotiating: 'Negotiating',
-  confirmed: 'Confirmed',
-  session_held: 'Session Held',
-  feedback_requested: 'Feedback Req.',
-  completed: 'Completed',
-  cancelled: 'Cancelled',
-};
 
 const STAGE_OPTIONS: { value: AdminAppointmentStage; label: string }[] = [
   { value: 'confirmed', label: 'Confirmed' },
@@ -33,23 +26,10 @@ const STAGE_OPTIONS: { value: AdminAppointmentStage; label: string }[] = [
   { value: 'feedback_requested', label: 'Feedback Requested' },
 ];
 
-const ACTIVE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'];
-
-const ALL_STATUSES: AppointmentStatus[] = [
-  'pending',
-  'contacted',
-  'negotiating',
-  'confirmed',
-  'session_held',
-  'feedback_requested',
-  'completed',
-  'cancelled',
-];
-
 function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-      {STATUS_LABELS[status] || status}
+      {STATUS_LABELS[status as keyof typeof STATUS_LABELS] || status}
     </span>
   );
 }
