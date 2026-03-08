@@ -483,42 +483,6 @@ describe('Chase target after courtesy email (regression bug scenario)', () => {
   });
 });
 
-// ============================================
-// Sentinel pattern validation
-// ============================================
-
-describe('Sentinel pattern', () => {
-  it('epoch date is distinguishable from null', () => {
-    const epoch = new Date(0);
-    expect(epoch.getTime()).toBe(0);
-    expect(epoch).not.toBeNull();
-  });
-
-  it('epoch date is distinguishable from actual timestamps', () => {
-    const epoch = new Date(0);
-    const now = new Date();
-    expect(now.getTime()).toBeGreaterThan(epoch.getTime());
-  });
-
-  it('gt: new Date(0) excludes both null and epoch sentinel', () => {
-    // Simulates the Prisma query: chaseSentAt: { gt: new Date(0) }
-    const sentinel = new Date(0);
-    const actual = new Date('2025-01-15T10:00:00Z');
-
-    // null case: would not match gt condition (null is excluded by Prisma)
-    // sentinel case: gt(0) means > 0, so epoch (0) is excluded
-    expect(actual.getTime()).toBeGreaterThan(sentinel.getTime());
-    expect(sentinel.getTime()).not.toBeGreaterThan(sentinel.getTime());
-  });
-
-  it('sentinel → actual timestamp is a valid progression', () => {
-    // Sequence: null → epoch(0) → actual timestamp
-    const steps = [null, new Date(0), new Date()];
-    expect(steps[0]).toBeNull();
-    expect(steps[1]!.getTime()).toBe(0);
-    expect(steps[2]!.getTime()).toBeGreaterThan(0);
-  });
-});
 
 // ============================================
 // Chase eligibility rules

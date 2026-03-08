@@ -5,6 +5,14 @@
  * Note: getOrCreateTrackingCode and database-dependent functions require integration tests.
  */
 
+jest.mock('../utils/logger', () => ({
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+}));
+
+jest.mock('../utils/database', () => ({
+  prisma: {},
+}));
+
 import {
   extractTrackingCode,
   formatTrackingCodeForSubject,

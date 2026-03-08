@@ -8,6 +8,10 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
+jest.mock('../services/settings.service', () => ({
+  getSettingValue: jest.fn(),
+}));
+
 import { renderTemplate } from '../utils/email-templates';
 
 describe('renderTemplate', () => {
