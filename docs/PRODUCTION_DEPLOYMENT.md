@@ -1,59 +1,103 @@
 # Production Deployment Guide
 
-## 🎯 **Deployment Scale**
+## Deployment Scale
 
-This guide is optimized for **small-scale production**:
-- **2-3 deliberations** running simultaneously
-- **Hundreds of messages** per deliberation
-- **~100 IBIS contributions** per deliberation
-- **10-50 concurrent users**
+This guide covers production deployment for the Therapist Scheduler platform. The current architecture supports:
+- 2-3 concurrent appointment negotiations
+- 10+ background services running on a single instance
+- 10-50 admin dashboard users
+- Hundreds of appointments per month
 
-## 📋 **Pre-Deployment Checklist**
+## Pre-Deployment Checklist
 
-### **Environment Variables**
+### Required Environment Variables
+
 ```bash
-# Required
-JWT_SECRET=<your-secure-jwt-secret>
-OPENAI_API_KEY=<your-openai-api-key>
-DATABASE_URL=<your-database-url>
-REDIS_URL=<your-redis-url>
+# Core
+NODE_ENV=production
+PORT=3000
+HOST=0.0.0.0
 
-# Optional (with defaults)
-RATE_LIMIT_MAX=200
+# Database (PostgreSQL 15+)
+DATABASE_URL=postgresql://user:password@host:5432/therapist_scheduling
+
+# Redis (7+)
+REDIS_URL=redis://host:6379
+
+# Authentication
+JWT_SECRET=<cryptographically-secure-random-string-32+-chars>
+JWT_EXPIRES_IN=24h
+
+# AI Agent (Anthropic Claude)
+ANTHROPIC_API_KEY=sk-ant-your-key
+
+# Gmail API
+# Google OAuth credentials configured via service account or OAuth2
+GOOGLE_PUBSUB_TOPIC=projects/your-project/topics/gmail-notifications
+GOOGLE_PUBSUB_AUDIENCE=your-audience-url
+
+# Notion (therapist database)
+NOTION_API_KEY=secret_your-notion-integration-token
+NOTION_DATABASE_ID=your-notion-database-id
+
+# Webhooks
+WEBHOOK_SECRET=your-webhook-secret
+```
+
+### Optional Environment Variables
+
+```bash
+# Rate Limiting
+RATE_LIMIT_MAX=200              # Max requests per window (global)
+RATE_LIMIT_WINDOW=60000         # Window duration in ms
+
+# SSE (real-time dashboard updates)
 SSE_MAX_CONNECTIONS=100
-TOKEN_BUCKET_CAPACITY=200
-TOKEN_BUCKET_REFILL_RATE=20
 MAX_CONNECTIONS_PER_USER=3
 MAX_TOTAL_CONNECTIONS=50
-CONNECTION_TIMEOUT=300000
+CONNECTION_TIMEOUT=300000       # 5 minutes
+
+# Performance Monitoring
 PERFORMANCE_MONITORING=true
+SLOW_QUERY_THRESHOLD=1000      # Log queries slower than 1s
+SLOW_AI_THRESHOLD=30000        # Log AI calls slower than 30s
+
+# Token Bucket (API throttling)
+TOKEN_BUCKET_CAPACITY=200
+TOKEN_BUCKET_REFILL_RATE=20
+
+# Distributed Locking
+SINGLE_INSTANCE_MODE=true      # Set false for multi-instance deployments
+
+# CORS
+CORS_ORIGIN=https://your-domain.com
+CORS_CREDENTIALS=true
+
+# Logging
+LOG_LEVEL=info
 ```
 
-### **Security Requirements**
-- [ ] JWT_SECRET is cryptographically secure (32+ characters)
-- [ ] OPENAI_API_KEY has sufficient quota for your expected usage
-- [ ] Database and Redis connections are secure
-- [ ] CORS is properly configured for your domain
-- [ ] Rate limiting is enabled and configured
+### Security Checklist
 
-## 🐳 **Docker Deployment**
+- [ ] `JWT_SECRET` is cryptographically secure (32+ characters, random)
+- [ ] `ANTHROPIC_API_KEY` has sufficient quota
+- [ ] Database connections use SSL in production
+- [ ] Redis connections are password-protected
+- [ ] CORS is configured for your specific domain (not wildcard)
+- [ ] Rate limiting is enabled
+- [ ] Admin authentication secret is not exposed in frontend bundle
 
-### **Quick Start**
+## Docker Deployment
+
+### Quick Start
+
 ```bash
-# 1. Set environment variables
-export JWT_SECRET="your-secure-secret"
-export OPENAI_API_KEY="your-openai-key"
-export DATABASE_URL="postgresql://user:pass@host:5432/db"
-export REDIS_URL="redis://host:6379"
+# Set required environment variables (or use .env file)
+cp .env.example .env
+# Edit .env with production credentials
 
-# 2. Run deployment script
-./deploy-production.sh
-```
-
-### **Manual Deployment**
-```bash
-# Build and start
-docker-compose -f docker-compose.yml up -d --build
+# Build and start all services
+docker-compose up -d --build
 
 # Check status
 docker-compose ps
@@ -62,147 +106,191 @@ docker-compose ps
 docker-compose logs -f app
 ```
 
-## 📊 **Performance Monitoring**
+### What Docker Compose Provides
 
-### **Key Metrics Endpoints**
-- **Health Check**: `GET /health`
-- **Performance Metrics**: `GET /metrics`
+The production `docker-compose.yml` runs three services:
 
-### **Expected Performance (Small Scale)**
-- **Message Rendering**: < 100ms (virtual scrolling)
-- **Database Queries**: < 50ms (with indexes)
-- **AI Responses**: < 5s (OpenAI API)
-- **Connection Limits**: 3 per user, 50 total
+| Service | Image | Resources |
+|---------|-------|-----------|
+| **app** | Built from Dockerfile (multi-stage) | 1 CPU, 1GB RAM |
+| **postgres** | postgres:15-alpine | 0.5 CPU, 512MB RAM |
+| **redis** | redis:7-alpine | 0.25 CPU, 256MB RAM |
 
-### **Monitoring Dashboard**
+The Dockerfile uses a multi-stage build:
+1. Stage 1: Build shared package + backend
+2. Stage 2: Build frontend (Vite)
+3. Stage 3: Minimal runtime combining both
+
+### Database Migrations
+
+After the first deployment, run Prisma migrations:
+
 ```bash
-# Real-time metrics
-curl http://localhost:3000/metrics | jq
+# Apply pending migrations
+docker-compose exec app npx prisma migrate deploy --schema=packages/backend/prisma/schema.prisma
 
-# Health status
+# Or push schema directly (development/initial setup)
+docker-compose exec app npx prisma db push --schema=packages/backend/prisma/schema.prisma
+```
+
+## Health Checks and Monitoring
+
+### Health Endpoints
+
+| Endpoint | Auth Required | Purpose |
+|----------|---------------|---------|
+| `GET /health` | No | Liveness probe — returns `{ status: "ok" }` if process is running |
+| `GET /health/ready` | No | Readiness probe — checks PostgreSQL and Redis connectivity |
+| `GET /health/circuits` | Yes (Admin) | Circuit breaker states for Gmail, Slack, Notion, Claude APIs |
+| `GET /health/tasks` | Yes (Admin) | Background task success rates, recent errors, timeout stats |
+| `GET /health/full` | Yes (Admin) | Comprehensive diagnostic combining all checks above |
+
+### Monitoring Commands
+
+```bash
+# Basic liveness check
 curl http://localhost:3000/health
+
+# Readiness check (database + Redis)
+curl http://localhost:3000/health/ready
+
+# Full diagnostic (requires admin auth header)
+curl -H "Authorization: Bearer <jwt-token>" http://localhost:3000/health/full
 ```
 
-## ⚙️ **Configuration Tuning**
+### What to Monitor
 
-### **Small Scale (Current)**
-```yaml
-rateLimitMax: 200
-sseMaxConnections: 100
-tokenBucketCapacity: 200
-maxConnectionsPerUser: 3
-maxTotalConnections: 50
+| Metric | Healthy | Warning | Action |
+|--------|---------|---------|--------|
+| Database latency | < 50ms | > 200ms | Check connection pool, query optimization |
+| Redis connectivity | Connected | Disconnected | Services degrade to PostgreSQL fallback |
+| Circuit breakers | All CLOSED | Any OPEN | Check external API status (Gmail/Slack/Notion/Claude) |
+| Background tasks | All healthy | Error rate > 10% | Check service logs for failures |
+| AI response time | < 10s | > 30s | Check Anthropic API status, review prompt size |
+
+## Configuration Tuning
+
+### Small Scale (current — up to 50 appointments/month)
+
+```
+RATE_LIMIT_MAX=200
+SSE_MAX_CONNECTIONS=100
+TOKEN_BUCKET_CAPACITY=200
+MAX_CONNECTIONS_PER_USER=3
+MAX_TOTAL_CONNECTIONS=50
 ```
 
-### **Medium Scale (10+ deliberations)**
-```yaml
-rateLimitMax: 500
-sseMaxConnections: 250
-tokenBucketCapacity: 500
-maxConnectionsPerUser: 5
-maxTotalConnections: 150
+### Medium Scale (50-200 appointments/month)
+
+```
+RATE_LIMIT_MAX=500
+SSE_MAX_CONNECTIONS=250
+TOKEN_BUCKET_CAPACITY=500
+MAX_CONNECTIONS_PER_USER=5
+MAX_TOTAL_CONNECTIONS=150
 ```
 
-### **Large Scale (50+ deliberations)**
-```yaml
-rateLimitMax: 1000
-sseMaxConnections: 500
-tokenBucketCapacity: 1000
-maxConnectionsPerUser: 10
-maxTotalConnections: 500
+### Large Scale (200+ appointments/month)
+
+```
+RATE_LIMIT_MAX=1000
+SSE_MAX_CONNECTIONS=500
+TOKEN_BUCKET_CAPACITY=1000
+MAX_CONNECTIONS_PER_USER=10
+MAX_TOTAL_CONNECTIONS=500
 ```
 
-## 🚨 **Troubleshooting**
+At large scale, consider separating API and worker services (see `ARCHITECTURE_RECOMMENDATIONS.md`).
 
-### **Common Issues**
+## Troubleshooting
 
-#### **High Memory Usage**
+### High Memory Usage
+
 ```bash
-# Check container resources
+# Check container resource usage
 docker stats
 
-# Restart with memory limits
-docker-compose down
-docker-compose up -d --build
+# Restart the app service
+docker-compose restart app
 ```
 
-#### **Slow AI Responses**
+Common causes: large conversation state blobs (500KB+ JSON), SSE connection accumulation, Redis backpressure.
+
+### Slow AI Responses
+
+Check Anthropic API status. The system has a circuit breaker on Claude calls — if it opens, scheduling conversations pause until the circuit recovers (30s timeout, 5 failure threshold).
+
 ```bash
-# Check OpenAI API status
-curl -H "Authorization: Bearer $OPENAI_API_KEY" \
-  https://api.openai.com/v1/models
-
-# Monitor AI response times
-curl http://localhost:3000/metrics | jq '.metrics.aiResponseTime'
+# Check circuit breaker status
+curl -H "Authorization: Bearer <jwt>" http://localhost:3000/health/circuits
 ```
 
-#### **Database Performance**
+### Email Delivery Issues
+
+The system uses Gmail API with Pub/Sub push notifications as the primary mechanism and polling (every 3 minutes) as a fallback. If emails aren't being processed:
+
+1. Check the Gmail circuit breaker status
+2. Verify Gmail API credentials are valid
+3. Check `GET /api/webhooks/gmail/health` for Gmail-specific diagnostics
+4. Review pending email queue: `GET /api/admin/queue/health`
+
+### Database Performance
+
 ```bash
-# Check if indexes are applied
-docker exec deliberation-main-postgres-1 psql -U postgres -d deliberation \
-  -c "\d+ deliberations"
+# Connect to PostgreSQL
+docker-compose exec postgres psql -U postgres -d therapist_scheduling
 
-# Apply indexes manually if needed
-docker exec deliberation-main-postgres-1 psql -U postgres -d deliberation \
-  -f /docker-entrypoint-initdb.d/20250101000000_add_performance_indexes.sql
+# Check table sizes
+SELECT relname, pg_size_pretty(pg_total_relation_size(relid))
+FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC;
+
+# Check index usage
+SELECT indexrelname, idx_scan, idx_tup_read
+FROM pg_stat_user_indexes ORDER BY idx_scan DESC;
 ```
 
-### **Log Analysis**
-```bash
-# Backend logs
-docker-compose logs -f app
+### Stale Conversations
 
-# Database logs
-docker-compose logs -f postgres
+The `StaleCheckService` automatically flags conversations with 48+ hours of inactivity. If conversations are getting stuck:
 
-# Redis logs
-docker-compose logs -f redis
-```
+1. Check admin dashboard for stale appointments (shown with health indicators)
+2. Review conversation state via the appointment detail panel
+3. Use "Take Control" to manually intervene in stuck conversations
 
-## 🔄 **Maintenance & Updates**
+## Backup Strategy
 
-### **Regular Maintenance**
-- **Daily**: Check health endpoints and metrics
-- **Weekly**: Review performance metrics and logs
-- **Monthly**: Update dependencies and security patches
-
-### **Scaling Up**
-1. **Increase connection limits** in docker-compose.yml
-2. **Adjust rate limiting** based on usage patterns
-3. **Monitor resource usage** and adjust Docker limits
-4. **Consider load balancing** for multiple instances
-
-### **Backup Strategy**
 ```bash
 # Database backup
-docker exec deliberation-main-postgres-1 pg_dump -U postgres deliberation > backup.sql
+docker-compose exec postgres pg_dump -U postgres therapist_scheduling > backup_$(date +%Y%m%d).sql
 
-# Redis backup
-docker exec deliberation-main-redis-1 redis-cli BGSAVE
+# Redis backup (triggers background save)
+docker-compose exec redis redis-cli BGSAVE
 
-# Configuration backup
-cp docker-compose.yml docker-compose.yml.backup
-cp .env .env.backup
+# Restore database
+cat backup.sql | docker-compose exec -T postgres psql -U postgres therapist_scheduling
 ```
 
-## 📚 **Additional Resources**
+### Data Retention
 
-- **Performance Monitoring**: See `/metrics` endpoint
-- **Health Checks**: See `/health` endpoint
-- **Logs**: Use `docker-compose logs`
-- **Database**: Connect to PostgreSQL on port 5432
-- **Cache**: Connect to Redis on port 6379
+The system automatically cleans up old data:
+- Cancelled appointments: removed after 90 days
+- Completed appointments: removed after 365 days
+- Processed Gmail message records: removed after 7 days
+- Completed weekly mailing inquiries: removed after 30 days
 
-## 🆘 **Support**
+## Graceful Shutdown
 
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review logs: `docker-compose logs -f`
-3. Check metrics: `curl http://localhost:3000/metrics`
-4. Verify environment variables are set correctly
-5. Ensure database indexes are applied
+The server implements a 30-second graceful shutdown period:
+1. Stops accepting new connections
+2. Waits for in-flight requests to complete
+3. Stops all background services in order
+4. Closes database and Redis connections
+5. Force-exits after 30s if anything hangs
 
----
+```bash
+# Graceful stop
+docker-compose stop app
 
-**Remember**: This system is optimized for small-scale production. Monitor performance and scale up gradually as your usage grows.
-
+# Force stop (skip grace period)
+docker-compose kill app
+```
