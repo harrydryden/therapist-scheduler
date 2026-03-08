@@ -20,6 +20,7 @@ import { runBackgroundTask } from '../utils/background-task';
 import { sanitizeName, sanitizeObject } from '../utils/input-sanitizer';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
+import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import type { FormQuestion, FormConfig } from '@therapist-scheduler/shared/types/feedback';
 
 interface PrefilledData {
@@ -51,25 +52,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
    */
   fastify.get('/api/feedback/form', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      let config = await prisma.feedbackFormConfig.findUnique({
-        where: { id: 'default' },
-      });
-
+      const config = await getOrCreateFeedbackFormConfig();
       if (!config || !config.isActive) {
         return sendError(reply, 404, 'Feedback form not available');
-      }
-
-      // Auto-populate if questions are empty or still have the old question set
-      const questions = config.questions as unknown[];
-      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-      const hasNewQuestions = questionIds.includes('met_goals');
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-      if (needsDefaults) {
-        const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
-        config = await prisma.feedbackFormConfig.update({
-          where: { id: 'default' },
-          data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
-        });
       }
 
       const formConfig: FormConfig = {
@@ -113,26 +98,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       const { splCode } = request.params;
 
       try {
-        // Get form config
-        let config = await prisma.feedbackFormConfig.findUnique({
-          where: { id: 'default' },
-        });
-
+        const config = await getOrCreateFeedbackFormConfig();
         if (!config || !config.isActive) {
           return sendError(reply, 404, 'Feedback form not available');
-        }
-
-        // Auto-populate if questions are empty or still have the old question set
-        const questions = config.questions as unknown[];
-        const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-        const hasNewQuestions = questionIds.includes('met_goals');
-        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-        if (needsDefaults) {
-          const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
-          config = await prisma.feedbackFormConfig.update({
-            where: { id: 'default' },
-            data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
-          });
         }
 
         // Look up appointment by tracking code

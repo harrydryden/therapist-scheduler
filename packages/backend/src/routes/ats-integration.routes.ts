@@ -31,6 +31,7 @@ import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
 import { STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
+import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import type {
   ATSAppointmentRecord,
   ATSFeedbackSubmission,
@@ -166,6 +167,46 @@ function mapAppointmentToATS(apt: {
     closureRecommendedReason: apt.closureRecommendedReason,
     closureRecommendationActioned: apt.closureRecommendationActioned,
     reschedulingInProgress: apt.reschedulingInProgress,
+  };
+}
+
+// ============================================
+// Helper: Map DB feedback submission to ATS format
+// ============================================
+
+function mapFeedbackToATS(s: {
+  id: string;
+  trackingCode: string | null;
+  appointmentRequestId: string | null;
+  userEmail: string | null;
+  userName: string | null;
+  therapistName: string;
+  responses: unknown;
+  formVersion: number;
+  createdAt: Date;
+  appointment?: {
+    id: string;
+    status: string;
+    confirmedDateTime: string | null;
+    trackingCode: string | null;
+  } | null;
+}): ATSFeedbackSubmission {
+  return {
+    id: s.id,
+    trackingCode: s.trackingCode,
+    appointmentId: s.appointmentRequestId,
+    userEmail: s.userEmail,
+    userName: s.userName,
+    therapistName: s.therapistName,
+    responses: s.responses as Record<string, string | number>,
+    formVersion: s.formVersion,
+    createdAt: s.createdAt.toISOString(),
+    appointment: s.appointment ? {
+      id: s.appointment.id,
+      status: s.appointment.status as ATSFeedbackSubmission['appointment'] extends null ? never : NonNullable<ATSFeedbackSubmission['appointment']>['status'],
+      confirmedDateTime: s.appointment.confirmedDateTime,
+      trackingCode: s.appointment.trackingCode,
+    } : null,
   };
 }
 
@@ -391,16 +432,11 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         let therapist = await notionService.getTherapist(therapistId);
 
         if (!therapist) {
-          // Try looking up by internal therapist entity
-          const dbTherapist = await prisma.therapist.findFirst({
-            where: {
-              OR: [
-                { id: therapistId },
-                { odId: therapistId },
-                { email: { equals: therapistId, mode: 'insensitive' } },
-              ],
-            },
-          });
+          // Try looking up by internal therapist entity — sequential for index efficiency
+          const dbTherapist =
+            await prisma.therapist.findUnique({ where: { id: therapistId } }) ??
+            await prisma.therapist.findFirst({ where: { odId: therapistId } }) ??
+            await prisma.therapist.findFirst({ where: { email: { equals: therapistId, mode: 'insensitive' } } });
 
           if (dbTherapist) {
             therapist = await notionService.getTherapist(dbTherapist.notionId);
@@ -631,23 +667,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           prisma.feedbackSubmission.count({ where }),
         ]);
 
-        const mapped: ATSFeedbackSubmission[] = submissions.map(s => ({
-          id: s.id,
-          trackingCode: s.trackingCode,
-          appointmentId: s.appointmentRequestId,
-          userEmail: s.userEmail,
-          userName: s.userName,
-          therapistName: s.therapistName,
-          responses: s.responses as Record<string, string | number>,
-          formVersion: s.formVersion,
-          createdAt: s.createdAt.toISOString(),
-          appointment: s.appointment ? {
-            id: s.appointment.id,
-            status: s.appointment.status as ATSFeedbackSubmission['appointment'] extends null ? never : NonNullable<ATSFeedbackSubmission['appointment']>['status'],
-            confirmedDateTime: s.appointment.confirmedDateTime,
-            trackingCode: s.appointment.trackingCode,
-          } : null,
-        }));
+        const mapped = submissions.map(mapFeedbackToATS);
 
         return sendSuccess(reply, {
           submissions: mapped,
@@ -673,6 +693,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
     '/api/v1/ats/feedback/submissions/:id',
     async (request, reply) => {
       const { id } = request.params;
+      const requestId = request.id;
 
       try {
         const submission = await prisma.feedbackSubmission.findUnique({
@@ -693,27 +714,9 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           return Errors.notFound(reply, 'Feedback submission');
         }
 
-        const mapped: ATSFeedbackSubmission = {
-          id: submission.id,
-          trackingCode: submission.trackingCode,
-          appointmentId: submission.appointmentRequestId,
-          userEmail: submission.userEmail,
-          userName: submission.userName,
-          therapistName: submission.therapistName,
-          responses: submission.responses as Record<string, string | number>,
-          formVersion: submission.formVersion,
-          createdAt: submission.createdAt.toISOString(),
-          appointment: submission.appointment ? {
-            id: submission.appointment.id,
-            status: submission.appointment.status as any,
-            confirmedDateTime: submission.appointment.confirmedDateTime,
-            trackingCode: submission.appointment.trackingCode,
-          } : null,
-        };
-
-        return sendSuccess(reply, mapped);
+        return sendSuccess(reply, mapFeedbackToATS(submission));
       } catch (err) {
-        logger.error({ err, appointmentId: id }, 'ATS: Failed to get feedback submission');
+        logger.error({ err, requestId, submissionId: id }, 'ATS: Failed to get feedback submission');
         return Errors.internal(reply, 'Failed to get feedback submission');
       }
     }
@@ -725,12 +728,10 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
    */
   fastify.get(
     '/api/v1/ats/feedback/form',
-    async (_request, reply) => {
+    async (request, reply) => {
+      const requestId = request.id;
       try {
-        const config = await prisma.feedbackFormConfig.findUnique({
-          where: { id: 'default' },
-        });
-
+        const config = await getOrCreateFeedbackFormConfig();
         if (!config) {
           return Errors.notFound(reply, 'Feedback form config');
         }
@@ -746,7 +747,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
 
         return sendSuccess(reply, formConfig);
       } catch (err) {
-        logger.error({ err }, 'ATS: Failed to get feedback form config');
+        logger.error({ err, requestId }, 'ATS: Failed to get feedback form config');
         return Errors.internal(reply, 'Failed to get feedback form config');
       }
     }
@@ -986,40 +987,67 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
   /**
    * GET /api/v1/ats/export/appointments
    * Export all appointments as JSON for bulk ATS sync.
-   * Supports `updatedAfter` filter for incremental sync.
+   * Supports cursor-based incremental sync via `syncCursor` (or `updatedAfter`).
+   * The cursor encodes both timestamp and ID to prevent data loss from timestamp collisions.
    */
-  fastify.get<{ Querystring: { updatedAfter?: string; limit?: string } }>(
+  fastify.get<{ Querystring: { updatedAfter?: string; syncCursor?: string; limit?: string } }>(
     '/api/v1/ats/export/appointments',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_ENDPOINTS.max,
+          timeWindow: RATE_LIMITS.ADMIN_ENDPOINTS.timeWindowMs,
+        },
+      },
+    },
     async (request, reply) => {
       const requestId = request.id;
-      const { updatedAfter, limit: limitStr } = request.query;
+      const { updatedAfter, syncCursor, limit: limitStr } = request.query;
       const limit = Math.min(1000, Math.max(1, parseInt(limitStr || '500', 10) || 500));
 
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const where: any = {};
-        if (updatedAfter) {
-          where.updatedAt = { gte: new Date(updatedAfter) };
+
+        // Parse cursor: "timestamp|id" format for precise pagination
+        const cursorValue = syncCursor || updatedAfter;
+        if (cursorValue) {
+          const [timestampPart, idPart] = cursorValue.split('|');
+          const cursorDate = new Date(timestampPart);
+          if (isNaN(cursorDate.getTime())) {
+            return Errors.badRequest(reply, 'Invalid date format for sync cursor');
+          }
+          if (idPart) {
+            // Cursor with ID tiebreaker: skip records at the exact same timestamp with lower/equal IDs
+            where.OR = [
+              { updatedAt: { gt: cursorDate } },
+              { updatedAt: cursorDate, id: { gt: idPart } },
+            ];
+          } else {
+            // Plain timestamp (first sync or legacy): use gt to avoid re-fetching last record
+            where.updatedAt = { gt: cursorDate };
+          }
         }
 
         const appointments = await prisma.appointmentRequest.findMany({
           where,
           select: APPOINTMENT_SELECT,
-          orderBy: { updatedAt: 'asc' },
+          orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
           take: limit,
         });
 
         const mapped = appointments.map(mapAppointmentToATS);
-        const lastUpdated = appointments.length > 0
-          ? appointments[appointments.length - 1].updatedAt.toISOString()
+        const lastRecord = appointments.length > 0 ? appointments[appointments.length - 1] : null;
+        const nextCursor = lastRecord
+          ? `${lastRecord.updatedAt.toISOString()}|${lastRecord.id}`
           : null;
 
         return sendSuccess(reply, {
           appointments: mapped,
           count: mapped.length,
           hasMore: mapped.length === limit,
-          lastUpdatedAt: lastUpdated,
-          syncCursor: lastUpdated,
+          lastUpdatedAt: lastRecord?.updatedAt.toISOString() ?? null,
+          syncCursor: nextCursor,
         });
       } catch (err) {
         logger.error({ err, requestId }, 'ATS: Failed to export appointments');
@@ -1031,25 +1059,48 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
   /**
    * GET /api/v1/ats/export/feedback
    * Export all feedback submissions as JSON for bulk ATS sync.
-   * Supports `createdAfter` filter for incremental sync.
+   * Supports cursor-based incremental sync via `syncCursor` (or `createdAfter`).
+   * The cursor encodes both timestamp and ID to prevent data loss from timestamp collisions.
    */
-  fastify.get<{ Querystring: { createdAfter?: string; limit?: string } }>(
+  fastify.get<{ Querystring: { createdAfter?: string; syncCursor?: string; limit?: string } }>(
     '/api/v1/ats/export/feedback',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_ENDPOINTS.max,
+          timeWindow: RATE_LIMITS.ADMIN_ENDPOINTS.timeWindowMs,
+        },
+      },
+    },
     async (request, reply) => {
       const requestId = request.id;
-      const { createdAfter, limit: limitStr } = request.query;
+      const { createdAfter, syncCursor, limit: limitStr } = request.query;
       const limit = Math.min(1000, Math.max(1, parseInt(limitStr || '500', 10) || 500));
 
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const where: any = {};
-        if (createdAfter) {
-          where.createdAt = { gte: new Date(createdAfter) };
+
+        const cursorValue = syncCursor || createdAfter;
+        if (cursorValue) {
+          const [timestampPart, idPart] = cursorValue.split('|');
+          const cursorDate = new Date(timestampPart);
+          if (isNaN(cursorDate.getTime())) {
+            return Errors.badRequest(reply, 'Invalid date format for sync cursor');
+          }
+          if (idPart) {
+            where.OR = [
+              { createdAt: { gt: cursorDate } },
+              { createdAt: cursorDate, id: { gt: idPart } },
+            ];
+          } else {
+            where.createdAt = { gt: cursorDate };
+          }
         }
 
         const submissions = await prisma.feedbackSubmission.findMany({
           where,
-          orderBy: { createdAt: 'asc' },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
           take: limit,
           include: {
             appointment: {
@@ -1063,34 +1114,19 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           },
         });
 
-        const mapped: ATSFeedbackSubmission[] = submissions.map(s => ({
-          id: s.id,
-          trackingCode: s.trackingCode,
-          appointmentId: s.appointmentRequestId,
-          userEmail: s.userEmail,
-          userName: s.userName,
-          therapistName: s.therapistName,
-          responses: s.responses as Record<string, string | number>,
-          formVersion: s.formVersion,
-          createdAt: s.createdAt.toISOString(),
-          appointment: s.appointment ? {
-            id: s.appointment.id,
-            status: s.appointment.status as any,
-            confirmedDateTime: s.appointment.confirmedDateTime,
-            trackingCode: s.appointment.trackingCode,
-          } : null,
-        }));
+        const mapped = submissions.map(mapFeedbackToATS);
 
-        const lastCreated = submissions.length > 0
-          ? submissions[submissions.length - 1].createdAt.toISOString()
+        const lastRecord = submissions.length > 0 ? submissions[submissions.length - 1] : null;
+        const nextCursor = lastRecord
+          ? `${lastRecord.createdAt.toISOString()}|${lastRecord.id}`
           : null;
 
         return sendSuccess(reply, {
           submissions: mapped,
           count: mapped.length,
           hasMore: mapped.length === limit,
-          lastCreatedAt: lastCreated,
-          syncCursor: lastCreated,
+          lastCreatedAt: lastRecord?.createdAt.toISOString() ?? null,
+          syncCursor: nextCursor,
         });
       } catch (err) {
         logger.error({ err, requestId }, 'ATS: Failed to export feedback');

@@ -200,13 +200,8 @@ export interface ATSFeedbackFilters {
 }
 
 /** Feedback form configuration as returned to the ATS */
-export interface ATSFeedbackFormConfig {
-  formName: string;
-  description: string | null;
-  questions: FormQuestion[];
-  isActive: boolean;
+export interface ATSFeedbackFormConfig extends Pick<FormConfig, 'formName' | 'description' | 'questions' | 'isActive' | 'requireExplanationFor'> {
   questionsVersion: number;
-  requireExplanationFor: string[];
 }
 
 // ============================================
@@ -248,20 +243,3 @@ export interface ATSWebhookEvent {
   data: ATSAppointmentRecord | ATSFeedbackSubmission | ATSTherapistResponse;
 }
 
-// ============================================
-// Common ATS API Response Wrapper
-// ============================================
-
-/** Standard API response wrapper for all ATS endpoints */
-export interface ATSApiResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  details?: unknown;
-  pagination?: {
-    page: number;
-    limit: number;
-    total: number;
-    totalPages: number;
-  };
-}

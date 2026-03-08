@@ -22,6 +22,7 @@ import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../service
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 
 // Schema for listing all appointments (admin page)
 const listAllAppointmentsSchema = z.object({
@@ -90,11 +91,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = listAppointmentsSchema.safeParse(request.query);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid query params',
-          details: validation.error.errors,
-        });
+        return Errors.badRequest(reply, 'Invalid query params', validation.error.errors);
       }
 
       const { status, therapistId, dateFrom, dateTo, page, limit, sortBy, sortOrder } =
@@ -113,12 +110,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         where.createdAt = {};
         if (dateFrom) {
           const d = new Date(dateFrom);
-          if (isNaN(d.getTime())) return reply.status(400).send({ error: 'Invalid dateFrom format' });
+          if (isNaN(d.getTime())) return Errors.badRequest(reply, 'Invalid dateFrom format');
           (where.createdAt as Record<string, Date>).gte = d;
         }
         if (dateTo) {
           const d = new Date(dateTo);
-          if (isNaN(d.getTime())) return reply.status(400).send({ error: 'Invalid dateTo format' });
+          if (isNaN(d.getTime())) return Errors.badRequest(reply, 'Invalid dateTo format');
           (where.createdAt as Record<string, Date>).lte = d;
         }
       }
@@ -214,9 +211,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         });
 
-        return reply.send({
-          success: true,
-          data: appointmentsWithMeta,
+        return sendSuccess(reply, appointmentsWithMeta, {
           pagination: {
             page,
             limit,
@@ -226,10 +221,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fetch appointments');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch appointments',
-        });
+        return Errors.internal(reply, 'Failed to fetch appointments');
       }
     }
   );
@@ -282,7 +274,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({ success: false, error: 'Appointment not found' });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         // Parse conversation state and extract only latest messages per sender.
@@ -329,9 +321,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         }
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id: appointment.id,
             userName: appointment.userName,
             userEmail: appointment.userEmail,
@@ -361,14 +351,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             closureRecommendedAt: appointment.closureRecommendedAt,
             closureRecommendedReason: appointment.closureRecommendedReason,
             closureRecommendationActioned: appointment.closureRecommendationActioned,
-          },
-        });
+          });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to fetch appointment detail');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch appointment detail',
-        });
+        return Errors.internal(reply, 'Failed to fetch appointment detail');
       }
     }
   );
@@ -393,11 +379,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = takeControlSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { adminId, reason } = validation.data;
@@ -410,30 +392,21 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!current) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         if (current.humanControlEnabled) {
           // Already controlled - check if by same admin
           if (current.humanControlTakenBy === adminId) {
-            return reply.send({
-              success: true,
-              data: {
+            return sendSuccess(reply, {
                 id,
                 humanControlEnabled: true,
                 humanControlTakenBy: adminId,
                 message: 'You already have control of this appointment',
-              },
             });
           }
           // Different admin already has control
-          return reply.status(409).send({
-            success: false,
-            error: `This appointment is already being handled by ${current.humanControlTakenBy}`,
-          });
+          return sendError(reply, 409, `This appointment is already being handled by ${current.humanControlTakenBy}`);
         }
 
         const appointment = await prisma.appointmentRequest.update({
@@ -454,21 +427,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
         sseService.emitHumanControl(id, true, adminId);
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id: appointment.id,
             humanControlEnabled: true,
             humanControlTakenBy: adminId,
             humanControlTakenAt: new Date(),
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to enable human control');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to enable human control',
-        });
+        return Errors.internal(reply, 'Failed to enable human control');
       }
     }
   );
@@ -529,19 +496,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
         sseService.emitHumanControl(id, false);
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id: appointment.id,
             humanControlEnabled: false,
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to release human control');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to release human control',
-        });
+        return Errors.internal(reply, 'Failed to release human control');
       }
     }
   );
@@ -573,11 +534,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = bodySchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { reason, adminId, forceDeleteConfirmed } = validation.data;
@@ -597,18 +554,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         // Don't allow deleting confirmed appointments unless force flag is set
         if (appointment.status === 'confirmed' && !forceDeleteConfirmed) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Cannot delete confirmed appointments. Use forceDeleteConfirmed: true if the appointment did not actually take place.',
-          });
+          return Errors.badRequest(reply, 'Cannot delete confirmed appointments. Use forceDeleteConfirmed: true if the appointment did not actually take place.');
         }
 
         const wasConfirmed = appointment.status === 'confirmed';
@@ -647,19 +598,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Appointment deleted by admin'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id,
             message: 'Appointment deleted successfully',
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to delete appointment');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to delete appointment',
-        });
+        return Errors.internal(reply, 'Failed to delete appointment');
       }
     }
   );
@@ -685,11 +630,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = updateAppointmentSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { status: newStatus, confirmedDateTime, adminId, reason } = validation.data;
@@ -707,27 +648,18 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         // Require human control to be enabled
         if (!appointment.humanControlEnabled) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Human control must be enabled before editing appointment. Take control first.',
-          });
+          return Errors.badRequest(reply, 'Human control must be enabled before editing appointment. Take control first.');
         }
 
         // Validate: if setting status to confirmed, confirmedDateTime is required
         const effectiveConfirmedDateTime = confirmedDateTime ?? appointment.confirmedDateTime;
         if (newStatus === 'confirmed' && !effectiveConfirmedDateTime) {
-          return reply.status(400).send({
-            success: false,
-            error: 'confirmedDateTime is required when setting status to confirmed',
-          });
+          return Errors.badRequest(reply, 'confirmedDateTime is required when setting status to confirmed');
         }
 
         // Check for unusual transitions and generate warnings
@@ -809,9 +741,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Appointment updated by admin via lifecycle service'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id: updated?.id,
             status: updated?.status,
             confirmedDateTime: updated?.confirmedDateTime,
@@ -819,29 +749,19 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             updatedAt: updated?.updatedAt,
             previousStatus,
             warning,
-          },
         });
       } catch (err) {
         // Surface lifecycle validation errors as 400 (bad request) with descriptive messages
         if (err instanceof InvalidTransitionError) {
           logger.warn({ err, requestId, appointmentId: id }, 'Invalid status transition requested');
-          return reply.status(400).send({
-            success: false,
-            error: err.message,
-          });
+          return Errors.badRequest(reply, err.message);
         }
         if (err instanceof ConcurrentModificationError) {
           logger.warn({ err, requestId, appointmentId: id }, 'Concurrent modification detected');
-          return reply.status(409).send({
-            success: false,
-            error: err.message,
-          });
+          return sendError(reply, 409, err.message);
         }
         logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to update appointment',
-        });
+        return Errors.internal(reply, 'Failed to update appointment');
       }
     }
   );
@@ -866,11 +786,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = sendMessageSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { to, subject, body, adminId } = validation.data;
@@ -888,26 +804,17 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         if (!appointment.humanControlEnabled) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Human control must be enabled before sending manual messages',
-          });
+          return Errors.badRequest(reply, 'Human control must be enabled before sending manual messages');
         }
 
         // Validate recipient is a participant in this appointment (security check)
         const validRecipients = [appointment.userEmail, appointment.therapistEmail].map(e => e.toLowerCase());
         if (!validRecipients.includes(to.toLowerCase())) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Email recipient must be either the client or therapist for this appointment',
-          });
+          return Errors.badRequest(reply, 'Email recipient must be either the client or therapist for this appointment');
         }
 
         // Send the email
@@ -949,19 +856,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Admin email sent successfully'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             messageId: result.messageId,
             sentAt: new Date().toISOString(),
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to send admin email');
-        return reply.status(500).send({
-          success: false,
-          error: err instanceof Error ? err.message : 'Failed to send email',
-        });
+        return Errors.internal(reply, err instanceof Error ? err.message : 'Failed to send email');
       }
     }
   );
@@ -1003,10 +904,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         // Build feedback form URL
@@ -1049,21 +947,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Manually sent feedback form email and transitioned to feedback_requested'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             appointmentId: id,
             emailSentTo: appointment.userEmail,
             feedbackFormUrl,
             message: 'Feedback email sent successfully',
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to send feedback email');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to send feedback email',
-        });
+        return Errors.internal(reply, 'Failed to send feedback email');
       }
     }
   );
@@ -1115,17 +1007,11 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         if (!appointment.gmailThreadId && !appointment.therapistGmailThreadId) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Appointment has no Gmail thread IDs to reprocess',
-          });
+          return Errors.badRequest(reply, 'Appointment has no Gmail thread IDs to reprocess');
         }
 
         const traceId = `${requestId}:admin-reprocess:${id}`;
@@ -1172,9 +1058,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           const allMessages = preview.flatMap(p => p.messages);
           const unprocessedCount = allMessages.filter(m => m.status === 'unprocessed').length;
 
-          return reply.send({
-            success: true,
-            data: {
+          return sendSuccess(reply, {
               appointmentId: id,
               userName: appointment.userName,
               therapistName: appointment.therapistName,
@@ -1185,7 +1069,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               message: unprocessedCount > 0
                 ? `Found ${unprocessedCount} unprocessed message(s) that can be recovered`
                 : 'All messages in this thread have already been processed',
-            },
           });
         }
 
@@ -1226,9 +1109,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Thread reprocessing complete'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             appointmentId: id,
             userName: appointment.userName,
             therapistName: appointment.therapistName,
@@ -1240,20 +1121,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               : totalCleared > 0
               ? `Cleared ${totalCleared} record(s) but no new messages found to process`
               : 'No unprocessed messages found in this thread',
-          },
         });
       } catch (err: any) {
         if (err?.code === 404 || err?.status === 404) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Gmail thread not found — it may have been deleted',
-          });
+          return Errors.notFound(reply, 'Gmail thread', 'it may have been deleted');
         }
         logger.error({ err, requestId, appointmentId: id }, 'Failed to reprocess thread');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to reprocess thread',
-        });
+        return Errors.internal(reply, 'Failed to reprocess thread');
       }
     }
   );
@@ -1283,16 +1157,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           orderBy: { name: 'asc' },
         });
 
-        return reply.send({
-          success: true,
-          data: users,
-        });
+        return sendSuccess(reply, users);
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fetch users');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch users',
-        });
+        return Errors.internal(reply, 'Failed to fetch users');
       }
     }
   );
@@ -1319,16 +1187,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           orderBy: { name: 'asc' },
         });
 
-        return reply.send({
-          success: true,
-          data: therapists,
-        });
+        return sendSuccess(reply, therapists);
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fetch therapists');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch therapists',
-        });
+        return Errors.internal(reply, 'Failed to fetch therapists');
       }
     }
   );
@@ -1346,11 +1208,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = listAllAppointmentsSchema.safeParse(request.query);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid query params',
-          details: validation.error.errors,
-        });
+        return Errors.badRequest(reply, 'Invalid query params', validation.error.errors);
       }
 
       const { status, search, page, limit, sortBy, sortOrder } = validation.data;
@@ -1454,22 +1312,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           };
         });
 
-        return reply.send({
-          success: true,
-          data: appointmentsWithMeta,
-          pagination: {
+        return sendSuccess(reply, { items: appointmentsWithMeta, pagination: {
             page,
             limit,
             total,
             totalPages: Math.ceil(total / limit),
-          },
-        });
+        } });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fetch all appointments');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch appointments',
-        });
+        return Errors.internal(reply, 'Failed to fetch appointments');
       }
     }
   );
@@ -1511,11 +1362,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
       const validation = adminUpdateSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { status: newStatus, confirmedDateTime, adminId, reason } = validation.data;
@@ -1531,19 +1378,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Appointment not found',
-          });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         // Validate: if setting status to confirmed, confirmedDateTime is required
         const effectiveConfirmedDateTime = confirmedDateTime ?? appointment.confirmedDateTime;
         if (newStatus === 'confirmed' && !effectiveConfirmedDateTime) {
-          return reply.status(400).send({
-            success: false,
-            error: 'confirmedDateTime is required when setting status to confirmed',
-          });
+          return Errors.badRequest(reply, 'confirmedDateTime is required when setting status to confirmed');
         }
 
         const previousStatus = appointment.status;
@@ -1594,9 +1435,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           'Appointment updated by admin from appointments page'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             id: updated?.id,
             status: updated?.status,
             confirmedDateTime: updated?.confirmedDateTime,
@@ -1605,12 +1444,11 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             updatedAt: updated?.updatedAt,
             previousStatus,
             warning,
-          },
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to update appointment from admin page');
         const message = err instanceof Error ? err.message : 'Unknown error';
-        return reply.status(500).send({ success: false, error: `Failed to update appointment: ${message}` });
+        return Errors.internal(reply, `Failed to update appointment: ${message}`);
       }
     }
   );
@@ -1640,10 +1478,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       const adminId = `admin:${request.ip || 'unknown'}`;
 
       if (!action || !['cancel', 'dismiss'].includes(action)) {
-        return reply.status(400).send({
-          success: false,
-          error: 'action must be "cancel" or "dismiss"',
-        });
+        return Errors.badRequest(reply, 'action must be "cancel" or "dismiss"');
       }
 
       logger.info(
@@ -1663,21 +1498,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         if (!appointment) {
-          return reply.status(404).send({ success: false, error: 'Appointment not found' });
+          return Errors.notFound(reply, 'Appointment');
         }
 
         if (!appointment.closureRecommendedAt) {
-          return reply.status(400).send({
-            success: false,
-            error: 'No closure recommendation exists for this appointment',
-          });
+          return Errors.badRequest(reply, 'No closure recommendation exists for this appointment');
         }
 
         if (appointment.closureRecommendationActioned) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Closure recommendation already actioned',
-          });
+          return Errors.badRequest(reply, 'Closure recommendation already actioned');
         }
 
         if (action === 'cancel') {
@@ -1736,13 +1565,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           );
         }
 
-        return reply.send({ success: true, action });
+        return sendSuccess(reply, { action });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to action closure recommendation');
-        return reply.status(500).send({
-          success: false,
-          error: err instanceof Error ? err.message : 'Failed to action closure',
-        });
+        return Errors.internal(reply, err instanceof Error ? err.message : 'Failed to action closure');
       }
     }
   );

@@ -75,8 +75,8 @@ export const Errors = {
   unauthorized: (reply: FastifyReply) =>
     sendError(reply, 401, 'Unauthorized'),
 
-  notFound: (reply: FastifyReply, resource = 'Resource') =>
-    sendError(reply, 404, `${resource} not found`),
+  notFound: (reply: FastifyReply, resource = 'Resource', details?: unknown) =>
+    sendError(reply, 404, `${resource} not found`, details),
 
   badRequest: (reply: FastifyReply, message = 'Invalid request', details?: unknown) =>
     sendError(reply, 400, message, details),

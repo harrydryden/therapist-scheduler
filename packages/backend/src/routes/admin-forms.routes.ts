@@ -15,8 +15,12 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { sendSuccess, Errors } from '../utils/response';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { getOrCreateFeedbackFormConfig, DEFAULT_QUESTIONS } from '../utils/feedback-form-config';
+
+// Re-export for backward compatibility (feedback-form.routes.ts dynamic import)
+export { DEFAULT_QUESTIONS };
 
 // ============================================
 // Validation Schemas
@@ -54,74 +58,6 @@ const updateFormConfigSchema = z.object({
   requireExplanationFor: z.array(z.string()).optional(),
 });
 
-// Default questions used when creating or migrating the form config
-export const DEFAULT_QUESTIONS = [
-  {
-    id: 'met_goals',
-    type: 'choice',
-    question: 'Did this session meet your goals?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'therapist_asked_goals',
-    type: 'choice',
-    question: 'Did the therapist ask what your goals were?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'goals_detail',
-    type: 'text',
-    question: 'Which goals, if any, were met, which goals, if any, were not met?',
-    required: true,
-    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'felt_heard',
-    type: 'choice',
-    question: 'Did you feel heard and understood?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'felt_heard_detail',
-    type: 'text',
-    question: 'Please tell us more about why you felt that way (eg anything your therapist said, did, non verbal cues, etc).',
-    required: true,
-    conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'would_book_again',
-    type: 'choice',
-    question: 'Would you book another session with this therapist in the future?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'would_book_again_detail',
-    type: 'text',
-    question: 'Please tell us why you felt that way.',
-    required: true,
-    conditionalOn: { questionId: 'would_book_again', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'would_recommend',
-    type: 'choice',
-    question: 'Based on this session, would you recommend this therapist to a close friend?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'would_recommend_detail',
-    type: 'text',
-    question: 'Tell us why you would be hesitant to recommend this therapist to a close friend.',
-    required: true,
-    conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
-  },
-];
-
 // ============================================
 // Routes
 // ============================================
@@ -136,46 +72,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
    */
   fastify.get('/api/admin/forms/feedback', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      let config = await prisma.feedbackFormConfig.findUnique({
-        where: { id: 'default' },
-      });
-
-      // If no config exists, create with default questions
-      if (!config) {
-        config = await prisma.feedbackFormConfig.create({
-          data: {
-            id: 'default',
-            formName: 'Therapy Session Feedback',
-            welcomeTitle: 'Session Feedback',
-            welcomeMessage:
-              'Please take a moment to share your feedback about your therapy session.',
-            thankYouTitle: 'Thank you!',
-            thankYouMessage: 'Thanks for sharing your feedback - we really appreciate it.',
-            questions: DEFAULT_QUESTIONS,
-            isActive: true,
-            requiresAuth: true,
-          },
-        });
-      }
-
-      // If config has empty questions or still has the old question set (pre-v2),
-      // replace with the new conditional questions
-      const questions = config.questions as unknown[];
-      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-      const hasNewQuestions = questionIds.includes('met_goals');
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-      if (needsDefaults) {
-        config = await prisma.feedbackFormConfig.update({
-          where: { id: 'default' },
-          data: {
-            questions: DEFAULT_QUESTIONS,
-            requiresAuth: true,
-            questionsVersion: 2,
-          },
-        });
-        logger.info('Populated feedback form config with default questions (v2)');
-      }
-
+      const config = await getOrCreateFeedbackFormConfig();
       return sendSuccess(reply, config);
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback form config');
@@ -294,7 +191,8 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         prisma.feedbackSubmission.count({ where }),
       ]);
 
-      return sendSuccess(reply, { submissions }, {
+      return sendSuccess(reply, {
+        submissions,
         pagination: {
           page: pageNum,
           limit: limitNum,
@@ -449,7 +347,12 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
             },
           });
 
-          return Errors.notFound(reply, 'No feedback submission found for this tracking code');
+          return sendError(reply, 404, 'No feedback submission found for this tracking code', {
+            appointment: appointment || null,
+            hint: appointment
+              ? 'The appointment exists but no feedback has been submitted yet'
+              : 'No appointment found with this tracking code either',
+          });
         }
 
         return sendSuccess(reply, submission);
