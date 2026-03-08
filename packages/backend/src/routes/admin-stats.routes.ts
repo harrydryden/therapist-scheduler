@@ -6,6 +6,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { sendSuccess, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
 
 export async function adminStatsRoutes(fastify: FastifyInstance) {
@@ -57,13 +58,10 @@ export async function adminStatsRoutes(fastify: FastifyInstance) {
           })),
         };
 
-        return reply.send({ success: true, data: stats });
+        return sendSuccess(reply, stats);
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fetch dashboard stats');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch dashboard stats',
-        });
+        return Errors.internal(reply, 'Failed to fetch dashboard stats');
       }
     }
   );

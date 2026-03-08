@@ -3,6 +3,7 @@ import { pdfIngestionService } from '../services/pdf-ingestion.service';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 
 interface AdminNotes {
   additionalInfo?: string; // Free text field for admin to add missing info
@@ -52,10 +53,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
           if (part.type === 'file') {
             // Handle file upload
             if (part.mimetype !== 'application/pdf') {
-              return reply.status(400).send({
-                success: false,
-                error: 'Only PDF files are accepted',
-              });
+              return Errors.badRequest(reply, 'Only PDF files are accepted');
             }
 
             const chunks: Buffer[] = [];
@@ -64,10 +62,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               totalSize += chunk.length;
               // Prevent memory exhaustion from infinite streams
               if (totalSize > MAX_CHUNK_ACCUMULATION) {
-                return reply.status(413).send({
-                  success: false,
-                  error: 'File too large. Maximum size is 10MB.',
-                });
+                return sendError(reply, 413, 'File too large. Maximum size is 10MB.');
               }
               chunks.push(chunk);
             }
@@ -81,26 +76,17 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
             // FIX R4: Validate field sizes to prevent memory exhaustion
             if (fieldName === 'additionalInfo') {
               if (value.length > MAX_FIELD_SIZES.additionalInfo) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `additionalInfo exceeds maximum length of ${MAX_FIELD_SIZES.additionalInfo} characters`,
-                });
+                return Errors.badRequest(reply, `additionalInfo exceeds maximum length of ${MAX_FIELD_SIZES.additionalInfo} characters`);
               }
               adminNotes.additionalInfo = value;
             } else if (fieldName === 'overrideEmail') {
               if (value.length > MAX_FIELD_SIZES.overrideEmail) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `overrideEmail exceeds maximum length of ${MAX_FIELD_SIZES.overrideEmail} characters`,
-                });
+                return Errors.badRequest(reply, `overrideEmail exceeds maximum length of ${MAX_FIELD_SIZES.overrideEmail} characters`);
               }
               adminNotes.overrideEmail = value;
             } else if (fieldName === 'overrideApproach') {
               if (value.length > MAX_FIELD_SIZES.arrayField) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `overrideApproach exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`,
-                });
+                return Errors.badRequest(reply, `overrideApproach exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`);
               }
               try {
                 adminNotes.overrideApproach = JSON.parse(value);
@@ -109,10 +95,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               }
             } else if (fieldName === 'overrideStyle') {
               if (value.length > MAX_FIELD_SIZES.arrayField) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `overrideStyle exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`,
-                });
+                return Errors.badRequest(reply, `overrideStyle exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`);
               }
               try {
                 adminNotes.overrideStyle = JSON.parse(value);
@@ -121,10 +104,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               }
             } else if (fieldName === 'overrideAreasOfFocus') {
               if (value.length > MAX_FIELD_SIZES.arrayField) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `overrideAreasOfFocus exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`,
-                });
+                return Errors.badRequest(reply, `overrideAreasOfFocus exceeds maximum length of ${MAX_FIELD_SIZES.arrayField} characters`);
               }
               try {
                 adminNotes.overrideAreasOfFocus = JSON.parse(value);
@@ -133,10 +113,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               }
             } else if (fieldName === 'overrideAvailability') {
               if (value.length > MAX_FIELD_SIZES.availabilityField) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `overrideAvailability exceeds maximum length of ${MAX_FIELD_SIZES.availabilityField} characters`,
-                });
+                return Errors.badRequest(reply, `overrideAvailability exceeds maximum length of ${MAX_FIELD_SIZES.availabilityField} characters`);
               }
               try {
                 adminNotes.overrideAvailability = JSON.parse(value);
@@ -145,10 +122,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               }
             } else if (fieldName === 'notes') {
               if (value.length > MAX_FIELD_SIZES.notes) {
-                return reply.status(400).send({
-                  success: false,
-                  error: `notes exceeds maximum length of ${MAX_FIELD_SIZES.notes} characters`,
-                });
+                return Errors.badRequest(reply, `notes exceeds maximum length of ${MAX_FIELD_SIZES.notes} characters`);
               }
               adminNotes.notes = value;
             }
@@ -160,10 +134,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
           // Validate file size (max 10MB)
           const maxSize = 10 * 1024 * 1024;
           if (pdfBuffer.length > maxSize) {
-            return reply.status(400).send({
-              success: false,
-              error: 'File too large. Maximum size is 10MB.',
-            });
+            return Errors.badRequest(reply, 'File too large. Maximum size is 10MB.');
           }
 
           logger.info(
@@ -178,10 +149,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         } else {
           // No PDF - require additional info to have enough data
           if (!adminNotes.additionalInfo || adminNotes.additionalInfo.trim().length < 50) {
-            return reply.status(400).send({
-              success: false,
-              error: 'When no PDF is uploaded, additional information is required (minimum 50 characters)',
-            });
+            return Errors.badRequest(reply, 'When no PDF is uploaded, additional information is required (minimum 50 characters)');
           }
 
           logger.info(
@@ -198,15 +166,10 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         const result = await pdfIngestionService.ingestPDF(pdfBuffer, requestId, adminNotes);
 
         if (!result.success) {
-          return reply.status(422).send({
-            success: false,
-            error: result.error,
-          });
+          return sendError(reply, 422, result.error);
         }
 
-        return reply.status(201).send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             therapistId: result.therapistId,
             notionUrl: result.notionUrl,
             extractedProfile: {
@@ -225,15 +188,10 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               hadOverrideAreasOfFocus: !!adminNotes.overrideAreasOfFocus,
               hadOverrideAvailability: !!adminNotes.overrideAvailability,
             },
-          },
-          message: 'Therapist profile successfully extracted and added to directory',
-        });
+          }, { statusCode: 201, message: 'Therapist profile successfully extracted and added to directory' });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to process therapist CV');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to process uploaded file',
-        });
+        return Errors.internal(reply, 'Failed to process uploaded file');
       }
     }
   );
@@ -254,10 +212,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         for await (const part of parts) {
           if (part.type === 'file') {
             if (part.mimetype !== 'application/pdf') {
-              return reply.status(400).send({
-                success: false,
-                error: 'Only PDF files are accepted',
-              });
+              return Errors.badRequest(reply, 'Only PDF files are accepted');
             }
 
             const chunks: Buffer[] = [];
@@ -266,10 +221,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
               totalSize += chunk.length;
               // Prevent memory exhaustion from infinite streams
               if (totalSize > MAX_CHUNK_ACCUMULATION) {
-                return reply.status(413).send({
-                  success: false,
-                  error: 'File too large. Maximum size is 10MB.',
-                });
+                return sendError(reply, 413, 'File too large. Maximum size is 10MB.');
               }
               chunks.push(chunk);
             }
@@ -278,10 +230,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
             const value = part.value as string;
             // FIX R4: Validate field size
             if (value.length > MAX_FIELD_SIZES.additionalInfo) {
-              return reply.status(400).send({
-                success: false,
-                error: `additionalInfo exceeds maximum length of ${MAX_FIELD_SIZES.additionalInfo} characters`,
-              });
+              return Errors.badRequest(reply, `additionalInfo exceeds maximum length of ${MAX_FIELD_SIZES.additionalInfo} characters`);
             }
             additionalInfo = value;
           }
@@ -296,31 +245,21 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         } else {
           // No PDF - require additional info
           if (!additionalInfo || additionalInfo.trim().length < 50) {
-            return reply.status(400).send({
-              success: false,
-              error: 'When no PDF is uploaded, additional information is required (minimum 50 characters)',
-            });
+            return Errors.badRequest(reply, 'When no PDF is uploaded, additional information is required (minimum 50 characters)');
           }
         }
 
         // Extract profile from PDF text and/or additional info
         const profile = await pdfIngestionService.extractTherapistProfile(pdfText, requestId, additionalInfo || undefined);
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             extractedProfile: profile,
             rawTextLength: pdfText.length,
             additionalInfoProvided: !!additionalInfo,
-          },
-          message: 'Preview only - no record created. Use /api/ingestion/therapist-cv to create the record.',
-        });
+          }, { message: 'Preview only - no record created. Use /api/ingestion/therapist-cv to create the record.' });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to preview therapist CV');
-        return reply.status(500).send({
-          success: false,
-          error: err instanceof Error ? err.message : 'Failed to process uploaded file',
-        });
+        return Errors.internal(reply, err instanceof Error ? err.message : 'Failed to process uploaded file');
       }
     }
   );

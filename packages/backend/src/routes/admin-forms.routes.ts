@@ -15,6 +15,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { sendSuccess, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
 
 // ============================================
@@ -175,10 +176,10 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         logger.info('Populated feedback form config with default questions (v2)');
       }
 
-      return reply.send({ success: true, data: config });
+      return sendSuccess(reply, config);
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback form config');
-      return reply.status(500).send({ error: 'Failed to load form configuration' });
+      return Errors.internal(reply, 'Failed to load form configuration');
     }
   });
 
@@ -191,10 +192,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       const validation = updateFormConfigSchema.safeParse(request.body);
 
       if (!validation.success) {
-        return reply.status(400).send({
-          error: 'Invalid form configuration',
-          details: validation.error.issues,
-        });
+        return Errors.badRequest(reply, 'Invalid form configuration', validation.error.issues);
       }
 
       const updates = validation.data;
@@ -230,10 +228,10 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
 
       logger.info('Feedback form configuration updated');
 
-      return reply.send({ success: true, data: config });
+      return sendSuccess(reply, config);
     } catch (error) {
       logger.error({ error }, 'Failed to update feedback form config');
-      return reply.status(500).send({ error: 'Failed to update form configuration' });
+      return Errors.internal(reply, 'Failed to update form configuration');
     }
   });
 
@@ -296,21 +294,17 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         prisma.feedbackSubmission.count({ where }),
       ]);
 
-      return reply.send({
-        success: true,
-        data: {
-          submissions,
-          pagination: {
-            page: pageNum,
-            limit: limitNum,
-            total,
-            totalPages: Math.ceil(total / limitNum),
-          },
+      return sendSuccess(reply, { submissions }, {
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages: Math.ceil(total / limitNum),
         },
       });
     } catch (error) {
       logger.error({ error }, 'Failed to list feedback submissions');
-      return reply.status(500).send({ error: 'Failed to load submissions' });
+      return Errors.internal(reply, 'Failed to load submissions');
     }
   });
 
@@ -342,13 +336,13 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         });
 
         if (!submission) {
-          return reply.status(404).send({ error: 'Submission not found' });
+          return Errors.notFound(reply, 'Submission');
         }
 
-        return reply.send({ success: true, data: submission });
+        return sendSuccess(reply, submission);
       } catch (error) {
         logger.error({ error }, 'Failed to get feedback submission');
-        return reply.status(500).send({ error: 'Failed to load submission' });
+        return Errors.internal(reply, 'Failed to load submission');
       }
     }
   );
@@ -401,15 +395,15 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         }
       }
 
-      return reply.send({ success: true, data: {
+      return sendSuccess(reply, {
         totalSubmissions,
         recentSubmissions,
         questions: questions.map(q => ({ id: q.id, question: q.question, type: q.type })),
         questionStats,
-      } });
+      });
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback stats');
-      return reply.status(500).send({ error: 'Failed to load statistics' });
+      return Errors.internal(reply, 'Failed to load statistics');
     }
   });
 
@@ -455,19 +449,13 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
             },
           });
 
-          return reply.status(404).send({
-            error: 'No feedback submission found for this tracking code',
-            appointment: appointment || null,
-            hint: appointment
-              ? 'The appointment exists but no feedback has been submitted yet'
-              : 'No appointment found with this tracking code either',
-          });
+          return Errors.notFound(reply, 'No feedback submission found for this tracking code');
         }
 
-        return reply.send({ success: true, data: submission });
+        return sendSuccess(reply, submission);
       } catch (error) {
         logger.error({ error }, 'Failed to get feedback submission by tracking code');
-        return reply.status(500).send({ error: 'Failed to load submission' });
+        return Errors.internal(reply, 'Failed to load submission');
       }
     }
   );
@@ -538,7 +526,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       return reply.send(csv);
     } catch (error) {
       logger.error({ error }, 'Failed to export feedback submissions');
-      return reply.status(500).send({ error: 'Failed to export submissions' });
+      return Errors.internal(reply, 'Failed to export submissions');
     }
   });
 
@@ -550,9 +538,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
     // Require explicit confirmation parameter to prevent accidental deletion
     const { confirm } = request.query as { confirm?: string };
     if (confirm !== 'DELETE_ALL') {
-      return reply.status(400).send({
-        error: 'Missing confirmation. Add ?confirm=DELETE_ALL to confirm bulk deletion.',
-      });
+      return Errors.badRequest(reply, 'Missing confirmation. Add ?confirm=DELETE_ALL to confirm bulk deletion.');
     }
 
     try {
@@ -560,14 +546,13 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
 
       logger.warn({ count: result.count }, 'All feedback submissions deleted');
 
-      return reply.send({
-        success: true,
+      return sendSuccess(reply, null, {
         message: `Deleted ${result.count} feedback submissions`,
         count: result.count,
       });
     } catch (error) {
       logger.error({ error }, 'Failed to delete feedback submissions');
-      return reply.status(500).send({ error: 'Failed to delete submissions' });
+      return Errors.internal(reply, 'Failed to delete submissions');
     }
   });
 }
