@@ -15,7 +15,12 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { getOrCreateFeedbackFormConfig, DEFAULT_QUESTIONS } from '../utils/feedback-form-config';
+
+// Re-export for backward compatibility (feedback-form.routes.ts dynamic import)
+export { DEFAULT_QUESTIONS };
 
 // ============================================
 // Validation Schemas
@@ -53,74 +58,6 @@ const updateFormConfigSchema = z.object({
   requireExplanationFor: z.array(z.string()).optional(),
 });
 
-// Default questions used when creating or migrating the form config
-export const DEFAULT_QUESTIONS = [
-  {
-    id: 'met_goals',
-    type: 'choice',
-    question: 'Did this session meet your goals?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'therapist_asked_goals',
-    type: 'choice',
-    question: 'Did the therapist ask what your goals were?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'goals_detail',
-    type: 'text',
-    question: 'Which goals, if any, were met, which goals, if any, were not met?',
-    required: true,
-    conditionalOn: { questionId: 'met_goals', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'felt_heard',
-    type: 'choice',
-    question: 'Did you feel heard and understood?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'felt_heard_detail',
-    type: 'text',
-    question: 'Please tell us more about why you felt that way (eg anything your therapist said, did, non verbal cues, etc).',
-    required: true,
-    conditionalOn: { questionId: 'felt_heard', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'would_book_again',
-    type: 'choice',
-    question: 'Would you book another session with this therapist in the future?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'would_book_again_detail',
-    type: 'text',
-    question: 'Please tell us why you felt that way.',
-    required: true,
-    conditionalOn: { questionId: 'would_book_again', values: ['No', 'Unsure'] },
-  },
-  {
-    id: 'would_recommend',
-    type: 'choice',
-    question: 'Based on this session, would you recommend this therapist to a close friend?',
-    required: true,
-    options: ['Yes', 'No', 'Unsure'],
-  },
-  {
-    id: 'would_recommend_detail',
-    type: 'text',
-    question: 'Tell us why you would be hesitant to recommend this therapist to a close friend.',
-    required: true,
-    conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
-  },
-];
-
 // ============================================
 // Routes
 // ============================================
@@ -135,50 +72,11 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
    */
   fastify.get('/api/admin/forms/feedback', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      let config = await prisma.feedbackFormConfig.findUnique({
-        where: { id: 'default' },
-      });
-
-      // If no config exists, create with default questions
-      if (!config) {
-        config = await prisma.feedbackFormConfig.create({
-          data: {
-            id: 'default',
-            formName: 'Therapy Session Feedback',
-            welcomeTitle: 'Session Feedback',
-            welcomeMessage:
-              'Please take a moment to share your feedback about your therapy session.',
-            thankYouTitle: 'Thank you!',
-            thankYouMessage: 'Thanks for sharing your feedback - we really appreciate it.',
-            questions: DEFAULT_QUESTIONS,
-            isActive: true,
-            requiresAuth: true,
-          },
-        });
-      }
-
-      // If config has empty questions or still has the old question set (pre-v2),
-      // replace with the new conditional questions
-      const questions = config.questions as unknown[];
-      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-      const hasNewQuestions = questionIds.includes('met_goals');
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-      if (needsDefaults) {
-        config = await prisma.feedbackFormConfig.update({
-          where: { id: 'default' },
-          data: {
-            questions: DEFAULT_QUESTIONS,
-            requiresAuth: true,
-            questionsVersion: 2,
-          },
-        });
-        logger.info('Populated feedback form config with default questions (v2)');
-      }
-
-      return reply.send({ success: true, data: config });
+      const config = await getOrCreateFeedbackFormConfig();
+      return sendSuccess(reply, config);
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback form config');
-      return reply.status(500).send({ error: 'Failed to load form configuration' });
+      return Errors.internal(reply, 'Failed to load form configuration');
     }
   });
 
@@ -191,10 +89,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       const validation = updateFormConfigSchema.safeParse(request.body);
 
       if (!validation.success) {
-        return reply.status(400).send({
-          error: 'Invalid form configuration',
-          details: validation.error.issues,
-        });
+        return Errors.badRequest(reply, 'Invalid form configuration', validation.error.issues);
       }
 
       const updates = validation.data;
@@ -230,10 +125,10 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
 
       logger.info('Feedback form configuration updated');
 
-      return reply.send({ success: true, data: config });
+      return sendSuccess(reply, config);
     } catch (error) {
       logger.error({ error }, 'Failed to update feedback form config');
-      return reply.status(500).send({ error: 'Failed to update form configuration' });
+      return Errors.internal(reply, 'Failed to update form configuration');
     }
   });
 
@@ -296,21 +191,18 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         prisma.feedbackSubmission.count({ where }),
       ]);
 
-      return reply.send({
-        success: true,
-        data: {
-          submissions,
-          pagination: {
-            page: pageNum,
-            limit: limitNum,
-            total,
-            totalPages: Math.ceil(total / limitNum),
-          },
+      return sendSuccess(reply, {
+        submissions,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages: Math.ceil(total / limitNum),
         },
       });
     } catch (error) {
       logger.error({ error }, 'Failed to list feedback submissions');
-      return reply.status(500).send({ error: 'Failed to load submissions' });
+      return Errors.internal(reply, 'Failed to load submissions');
     }
   });
 
@@ -342,13 +234,13 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         });
 
         if (!submission) {
-          return reply.status(404).send({ error: 'Submission not found' });
+          return Errors.notFound(reply, 'Submission');
         }
 
-        return reply.send({ success: true, data: submission });
+        return sendSuccess(reply, submission);
       } catch (error) {
         logger.error({ error }, 'Failed to get feedback submission');
-        return reply.status(500).send({ error: 'Failed to load submission' });
+        return Errors.internal(reply, 'Failed to load submission');
       }
     }
   );
@@ -401,15 +293,15 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         }
       }
 
-      return reply.send({ success: true, data: {
+      return sendSuccess(reply, {
         totalSubmissions,
         recentSubmissions,
         questions: questions.map(q => ({ id: q.id, question: q.question, type: q.type })),
         questionStats,
-      } });
+      });
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback stats');
-      return reply.status(500).send({ error: 'Failed to load statistics' });
+      return Errors.internal(reply, 'Failed to load statistics');
     }
   });
 
@@ -455,8 +347,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
             },
           });
 
-          return reply.status(404).send({
-            error: 'No feedback submission found for this tracking code',
+          return sendError(reply, 404, 'No feedback submission found for this tracking code', {
             appointment: appointment || null,
             hint: appointment
               ? 'The appointment exists but no feedback has been submitted yet'
@@ -464,10 +355,10 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
           });
         }
 
-        return reply.send({ success: true, data: submission });
+        return sendSuccess(reply, submission);
       } catch (error) {
         logger.error({ error }, 'Failed to get feedback submission by tracking code');
-        return reply.status(500).send({ error: 'Failed to load submission' });
+        return Errors.internal(reply, 'Failed to load submission');
       }
     }
   );
@@ -538,7 +429,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       return reply.send(csv);
     } catch (error) {
       logger.error({ error }, 'Failed to export feedback submissions');
-      return reply.status(500).send({ error: 'Failed to export submissions' });
+      return Errors.internal(reply, 'Failed to export submissions');
     }
   });
 
@@ -550,9 +441,7 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
     // Require explicit confirmation parameter to prevent accidental deletion
     const { confirm } = request.query as { confirm?: string };
     if (confirm !== 'DELETE_ALL') {
-      return reply.status(400).send({
-        error: 'Missing confirmation. Add ?confirm=DELETE_ALL to confirm bulk deletion.',
-      });
+      return Errors.badRequest(reply, 'Missing confirmation. Add ?confirm=DELETE_ALL to confirm bulk deletion.');
     }
 
     try {
@@ -560,14 +449,13 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
 
       logger.warn({ count: result.count }, 'All feedback submissions deleted');
 
-      return reply.send({
-        success: true,
+      return sendSuccess(reply, null, {
         message: `Deleted ${result.count} feedback submissions`,
         count: result.count,
       });
     } catch (error) {
       logger.error({ error }, 'Failed to delete feedback submissions');
-      return reply.status(500).send({ error: 'Failed to delete submissions' });
+      return Errors.internal(reply, 'Failed to delete submissions');
     }
   });
 }

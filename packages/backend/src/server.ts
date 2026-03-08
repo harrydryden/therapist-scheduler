@@ -9,15 +9,32 @@ import path from 'path';
 import fs from 'fs';
 import pino from 'pino';
 import { config } from './config';
+// --- Route Modules ---
+// Public-facing routes (no auth required)
 import { therapistRoutes } from './routes/therapists.routes';
-import { webhookRoutes } from './routes/webhooks.routes';
 import { appointmentsRoutes } from './routes/appointments.routes';
-import { ingestionRoutes } from './routes/ingestion.routes';
-import { emailWebhookRoutes } from './routes/email-webhook.routes';
+import { feedbackFormRoutes } from './routes/feedback-form.routes';
+import { unsubscribeRoutes } from './routes/unsubscribe.routes';
+import { publicSettingsRoutes } from './routes/admin-settings.routes';
+
+// Admin routes (webhook secret auth required)
 import { adminRoutes } from './routes/admin.routes';
 import { adminDashboardRoutes } from './routes/admin-dashboard.routes';
 import { adminKnowledgeRoutes } from './routes/admin-knowledge.routes';
-import { adminSettingsRoutes, publicSettingsRoutes } from './routes/admin-settings.routes';
+import { adminSettingsRoutes } from './routes/admin-settings.routes';
+import { adminFormsRoutes } from './routes/admin-forms.routes';
+import { ingestionRoutes } from './routes/ingestion.routes';
+
+// ATS Integration routes (versioned, webhook secret auth required)
+import { atsIntegrationRoutes } from './routes/ats-integration.routes';
+
+// Webhook receivers (Gmail, Slack — external service callbacks)
+import { emailWebhookRoutes } from './routes/email-webhook.routes';
+
+// Legacy routes (deprecated — maintained for backward compatibility)
+import { webhookRoutes } from './routes/webhooks.routes';
+
+// --- Services ---
 import { notionService } from './services/notion.service';
 import { staleCheckService } from './services/stale-check.service';
 import { emailPollingService } from './services/email-polling.service';
@@ -29,9 +46,6 @@ import { slackWeeklySummaryService } from './services/slack-weekly-summary.servi
 import { notionSyncManager } from './services/notion-sync-manager.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
-import { unsubscribeRoutes } from './routes/unsubscribe.routes';
-import { feedbackFormRoutes } from './routes/feedback-form.routes';
-import { adminFormsRoutes } from './routes/admin-forms.routes';
 import { prisma, checkDatabaseHealth } from './utils/database';
 import { redis } from './utils/redis';
 import { circuitBreakerRegistry } from './utils/circuit-breaker';
@@ -287,20 +301,33 @@ async function buildServer() {
     };
   });
 
-  // Register routes
-  await fastify.register(therapistRoutes);
-  await fastify.register(webhookRoutes);
-  await fastify.register(appointmentsRoutes);
-  await fastify.register(ingestionRoutes);
-  await fastify.register(emailWebhookRoutes);
-  await fastify.register(adminRoutes);
-  await fastify.register(adminDashboardRoutes);
-  await fastify.register(adminKnowledgeRoutes);
-  await fastify.register(adminSettingsRoutes);
-  await fastify.register(publicSettingsRoutes);
-  await fastify.register(unsubscribeRoutes);
-  await fastify.register(feedbackFormRoutes);
-  await fastify.register(adminFormsRoutes);
+  // ==========================================
+  // Route Registration
+  // ==========================================
+
+  // --- Public routes (no authentication required) ---
+  await fastify.register(therapistRoutes);         // GET /api/therapists
+  await fastify.register(appointmentsRoutes);       // POST /api/appointments/request, GET /api/appointments/:id/status
+  await fastify.register(feedbackFormRoutes);        // GET /api/feedback/form, POST /api/feedback/submit
+  await fastify.register(unsubscribeRoutes);         // POST /api/unsubscribe/:token
+  await fastify.register(publicSettingsRoutes);      // GET /api/settings/frontend
+
+  // --- Admin routes (webhook secret authentication) ---
+  await fastify.register(adminRoutes);              // Gmail setup, Slack diagnostics, weekly mailing
+  await fastify.register(adminDashboardRoutes);     // Appointments CRUD, therapist management, stats, SSE
+  await fastify.register(adminKnowledgeRoutes);     // Knowledge base CRUD
+  await fastify.register(adminSettingsRoutes);      // System settings CRUD, alerts, health
+  await fastify.register(adminFormsRoutes);         // Feedback form config & submissions
+  await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion
+
+  // --- ATS Integration routes (versioned API for external ATS system) ---
+  await fastify.register(atsIntegrationRoutes);     // /api/v1/ats/* — appointments, feedback, therapists, stats
+
+  // --- External webhook receivers ---
+  await fastify.register(emailWebhookRoutes);       // Gmail Pub/Sub push notifications
+
+  // --- Legacy routes (deprecated — remove after ATS migration) ---
+  await fastify.register(webhookRoutes);            // POST /api/webhooks/appointment-request (use /api/v1/ats/appointments instead)
 
   // In production, serve the frontend SPA build
   if (config.env === 'production') {

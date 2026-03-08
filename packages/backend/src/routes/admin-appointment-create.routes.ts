@@ -10,6 +10,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { sendSuccess, Errors } from '../utils/response';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS } from '../constants';
 import { notionService } from '../services/notion.service';
@@ -53,11 +54,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
 
       const validation = createAppointmentSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       const { userEmail, userName, therapistNotionId, stage, confirmedDateTime, adminId, notes } = validation.data;
@@ -66,20 +63,14 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
         // 1. Fetch therapist from Notion (trusted source for email and name)
         const therapist = await notionService.getTherapist(therapistNotionId);
         if (!therapist) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Therapist not found in Notion',
-          });
+          return Errors.notFound(reply, 'Therapist');
         }
 
         const therapistEmail = therapist.email;
         const therapistName = therapist.name;
 
         if (!therapistEmail || therapistEmail.trim() === '') {
-          return reply.status(400).send({
-            success: false,
-            error: 'Therapist has no email configured in Notion',
-          });
+          return Errors.badRequest(reply, 'Therapist has no email configured in Notion');
         }
 
         // 2. Get or create User and Therapist entities with unique IDs
@@ -216,21 +207,15 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
           },
         });
 
-        return reply.status(201).send({
-          success: true,
-          data: {
-            id: finalAppointment?.id || appointmentRequest.id,
-            trackingCode: finalAppointment?.trackingCode || appointmentRequest.trackingCode,
-            status: finalAppointment?.status || stage,
-            confirmedDateTime: finalAppointment?.confirmedDateTime || confirmedDateTime,
-          },
-        });
+        return sendSuccess(reply, {
+          id: finalAppointment?.id || appointmentRequest.id,
+          trackingCode: finalAppointment?.trackingCode || appointmentRequest.trackingCode,
+          status: finalAppointment?.status || stage,
+          confirmedDateTime: finalAppointment?.confirmedDateTime || confirmedDateTime,
+        }, { statusCode: 201 });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to create admin appointment');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to create appointment',
-        });
+        return Errors.internal(reply, 'Failed to create appointment');
       }
     }
   );

@@ -18,7 +18,9 @@ import { appointmentLifecycleService } from '../services/appointment-lifecycle.s
 import { slackNotificationService } from '../services/slack-notification.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { sanitizeName, sanitizeObject } from '../utils/input-sanitizer';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
+import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import type { FormQuestion, FormConfig } from '@therapist-scheduler/shared/types/feedback';
 
 interface PrefilledData {
@@ -50,25 +52,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
    */
   fastify.get('/api/feedback/form', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      let config = await prisma.feedbackFormConfig.findUnique({
-        where: { id: 'default' },
-      });
-
+      const config = await getOrCreateFeedbackFormConfig();
       if (!config || !config.isActive) {
-        return reply.status(404).send({ error: 'Feedback form not available' });
-      }
-
-      // Auto-populate if questions are empty or still have the old question set
-      const questions = config.questions as unknown[];
-      const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-      const hasNewQuestions = questionIds.includes('met_goals');
-      const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-      if (needsDefaults) {
-        const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
-        config = await prisma.feedbackFormConfig.update({
-          where: { id: 'default' },
-          data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
-        });
+        return sendError(reply, 404, 'Feedback form not available');
       }
 
       const formConfig: FormConfig = {
@@ -83,10 +69,10 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         requireExplanationFor: (config.requireExplanationFor as string[]) ?? ['No', 'Unsure'],
       };
 
-      return reply.send({ form: formConfig, prefilled: null });
+      return sendSuccess(reply, { form: formConfig, prefilled: null });
     } catch (error) {
       logger.error({ error }, 'Failed to get feedback form config');
-      return reply.status(500).send({ error: 'Failed to load form' });
+      return Errors.internal(reply, 'Failed to load form');
     }
   });
 
@@ -112,26 +98,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       const { splCode } = request.params;
 
       try {
-        // Get form config
-        let config = await prisma.feedbackFormConfig.findUnique({
-          where: { id: 'default' },
-        });
-
+        const config = await getOrCreateFeedbackFormConfig();
         if (!config || !config.isActive) {
-          return reply.status(404).send({ error: 'Feedback form not available' });
-        }
-
-        // Auto-populate if questions are empty or still have the old question set
-        const questions = config.questions as unknown[];
-        const questionIds = Array.isArray(questions) ? (questions as Array<{ id?: string }>).map(q => q.id) : [];
-        const hasNewQuestions = questionIds.includes('met_goals');
-        const needsDefaults = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
-        if (needsDefaults) {
-          const { DEFAULT_QUESTIONS } = await import('./admin-forms.routes');
-          config = await prisma.feedbackFormConfig.update({
-            where: { id: 'default' },
-            data: { questions: DEFAULT_QUESTIONS, requiresAuth: true, questionsVersion: 2 },
-          });
+          return sendError(reply, 404, 'Feedback form not available');
         }
 
         // Look up appointment by tracking code
@@ -168,7 +137,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         // If no appointment found, return form without prefilled data
         if (!appointment) {
           logger.warn({ splCode }, 'No appointment found for SPL code');
-          return reply.send({
+          return sendSuccess(reply, {
             form: formConfig,
             prefilled: null,
             warning: 'Could not find appointment for this code',
@@ -181,10 +150,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         });
 
         if (existingFeedback) {
-          return reply.status(400).send({
-            error: 'Feedback already submitted',
-            message: 'You have already submitted feedback for this session.',
-          });
+          return Errors.badRequest(reply, 'Feedback already submitted');
         }
 
         // FIX #2: Redact PII from prefilled data to prevent leaking via SPL code brute-force.
@@ -202,10 +168,10 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           'Loaded feedback form with prefilled data'
         );
 
-        return reply.send({ form: formConfig, prefilled });
+        return sendSuccess(reply, { form: formConfig, prefilled });
       } catch (error) {
         logger.error({ error, splCode }, 'Failed to get feedback form with prefill');
-        return reply.status(500).send({ error: 'Failed to load form' });
+        return Errors.internal(reply, 'Failed to load form');
       }
     }
   );
@@ -230,10 +196,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       const validation = submitFeedbackSchema.safeParse(request.body);
 
       if (!validation.success) {
-        return reply.status(400).send({
-          error: 'Invalid form data',
-          details: validation.error.issues,
-        });
+        return Errors.badRequest(reply, 'Invalid form data', validation.error.issues);
       }
 
       const { trackingCode, therapistName: rawTherapistName, responses: rawResponses } = validation.data;
@@ -276,9 +239,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           if (q.required) {
             const val = responses[q.id];
             if (val === undefined || val === null || (typeof val === 'string' && !val.trim())) {
-              return reply.status(400).send({
-                error: `Please answer "${q.question}"`,
-              });
+              return Errors.badRequest(reply, `Please answer "${q.question}"`);
             }
           }
 
@@ -292,9 +253,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
             if (needsExplanation) {
               const textVal = responses[`${q.id}_text`];
               if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
-                return reply.status(400).send({
-                  error: `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`,
-                });
+                return Errors.badRequest(reply, `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`);
               }
             }
           }
@@ -506,21 +465,14 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         }
       }
 
-      return reply.status(201).send({
-        success: true,
-        submissionId: submission.id,
-        message: 'Thank you for your feedback!',
-      });
+      return sendSuccess(reply, { submissionId: submission.id }, { statusCode: 201, message: 'Thank you for your feedback!' });
     } catch (error) {
       // Handle duplicate feedback error from transaction
       if (error instanceof Error && error.message === 'DUPLICATE_FEEDBACK') {
-        return reply.status(400).send({
-          error: 'Feedback already submitted',
-          message: 'You have already submitted feedback for this session.',
-        });
+        return Errors.badRequest(reply, 'Feedback already submitted');
       }
       logger.error({ error }, 'Failed to submit feedback');
-      return reply.status(500).send({ error: 'Failed to submit feedback' });
+      return Errors.internal(reply, 'Failed to submit feedback');
     }
   });
 }
