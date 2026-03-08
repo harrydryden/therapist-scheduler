@@ -58,8 +58,10 @@ COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/dist ./package
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/package.json ./packages/backend/package.json
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/prisma ./packages/backend/prisma
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/scripts/docker-entrypoint.sh ./packages/backend/scripts/docker-entrypoint.sh
-# Copy backend workspace-local node_modules (includes @prisma/client when not hoisted)
-COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/node_modules ./packages/backend/node_modules
+# Copy backend workspace-local node_modules if it exists (includes @prisma/client when not hoisted).
+# The trailing slash + wildcard pattern ensures the COPY is a no-op when the directory is absent,
+# which happens when npm hoists all deps to the root node_modules.
+COPY --from=builder --chown=nodeuser:nodejs /app/packages/backend/node_module[s] ./packages/backend/node_modules
 
 # Copy frontend build output (served by backend via @fastify/static)
 COPY --from=builder --chown=nodeuser:nodejs /app/packages/frontend/dist ./dist

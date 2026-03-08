@@ -94,6 +94,7 @@ export async function buildSystemPrompt(
     'email.slotConfirmationToTherapistSubject',
     'email.slotConfirmationToTherapistBody',
     'agent.languageStyle',
+    'agent.toneStyle',
   ]);
   const initialClientSubject = settingsMap.get('email.initialClientWithAvailabilitySubject')!;
   const initialClientBody = settingsMap.get('email.initialClientWithAvailabilityBody')!;
@@ -104,6 +105,8 @@ export async function buildSystemPrompt(
   const slotConfirmSubject = settingsMap.get('email.slotConfirmationToTherapistSubject')!;
   const slotConfirmBody = settingsMap.get('email.slotConfirmationToTherapistBody')!;
   const languageStyle = settingsMap.get('agent.languageStyle')!;
+  const toneStyle = settingsMap.get('agent.toneStyle')!;
+  const toneGuidance = getToneGuidance(toneStyle as string);
 
   const hasAvailability = context.therapistAvailability &&
     (context.therapistAvailability as any).slots &&
@@ -146,14 +149,16 @@ ${getValidActionsForStage(currentStage)}
 
   return `# Justin Time - Scheduling Coordinator
 
-You are Justin Time, a professional and warm scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
+You are Justin Time, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
 ${factsSection}${stageGuidance}${knowledgeSection}
 ## Your Identity
 - **Name:** Justin Time
 - **Role:** Scheduling Coordinator
 - **Email:** scheduling@spill.chat
-- **Tone:** Warm, professional, concise
 - **Language:** Use ${languageStyle} English spelling and grammar (e.g., ${languageStyle === 'UK' ? '"organise", "colour", "centre", "favour"' : '"organize", "color", "center", "favor"'})
+
+## Tone & Communication Style
+${toneGuidance}
 
 ## Current Scheduling Request
 - **Client name:** ${context.userName}
@@ -242,6 +247,28 @@ Begin now based on whether availability exists or not.`;
 }
 
 // ─── Internal Helpers ──────────────────────────────────────────
+
+const TONE_GUIDANCE: Record<string, string> = {
+  formal: `- Be polite, professional, and measured in all communications
+- Use complete sentences and formal phrasing (e.g., "I would be happy to assist you with…")
+- Avoid contractions — use "I am", "you will", "it is" instead of "I'm", "you'll", "it's"
+- Maintain a respectful distance while remaining helpful`,
+  'warm-casual': `- Be professional but approachable — write like a helpful colleague, not a corporate bot
+- Use natural, conversational language with contractions (e.g., "I'll", "you're", "that's")
+- Keep things concise and to the point — no filler or overly polished phrasing
+- Be straightforward: say "let me know" rather than "please do not hesitate to reach out"
+- Never be apologetic or overly formal — skip phrases like "I sincerely apologise for any inconvenience"
+- Show warmth through being genuinely helpful, not through flowery language`,
+  friendly: `- Be warm, upbeat, and personable — like a friendly coworker who's happy to help
+- Use casual, natural language with contractions and a light touch
+- Keep things brief and easygoing — it's fine to be a bit informal
+- Show personality: a lighthearted tone is welcome where appropriate
+- Avoid corporate-speak, stiffness, or unnecessary formality`,
+};
+
+function getToneGuidance(toneStyle: string): string {
+  return TONE_GUIDANCE[toneStyle] || TONE_GUIDANCE['warm-casual'];
+}
 
 interface WorkflowParams {
   hasAvailability: boolean;

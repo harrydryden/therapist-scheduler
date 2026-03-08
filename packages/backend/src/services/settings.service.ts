@@ -138,6 +138,14 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     defaultValue: 'UK',
     allowedValues: ['UK', 'US'],
   },
+  'agent.toneStyle': {
+    category: 'agent',
+    label: 'Tone Style',
+    description: 'The overall tone Justin uses in emails. Controls formality, warmth, and communication style.',
+    valueType: 'string',
+    defaultValue: 'warm-casual',
+    allowedValues: ['formal', 'warm-casual', 'friendly'],
+  },
 
   // Data retention settings
   'retention.cancelledDays': {
