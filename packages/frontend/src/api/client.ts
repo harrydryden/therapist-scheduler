@@ -29,7 +29,7 @@ import type {
 import { API_BASE, getAdminSecret, clearAdminSecret } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
 
-const EMPTY_PAGINATION: PaginationInfo = EMPTY_PAGINATION;
+const EMPTY_PAGINATION: PaginationInfo = { page: 1, limit: 20, total: 0, totalPages: 0 };
 
 // Known API error detail shapes — avoids catch-all index signature
 interface ThreadLimitDetails {
