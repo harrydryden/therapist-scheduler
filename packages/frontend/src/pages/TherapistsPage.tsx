@@ -29,7 +29,7 @@ export default function TherapistsPage() {
 
   // Filter to only show active therapists
   const activeTherapists = useMemo(() => {
-    if (!therapists) return [];
+    if (!Array.isArray(therapists)) return [];
     return therapists.filter((t) => t.active);
   }, [therapists]);
 

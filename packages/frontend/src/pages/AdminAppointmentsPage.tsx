@@ -631,7 +631,7 @@ function AppointmentsTable() {
     refetchOnWindowFocus: false, // Polling handles freshness; avoid duplicate requests on tab switch
   });
 
-  const appointments = data?.data || [];
+  const appointments = Array.isArray(data?.data) ? data.data : [];
   const pagination = data?.pagination;
 
   const updateMutation = useMutation({

@@ -76,7 +76,7 @@ export default function AdminDashboardPage() {
 
   // Group appointments by therapist
   const therapistGroups = useMemo(() => {
-    if (!appointmentsData?.data) return [];
+    if (!Array.isArray(appointmentsData?.data)) return [];
 
     let filteredAppointments = appointmentsData.data;
 
