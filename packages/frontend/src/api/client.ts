@@ -244,14 +244,20 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
       TIMEOUTS.DEFAULT_MS
     );
 
-    const data = await safeParseJson(response) as Record<string, unknown>;
+    const data = await safeParseJson(response);
 
     if (!response.ok) {
+      const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
       throw new ApiError(
-        (data.error as string) || 'An error occurred',
-        data.code as string | undefined,
-        data.details as ApiError['details']
+        (errorData.error as string) || 'An error occurred',
+        errorData.code as string | undefined,
+        errorData.details as ApiError['details']
       );
+    }
+
+    // Validate response is an object with expected structure
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new ApiError('Invalid API response format');
     }
 
     return data as unknown as ApiResponse<T>;
@@ -260,7 +266,7 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<Api
 
 export async function getTherapists(): Promise<Therapist[]> {
   const response = await fetchApi<Therapist[]>('/therapists');
-  return response.data || [];
+  return Array.isArray(response?.data) ? response.data : [];
 }
 
 export async function getTherapist(id: string): Promise<TherapistDetail> {
@@ -455,7 +461,7 @@ export async function getAppointments(filters: AppointmentFilters = {}): Promise
   );
 
   return {
-    data: response.data || [],
+    data: Array.isArray(response?.data) ? response.data : [],
     pagination: response.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
   };
 }
@@ -645,7 +651,7 @@ export async function reprocessThread(
 
 export async function getKnowledgeEntries(): Promise<KnowledgeEntry[]> {
   const response = await fetchAdminApi<KnowledgeEntry[]>('/admin/knowledge');
-  return response.data || [];
+  return Array.isArray(response?.data) ? response.data : [];
 }
 
 export async function createKnowledgeEntry(
@@ -761,12 +767,12 @@ export async function getFrontendSettings(): Promise<FrontendSettings> {
 
 export async function getAdminUsers(): Promise<AdminUser[]> {
   const response = await fetchAdminApi<AdminUser[]>('/admin/appointments/users');
-  return response.data || [];
+  return Array.isArray(response?.data) ? response.data : [];
 }
 
 export async function getAdminTherapists(): Promise<AdminTherapist[]> {
   const response = await fetchAdminApi<AdminTherapist[]>('/admin/appointments/therapists');
-  return response.data || [];
+  return Array.isArray(response?.data) ? response.data : [];
 }
 
 export async function getAllAppointments(filters: {
@@ -793,7 +799,7 @@ export async function getAllAppointments(filters: {
   );
 
   return {
-    data: response.data || [],
+    data: Array.isArray(response?.data) ? response.data : [],
     pagination: response.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
   };
 }

@@ -76,7 +76,7 @@ export default function TherapistDetailPage() {
                 {/* Categories */}
                 <div className="space-y-3 mb-4">
                   {/* Approach */}
-                  {therapist.approach && therapist.approach.length > 0 && (
+                  {Array.isArray(therapist.approach) && therapist.approach.length > 0 && (
                     <div>
                       <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Approach</span>
                       <div className="flex flex-wrap gap-1.5 mt-1">
@@ -97,7 +97,7 @@ export default function TherapistDetailPage() {
                   )}
 
                   {/* Style */}
-                  {therapist.style && therapist.style.length > 0 && (
+                  {Array.isArray(therapist.style) && therapist.style.length > 0 && (
                     <div>
                       <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Style</span>
                       <div className="flex flex-wrap gap-1.5 mt-1">
@@ -118,7 +118,7 @@ export default function TherapistDetailPage() {
                   )}
 
                   {/* Areas of Focus */}
-                  {therapist.areasOfFocus && therapist.areasOfFocus.length > 0 && (
+                  {Array.isArray(therapist.areasOfFocus) && therapist.areasOfFocus.length > 0 && (
                     <div>
                       <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Focus Areas</span>
                       <div className="flex flex-wrap gap-1.5 mt-1">
@@ -143,7 +143,7 @@ export default function TherapistDetailPage() {
 
                 <div className="border-t pt-4">
                   <h3 className="text-sm font-semibold text-gray-900 mb-2">Availability</h3>
-                  {therapist.availability && therapist.availability.slots.length > 0 ? (
+                  {therapist.availability && Array.isArray(therapist.availability.slots) && therapist.availability.slots.length > 0 ? (
                     <div className="space-y-1">
                       {therapist.availability.slots.map((slot) => (
                         <p key={`${slot.day}-${slot.start}-${slot.end}`} className="text-sm text-gray-600">
