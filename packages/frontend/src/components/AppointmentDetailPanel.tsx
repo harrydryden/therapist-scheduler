@@ -95,7 +95,8 @@ export default function AppointmentDetailPanel({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
-      queryClient.invalidateQueries({ queryKey: ['appointments'] });
+      // Mark list stale without immediate refetch — polling will pick it up
+      queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
       setMutationError(null);
     },
     onError: (error, _vars, context) => {
@@ -125,7 +126,7 @@ export default function AppointmentDetailPanel({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
-      queryClient.invalidateQueries({ queryKey: ['appointments'] });
+      queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
       setMutationError(null);
     },
     onError: (error, _vars, context) => {
@@ -174,8 +175,9 @@ export default function AppointmentDetailPanel({
     onMutate: () => { setMutationError(null); },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
-      queryClient.invalidateQueries({ queryKey: ['appointments'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      // Mark list and stats stale — polling will refresh them shortly
+      queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'], refetchType: 'none' });
       setShowEditPanel(false);
       setMutationError(null);
       if (data.warning) {
@@ -300,8 +302,8 @@ export default function AppointmentDetailPanel({
             onAction={async (action) => {
               await actionClosure(appointmentDetail.id, action);
               queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
-              queryClient.invalidateQueries({ queryKey: ['appointments'] });
-              queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+              queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
+              queryClient.invalidateQueries({ queryKey: ['dashboard-stats'], refetchType: 'none' });
               if (action === 'cancel') {
                 onClearSelection();
               }

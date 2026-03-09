@@ -601,6 +601,7 @@ function AppointmentsTable() {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showCancelled, setShowCancelled] = useState(false);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
@@ -608,6 +609,18 @@ function AppointmentsTable() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const limit = 20;
   const queryClient = useQueryClient();
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounce search input to avoid firing API calls on every keystroke
+  useEffect(() => {
+    searchTimerRef.current = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(1);
+    }, 300);
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, [search]);
 
   const statusFilter = useMemo(() => {
     const statuses = [...ACTIVE_STATUSES];
@@ -617,10 +630,10 @@ function AppointmentsTable() {
   }, [showCompleted, showCancelled]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['admin-all-appointments', statusFilter, search, page, limit, sortBy, sortOrder],
+    queryKey: ['admin-all-appointments', statusFilter, debouncedSearch, page, limit, sortBy, sortOrder],
     queryFn: () => getAllAppointments({
       status: statusFilter,
-      search: search || undefined,
+      search: debouncedSearch || undefined,
       page,
       limit,
       sortBy,
@@ -701,10 +714,7 @@ function AppointmentsTable() {
               <input
                 type="text"
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search user or therapist..."
                 className="pl-9 pr-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none w-56 sm:w-64"
               />

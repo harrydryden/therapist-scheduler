@@ -330,18 +330,25 @@ class NotionSyncManager {
       const therapistIds = statuses.map(s => s.id);
       const freezeStatusMap = await therapistBookingStatusService.batchComputeFreezeStatus(therapistIds);
 
-      for (const status of statuses) {
-        try {
-          const shouldBeFrozen = freezeStatusMap.get(status.id) ?? false;
-
-          await notionClientManager.executeWithRateLimit(async () => {
-            await notionService.updateTherapistFrozen(status.id, shouldBeFrozen);
-          });
-
-          synced++;
-        } catch (error) {
-          logger.error({ error, therapistId: status.id }, 'Failed to sync therapist freeze status');
-          errors++;
+      // Process in concurrent batches of 5 (respecting Notion rate limits)
+      const CONCURRENCY = 5;
+      for (let i = 0; i < statuses.length; i += CONCURRENCY) {
+        const batch = statuses.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          batch.map(async (status) => {
+            const shouldBeFrozen = freezeStatusMap.get(status.id) ?? false;
+            await notionClientManager.executeWithRateLimit(async () => {
+              await notionService.updateTherapistFrozen(status.id, shouldBeFrozen);
+            });
+          })
+        );
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            synced++;
+          } else {
+            logger.error({ error: result.reason }, 'Failed to sync therapist freeze status');
+            errors++;
+          }
         }
       }
 
@@ -442,19 +449,23 @@ class NotionSyncManager {
 
     let transitioned = 0;
 
-    for (const apt of appointments) {
-      try {
+    // Process transitions concurrently — each uses atomic preconditions so safe to parallelize
+    const results = await Promise.allSettled(
+      appointments.map(async (apt) => {
         const result = await appointmentLifecycleService.transitionToSessionHeld({
           appointmentId: apt.id,
           source: 'system',
         });
+        return { id: apt.id, skipped: result.skipped };
+      })
+    );
 
-        if (!result.skipped) {
-          logger.info({ syncId, appointmentId: apt.id }, 'Transitioned to session_held');
-          transitioned++;
-        }
-      } catch (error) {
-        logger.error({ syncId, appointmentId: apt.id, error }, 'Failed to transition to session_held');
+    for (const result of results) {
+      if (result.status === 'fulfilled' && !result.value.skipped) {
+        logger.info({ syncId, appointmentId: result.value.id }, 'Transitioned to session_held');
+        transitioned++;
+      } else if (result.status === 'rejected') {
+        logger.error({ syncId, error: result.reason }, 'Failed to transition to session_held');
       }
     }
 

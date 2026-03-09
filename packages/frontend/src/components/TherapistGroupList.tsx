@@ -330,8 +330,10 @@ export default memo(function TherapistGroupList({
         <h2 className="font-semibold text-slate-900">By Therapist</h2>
         <p className="text-sm text-slate-500">
           {therapistGroups.length} therapist{therapistGroups.length !== 1 ? 's' : ''}
-          {therapistGroups.reduce((sum, g) => sum + g.pendingCount + g.negotiatingCount, 0) > 0 &&
-            ` • ${therapistGroups.reduce((sum, g) => sum + g.pendingCount + g.negotiatingCount, 0)} active conversations`}
+          {(() => {
+            const activeConversations = therapistGroups.reduce((sum, g) => sum + g.pendingCount + g.negotiatingCount, 0);
+            return activeConversations > 0 ? ` • ${activeConversations} active conversations` : '';
+          })()}
         </p>
       </div>
 
