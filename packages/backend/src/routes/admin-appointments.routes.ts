@@ -1155,6 +1155,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             odId: true,
           },
           orderBy: { name: 'asc' },
+          take: 1000, // Cap results to prevent unbounded queries
         });
 
         return sendSuccess(reply, users);
@@ -1185,6 +1186,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             odId: true,
           },
           orderBy: { name: 'asc' },
+          take: 1000, // Cap results to prevent unbounded queries
         });
 
         return sendSuccess(reply, therapists);

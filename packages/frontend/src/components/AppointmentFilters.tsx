@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { AppointmentFilters as AppointmentFiltersType, AppointmentListItem } from '../types';
 import { PRE_BOOKING_STATUSES, POST_SESSION_STATUSES } from '../types';
 
@@ -26,16 +27,21 @@ export default function AppointmentFilters({
   const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
   const postSessionStatuses = POST_SESSION_STATUSES as readonly string[];
 
-  const activeAppointments = data.filter(
-    (apt) => preBookingStatuses.includes(apt.status)
-  );
-  const redCount = activeAppointments.filter((apt) => apt.healthStatus === 'red').length;
-  const humanCount = data.filter((apt) => apt.humanControlEnabled).length;
-
-  // Lifecycle stage counts
-  const activeCount = activeAppointments.length;
-  const confirmedCount = data.filter((apt) => apt.status === 'confirmed').length;
-  const postSessionCount = data.filter((apt) => postSessionStatuses.includes(apt.status)).length;
+  // Compute all counts in a single pass to avoid 5+ iterations over the data
+  const { activeCount, redCount, humanCount, confirmedCount, postSessionCount } = useMemo(() => {
+    let active = 0, red = 0, human = 0, confirmed = 0, postSession = 0;
+    for (const apt of data) {
+      const isPreBooking = preBookingStatuses.includes(apt.status);
+      if (isPreBooking) {
+        active++;
+        if (apt.healthStatus === 'red') red++;
+      }
+      if (apt.humanControlEnabled) human++;
+      if (apt.status === 'confirmed') confirmed++;
+      if (postSessionStatuses.includes(apt.status)) postSession++;
+    }
+    return { activeCount: active, redCount: red, humanCount: human, confirmedCount: confirmed, postSessionCount: postSession };
+  }, [data, preBookingStatuses, postSessionStatuses]);
 
   // Determine current filter based on state
   let currentFilter: FilterValue = 'all';

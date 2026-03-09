@@ -777,55 +777,59 @@ class StaleCheckService {
       return 0;
     }
 
-    let escalatedCount = 0;
+    // Batch update all candidates in a single query instead of N individual updates
+    const now = new Date();
+    const candidateIds = candidates.map(c => c.id);
 
-    for (const appointment of candidates) {
-      try {
-        const stallHours = Math.round(
-          (Date.now() - (appointment.conversationStallAlertAt?.getTime() || 0)) / (60 * 60 * 1000)
-        );
+    try {
+      const batchResult = await prisma.appointmentRequest.updateMany({
+        where: { id: { in: candidateIds } },
+        data: {
+          humanControlEnabled: true,
+          humanControlTakenBy: 'system-auto-escalation',
+          humanControlTakenAt: now,
+          autoEscalatedAt: now,
+        },
+      });
 
-        await prisma.appointmentRequest.update({
-          where: { id: appointment.id },
-          data: {
-            humanControlEnabled: true,
-            humanControlTakenBy: 'system-auto-escalation',
-            humanControlTakenAt: new Date(),
-            humanControlReason: `Auto-escalated: Stalled for ${stallHours}h with no agent progress. User: ${appointment.userName || appointment.userEmail}, Therapist: ${appointment.therapistName}`,
-            autoEscalatedAt: new Date(),
-          },
-          select: { id: true },
-        });
+      // Send Slack notifications concurrently (fire-and-forget with error isolation)
+      const notificationPromises = candidates.map(async (appointment) => {
+        try {
+          const aptStallHours = Math.round(
+            (Date.now() - (appointment.conversationStallAlertAt?.getTime() || 0)) / (60 * 60 * 1000)
+          );
 
-        logger.warn(
-          {
-            checkId,
-            appointmentId: appointment.id,
-            userName: appointment.userName,
-            therapistName: appointment.therapistName,
-            stallHours,
-          },
-          'Auto-escalated stalled conversation to human control'
-        );
+          logger.warn(
+            {
+              checkId,
+              appointmentId: appointment.id,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+              stallHours: aptStallHours,
+            },
+            'Auto-escalated stalled conversation to human control'
+          );
 
-        // Send Slack notification for auto-escalation
-        await slackNotificationService.notifyAutoEscalation(
-          appointment.id,
-          appointment.userName,
-          appointment.therapistName,
-          stallHours
-        );
+          await slackNotificationService.notifyAutoEscalation(
+            appointment.id,
+            appointment.userName,
+            appointment.therapistName,
+            aptStallHours
+          );
+        } catch (error) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, error },
+            'Failed to send auto-escalation Slack notification'
+          );
+        }
+      });
 
-        escalatedCount++;
-      } catch (error) {
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to auto-escalate appointment'
-        );
-      }
+      await Promise.all(notificationPromises);
+      return batchResult.count;
+    } catch (error) {
+      logger.error({ checkId, error }, 'Failed to batch auto-escalate appointments');
+      return 0;
     }
-
-    return escalatedCount;
   }
 
   /**

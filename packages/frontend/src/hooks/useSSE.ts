@@ -55,11 +55,17 @@ export function useSSE() {
 
             case 'appointment:status-changed':
             case 'appointment:human-control':
-              // Invalidate both the list and the specific appointment detail
-              queryClient.invalidateQueries({ queryKey: ['appointments'] });
+              // Invalidate dashboard stats and the specific appointment only.
+              // The full list will refresh via its polling interval (30s),
+              // avoiding a full re-fetch + re-render cascade on every SSE event.
               queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
               if (data.appointmentId) {
                 queryClient.invalidateQueries({ queryKey: ['appointment', data.appointmentId] });
+                // Optimistically update the list cache entry if it exists
+                queryClient.invalidateQueries({
+                  queryKey: ['appointments'],
+                  refetchType: 'none', // Mark stale without immediate refetch
+                });
               }
               break;
 
