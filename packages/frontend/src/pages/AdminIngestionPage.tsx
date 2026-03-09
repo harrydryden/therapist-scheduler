@@ -455,11 +455,13 @@ export default function AdminIngestionPage() {
 
       // Extract type strings and build evidence maps from CategoryWithEvidence arrays
       const extractTypes = (categories: CategoryWithEvidence[]): string[] =>
-        categories?.map(c => c.type) || [];
+        Array.isArray(categories) ? categories.map(c => c.type) : [];
 
       const buildEvidenceMap = (categories: CategoryWithEvidence[]): Map<string, CategoryWithEvidence> => {
         const map = new Map<string, CategoryWithEvidence>();
-        categories?.forEach(c => map.set(c.type, c));
+        if (Array.isArray(categories)) {
+          categories.forEach(c => map.set(c.type, c));
+        }
         return map;
       };
 
@@ -934,7 +936,7 @@ export default function AdminIngestionPage() {
               </div>
 
               {/* Qualifications */}
-              {previewData.qualifications && previewData.qualifications.length > 0 && (
+              {Array.isArray(previewData.qualifications) && previewData.qualifications.length > 0 && (
                 <div>
                   <label className="block text-sm font-medium text-slate-500 mb-1">Qualifications</label>
                   <ul className="list-disc list-inside text-slate-700">
