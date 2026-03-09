@@ -417,7 +417,7 @@ export default function AdminSettingsPage() {
           >
             All Settings
           </button>
-          {(settingsData?.categories || []).map((cat) => (
+          {(Array.isArray(settingsData?.categories) ? settingsData.categories : []).map((cat) => (
             <button
               key={cat}
               type="button"

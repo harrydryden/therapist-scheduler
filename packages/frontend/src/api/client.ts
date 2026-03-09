@@ -29,6 +29,8 @@ import type {
 import { API_BASE, getAdminSecret, clearAdminSecret } from '../config/env';
 import { HEADERS, TIMEOUTS } from '../config/constants';
 
+const EMPTY_PAGINATION: PaginationInfo = EMPTY_PAGINATION;
+
 // Known API error detail shapes — avoids catch-all index signature
 interface ThreadLimitDetails {
   maxAllowed: number;
@@ -407,21 +409,24 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
         TIMEOUTS.DEFAULT_MS
       );
 
-      const data = await safeParseJson(response) as Record<string, unknown>;
+      const data = await safeParseJson(response);
 
       // Handle auth failures: clear stored secret and throw AuthError
       // so React Query stops retrying and AdminLayout shows login screen
       if (response.status === 401 || response.status === 403) {
         clearAdminSecret();
         window.dispatchEvent(new Event('admin-auth-failed'));
+        const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
         throw new AuthError(
-          (data.error as string) || 'Authentication failed. Please re-enter your admin secret.',
+          (errorData.error as string) || 'Authentication failed. Please re-enter your admin secret.',
           response.status
         );
       }
 
+      const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+
       if (response.status === 429) {
-        const errorMsg = (data.error as string) || '';
+        const errorMsg = (errorData.error as string) || '';
         if (errorMsg.toLowerCase().includes('authentication')) {
           // Auth lockout - clear secret so user can re-enter after lockout expires
           clearAdminSecret();
@@ -436,7 +441,11 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
       }
 
       if (!response.ok) {
-        throw new Error((data.error as string) || 'An error occurred');
+        throw new Error((errorData.error as string) || 'An error occurred');
+      }
+
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new Error('Invalid API response format');
       }
 
       return data as unknown as ApiResponse<T> & { pagination?: PaginationInfo; total?: number };
@@ -462,7 +471,7 @@ export async function getAppointments(filters: AppointmentFilters = {}): Promise
 
   return {
     data: Array.isArray(response?.data) ? response.data : [],
-    pagination: response.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
+    pagination: response.pagination || EMPTY_PAGINATION,
   };
 }
 
@@ -794,15 +803,13 @@ export async function getAllAppointments(filters: {
   });
 
   const queryString = params.toString();
-  const response = await fetchAdminApi<AppointmentListItem[]>(
+  const response = await fetchAdminApi<{ items: AppointmentListItem[]; pagination: PaginationInfo }>(
     `/admin/appointments/all${queryString ? `?${queryString}` : ''}`
   );
 
-  // Backend sends { success: true, data: { items: [...], pagination: {...} } }
-  const responseData = response?.data as unknown as { items?: AppointmentListItem[]; pagination?: PaginationInfo } | undefined;
   return {
-    data: Array.isArray(responseData?.items) ? responseData.items : [],
-    pagination: responseData?.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
+    data: Array.isArray(response?.data?.items) ? response.data.items : [],
+    pagination: response?.data?.pagination || EMPTY_PAGINATION,
   };
 }
 
