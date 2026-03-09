@@ -798,9 +798,11 @@ export async function getAllAppointments(filters: {
     `/admin/appointments/all${queryString ? `?${queryString}` : ''}`
   );
 
+  // Backend sends { success: true, data: { items: [...], pagination: {...} } }
+  const responseData = response?.data as unknown as { items?: AppointmentListItem[]; pagination?: PaginationInfo } | undefined;
   return {
-    data: Array.isArray(response?.data) ? response.data : [],
-    pagination: response.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
+    data: Array.isArray(responseData?.items) ? responseData.items : [],
+    pagination: responseData?.pagination || { page: 1, limit: 20, total: 0, totalPages: 0 },
   };
 }
 
