@@ -15,7 +15,6 @@ import type {
 import {
   STATUS_LABELS,
   ALL_STATUSES,
-  ACTIVE_STATUSES,
 } from '../types';
 import { getStatusColor } from '../config/color-mappings';
 import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
@@ -623,9 +622,11 @@ function AppointmentsTable() {
   }, [search]);
 
   const statusFilter = useMemo(() => {
-    const statuses = [...ACTIVE_STATUSES];
-    if (showCompleted) statuses.push('completed');
-    if (showCancelled) statuses.push('cancelled');
+    const statuses = ALL_STATUSES.filter((s) => {
+      if (s === 'completed') return showCompleted;
+      if (s === 'cancelled') return showCancelled;
+      return true;
+    });
     return statuses.join(',');
   }, [showCompleted, showCancelled]);
 
