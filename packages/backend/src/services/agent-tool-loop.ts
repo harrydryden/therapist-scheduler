@@ -371,15 +371,21 @@ export async function runToolLoop(
           }
         }
 
-        // flag_for_human_review stops the loop
-        if (toolCall.name === 'flag_for_human_review' && !result.skipped) {
+        // Tools that enable human control stop the loop to prevent
+        // the agent from taking further actions on a paused conversation.
+        if ((toolCall.name === 'flag_for_human_review' || toolCall.name === 'recommend_cancel_match') && !result.skipped) {
+          const reason = toolCall.name === 'recommend_cancel_match'
+            ? 'Agent recommended cancelling match — stopping tool loop'
+            : 'Agent flagged for human review — stopping tool loop';
           logger.info(
             { traceId, appointmentRequestId: context.appointmentRequestId },
-            `${logContext} - Agent flagged for human review — stopping tool loop`
+            `${logContext} - ${reason}`
           );
           conversationState.messages.push({
             role: 'admin' as const,
-            content: '[System: Conversation flagged for human review. Agent processing paused.]',
+            content: toolCall.name === 'recommend_cancel_match'
+              ? '[System: Match cancellation recommended. Agent processing paused pending admin review.]'
+              : '[System: Conversation flagged for human review. Agent processing paused.]',
           });
           flaggedForHumanReview = true;
           stopLoop = true;

@@ -44,7 +44,8 @@ export type ConversationAction =
   | 'received_reschedule_request'
   | 'processed_reschedule'
   | 'sent_chase_followup'
-  | 'closure_recommended_to_admin';
+  | 'closure_recommended_to_admin'
+  | 'recommended_cancel_match';
 
 /**
  * Checkpoint data structure
@@ -68,10 +69,10 @@ export interface ConversationCheckpoint {
  * Stage transition rules - what stages can transition to what
  */
 const VALID_TRANSITIONS: Record<ConversationStage, ConversationStage[]> = {
-  initial_contact: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased'],
-  awaiting_therapist_availability: ['awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased'],
-  awaiting_user_slot_selection: ['awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling', 'chased'],
-  awaiting_therapist_confirmation: ['awaiting_user_slot_selection', 'awaiting_meeting_link', 'confirmed', 'cancelled', 'stalled', 'chased'],
+  initial_contact: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
+  awaiting_therapist_availability: ['awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
+  awaiting_user_slot_selection: ['awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling', 'chased', 'closure_recommended'],
+  awaiting_therapist_confirmation: ['awaiting_user_slot_selection', 'awaiting_meeting_link', 'confirmed', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
   awaiting_meeting_link: ['confirmed', 'rescheduling', 'cancelled', 'stalled', 'chased'],
   confirmed: ['rescheduling', 'cancelled'],
   rescheduling: ['awaiting_user_slot_selection', 'awaiting_therapist_confirmation', 'confirmed', 'cancelled', 'stalled', 'chased'],
@@ -166,6 +167,7 @@ export function stageFromAction(action: ConversationAction): ConversationStage {
     processed_reschedule: 'awaiting_user_slot_selection',
     sent_chase_followup: 'chased',
     closure_recommended_to_admin: 'closure_recommended',
+    recommended_cancel_match: 'closure_recommended',
   };
 
   return actionToStage[action] || 'initial_contact';

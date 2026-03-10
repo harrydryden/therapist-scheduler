@@ -908,7 +908,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
             return { success: false, toolName: name, error: 'recommend_cancel_match requires a reason' };
           }
           await this.recommendCancelMatch(context, rcmInput.reason);
-          // No checkpoint action - this is a recommendation, admin decides
+          checkpointAction = 'recommended_cancel_match';
           break;
         }
 
