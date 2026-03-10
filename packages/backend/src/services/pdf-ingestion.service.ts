@@ -9,6 +9,7 @@ import {
   type TherapistCategories,
 } from '../config/therapist-categories';
 import { aiService } from './ai.service';
+import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 
 const notion = new Client({ auth: config.notionApiKey });
@@ -468,6 +469,15 @@ class PDFIngestionService {
       // Step 4: Create therapist in Notion (with internal admin notes if provided)
       logger.info({ traceId, name: profile.name }, 'Creating therapist in Notion');
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
+
+      // Step 5: Create Prisma Therapist record with ingestedAt timestamp
+      try {
+        await getOrCreateTherapist(id, profile.email, profile.name);
+        logger.info({ traceId, notionId: id }, 'Created Prisma therapist record with ingestion date');
+      } catch (err) {
+        // Non-critical - log but don't fail the ingestion
+        logger.warn({ err, traceId, notionId: id }, 'Failed to create Prisma therapist record during ingestion');
+      }
 
       return {
         success: true,
