@@ -185,7 +185,7 @@ export async function handleBounce(
           ],
           status: { notIn: ['cancelled', 'confirmed'] },
         },
-        select: { id: true, therapistNotionId: true },
+        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true },
       });
     }
 
@@ -196,7 +196,7 @@ export async function handleBounce(
           status: { notIn: ['cancelled', 'confirmed'] },
         },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, therapistNotionId: true },
+        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true },
       });
     }
 

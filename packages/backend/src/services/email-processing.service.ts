@@ -3,7 +3,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { DEFAULT_TIMEOUTS, TimeoutError } from '../utils/timeout';
+import { DEFAULT_TIMEOUTS, TimeoutError, withTimeout } from '../utils/timeout';
 import {
   decodeHtmlEntities,
   stripHtml,
@@ -92,7 +92,13 @@ return 0
 const gmailCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.GMAIL_API);
 
 /**
- * Execute a Gmail API call with circuit breaker and timeout protection
+ * Execute a Gmail API call with circuit breaker and timeout protection.
+ *
+ * All Gmail API calls should go through this wrapper to:
+ * 1. Fail fast when Gmail is degraded (circuit breaker OPEN)
+ * 2. Prevent hanging requests (timeout)
+ * 3. Track failures for automatic recovery detection
+ *
  * @param operation - Name of the operation for logging
  * @param fn - The Gmail API function to execute
  * @param timeoutMs - Optional timeout (default: 30s)
@@ -103,24 +109,8 @@ async function executeGmailWithProtection<T>(
   timeoutMs: number = DEFAULT_TIMEOUTS.HTTP_FETCH
 ): Promise<T> {
   return gmailCircuitBreaker.execute(async () => {
-    // Create timeout wrapper
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new TimeoutError(operation, timeoutMs));
-      }, timeoutMs);
-    });
-
-    // Race against timeout
-    return Promise.race([fn(), timeoutPromise]);
+    return withTimeout(fn(), timeoutMs, operation);
   });
-}
-
-/**
- * Check if Gmail operations should be attempted
- * Returns false if circuit breaker is open
- */
-function canAttemptGmailOperation(): boolean {
-  return !gmailCircuitBreaker.isOpen();
 }
 
 /**
@@ -311,6 +301,21 @@ export class EmailProcessingService {
 
   constructor() {
     this.initializeGmailClient();
+  }
+
+  /**
+   * Ensure the Gmail client is initialized and return it.
+   * Consolidates the repeated init-check-throw pattern used across 7+ methods.
+   * @throws Error if Gmail client cannot be initialized
+   */
+  private async ensureGmailClient(): Promise<gmail_v1.Gmail> {
+    if (!this.gmail) {
+      await this.initializeGmailClient();
+      if (!this.gmail) {
+        throw new Error('Gmail client not initialized');
+      }
+    }
+    return this.gmail;
   }
 
   /**
@@ -537,12 +542,7 @@ export class EmailProcessingService {
   ): Promise<void> {
     logger.info({ traceId, emailAddress, notificationHistoryId }, 'Processing Gmail notification');
 
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     try {
       // Get the last processed history ID (our sync point)
@@ -732,22 +732,20 @@ export class EmailProcessingService {
   async pollForNewEmails(traceId: string): Promise<{ processed: number }> {
     logger.info({ traceId }, 'Polling for new emails');
 
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     try {
       let processed = 0;
 
       // Pass 1: Unread emails (fast path - handles the common case efficiently)
-      const unreadResponse = await this.gmail.users.messages.list({
-        userId: 'me',
-        q: 'is:unread in:inbox newer_than:3d',
-        maxResults: 20,
-      });
+      const unreadResponse = await executeGmailWithProtection(
+        'poll-unread-messages',
+        () => this.gmail!.users.messages.list({
+          userId: 'me',
+          q: 'is:unread in:inbox newer_than:3d',
+          maxResults: 20,
+        })
+      );
 
       const unreadMessages = unreadResponse.data.messages || [];
       const processedIds = new Set<string>();
@@ -764,11 +762,14 @@ export class EmailProcessingService {
       // but never processed by the application). Uses a shorter window (1d)
       // since the stale recovery handles older messages via thread checking.
       // The processMessage dedup ensures this doesn't reprocess pass 1 results.
-      const allRecentResponse = await this.gmail.users.messages.list({
-        userId: 'me',
-        q: 'in:inbox newer_than:1d',
-        maxResults: 20,
-      });
+      const allRecentResponse = await executeGmailWithProtection(
+        'poll-all-recent-messages',
+        () => this.gmail!.users.messages.list({
+          userId: 'me',
+          q: 'in:inbox newer_than:1d',
+          maxResults: 20,
+        })
+      );
 
       const allRecentMessages = allRecentResponse.data.messages || [];
 
@@ -1053,16 +1054,17 @@ export class EmailProcessingService {
         }
       }
 
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
+      await this.ensureGmailClient();
 
       // Fetch full message
-      const messageResponse = await this.gmail.users.messages.get({
-        userId: 'me',
-        id: messageId,
-        format: 'full',
-      });
+      const messageResponse = await executeGmailWithProtection(
+        'fetch-message',
+        () => this.gmail!.users.messages.get({
+          userId: 'me',
+          id: messageId,
+          format: 'full',
+        })
+      );
 
       const email = this.parseEmailMessage(messageResponse.data);
       if (!email) {
@@ -1282,13 +1284,15 @@ export class EmailProcessingService {
         await recordDivergenceAlert(appointmentRequest.id, divergence);
 
         // Store divergence info for admin review in notes (legacy, keep for backwards compat)
-        await prisma.appointmentRequest.update({
-          where: { id: appointmentRequest.id },
-          data: {
-            notes: `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n${(await prisma.appointmentRequest.findUnique({ where: { id: appointmentRequest.id }, select: { notes: true } }))?.notes || ''}`,
-          },
-          select: { id: true },
-        });
+        // Uses atomic SQL concatenation to prevent race conditions where concurrent
+        // updates could overwrite each other's notes (the previous read-modify-write
+        // pattern with inline findUnique had a TOCTOU window)
+        const divergenceNote = `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n`;
+        await prisma.$executeRaw`
+          UPDATE "AppointmentRequest"
+          SET "notes" = ${divergenceNote} || COALESCE("notes", '')
+          WHERE "id" = ${appointmentRequest.id}
+        `;
 
         // Mark as needing manual review but don't process automatically
         // Don't mark as processed - leave for admin to handle
@@ -1848,15 +1852,10 @@ export class EmailProcessingService {
    * Returns the number of messages successfully processed.
    */
   async checkThreadForUnprocessedReplies(threadId: string, traceId: string): Promise<number> {
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     try {
-      const threadResponse = await this.gmail.users.threads.get({
+      const threadResponse = await this.gmail!.users.threads.get({
         userId: 'me',
         id: threadId,
         format: 'minimal',
@@ -1936,15 +1935,10 @@ export class EmailProcessingService {
       snippet: string;
     }>;
   }> {
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     // Fetch thread with full format to get headers for preview
-    const threadResponse = await this.gmail.users.threads.get({
+    const threadResponse = await this.gmail!.users.threads.get({
       userId: 'me',
       id: threadId,
       format: 'metadata',
@@ -2026,12 +2020,7 @@ export class EmailProcessingService {
     traceId: string,
     forceMessageIds?: string[]
   ): Promise<{ cleared: number; reprocessed: number }> {
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     // If force-reprocessing specific messages, clear only those records
     let cleared = 0;
@@ -2079,14 +2068,9 @@ export class EmailProcessingService {
    * Set up Gmail push notifications (watch)
    */
   async setupPushNotifications(topicName: string): Promise<{ historyId: string; expiration: string }> {
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
-    const response = await this.gmail.users.watch({
+    const response = await this.gmail!.users.watch({
       userId: 'me',
       requestBody: {
         topicName,
@@ -2268,12 +2252,7 @@ ${htmlParts.join('\n')}
     replyTo?: string;
     threadId?: string; // Pass existing threadId to maintain conversation threading
   }): Promise<{ messageId: string; threadId: string }> {
-    if (!this.gmail) {
-      await this.initializeGmailClient();
-      if (!this.gmail) {
-        throw new Error('Gmail client not initialized');
-      }
-    }
+    await this.ensureGmailClient();
 
     // Encode subject if it contains non-ASCII characters (RFC 2047)
     const encodedSubject = encodeEmailHeader(params.subject);
@@ -2358,10 +2337,13 @@ ${htmlParts.join('\n')}
       );
     }
 
-    const response = await this.gmail.users.messages.send({
-      userId: 'me',
-      requestBody,
-    });
+    const response = await executeGmailWithProtection(
+      'send-email',
+      () => this.gmail!.users.messages.send({
+        userId: 'me',
+        requestBody,
+      })
+    );
 
     // Fetch the sent message to get threadId for conversation tracking
     // (in case a new thread was created)
@@ -2601,25 +2583,16 @@ ${htmlParts.join('\n')}
             // FIX T3: Propagate abandonment to appointment for admin visibility
             // This ensures admins are notified when critical emails fail permanently
             if (email.appointmentId) {
-              const existingApt = await prisma.appointmentRequest.findUnique({
-                where: { id: email.appointmentId },
-                select: { notes: true },
-              });
+              const abandonmentNote = `\n\n[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${email.toEmail}\nSubject: ${email.subject.slice(0, 100)}${email.subject.length > 100 ? '...' : ''}\nFailed after ${newRetryCount} retries: ${errorMessage.slice(0, 200)}`;
 
-              const abandonmentNote = `[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${email.toEmail}\nSubject: ${email.subject.slice(0, 100)}${email.subject.length > 100 ? '...' : ''}\nFailed after ${newRetryCount} retries: ${errorMessage.slice(0, 200)}`;
-
-              await prisma.appointmentRequest.update({
-                where: { id: email.appointmentId },
-                data: {
-                  notes: existingApt?.notes
-                    ? `${existingApt.notes}\n\n${abandonmentNote}`
-                    : abandonmentNote,
-                  // Flag for admin attention via stall alert
-                  conversationStallAlertAt: new Date(),
-                  conversationStallAcknowledged: false,
-                },
-                select: { id: true },
-              });
+              // Atomic append to prevent note loss under concurrent updates
+              await prisma.$executeRaw`
+                UPDATE "AppointmentRequest"
+                SET "notes" = COALESCE("notes", '') || ${abandonmentNote},
+                    "conversationStallAlertAt" = ${now},
+                    "conversationStallAcknowledged" = false
+                WHERE "id" = ${email.appointmentId}
+              `;
 
               logger.warn(
                 { traceId, emailId: email.id, appointmentId: email.appointmentId },
