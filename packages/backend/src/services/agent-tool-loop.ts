@@ -140,6 +140,20 @@ export const schedulingTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'recommend_cancel_match',
+    description: 'Recommend cancelling this match to the admin when the user has declined the therapist (e.g. due to availability issues, preference, or any other reason they do not want to proceed). This sends an alert to the admin so they can cancel the match and free up the therapist for other users. Use this instead of cancel_appointment when the user indicates they do not want to work with this therapist but has not explicitly asked to cancel.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        reason: {
+          type: 'string',
+          description: 'The reason the user has declined the match (e.g., "User declined due to therapist availability not matching their schedule")',
+        },
+      },
+      required: ['reason'],
+    },
+  },
+  {
     name: 'flag_for_human_review',
     description: 'Flag this conversation for human review when you are uncertain how to proceed, the situation is unusual, or you need guidance. This enables human control mode so an admin can review and respond. Use this proactively when unsure rather than guessing or stalling.',
     input_schema: {
@@ -160,7 +174,7 @@ export const schedulingTools: Anthropic.Tool[] = [
 ];
 
 /** Tools whose execution produces external side effects */
-const SIDE_EFFECT_TOOLS = new Set(['send_email', 'mark_scheduling_complete', 'flag_for_human_review']);
+const SIDE_EFFECT_TOOLS = new Set(['send_email', 'mark_scheduling_complete', 'flag_for_human_review', 'recommend_cancel_match']);
 
 export interface ExecutedTool {
   toolName: string;

@@ -816,6 +816,31 @@ class SlackNotificationService {
   }
 
   /**
+   * Alert when the agent recommends cancelling a match because the user
+   * has declined the therapist (e.g. due to availability).  This frees
+   * the counsellor for other users.
+   */
+  async notifyCancelMatchRecommended(
+    appointmentId: string,
+    userName: string | null,
+    therapistName: string,
+    reason: string
+  ): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Cancel Match Recommended',
+      severity: 'high',
+      appointmentId,
+      therapistName,
+      details: `User has declined this therapist. Recommend cancelling the match so the counsellor is available to others.`,
+      additionalFields: {
+        'Reason': reason,
+        'Action needed': 'Review and cancel match to free up therapist',
+      },
+      emoji: '🔄',
+    });
+  }
+
+  /**
    * Alert when an incoming email could not be matched to any appointment
    * after max retries. This means a therapist or client reply was silently dropped.
    */
