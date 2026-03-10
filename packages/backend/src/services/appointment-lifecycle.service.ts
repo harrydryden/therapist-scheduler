@@ -1142,11 +1142,6 @@ class AppointmentLifecycleService {
         if (otherActiveAppointments === 0) {
           // No other active appointments - safe to deactivate
           await notionService.updateTherapistActive(appointment.therapistNotionId, false);
-          // Also mark inactive in Postgres
-          await prisma.therapist.updateMany({
-            where: { notionId: appointment.therapistNotionId },
-            data: { active: false },
-          });
           logger.info(
             { ...logContext, therapistNotionId: appointment.therapistNotionId },
             'Marked therapist as inactive after last appointment completed'
@@ -1893,11 +1888,6 @@ class AppointmentLifecycleService {
 
           if (otherActiveAppointments === 0) {
             await notionService.updateTherapistActive(appointment.therapistNotionId, false);
-            // Also mark inactive in Postgres
-            await prisma.therapist.updateMany({
-              where: { notionId: appointment.therapistNotionId },
-              data: { active: false },
-            });
             logger.info(
               { ...logContext, therapistNotionId: appointment.therapistNotionId },
               'Marked therapist as inactive after admin force-completed last appointment'

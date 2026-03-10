@@ -145,7 +145,7 @@ export async function getOrCreateTherapist(
   notionId: string,
   email: string,
   name: string
-): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; active: boolean; ingestedAt: Date | null; createdAt: Date; updatedAt: Date }> {
+): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; ingestedAt: Date | null; createdAt: Date; updatedAt: Date }> {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if therapist already exists by Notion ID

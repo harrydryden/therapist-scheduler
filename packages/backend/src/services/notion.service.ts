@@ -282,41 +282,6 @@ class NotionService {
     }
   }
 
-  /**
-   * Fetch ALL therapists from Notion (including inactive).
-   * Used by the periodic sync to reconcile Postgres with Notion.
-   * Not cached — only called by background sync jobs.
-   */
-  async fetchAllTherapists(): Promise<Therapist[]> {
-    logger.info('Fetching all therapists (including inactive) from Notion for sync');
-
-    try {
-      const allPages: NotionPage[] = [];
-      let startCursor: string | undefined;
-
-      // Paginate through all results (no Active filter)
-      do {
-        const response = await notionCircuitBreaker.execute(() =>
-          this.notion.databases.query({
-            database_id: config.notionDatabaseId,
-            page_size: 100,
-            ...(startCursor ? { start_cursor: startCursor } : {}),
-          })
-        );
-        allPages.push(...response.results as NotionPage[]);
-        startCursor = response.has_more ? response.next_cursor ?? undefined : undefined;
-      } while (startCursor);
-
-      const therapists = allPages.map((page) => this.parseTherapistFromPage(page));
-
-      logger.info({ count: therapists.length }, 'Fetched all therapists from Notion for sync');
-      return therapists;
-    } catch (err) {
-      logger.error({ err }, 'Failed to fetch all therapists from Notion');
-      throw err;
-    }
-  }
-
   async getTherapist(id: string, bypassCache: boolean = false): Promise<Therapist | null> {
     const cacheKey = CACHE_KEY_SINGLE + id;
     if (!bypassCache) {

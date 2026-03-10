@@ -38,7 +38,6 @@ model Therapist {
   notionId  String   @unique @map("notion_id") // Links to Notion database
   email      String   @unique
   name       String
-  active     Boolean  @default(true) // Synced from Notion; false when all appointments completed
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
