@@ -170,6 +170,18 @@ class SideEffectRetryService {
             { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempts: nextAttempt },
             'Side effect permanently abandoned'
           );
+
+          // Alert admin via Slack so abandoned side effects don't go unnoticed
+          try {
+            await slackNotificationService.sendAlert({
+              title: 'Side Effect Abandoned',
+              severity: 'high',
+              appointmentId: effect.appointmentId,
+              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned. Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
+            });
+          } catch {
+            // Don't let Slack failure mask the original error
+          }
         } else {
           await sideEffectTrackerService.markFailed(effect.idempotencyKey, errorMessage);
           failed++;
@@ -254,9 +266,10 @@ class SideEffectRetryService {
         break;
 
       case 'slack_notify_completed':
-        logger.info(
-          { appointmentId: appointment.id, effectType: effect.effectType },
-          'Retrying completion notification'
+        await slackNotificationService.notifyAppointmentCompleted(
+          appointment.id,
+          appointment.userName,
+          appointment.therapistName
         );
         break;
 
