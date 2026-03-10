@@ -200,6 +200,14 @@ class SlackNotificationService {
             });
           }
         }
+
+        // Clear Redis queue after loading to prevent duplicate loading on rapid restarts
+        try {
+          await cacheManager.delete(SLACK_QUEUE_KEY);
+        } catch {
+          // Non-fatal — queue will be overwritten on next processQueue sync
+        }
+
         logger.info({ count: persisted.length }, 'Loaded persisted Slack notifications from Redis');
         return persisted.length;
       }
@@ -232,9 +240,14 @@ class SlackNotificationService {
 
     for (const item of batch) {
       if (item.attempts >= maxRetries) {
-        logger.warn(
-          { attempts: item.attempts, message: item.message.text?.substring(0, 100) },
-          'Dropping Slack notification after max retries'
+        logger.error(
+          {
+            attempts: item.attempts,
+            message: item.message.text?.substring(0, 200),
+            queuedAt: item.queuedAt,
+            ageSeconds: Math.round((Date.now() - item.queuedAt.getTime()) / 1000),
+          },
+          'Permanently dropping Slack notification after max retries — message lost'
         );
         failed++;
         continue;

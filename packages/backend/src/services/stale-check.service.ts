@@ -603,15 +603,18 @@ class StaleCheckService {
       if (stalledResult.count > 0) {
         logger.warn(
           { checkId, stalledCount: stalledResult.count },
-          'FIX NEW: Flagged stalled conversations for admin review (activity but no tool execution)'
+          'Flagged stalled conversations for admin review (activity but no tool execution)'
         );
 
-        // Send Slack notifications for newly stalled conversations
-        // Fetch the details of stalled appointments for notification
+        // Send Slack notifications for NEWLY stalled conversations only.
+        // Filter by conversationStallAlertAt within the last 2 minutes to avoid
+        // re-notifying previously flagged (but unacknowledged) appointments on
+        // every hourly stale-check cycle.
+        const recentStallCutoff = new Date(Date.now() - 2 * 60 * 1000);
         const stalledAppointments = await prisma.appointmentRequest.findMany({
           where: {
             status: { in: ['pending', 'contacted', 'negotiating'] },
-            conversationStallAlertAt: { not: null },
+            conversationStallAlertAt: { gte: recentStallCutoff },
             conversationStallAcknowledged: false,
           },
           select: {
