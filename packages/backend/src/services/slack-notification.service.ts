@@ -826,15 +826,16 @@ class SlackNotificationService {
     therapistName: string,
     reason: string
   ): Promise<boolean> {
+    const userLabel = userName || 'Unknown user';
     return this.sendAlert({
       title: 'Cancel Match Recommended',
       severity: 'high',
       appointmentId,
       therapistName,
-      details: `User has declined this therapist. Recommend cancelling the match so the counsellor is available to others.`,
+      details: `*${userLabel}* has declined this therapist. Recommend cancelling the match so the counsellor is available to others.`,
       additionalFields: {
         'Reason': reason,
-        'Action needed': 'Review and cancel match to free up therapist',
+        'Action needed': 'Review and cancel match via dashboard',
       },
       emoji: '🔄',
     });

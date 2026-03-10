@@ -68,6 +68,10 @@ const cancelAppointmentInputSchema = z.object({
   cancelled_by: z.enum(['client', 'therapist']),
 });
 
+const recommendCancelMatchInputSchema = z.object({
+  reason: z.string().min(1).max(500),
+});
+
 /**
  * FIX T1: Tool execution result type for explicit success/failure reporting
  * Instead of returning void, executeToolCall now returns this type so callers
@@ -903,11 +907,13 @@ ${formatClassificationForPrompt(emailClassification)}`;
         }
 
         case 'recommend_cancel_match': {
-          const rcmInput = input as { reason: string };
-          if (!rcmInput.reason) {
-            return { success: false, toolName: name, error: 'recommend_cancel_match requires a reason' };
+          const parsed = recommendCancelMatchInputSchema.safeParse(input);
+          if (!parsed.success) {
+            const errorMsg = `Invalid recommend_cancel_match input: ${parsed.error.message}`;
+            logger.error({ traceId: this.traceId, errors: parsed.error.errors }, 'Invalid recommend_cancel_match input');
+            return { success: false, toolName: name, error: errorMsg };
           }
-          await this.recommendCancelMatch(context, rcmInput.reason);
+          await this.recommendCancelMatch(context, parsed.data.reason);
           checkpointAction = 'recommended_cancel_match';
           break;
         }
@@ -1762,7 +1768,8 @@ ${formatClassificationForPrompt(emailClassification)}`;
       'Agent recommending match cancellation'
     );
 
-    // Enable human control so admin can review and act
+    // Enable human control and set closure recommendation fields so the admin
+    // can action this via the existing /action-closure endpoint.
     await prisma.appointmentRequest.update({
       where: { id: context.appointmentRequestId },
       data: {
@@ -1770,6 +1777,9 @@ ${formatClassificationForPrompt(emailClassification)}`;
         humanControlTakenBy: 'agent-flagged',
         humanControlTakenAt: new Date(),
         humanControlReason: `Cancel match recommended: ${reason}`,
+        closureRecommendedAt: new Date(),
+        closureRecommendedReason: `Match cancellation recommended: ${reason}`,
+        closureRecommendationActioned: false,
       },
       select: { id: true },
     });
