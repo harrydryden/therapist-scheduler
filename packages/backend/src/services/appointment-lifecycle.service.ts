@@ -1512,8 +1512,10 @@ class AppointmentLifecycleService {
       );
     }
 
-    // Send therapist cancellation email
-    if (settings.email.therapistCancellation && appointment.therapistEmail) {
+    // Send therapist cancellation email — only if the therapist was already contacted
+    // (i.e. an email thread exists with them, meaning the user's name was shared).
+    // If we never emailed the therapist, there is nothing to notify them about.
+    if (settings.email.therapistCancellation && appointment.therapistEmail && appointment.therapistGmailThreadId) {
       runBackgroundTask(
         async () => {
           // Format the date in human-friendly relative format

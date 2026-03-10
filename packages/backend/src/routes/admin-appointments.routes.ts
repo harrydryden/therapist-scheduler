@@ -1495,7 +1495,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             id: true,
             status: true,
             closureRecommendedAt: true,
+            closureRecommendedReason: true,
             closureRecommendationActioned: true,
+            humanControlEnabled: true,
+            humanControlTakenBy: true,
           },
         });
 
@@ -1515,16 +1518,21 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           // Cancel the appointment via lifecycle service
           await appointmentLifecycleService.transitionToCancelled({
             appointmentId: id,
-            reason: 'Closed on admin review: chase follow-up went unanswered',
+            reason: `Closed on admin review: ${appointment.closureRecommendedReason || 'closure recommended'}`,
             cancelledBy: 'admin',
             source: 'admin',
             adminId,
           });
 
-          // Mark recommendation as actioned
+          // Mark recommendation as actioned and release human control if agent-flagged
           await prisma.appointmentRequest.update({
             where: { id },
-            data: { closureRecommendationActioned: true },
+            data: {
+              closureRecommendationActioned: true,
+              ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+                humanControlEnabled: false,
+              }),
+            },
             select: { id: true },
           });
 
@@ -1557,6 +1565,11 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               checkpointStage: originalStage !== 'chased' && originalStage !== 'closure_recommended'
                 ? originalStage
                 : null,
+              // Release human control if it was set by the agent (not by an admin manually)
+              // so the agent can resume processing emails
+              ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+                humanControlEnabled: false,
+              }),
             },
             select: { id: true },
           });

@@ -68,6 +68,10 @@ const cancelAppointmentInputSchema = z.object({
   cancelled_by: z.enum(['client', 'therapist']),
 });
 
+const recommendCancelMatchInputSchema = z.object({
+  reason: z.string().min(1).max(500),
+});
+
 /**
  * FIX T1: Tool execution result type for explicit success/failure reporting
  * Instead of returning void, executeToolCall now returns this type so callers
@@ -902,6 +906,18 @@ ${formatClassificationForPrompt(emailClassification)}`;
           break;
         }
 
+        case 'recommend_cancel_match': {
+          const parsed = recommendCancelMatchInputSchema.safeParse(input);
+          if (!parsed.success) {
+            const errorMsg = `Invalid recommend_cancel_match input: ${parsed.error.message}`;
+            logger.error({ traceId: this.traceId, errors: parsed.error.errors }, 'Invalid recommend_cancel_match input');
+            return { success: false, toolName: name, error: errorMsg };
+          }
+          await this.recommendCancelMatch(context, parsed.data.reason);
+          checkpointAction = 'recommended_cancel_match';
+          break;
+        }
+
         case 'flag_for_human_review': {
           const flagInput = input as { reason: string; suggested_action?: string };
           if (!flagInput.reason) {
@@ -1730,6 +1746,50 @@ ${formatClassificationForPrompt(emailClassification)}`;
       context.userName,
       context.therapistName,
       params.reason
+    );
+  }
+
+  /**
+   * Recommend cancelling a match when the user has declined the therapist.
+   * Sends a Slack notification to the admin so they can cancel and free up
+   * the therapist for other users. Also enables human control so the admin
+   * can review the conversation and take action.
+   */
+  private async recommendCancelMatch(
+    context: SchedulingContext,
+    reason: string
+  ): Promise<void> {
+    logger.info(
+      {
+        traceId: this.traceId,
+        appointmentRequestId: context.appointmentRequestId,
+        reason,
+      },
+      'Agent recommending match cancellation'
+    );
+
+    // Enable human control and set closure recommendation fields so the admin
+    // can action this via the existing /action-closure endpoint.
+    await prisma.appointmentRequest.update({
+      where: { id: context.appointmentRequestId },
+      data: {
+        humanControlEnabled: true,
+        humanControlTakenBy: 'agent-flagged',
+        humanControlTakenAt: new Date(),
+        humanControlReason: `Cancel match recommended: ${reason}`,
+        closureRecommendedAt: new Date(),
+        closureRecommendedReason: `Match cancellation recommended: ${reason}`,
+        closureRecommendationActioned: false,
+      },
+      select: { id: true },
+    });
+
+    // Send targeted Slack notification recommending match cancellation
+    await slackNotificationService.notifyCancelMatchRecommended(
+      context.appointmentRequestId,
+      context.userName,
+      context.therapistName,
+      reason
     );
   }
 
