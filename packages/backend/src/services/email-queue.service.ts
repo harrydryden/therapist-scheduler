@@ -351,23 +351,17 @@ class EmailQueueService {
     });
 
     // Propagate to appointment for admin visibility
+    // Uses atomic SQL append to prevent note loss under concurrent updates
     if (appointmentId) {
-      const apt = await prisma.appointmentRequest.findUnique({
-        where: { id: appointmentId },
-        select: { notes: true },
-      });
+      const note = `\n\n[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${to}\nSubject: ${subject.slice(0, 100)}${subject.length > 100 ? '...' : ''}\nFailed after ${job.attemptsMade} retries: ${errorMessage.slice(0, 200)}`;
 
-      const note = `[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${to}\nSubject: ${subject.slice(0, 100)}${subject.length > 100 ? '...' : ''}\nFailed after ${job.attemptsMade} retries: ${errorMessage.slice(0, 200)}`;
-
-      await prisma.appointmentRequest.update({
-        where: { id: appointmentId },
-        data: {
-          notes: apt?.notes ? `${apt.notes}\n\n${note}` : note,
-          conversationStallAlertAt: now,
-          conversationStallAcknowledged: false,
-        },
-        select: { id: true },
-      });
+      await prisma.$executeRaw`
+        UPDATE "AppointmentRequest"
+        SET "notes" = COALESCE("notes", '') || ${note},
+            "conversationStallAlertAt" = ${now},
+            "conversationStallAcknowledged" = false
+        WHERE "id" = ${appointmentId}
+      `;
     }
   }
 
