@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { notionService, Therapist } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { prisma } from '../utils/database';
+import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { RATE_LIMITS } from '../constants';
 import { adminAuthHook } from '../middleware/auth';
@@ -42,8 +43,24 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       const ingestedAtMap = new Map<string, Date>();
       const now = new Date();
       for (const record of therapistRecords) {
-        // Null ingestedAt (pre-existing therapists) treated as today
         ingestedAtMap.set(record.notionId, record.ingestedAt ?? now);
+      }
+
+      // Lazily create Prisma records for Notion therapists missing from the DB
+      // (e.g. therapists added to Notion before ingestion tracking was introduced)
+      const missingTherapists = therapists.filter((t) => !ingestedAtMap.has(t.id));
+      if (missingTherapists.length > 0) {
+        await Promise.allSettled(
+          missingTherapists.map(async (t) => {
+            try {
+              const record = await getOrCreateTherapist(t.id, t.email, t.name);
+              ingestedAtMap.set(t.id, record.ingestedAt ?? now);
+            } catch (err) {
+              logger.warn({ err, notionId: t.id }, 'Failed to backfill Prisma therapist record');
+              ingestedAtMap.set(t.id, now);
+            }
+          })
+        );
       }
 
       logger.info(
