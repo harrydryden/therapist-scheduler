@@ -15,10 +15,9 @@ import type { ReprocessPreviewResult, ReprocessThreadResult } from '../api/clien
 import type { AppointmentDetail } from '../types';
 import { getAdminId } from '../utils/admin-id';
 import DetailHeader from './detail-panel/DetailHeader';
-import HumanControlSection from './detail-panel/HumanControlSection';
 import ClosureRecommendationSection from './detail-panel/ClosureRecommendationSection';
-import DeleteSection from './detail-panel/DeleteSection';
-import ConversationSection from './detail-panel/ConversationSection';
+import AppointmentSummarySection from './detail-panel/AppointmentSummarySection';
+import CompactControlPanel from './detail-panel/CompactControlPanel';
 import AppointmentDetailSkeleton from './skeletons/AppointmentDetailSkeleton';
 
 interface AppointmentDetailPanelProps {
@@ -297,6 +296,8 @@ export default function AppointmentDetailPanel({
         <div className="flex flex-col">
           <DetailHeader appointment={appointmentDetail} />
 
+          <AppointmentSummarySection summary={appointmentDetail.summary} />
+
           <ClosureRecommendationSection
             appointment={appointmentDetail}
             onAction={async (action) => {
@@ -310,7 +311,7 @@ export default function AppointmentDetailPanel({
             }}
           />
 
-          <HumanControlSection
+          <CompactControlPanel
             appointment={appointmentDetail}
             mutationError={mutationError}
             onDismissError={() => setMutationError(null)}
@@ -331,16 +332,8 @@ export default function AppointmentDetailPanel({
             editConfirmedDateTime={editConfirmedDateTime}
             onEditConfirmedDateTimeChange={setEditConfirmedDateTime}
             editWarning={editWarning}
+            deleteAppointmentMutation={deleteAppointmentMutation}
           />
-
-          <div className="p-4 border-b border-slate-100 bg-slate-50">
-            <DeleteSection
-              appointment={appointmentDetail}
-              deleteMutation={deleteAppointmentMutation}
-            />
-          </div>
-
-          <ConversationSection conversation={appointmentDetail.conversation} />
         </div>
       </ErrorBoundary>
     </div>

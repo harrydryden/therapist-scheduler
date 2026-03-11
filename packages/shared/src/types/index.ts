@@ -155,6 +155,21 @@ export interface AppointmentListItem {
   reschedulingInProgress: boolean;
 }
 
+export interface AppointmentSummary {
+  /** One-line description of current stage */
+  stage: string;
+  /** What the system is waiting for / what should happen next */
+  nextAction: string;
+  /** Key facts: proposed times, selected time, confirmed time, etc. */
+  keyFacts: string[];
+  /** Total messages in the conversation */
+  messageCount: number;
+  /** How long since last activity */
+  lastActivityAgo: string | null;
+  /** Warning flags (stalled, chased, closure recommended, etc.) */
+  flags: string[];
+}
+
 export interface AppointmentDetail extends Omit<AppointmentListItem,
   | 'messageCount'
   | 'checkpointStage' | 'checkpointProgress'
@@ -168,6 +183,7 @@ export interface AppointmentDetail extends Omit<AppointmentListItem,
     }>;
     totalMessageCount: number;
   } | null;
+  summary: AppointmentSummary | null;
   therapistAvailability: TherapistAvailability | null;
   notes: string | null;
   gmailThreadId: string | null;
