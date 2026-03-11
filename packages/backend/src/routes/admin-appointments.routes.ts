@@ -17,7 +17,8 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { parseConversationState, parseTherapistAvailability } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
-import { ConversationStage, STAGE_COMPLETION_PERCENTAGE, STAGE_DESCRIPTIONS } from '../utils/conversation-checkpoint';
+import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
+import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
 import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
@@ -277,59 +278,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           return Errors.notFound(reply, 'Appointment');
         }
 
-        // Parse conversation state and extract latest messages + structured summary.
-        const fullConversation = parseConversationState(appointment.conversationState);
-
-        // Also parse the raw JSON for checkpoint/facts (not covered by the Zod schema)
-        let rawState: Record<string, unknown> | null = null;
-        try {
-          rawState = typeof appointment.conversationState === 'string'
-            ? JSON.parse(appointment.conversationState)
-            : (appointment.conversationState as Record<string, unknown> | null);
-        } catch { /* ignore parse errors */ }
-
-        let conversationSummary: {
-          latestMessages: Array<{ role: string; content: string; senderType: string }>;
-          totalMessageCount: number;
-        } | null = null;
-
-        if (fullConversation?.messages) {
-          const messages = fullConversation.messages;
-          const latestByType = new Map<string, { role: string; content: string; senderType: string }>();
-
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const msg = messages[i];
-            let senderType: string;
-
-            if (msg.role === 'assistant') {
-              senderType = 'agent';
-            } else if (msg.role === 'admin') {
-              senderType = 'admin';
-            } else {
-              const content = msg.content.toLowerCase();
-              if (content.includes('from therapist') || content.includes('from: therapist')) {
-                senderType = 'therapist';
-              } else {
-                senderType = 'client';
-              }
-            }
-
-            if (!latestByType.has(senderType)) {
-              latestByType.set(senderType, { role: msg.role, content: msg.content, senderType });
-            }
-          }
-
-          conversationSummary = {
-            latestMessages: Array.from(latestByType.values()),
-            totalMessageCount: messages.length,
-          };
-        }
-
-        // Build structured appointment summary from checkpoint, facts, and status
+        // Parse raw conversation state once for summary builder
         const appointmentSummary = buildAppointmentSummary(
-          rawState,
+          parseRawConversationState(appointment.conversationState),
           appointment,
-          conversationSummary?.totalMessageCount ?? 0,
         );
 
         return sendSuccess(reply, {
@@ -349,7 +301,6 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             updatedAt: appointment.updatedAt,
             gmailThreadId: appointment.gmailThreadId,
             therapistGmailThreadId: appointment.therapistGmailThreadId,
-            conversation: conversationSummary,
             summary: appointmentSummary,
             humanControlEnabled: appointment.humanControlEnabled,
             humanControlTakenBy: appointment.humanControlTakenBy,
@@ -1600,142 +1551,4 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
     }
   );
 
-}
-
-// ============================================
-// Appointment Summary Builder
-// ============================================
-
-interface SummaryAppointment {
-  status: string;
-  humanControlEnabled: boolean;
-  humanControlTakenBy: string | null;
-  isStale: boolean;
-  lastActivityAt: Date | string;
-  chaseSentAt: Date | string | null;
-  chaseSentTo: string | null;
-  closureRecommendedAt: Date | string | null;
-  closureRecommendedReason: string | null;
-  closureRecommendationActioned: boolean;
-  confirmedDateTime: string | null;
-}
-
-function formatTimeAgo(date: Date): string {
-  const now = Date.now();
-  const diffMs = now - date.getTime();
-  const diffMins = Math.floor(diffMs / 60_000);
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
-}
-
-function buildAppointmentSummary(
-  rawState: Record<string, unknown> | null,
-  appointment: SummaryAppointment,
-  messageCount: number,
-): {
-  stage: string;
-  nextAction: string;
-  keyFacts: string[];
-  messageCount: number;
-  lastActivityAgo: string | null;
-  flags: string[];
-} {
-  // Extract checkpoint from raw conversation state
-  const checkpoint = rawState?.checkpoint as Record<string, unknown> | undefined;
-  const facts = rawState?.facts as Record<string, unknown> | undefined;
-
-  // Stage description
-  const checkpointStage = checkpoint?.stage as ConversationStage | undefined;
-  let stage: string;
-  if (appointment.status === 'cancelled') {
-    stage = 'Cancelled';
-  } else if (appointment.status === 'confirmed') {
-    stage = 'Confirmed';
-  } else if (checkpointStage && STAGE_DESCRIPTIONS[checkpointStage]) {
-    stage = STAGE_DESCRIPTIONS[checkpointStage];
-  } else {
-    // Fallback to status
-    stage = appointment.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  }
-
-  // Next action
-  let nextAction: string;
-  if (appointment.status === 'cancelled') {
-    nextAction = 'No action needed — appointment cancelled.';
-  } else if (appointment.status === 'confirmed') {
-    nextAction = appointment.confirmedDateTime
-      ? `Session scheduled for ${appointment.confirmedDateTime}. Awaiting session completion.`
-      : 'Session confirmed. Awaiting session completion.';
-  } else if (appointment.closureRecommendedAt && !appointment.closureRecommendationActioned) {
-    nextAction = 'Admin action needed: cancel or dismiss closure recommendation.';
-  } else if (appointment.chaseSentAt) {
-    nextAction = `Chase sent to ${appointment.chaseSentTo || 'unknown'}. Awaiting response.`;
-  } else if (appointment.humanControlEnabled) {
-    nextAction = `Human control active (${appointment.humanControlTakenBy || 'unknown'}). Agent paused.`;
-  } else if (checkpoint?.pendingAction) {
-    nextAction = String(checkpoint.pendingAction);
-  } else if (checkpointStage) {
-    // Derive next action from stage
-    const nextActions: Record<string, string> = {
-      initial_contact: 'Waiting for initial emails to be sent.',
-      awaiting_therapist_availability: 'Waiting for therapist to reply with available times.',
-      awaiting_user_slot_selection: 'Waiting for client to pick a time slot.',
-      awaiting_therapist_confirmation: 'Waiting for therapist to confirm the selected slot.',
-      awaiting_meeting_link: 'Waiting for therapist to share a meeting link.',
-      rescheduling: 'Rescheduling in progress — waiting for new times.',
-      stalled: 'Conversation stalled. May need manual intervention.',
-      chased: 'Follow-up chase sent. Awaiting response.',
-      closure_recommended: 'Recommended for closure. Admin action needed.',
-    };
-    nextAction = nextActions[checkpointStage] || 'Waiting for next message.';
-  } else {
-    nextAction = 'Waiting for next message.';
-  }
-
-  // Key facts from conversation facts
-  const keyFacts: string[] = [];
-  if (facts) {
-    const proposedTimes = facts.proposedTimes as string[] | undefined;
-    if (proposedTimes?.length) {
-      keyFacts.push(`Times proposed: ${proposedTimes.slice(-3).join(', ')}`);
-    }
-    if (facts.selectedTime) {
-      keyFacts.push(`Client selected: ${facts.selectedTime}`);
-    }
-    if (facts.confirmedTime) {
-      keyFacts.push(`Confirmed: ${facts.confirmedTime}`);
-    }
-    const blockers = facts.blockers as string[] | undefined;
-    if (blockers?.length) {
-      keyFacts.push(`Blockers: ${blockers.join(', ')}`);
-    }
-    const specialNotes = facts.specialNotes as string[] | undefined;
-    if (specialNotes?.length) {
-      keyFacts.push(...specialNotes.slice(-2));
-    }
-  }
-
-  // Last activity
-  let lastActivityAgo: string | null = null;
-  if (appointment.lastActivityAt) {
-    const lastActivity = new Date(appointment.lastActivityAt);
-    if (!isNaN(lastActivity.getTime())) {
-      lastActivityAgo = formatTimeAgo(lastActivity);
-    }
-  }
-
-  // Flags
-  const flags: string[] = [];
-  if (appointment.isStale) flags.push('stale');
-  if (appointment.humanControlEnabled) flags.push('human_control');
-  if (appointment.chaseSentAt) flags.push('chased');
-  if (appointment.closureRecommendedAt && !appointment.closureRecommendationActioned) {
-    flags.push('closure_recommended');
-  }
-
-  return { stage, nextAction, keyFacts, messageCount, lastActivityAgo, flags };
 }

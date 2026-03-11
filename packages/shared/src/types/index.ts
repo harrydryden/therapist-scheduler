@@ -164,8 +164,8 @@ export interface AppointmentSummary {
   keyFacts: string[];
   /** Total messages in the conversation */
   messageCount: number;
-  /** How long since last activity */
-  lastActivityAgo: string | null;
+  /** ISO timestamp of last activity (compute relative time client-side) */
+  lastActivityAt: string | null;
   /** Warning flags (stalled, chased, closure recommended, etc.) */
   flags: string[];
 }
@@ -175,14 +175,6 @@ export interface AppointmentDetail extends Omit<AppointmentListItem,
   | 'checkpointStage' | 'checkpointProgress'
   | 'healthStatus' | 'healthScore' | 'isStalled' | 'hasThreadDivergence' | 'hasToolFailure'
 > {
-  conversation: {
-    latestMessages: Array<{
-      role: 'user' | 'assistant' | 'admin';
-      content: string;
-      senderType: 'client' | 'therapist' | 'agent' | 'admin';
-    }>;
-    totalMessageCount: number;
-  } | null;
   summary: AppointmentSummary | null;
   therapistAvailability: TherapistAvailability | null;
   notes: string | null;

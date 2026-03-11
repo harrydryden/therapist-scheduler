@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import type { AppointmentSummary } from '../../types';
 
 interface AppointmentSummarySectionProps {
@@ -11,11 +12,30 @@ const flagLabels: Record<string, { label: string; color: string }> = {
   closure_recommended: { label: 'Close', color: 'bg-red-100 text-red-700' },
 };
 
+function formatTimeAgo(isoDate: string): string {
+  const diffMs = Date.now() - new Date(isoDate).getTime();
+  const diffMins = Math.floor(diffMs / 60_000);
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
 export default function AppointmentSummarySection({ summary }: AppointmentSummarySectionProps) {
+  // Re-render every 60s to keep relative timestamps fresh
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!summary?.lastActivityAt) return;
+    const interval = setInterval(() => setTick(t => t + 1), 60_000);
+    return () => clearInterval(interval);
+  }, [summary?.lastActivityAt]);
+
   if (!summary) {
     return (
       <div className="px-4 py-3 border-b border-slate-100">
-        <p className="text-sm text-slate-400 italic">No conversation data yet.</p>
+        <p className="text-sm text-slate-400 italic">Awaiting first message.</p>
       </div>
     );
   }
@@ -55,7 +75,7 @@ export default function AppointmentSummarySection({ summary }: AppointmentSummar
       {/* Meta line */}
       <p className="text-xs text-slate-400">
         {summary.messageCount} messages
-        {summary.lastActivityAgo && <> &middot; last activity {summary.lastActivityAgo}</>}
+        {summary.lastActivityAt && <> &middot; last activity {formatTimeAgo(summary.lastActivityAt)}</>}
       </p>
     </div>
   );
