@@ -1616,13 +1616,9 @@ export class EmailProcessingService {
   private async findMatchingAppointmentRequest(
     email: EmailMessage
   ): Promise<{ id: string; userEmail: string; therapistEmail: string } | null> {
-    // FIX EMAIL-CONTEXT: Statuses that should be matched for incoming emails
-    // - Pre-booking: pending, contacted, negotiating
-    // - Post-booking (active): confirmed (session not yet held)
-    // - Post-session: session_held, feedback_requested (clients/therapists may reply to session emails)
-    // - NOT included: completed (terminal state, no further emails expected)
-    // - NOT included: cancelled (terminal state)
-    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'];
+    // All statuses are matchable so that final emails (e.g. thank-you notes,
+    // cancellation confirmations) are still threaded into the correct appointment.
+    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'];
 
     // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
     // The query fetches all potential matches and post-query logic applies priority ordering:
