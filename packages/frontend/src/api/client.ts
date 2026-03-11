@@ -387,7 +387,7 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
 // 2. Use httpOnly cookies for session tokens
 // 3. Remove x-webhook-secret header from frontend
 
-export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }> {
+export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, timeoutMs: number = TIMEOUTS.DEFAULT_MS): Promise<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }> {
   // FIX M3: Use request deduplication for GET requests
   return fetchWithDedup<ApiResponse<T> & { pagination?: PaginationInfo; total?: number }>(
     endpoint,
@@ -406,7 +406,7 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit):
           },
           ...options,
         },
-        TIMEOUTS.DEFAULT_MS
+        timeoutMs
       );
 
       const data = await safeParseJson(response);
@@ -631,7 +631,8 @@ export async function previewReprocessThread(
     {
       method: 'POST',
       body: JSON.stringify({ dryRun: true }),
-    }
+    },
+    TIMEOUTS.LONG_MS
   );
   if (!response.data) {
     throw new Error('Failed to preview thread');
@@ -648,7 +649,8 @@ export async function reprocessThread(
     {
       method: 'POST',
       body: JSON.stringify(forceMessageIds ? { forceMessageIds } : {}),
-    }
+    },
+    TIMEOUTS.LONG_MS
   );
   if (!response.data) {
     throw new Error('Failed to reprocess thread');
