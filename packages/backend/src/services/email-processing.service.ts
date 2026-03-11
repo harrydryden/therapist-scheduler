@@ -1619,9 +1619,10 @@ export class EmailProcessingService {
     // FIX EMAIL-CONTEXT: Statuses that should be matched for incoming emails
     // - Pre-booking: pending, contacted, negotiating
     // - Post-booking (active): confirmed (session not yet held)
-    // - NOT included: session_held, feedback_requested, completed (post-session)
+    // - Post-session: session_held, feedback_requested (clients/therapists may reply to session emails)
+    // - NOT included: completed (terminal state, no further emails expected)
     // - NOT included: cancelled (terminal state)
-    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed'];
+    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'];
 
     // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
     // The query fetches all potential matches and post-query logic applies priority ordering:
