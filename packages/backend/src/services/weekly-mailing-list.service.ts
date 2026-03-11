@@ -11,7 +11,7 @@
  *
  * Features:
  * - Configurable send day/time via admin settings
- * - Distributed lock for multi-instance safety
+ * - Uses LockedTaskRunner for distributed lock management
  * - Tracks last send date to prevent duplicate sends
  * - Includes personalized unsubscribe links
  */
@@ -19,7 +19,7 @@
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { releaseLock, renewLock } from '../utils/redis-locks';
+import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { notionUsersService, NotionUser } from './notion-users.service';
 import { notionService } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
@@ -41,15 +41,20 @@ const RETRY_CONFIG = {
 
 class WeeklyMailingListService {
   private intervalId: NodeJS.Timeout | null = null;
-  private isRunning = false;
   private instanceId: string;
-  private lockRenewalId: NodeJS.Timeout | null = null;
-  private lockValid = true;
+  private lockedRunner: LockedTaskRunner;
   private consecutiveFailures = 0;
 
   constructor() {
-    // Unique instance ID for distributed lock ownership
     this.instanceId = `${process.pid}-${Date.now().toString(36)}-weekly`;
+
+    this.lockedRunner = new LockedTaskRunner({
+      lockKey: WEEKLY_MAILING.LOCK_KEY,
+      lockTtlSeconds: WEEKLY_MAILING.LOCK_TTL_SECONDS,
+      renewalIntervalMs: WEEKLY_MAILING.RENEWAL_INTERVAL_MS,
+      instanceId: this.instanceId,
+      context: 'weekly-mailing',
+    });
   }
 
   /**
@@ -81,7 +86,6 @@ class WeeklyMailingListService {
       this.intervalId = null;
       logger.info('Weekly mailing list service stopped');
     }
-    this.stopLockRenewal();
   }
 
   /**
@@ -95,90 +99,20 @@ class WeeklyMailingListService {
   }
 
   /**
-   * Attempt to acquire the distributed lock and start renewal atomically.
-   * FIX: Previously there was a gap between lock acquisition and renewal start
-   * where a crash could leave the lock orphaned. Now renewal starts immediately
-   * after acquisition in the same operation.
-   */
-  private async tryAcquireLockWithRenewal(): Promise<boolean> {
-    try {
-      const result = await redis.set(
-        WEEKLY_MAILING.LOCK_KEY,
-        this.instanceId,
-        'EX',
-        WEEKLY_MAILING.LOCK_TTL_SECONDS,
-        'NX'
-      );
-
-      if (result === 'OK') {
-        // Start renewal immediately - no gap between acquisition and renewal
-        this.startLockRenewal();
-        return true;
-      }
-      return false;
-    } catch (error) {
-      logger.warn({ error }, 'Redis unavailable for weekly mailing lock - using local guard only');
-      return true;
-    }
-  }
-
-  /**
-   * Release the lock only if we own it
-   */
-  private async releaseInstanceLock(): Promise<void> {
-    await releaseLock(WEEKLY_MAILING.LOCK_KEY, this.instanceId, 'weekly-mailing');
-  }
-
-  /**
-   * Start lock renewal
-   */
-  private startLockRenewal(): void {
-    this.lockValid = true;
-    this.lockRenewalId = setInterval(async () => {
-      const renewed = await renewLock(WEEKLY_MAILING.LOCK_KEY, this.instanceId, WEEKLY_MAILING.LOCK_TTL_SECONDS);
-      if (!renewed) {
-        logger.warn('Weekly mailing lock lost - stopping renewal and aborting send loop');
-        this.lockValid = false;
-        this.stopLockRenewal();
-      }
-    }, WEEKLY_MAILING.RENEWAL_INTERVAL_MS);
-  }
-
-  /**
-   * Stop lock renewal
-   */
-  private stopLockRenewal(): void {
-    if (this.lockRenewalId) {
-      clearInterval(this.lockRenewalId);
-      this.lockRenewalId = null;
-    }
-  }
-
-  /**
-   * Safe wrapper that catches errors without crashing the interval
+   * Safe wrapper that catches errors without crashing the interval.
+   * Uses LockedTaskRunner for distributed lock management.
    */
   private async runSafeCheck(): Promise<void> {
-    // Local guard to prevent overlapping checks
-    if (this.isRunning) {
-      logger.debug('Weekly mailing check already running, skipping');
-      return;
-    }
+    const taskResult = await this.lockedRunner.run(async (ctx) => {
+      await this.checkAndSendWeeklyEmail(ctx.isLockValid);
+    });
 
-    this.isRunning = true;
-
-    // Try to acquire distributed lock (starts renewal atomically)
-    const lockAcquired = await this.tryAcquireLockWithRenewal();
-    if (!lockAcquired) {
+    if (!taskResult.acquired) {
       logger.debug('Another instance is handling weekly mailing, skipping');
-      this.isRunning = false;
       return;
     }
 
-    try {
-      await this.checkAndSendWeeklyEmail();
-      // FIX L2: Reset failure counter on success
-      this.consecutiveFailures = 0;
-    } catch (error) {
+    if (taskResult.error) {
       // FIX L2: Implement retry with exponential backoff
       this.consecutiveFailures++;
       const shouldRetry = this.consecutiveFailures <= RETRY_CONFIG.MAX_RETRIES;
@@ -188,22 +122,21 @@ class WeeklyMailingListService {
       );
 
       logger.error(
-        { error, consecutiveFailures: this.consecutiveFailures, willRetry: shouldRetry, backoffMs: backoffDelay },
+        { error: taskResult.error, consecutiveFailures: this.consecutiveFailures, willRetry: shouldRetry, backoffMs: backoffDelay },
         'Error in weekly mailing check'
       );
 
       if (shouldRetry) {
-        // Schedule a retry after backoff delay
         setTimeout(() => {
           logger.info({ attempt: this.consecutiveFailures + 1 }, 'Retrying weekly mailing check');
           this.runSafeCheck();
         }, backoffDelay);
       }
-    } finally {
-      this.stopLockRenewal();
-      await this.releaseInstanceLock();
-      this.isRunning = false;
+      return;
     }
+
+    // FIX L2: Reset failure counter on success
+    this.consecutiveFailures = 0;
   }
 
   /**
@@ -262,9 +195,10 @@ class WeeklyMailingListService {
   }
 
   /**
-   * Main check function - determines if it's time to send and processes eligible users
+   * Main check function - determines if it's time to send and processes eligible users.
+   * Accepts isLockValid callback from LockedTaskRunner to abort if lock is lost mid-send.
    */
-  private async checkAndSendWeeklyEmail(): Promise<void> {
+  private async checkAndSendWeeklyEmail(isLockValid: () => boolean): Promise<void> {
     const checkId = Date.now().toString(36);
     logger.info({ checkId }, 'Running weekly mailing check');
 
@@ -313,7 +247,7 @@ class WeeklyMailingListService {
 
     for (const user of users) {
       // Abort if we lost the distributed lock mid-send
-      if (!this.lockValid) {
+      if (!isLockValid()) {
         logger.warn({ checkId, sent, failed, remaining: users.length - sent - failed }, 'Aborting weekly mailing - lock lost');
         break;
       }
