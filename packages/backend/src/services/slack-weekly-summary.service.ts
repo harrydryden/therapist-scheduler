@@ -2,73 +2,49 @@
  * Slack Weekly Summary Service
  *
  * Sends a weekly summary of scheduling activity to Slack every Monday at 9am UK time.
- * Uses distributed locking to ensure only one instance sends the summary.
+ * Uses LockedTaskRunner for distributed locking to ensure only one instance sends.
+ * Extends PeriodicService for standard start/stop/interval lifecycle.
  */
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { releaseLock, acquireLock } from '../utils/redis-locks';
+import { LockedTaskRunner } from '../utils/locked-task-runner';
+import { PeriodicService } from '../utils/periodic-service';
 import { slackNotificationService } from './slack-notification.service';
 import { SLACK_NOTIFICATIONS } from '../constants';
 
-const LOCK_KEY = SLACK_NOTIFICATIONS.LOCK_KEY;
-const LOCK_TTL_SECONDS = SLACK_NOTIFICATIONS.LOCK_TTL_SECONDS;
 const LAST_SUMMARY_KEY = SLACK_NOTIFICATIONS.LAST_SUMMARY_KEY;
-const CHECK_INTERVAL_MS = SLACK_NOTIFICATIONS.CHECK_INTERVAL_MS;
 
-class SlackWeeklySummaryService {
-  private intervalId: NodeJS.Timeout | null = null;
+class SlackWeeklySummaryService extends PeriodicService {
   private instanceId: string;
+  private lockedRunner: LockedTaskRunner;
 
   constructor() {
+    super({
+      name: 'slack-weekly-summary',
+      intervalMs: SLACK_NOTIFICATIONS.CHECK_INTERVAL_MS,
+    });
+
     this.instanceId = `summary-${process.pid}-${Date.now().toString(36)}`;
+    this.lockedRunner = new LockedTaskRunner({
+      lockKey: SLACK_NOTIFICATIONS.LOCK_KEY,
+      lockTtlSeconds: SLACK_NOTIFICATIONS.LOCK_TTL_SECONDS,
+      renewalIntervalMs: 30_000,
+      instanceId: this.instanceId,
+      context: 'slack-weekly-summary',
+    });
   }
 
-  /**
-   * Start the periodic summary check
-   */
   start(): void {
-    if (this.intervalId) {
-      logger.warn('Slack weekly summary service already running');
-      return;
-    }
-
     if (!slackNotificationService.isEnabled()) {
       logger.info('Slack weekly summary service not starting - Slack notifications disabled');
       return;
     }
-
-    logger.info('Starting Slack weekly summary service (checks every hour)');
-
-    // Run immediately on startup
-    this.checkAndSend().catch((err) => {
-      logger.error({ err }, 'Error in initial weekly summary check');
-    });
-
-    // Then check every hour
-    this.intervalId = setInterval(() => {
-      this.checkAndSend().catch((err) => {
-        logger.error({ err }, 'Error in periodic weekly summary check');
-      });
-    }, CHECK_INTERVAL_MS);
+    super.start();
   }
 
-  /**
-   * Stop the service
-   */
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      logger.info('Slack weekly summary service stopped');
-    }
-  }
-
-  /**
-   * Check if it's time to send and send if needed
-   */
-  private async checkAndSend(): Promise<void> {
+  protected async runCheck(): Promise<void> {
     // Get current time in UK timezone
     const now = new Date();
     const ukTime = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
@@ -89,21 +65,19 @@ class SlackWeeklySummaryService {
       return;
     }
 
-    // Try to acquire lock
-    const acquired = await acquireLock(LOCK_KEY, this.instanceId, LOCK_TTL_SECONDS);
+    const taskResult = await this.lockedRunner.run(async () => {
+      await this.sendWeeklySummary();
+      // Mark as sent
+      await redis.set(LAST_SUMMARY_KEY, today, 'EX', 7 * 24 * 60 * 60);
+    });
 
-    if (!acquired) {
+    if (!taskResult.acquired) {
       logger.debug('Another instance is handling weekly summary');
       return;
     }
 
-    try {
-      await this.sendWeeklySummary();
-
-      // Mark as sent
-      await redis.set(LAST_SUMMARY_KEY, today, 'EX', 7 * 24 * 60 * 60); // Expire in 7 days
-    } finally {
-      await releaseLock(LOCK_KEY, this.instanceId, 'slack-weekly-summary');
+    if (taskResult.error) {
+      logger.error({ error: taskResult.error }, 'Error sending weekly summary');
     }
   }
 

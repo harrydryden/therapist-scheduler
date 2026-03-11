@@ -3,6 +3,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
+import { renewLock, releaseLock } from '../utils/redis-locks';
 import { DEFAULT_TIMEOUTS, TimeoutError, withTimeout } from '../utils/timeout';
 import {
   decodeHtmlEntities,
@@ -158,44 +159,9 @@ const LOCK_RENEWAL_INTERVAL_MS = 60 * 1000;
 const LOCK_TTL_SECONDS = 300;
 
 /**
- * Lua script to renew a lock only if we still own it
- * Returns 1 if renewed, 0 if lock was taken by someone else
- */
-const LOCK_RENEWAL_SCRIPT = `
-local lockKey = KEYS[1]
-local expectedValue = ARGV[1]
-local newTtl = tonumber(ARGV[2])
-
-local currentValue = redis.call('GET', lockKey)
-if currentValue == expectedValue then
-  redis.call('EXPIRE', lockKey, newTtl)
-  return 1
-else
-  return 0
-end
-`;
-
-/**
- * Lua script to release a lock only if we still own it (FIX E2)
- * Prevents accidentally releasing another worker's lock
- * Returns 1 if released, 0 if lock was owned by someone else
- */
-const LOCK_RELEASE_SCRIPT = `
-local lockKey = KEYS[1]
-local expectedValue = ARGV[1]
-
-local currentValue = redis.call('GET', lockKey)
-if currentValue == expectedValue then
-  redis.call('DEL', lockKey)
-  return 1
-else
-  return 0
-end
-`;
-
-/**
- * Creates a lock renewal manager that periodically extends the lock TTL
- * Returns a cleanup function to stop renewal when processing is done
+ * Creates a lock renewal manager that periodically extends the lock TTL.
+ * Uses shared renewLock utility from redis-locks.ts.
+ * Returns a cleanup function to stop renewal when processing is done.
  */
 function createLockRenewal(
   lockKey: string,
@@ -208,31 +174,14 @@ function createLockRenewal(
   const renewalInterval = setInterval(async () => {
     if (!isActive) return;
 
-    try {
-      const result = await redis.eval(
-        LOCK_RENEWAL_SCRIPT,
-        1,
-        lockKey,
-        lockValue,
-        LOCK_TTL_SECONDS
-      );
-
-      if (result === 0) {
-        // Lock was taken by someone else
-        lockValid = false;
-        logger.error(
-          { lockKey },
-          'Lock renewal failed - lock was taken by another process'
-        );
-        if (onLockLost) {
-          onLockLost();
-        }
-        // Stop trying to renew
-        clearInterval(renewalInterval);
+    const renewed = await renewLock(lockKey, lockValue, LOCK_TTL_SECONDS);
+    if (!renewed) {
+      lockValid = false;
+      logger.error({ lockKey }, 'Lock renewal failed - lock was taken by another process');
+      if (onLockLost) {
+        onLockLost();
       }
-    } catch (err) {
-      logger.error({ err, lockKey }, 'Lock renewal Redis error');
-      // Don't invalidate lock on Redis errors - it might recover
+      clearInterval(renewalInterval);
     }
   }, LOCK_RENEWAL_INTERVAL_MS);
 
@@ -1381,23 +1330,7 @@ export class EmailProcessingService {
           );
         } else {
           // FIX E2: Release lock only if we still own it (prevents releasing another worker's lock)
-          try {
-            const released = await redis.eval(
-              LOCK_RELEASE_SCRIPT,
-              1,
-              lockKey,
-              traceId // traceId was used as lock value
-            );
-            if (released === 0) {
-              logger.warn(
-                { traceId, messageId },
-                'Lock was taken by another process before release - lock ownership lost'
-              );
-            }
-          } catch (err) {
-            // Log but don't throw - lock will expire naturally
-            logger.warn({ traceId, messageId, err }, 'Failed to release Redis lock - will expire naturally');
-          }
+          await releaseLock(lockKey, traceId, `email-processing:${messageId}`);
         }
       }
       // Note: Database "lock" (processedGmailMessage) is not deleted - it serves as

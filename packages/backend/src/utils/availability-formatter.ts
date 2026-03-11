@@ -11,6 +11,13 @@
 
 import { logger } from './logger';
 import { MIN_BOOKING_LEAD_HOURS } from './date-parser';
+import {
+  DAYS_LONG,
+  DAYS_SHORT,
+  MONTHS,
+  getOrdinalSuffix,
+  formatTime12Compact,
+} from './date-formatting';
 
 export interface AvailabilitySlot {
   day: string; // "Monday", "Tuesday", etc.
@@ -70,60 +77,24 @@ const DAY_INDEX: Record<string, number> = {
  * Format a date as "Monday 10th February"
  */
 function formatDateLong(date: Date): string {
-  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const months = ['January', 'February', 'March', 'April', 'May', 'June',
-                  'July', 'August', 'September', 'October', 'November', 'December'];
-
   const day = date.getDate();
   const suffix = getOrdinalSuffix(day);
-
-  return `${days[date.getDay()]} ${day}${suffix} ${months[date.getMonth()]}`;
+  return `${DAYS_LONG[date.getDay()]} ${day}${suffix} ${MONTHS[date.getMonth()]}`;
 }
 
 /**
  * Format a date as "Mon 10th"
  */
 function formatDateShort(date: Date): string {
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const day = date.getDate();
   const suffix = getOrdinalSuffix(day);
-  return `${days[date.getDay()]} ${day}${suffix}`;
+  return `${DAYS_SHORT[date.getDay()]} ${day}${suffix}`;
 }
 
-/**
- * Get ordinal suffix for a number (1st, 2nd, 3rd, etc.)
- */
-function getOrdinalSuffix(n: number): string {
-  const s = ['th', 'st', 'nd', 'rd'];
-  const v = n % 100;
-  return s[(v - 20) % 10] || s[v] || s[0];
-}
-
-/**
- * Format time as "10:00am" or "2:30pm"
- */
-function formatTime(date: Date): string {
-  let hours = date.getHours();
-  const minutes = date.getMinutes();
-  const ampm = hours >= 12 ? 'pm' : 'am';
-  hours = hours % 12 || 12;
-  const minuteStr = minutes === 0 ? '' : `:${minutes.toString().padStart(2, '0')}`;
-  return `${hours}${minuteStr}${ampm}`;
-}
-
-/**
- * Format time as "10am" (short version for lists)
- */
-function formatTimeShort(date: Date): string {
-  let hours = date.getHours();
-  const minutes = date.getMinutes();
-  const ampm = hours >= 12 ? 'pm' : 'am';
-  hours = hours % 12 || 12;
-  if (minutes === 0) {
-    return `${hours}${ampm}`;
-  }
-  return `${hours}:${minutes.toString().padStart(2, '0')}${ampm}`;
-}
+// Use shared formatTime12Compact for both formatTime and formatTimeShort
+// (they were identical: "10am" or "10:30am")
+const formatTime = formatTime12Compact;
+const formatTimeShort = formatTime12Compact;
 
 /**
  * Get the start of the current week (Sunday)
