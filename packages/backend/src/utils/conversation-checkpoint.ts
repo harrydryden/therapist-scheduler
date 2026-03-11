@@ -85,7 +85,7 @@ const VALID_TRANSITIONS: Record<ConversationStage, ConversationStage[]> = {
 /**
  * Human-readable descriptions for each stage
  */
-const STAGE_DESCRIPTIONS: Record<ConversationStage, string> = {
+export const STAGE_DESCRIPTIONS: Record<ConversationStage, string> = {
   initial_contact: 'Initial contact made',
   awaiting_therapist_availability: 'Waiting for therapist to provide availability',
   awaiting_user_slot_selection: 'Waiting for user to select a time slot',

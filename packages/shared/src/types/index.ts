@@ -155,19 +155,27 @@ export interface AppointmentListItem {
   reschedulingInProgress: boolean;
 }
 
+export interface AppointmentSummary {
+  /** One-line description of current stage */
+  stage: string;
+  /** What the system is waiting for / what should happen next */
+  nextAction: string;
+  /** Key facts: proposed times, selected time, confirmed time, etc. */
+  keyFacts: string[];
+  /** Total messages in the conversation */
+  messageCount: number;
+  /** ISO timestamp of last activity (compute relative time client-side) */
+  lastActivityAt: string | null;
+  /** Warning flags (stalled, chased, closure recommended, etc.) */
+  flags: string[];
+}
+
 export interface AppointmentDetail extends Omit<AppointmentListItem,
   | 'messageCount'
   | 'checkpointStage' | 'checkpointProgress'
   | 'healthStatus' | 'healthScore' | 'isStalled' | 'hasThreadDivergence' | 'hasToolFailure'
 > {
-  conversation: {
-    latestMessages: Array<{
-      role: 'user' | 'assistant' | 'admin';
-      content: string;
-      senderType: 'client' | 'therapist' | 'agent' | 'admin';
-    }>;
-    totalMessageCount: number;
-  } | null;
+  summary: AppointmentSummary | null;
   therapistAvailability: TherapistAvailability | null;
   notes: string | null;
   gmailThreadId: string | null;

@@ -18,6 +18,7 @@ import { parseConversationState, parseTherapistAvailability } from '../utils/jso
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
+import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
 import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
@@ -277,49 +278,11 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           return Errors.notFound(reply, 'Appointment');
         }
 
-        // Parse conversation state and extract only latest messages per sender.
-        // The full blob stays in the DB for the AI agent — we only trim the API response.
-        const fullConversation = parseConversationState(appointment.conversationState);
-        let conversationSummary: {
-          latestMessages: Array<{ role: string; content: string; senderType: string }>;
-          totalMessageCount: number;
-        } | null = null;
-
-        if (fullConversation?.messages) {
-          const messages = fullConversation.messages;
-          // Walk backwards to find the latest message from each sender type.
-          // Messages with role 'user' can be from the client or therapist —
-          // determined by checking content for "from therapist" / "from user" patterns.
-          const latestByType = new Map<string, { role: string; content: string; senderType: string }>();
-
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const msg = messages[i];
-            let senderType: string;
-
-            if (msg.role === 'assistant') {
-              senderType = 'agent';
-            } else if (msg.role === 'admin') {
-              senderType = 'admin';
-            } else {
-              // role === 'user': determine if from client or therapist
-              const content = msg.content.toLowerCase();
-              if (content.includes('from therapist') || content.includes('from: therapist')) {
-                senderType = 'therapist';
-              } else {
-                senderType = 'client';
-              }
-            }
-
-            if (!latestByType.has(senderType)) {
-              latestByType.set(senderType, { role: msg.role, content: msg.content, senderType });
-            }
-          }
-
-          conversationSummary = {
-            latestMessages: Array.from(latestByType.values()),
-            totalMessageCount: messages.length,
-          };
-        }
+        // Parse raw conversation state once for summary builder
+        const appointmentSummary = buildAppointmentSummary(
+          parseRawConversationState(appointment.conversationState),
+          appointment,
+        );
 
         return sendSuccess(reply, {
             id: appointment.id,
@@ -338,7 +301,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             updatedAt: appointment.updatedAt,
             gmailThreadId: appointment.gmailThreadId,
             therapistGmailThreadId: appointment.therapistGmailThreadId,
-            conversation: conversationSummary,
+            summary: appointmentSummary,
             humanControlEnabled: appointment.humanControlEnabled,
             humanControlTakenBy: appointment.humanControlTakenBy,
             humanControlTakenAt: appointment.humanControlTakenAt,
