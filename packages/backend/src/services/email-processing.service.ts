@@ -1618,7 +1618,6 @@ export class EmailProcessingService {
   ): Promise<{ id: string; userEmail: string; therapistEmail: string } | null> {
     // All statuses are matchable so that final emails (e.g. thank-you notes,
     // cancellation confirmations) are still threaded into the correct appointment.
-    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested', 'completed', 'cancelled'];
 
     // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
     // The query fetches all potential matches and post-query logic applies priority ordering:
@@ -1651,7 +1650,6 @@ export class EmailProcessingService {
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           OR: deterministicConditions,
-          status: { in: MATCHABLE_STATUSES as any },
         },
         select: {
           id: true,
@@ -1726,9 +1724,6 @@ export class EmailProcessingService {
           { userEmail: email.from },
           { therapistEmail: email.from },
         ],
-        status: {
-          in: MATCHABLE_STATUSES as any,
-        },
       },
       orderBy: {
         updatedAt: 'desc',
