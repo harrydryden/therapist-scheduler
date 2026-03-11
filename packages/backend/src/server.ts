@@ -380,8 +380,6 @@ async function buildServer() {
   return fastify;
 }
 
-// Grace period for in-flight requests during shutdown
-const SHUTDOWN_GRACE_PERIOD_MS = 30000; // 30 seconds
 
 async function start() {
   let server: Awaited<ReturnType<typeof buildServer>> | null = null;
@@ -400,15 +398,11 @@ async function start() {
     logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown...');
 
     try {
-      // Close Fastify server (stop accepting new requests)
+      // Close Fastify server (stops accepting new requests and waits for in-flight to complete)
       if (server) {
         await server.close();
-        logger.info('HTTP server closed, no new requests accepted');
+        logger.info('HTTP server closed, all in-flight requests completed');
       }
-
-      // Grace period for in-flight requests to complete
-      logger.info({ graceMs: SHUTDOWN_GRACE_PERIOD_MS }, 'Waiting for in-flight requests to complete...');
-      await new Promise((resolve) => setTimeout(resolve, SHUTDOWN_GRACE_PERIOD_MS));
 
       // Stop background services (they should check isShuttingDown internally)
       logger.info('Stopping background services...');

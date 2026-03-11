@@ -44,6 +44,7 @@ class WeeklyMailingListService {
   private isRunning = false;
   private instanceId: string;
   private lockRenewalId: NodeJS.Timeout | null = null;
+  private lockValid = true;
   private consecutiveFailures = 0;
 
   constructor() {
@@ -132,10 +133,13 @@ class WeeklyMailingListService {
    * Start lock renewal
    */
   private startLockRenewal(): void {
+    this.lockValid = true;
     this.lockRenewalId = setInterval(async () => {
       const renewed = await renewLock(WEEKLY_MAILING.LOCK_KEY, this.instanceId, WEEKLY_MAILING.LOCK_TTL_SECONDS);
       if (!renewed) {
-        logger.warn('Weekly mailing lock lost - another instance may have taken over');
+        logger.warn('Weekly mailing lock lost - stopping renewal and aborting send loop');
+        this.lockValid = false;
+        this.stopLockRenewal();
       }
     }, WEEKLY_MAILING.RENEWAL_INTERVAL_MS);
   }
@@ -233,13 +237,16 @@ class WeeklyMailingListService {
 
     logger.info({ checkId, userCount: users.length }, 'Force sending weekly emails');
 
+    // Fetch email template settings once for the entire batch
+    const emailSettings = await this.fetchEmailSettings();
+
     // Send emails
     let sent = 0;
     let failed = 0;
 
     for (const user of users) {
       try {
-        await this.sendWeeklyEmail(user);
+        await this.sendWeeklyEmail(user, emailSettings);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -297,13 +304,21 @@ class WeeklyMailingListService {
 
     logger.info({ checkId, userCount: users.length }, 'Sending weekly emails');
 
+    // Fetch email template settings once for the entire batch
+    const emailSettings = await this.fetchEmailSettings();
+
     // Send emails
     let sent = 0;
     let failed = 0;
 
     for (const user of users) {
+      // Abort if we lost the distributed lock mid-send
+      if (!this.lockValid) {
+        logger.warn({ checkId, sent, failed, remaining: users.length - sent - failed }, 'Aborting weekly mailing - lock lost');
+        break;
+      }
       try {
-        await this.sendWeeklyEmail(user);
+        await this.sendWeeklyEmail(user, emailSettings);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -311,7 +326,7 @@ class WeeklyMailingListService {
       }
     }
 
-    // Mark as sent for this week
+    // Mark as sent for this week (even partial sends count to avoid double-send)
     await this.markAsSent();
 
     logger.info({ checkId, sent, failed, total: users.length }, 'Weekly mailing complete');
@@ -448,18 +463,29 @@ class WeeklyMailingListService {
   }
 
   /**
-   * Send weekly email to a single user
+   * Fetch email template settings once (call before the send loop, not per-user)
    */
-  private async sendWeeklyEmail(user: NotionUser): Promise<void> {
-    // Batch fetch all needed settings in a single query
+  private async fetchEmailSettings(): Promise<{ subjectTemplate: string; bodyTemplate: string; webAppUrl: string }> {
     const settingsMap = await getSettingValues<string>([
       'email.weeklyMailingSubject',
       'email.weeklyMailingBody',
       'weeklyMailing.webAppUrl',
     ]);
-    const subjectTemplate = settingsMap.get('email.weeklyMailingSubject')!;
-    const bodyTemplate = settingsMap.get('email.weeklyMailingBody')!;
-    const webAppUrl = settingsMap.get('weeklyMailing.webAppUrl')!;
+    return {
+      subjectTemplate: settingsMap.get('email.weeklyMailingSubject')!,
+      bodyTemplate: settingsMap.get('email.weeklyMailingBody')!,
+      webAppUrl: settingsMap.get('weeklyMailing.webAppUrl')!,
+    };
+  }
+
+  /**
+   * Send weekly email to a single user
+   */
+  private async sendWeeklyEmail(
+    user: NotionUser,
+    emailSettings: { subjectTemplate: string; bodyTemplate: string; webAppUrl: string },
+  ): Promise<void> {
+    const { subjectTemplate, bodyTemplate, webAppUrl } = emailSettings;
 
     // Generate unsubscribe URL using configured backend URL
     const unsubscribeUrl = generateUnsubscribeUrl(user.email, config.backendUrl);

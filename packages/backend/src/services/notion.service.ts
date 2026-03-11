@@ -252,21 +252,30 @@ class NotionService {
     logger.info('Fetching therapists from Notion');
 
     try {
-      // Wrap Notion API call with circuit breaker for resilience
-      const response = await notionCircuitBreaker.execute(() =>
-        this.notion.databases.query({
-          database_id: config.notionDatabaseId,
-          filter: {
-            property: 'Active',
-            checkbox: {
-              equals: true,
-            },
-          },
-          page_size: 100,
-        })
-      );
+      // Fetch all pages with pagination (Notion API max page_size is 100)
+      const allResults: NotionPage[] = [];
+      let cursor: string | undefined = undefined;
 
-      const therapists = response.results.map((page) => this.parseTherapistFromPage(page as NotionPage));
+      do {
+        const response = await notionCircuitBreaker.execute(() =>
+          this.notion.databases.query({
+            database_id: config.notionDatabaseId,
+            filter: {
+              property: 'Active',
+              checkbox: {
+                equals: true,
+              },
+            },
+            page_size: 100,
+            ...(cursor ? { start_cursor: cursor } : {}),
+          })
+        );
+
+        allResults.push(...(response.results as NotionPage[]));
+        cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+      } while (cursor);
+
+      const therapists = allResults.map((page) => this.parseTherapistFromPage(page));
 
       // Cache the results
       await this.setCache(CACHE_KEY_ALL, therapists);
