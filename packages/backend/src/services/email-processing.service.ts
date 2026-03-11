@@ -1616,12 +1616,8 @@ export class EmailProcessingService {
   private async findMatchingAppointmentRequest(
     email: EmailMessage
   ): Promise<{ id: string; userEmail: string; therapistEmail: string } | null> {
-    // FIX EMAIL-CONTEXT: Statuses that should be matched for incoming emails
-    // - Pre-booking: pending, contacted, negotiating
-    // - Post-booking (active): confirmed (session not yet held)
-    // - NOT included: session_held, feedback_requested, completed (post-session)
-    // - NOT included: cancelled (terminal state)
-    const MATCHABLE_STATUSES = ['pending', 'contacted', 'negotiating', 'confirmed'];
+    // All statuses are matchable so that final emails (e.g. thank-you notes,
+    // cancellation confirmations) are still threaded into the correct appointment.
 
     // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
     // The query fetches all potential matches and post-query logic applies priority ordering:
@@ -1654,7 +1650,6 @@ export class EmailProcessingService {
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           OR: deterministicConditions,
-          status: { in: MATCHABLE_STATUSES as any },
         },
         select: {
           id: true,
@@ -1723,15 +1718,22 @@ export class EmailProcessingService {
 
     // PRIORITY 4: Fallback to sender + therapist name matching (for legacy appointments without tracking codes)
     // Limited to 50 to prevent memory issues with high-volume users
-    const activeRequests = await prisma.appointmentRequest.findMany({
+    /** Sort by most recently updated, with ID as deterministic tiebreaker */
+    const byMostRecent = (
+      a: { updatedAt: Date; id: string },
+      b: { updatedAt: Date; id: string },
+    ) => {
+      const timeDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return a.id.localeCompare(b.id);
+    };
+
+    const matchingRequests = await prisma.appointmentRequest.findMany({
       where: {
         OR: [
           { userEmail: email.from },
           { therapistEmail: email.from },
         ],
-        status: {
-          in: MATCHABLE_STATUSES as any,
-        },
       },
       orderBy: {
         updatedAt: 'desc',
@@ -1746,21 +1748,21 @@ export class EmailProcessingService {
       },
     });
 
-    if (activeRequests.length === 0) {
+    if (matchingRequests.length === 0) {
       return null;
     }
 
-    // If only one active request, return it
-    if (activeRequests.length === 1) {
-      return activeRequests[0];
+    // If only one matching request, return it
+    if (matchingRequests.length === 1) {
+      return matchingRequests[0];
     }
 
-    // Multiple active requests - try to match by therapist name in subject
+    // Multiple matching requests - try to match by therapist name in subject
     // FIX E8: Collect ALL matches, then select deterministically (most recently updated)
     const subjectLower = email.subject.toLowerCase();
-    const nameMatches: typeof activeRequests = [];
+    const nameMatches: typeof matchingRequests = [];
 
-    for (const request of activeRequests) {
+    for (const request of matchingRequests) {
       // Skip if therapistName is null/undefined to prevent crash
       if (!request.therapistName) {
         logger.warn(
@@ -1789,13 +1791,7 @@ export class EmailProcessingService {
 
     // FIX E8 + H4: If multiple name matches, select deterministically
     if (nameMatches.length > 1) {
-      // Sort by updatedAt (descending), then by ID (ascending) as tiebreaker
-      // This ensures deterministic selection even if two appointments have identical updatedAt
-      nameMatches.sort((a, b) => {
-        const timeDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-        if (timeDiff !== 0) return timeDiff;
-        return a.id.localeCompare(b.id); // Deterministic tiebreaker
-      });
+      nameMatches.sort(byMostRecent);
       logger.warn(
         {
           matchCount: nameMatches.length,
@@ -1809,7 +1805,7 @@ export class EmailProcessingService {
 
     // Fallback: if sender is a therapist, match by their email
     // If multiple appointments have the same therapist email, prefer most recently active
-    const therapistMatches = activeRequests.filter(r => r.therapistEmail === email.from);
+    const therapistMatches = matchingRequests.filter(r => r.therapistEmail === email.from);
     if (therapistMatches.length === 1) {
       logger.info(
         { appointmentId: therapistMatches[0].id, therapistEmail: email.from },
@@ -1817,12 +1813,7 @@ export class EmailProcessingService {
       );
       return therapistMatches[0];
     } else if (therapistMatches.length > 1) {
-      // FIX E8 + H4: Sort with ID as tiebreaker for deterministic selection
-      therapistMatches.sort((a, b) => {
-        const timeDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-        if (timeDiff !== 0) return timeDiff;
-        return a.id.localeCompare(b.id); // Deterministic tiebreaker
-      });
+      therapistMatches.sort(byMostRecent);
       logger.warn(
         {
           therapistEmail: email.from,
@@ -1837,7 +1828,7 @@ export class EmailProcessingService {
     // SAFETY: Reject ambiguous emails rather than guessing wrong
     // This prevents sending responses to the wrong therapist/user
     logger.error(
-      { from: email.from, subject: email.subject, activeRequestCount: activeRequests.length },
+      { from: email.from, subject: email.subject, matchingRequestCount: matchingRequests.length },
       'AMBIGUOUS MATCH: Could not deterministically match email to appointment. ' +
       'Email will be skipped to prevent misdirected responses. Manual intervention required.'
     );
