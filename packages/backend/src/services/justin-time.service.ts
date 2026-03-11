@@ -22,6 +22,7 @@ import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, typ
 import {
   type ConversationCheckpoint,
   type ConversationAction,
+  createCheckpoint,
   updateCheckpoint,
 } from '../utils/conversation-checkpoint';
 import {
@@ -222,6 +223,14 @@ export class JustinTimeService {
         messages: [
           { role: 'user' as const, content: truncateMessageContent(initialMessage) },
         ],
+        checkpoint: createCheckpoint(
+          'initial_contact',
+          null,
+          hasAvailability
+            ? 'Sending available times to client'
+            : 'Requesting availability from therapist',
+        ),
+        facts: createEmptyFacts(),
       };
 
       // Run the unified tool loop (extracted from the previously duplicated inline loop)

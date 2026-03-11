@@ -46,6 +46,10 @@ function inferStageFromStatus(
     case 'negotiating':
       // Active negotiation - likely awaiting confirmation
       return 'awaiting_therapist_confirmation';
+    case 'session_held':
+    case 'feedback_requested':
+    case 'completed':
+      return 'confirmed';
     default:
       // Unknown status - default to initial
       return 'initial_contact';
@@ -79,13 +83,6 @@ async function migrateConversationStates() {
 
   const appointments = await prisma.appointmentRequest.findMany({
     where: {
-      OR: [
-        { status: { in: ['pending', 'contacted', 'negotiating'] } },
-        {
-          status: 'confirmed',
-          confirmedAt: { gte: sevenDaysAgo },
-        },
-      ],
       conversationState: { not: null },
     },
     select: {
@@ -116,8 +113,10 @@ async function migrateConversationStates() {
         continue;
       }
 
-      // Check if already migrated
-      if ((state as any).checkpoint && (state as any).facts) {
+      // Check if already fully migrated (has both checkpoint and facts)
+      const hasCheckpoint = !!(state as any).checkpoint?.stage;
+      const hasFacts = !!(state as any).facts?.updatedAt;
+      if (hasCheckpoint && hasFacts) {
         logger.debug({ appointmentId: appointment.id }, 'Already migrated - skipping');
         skipped++;
         continue;
@@ -151,11 +150,13 @@ async function migrateConversationStates() {
         facts,
       };
 
-      // Store updated state (cast to satisfy Prisma's JSON type)
+      // Store updated state and sync denormalized columns
       await prisma.appointmentRequest.update({
         where: { id: appointment.id },
         data: {
           conversationState: updatedState as object,
+          messageCount: messageCount,
+          checkpointStage: stage,
         },
         select: { id: true },
       });
