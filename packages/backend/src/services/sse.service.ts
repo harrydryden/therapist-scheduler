@@ -40,6 +40,8 @@ interface SSEConnection {
   id: string;
   reply: FastifyReply;
   connectedAt: Date;
+  /** Event listener reference — needed to remove from EventEmitter on cleanup */
+  listener: (event: SSEEvent) => void;
 }
 
 const MAX_CONNECTIONS = parseInt(process.env.SSE_MAX_CONNECTIONS || '100', 10);
@@ -87,23 +89,23 @@ class SSEService {
       connectionId,
     });
 
-    const connection: SSEConnection = {
-      id: connectionId,
-      reply,
-      connectedAt: new Date(),
-    };
-    this.connections.set(connectionId, connection);
-
     // Subscribe to events
     const listener = (event: SSEEvent) => {
       this.sendToConnection(reply, event);
     };
     this.eventBus.on('event', listener);
 
+    const connection: SSEConnection = {
+      id: connectionId,
+      reply,
+      connectedAt: new Date(),
+      listener,
+    };
+    this.connections.set(connectionId, connection);
+
     // Clean up on disconnect
     reply.raw.on('close', () => {
-      this.eventBus.off('event', listener);
-      this.connections.delete(connectionId);
+      this.removeConnection(connectionId);
       logger.debug({ connectionId }, 'SSE connection closed');
     });
 
@@ -171,6 +173,17 @@ class SSEService {
     };
   }
 
+  /**
+   * Remove a connection and its EventEmitter listener.
+   * Called from both the 'close' handler and heartbeat dead-connection cleanup.
+   */
+  private removeConnection(connectionId: string): void {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
+    this.eventBus.off('event', conn.listener);
+    this.connections.delete(connectionId);
+  }
+
   private sendToConnection(reply: FastifyReply, data: unknown): void {
     try {
       const payload = `data: ${JSON.stringify(data)}\n\n`;
@@ -186,8 +199,8 @@ class SSEService {
         try {
           conn.reply.raw.write(': heartbeat\n\n');
         } catch {
-          // Dead connection — remove it
-          this.connections.delete(id);
+          // Dead connection — remove it and its EventEmitter listener
+          this.removeConnection(id);
         }
       }
     }, HEARTBEAT_INTERVAL_MS);
@@ -198,8 +211,9 @@ class SSEService {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    // Close all connections
+    // Close all connections and remove their EventEmitter listeners
     for (const [, conn] of this.connections) {
+      this.eventBus.off('event', conn.listener);
       try {
         conn.reply.raw.end();
       } catch {

@@ -16,6 +16,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { PeriodicService } from '../utils/periodic-service';
 import { emailProcessingService } from './email-processing.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import {
@@ -28,9 +29,6 @@ import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { getSettingValue } from './settings.service';
 import { POST_BOOKING, APPOINTMENT_STATUS } from '../constants';
-
-// Check interval: every 15 minutes
-const CHECK_INTERVAL_MS = POST_BOOKING.CHECK_INTERVAL_MS;
 
 // Batch size for processing to prevent memory issues
 const BATCH_SIZE = 50;
@@ -48,44 +46,17 @@ interface ParseFailureEntry {
   firstFailure: number; // Track when we first started failing to enable daily reparse
 }
 
-class PostBookingFollowupService {
-  private intervalId: NodeJS.Timeout | null = null;
-  private isRunning = false;
-
+class PostBookingFollowupService extends PeriodicService {
   // Track parse failures with timestamps to allow retry after reset period
   // Bounded to prevent unbounded memory growth
   private static MAX_PARSE_FAILURES = 500;
   private parseFailures: Map<string, ParseFailureEntry> = new Map();
 
-  /**
-   * Start the periodic follow-up check job
-   */
-  start(): void {
-    if (this.intervalId) {
-      logger.warn('Post-booking follow-up service already running');
-      return;
-    }
-
-    logger.info('Starting post-booking follow-up service (runs every 15 minutes)');
-
-    // Run immediately on startup (wrapped in try-catch to prevent crash)
-    this.runSafeCheck();
-
-    // Then run every 15 minutes
-    this.intervalId = setInterval(() => {
-      this.runSafeCheck();
-    }, CHECK_INTERVAL_MS);
-  }
-
-  /**
-   * Stop the periodic follow-up check job
-   */
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      logger.info('Post-booking follow-up service stopped');
-    }
+  constructor() {
+    super({
+      name: 'post-booking-followup',
+      intervalMs: POST_BOOKING.CHECK_INTERVAL_MS,
+    });
   }
 
   /**
@@ -93,29 +64,13 @@ class PostBookingFollowupService {
    */
   getStatus(): { running: boolean; intervalMs: number; parseFailures: number } {
     return {
-      running: this.intervalId !== null,
-      intervalMs: CHECK_INTERVAL_MS,
+      ...super.getStatus(),
       parseFailures: this.parseFailures.size,
     };
   }
 
-  /**
-   * Safe wrapper that catches and logs errors without crashing the interval
-   */
-  private async runSafeCheck(): Promise<void> {
-    if (this.isRunning) {
-      logger.debug('Post-booking follow-up check already in progress, skipping');
-      return;
-    }
-
-    this.isRunning = true;
-    try {
-      await this.processFollowUps();
-    } catch (error) {
-      logger.error({ error }, 'Unhandled error in post-booking follow-up check - will retry next interval');
-    } finally {
-      this.isRunning = false;
-    }
+  protected async runCheck(): Promise<void> {
+    await this.processFollowUps();
   }
 
   /**

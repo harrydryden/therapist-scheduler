@@ -1,7 +1,6 @@
 import { emailProcessingService } from './email-processing.service';
 import { logger } from '../utils/logger';
-import { redis } from '../utils/redis';
-import { releaseLock, renewLock } from '../utils/redis-locks';
+import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { PENDING_EMAIL_LOCK } from '../constants';
 
 /**
@@ -13,7 +12,7 @@ import { PENDING_EMAIL_LOCK } from '../constants';
  *
  * Features:
  * - Processes pending emails every 2 minutes by default
- * - Uses Redis distributed lock for multi-instance safety
+ * - Uses LockedTaskRunner for distributed lock management
  * - Handles failures gracefully without crashing
  * - Logs success/failure counts for monitoring
  * - Prevents overlapping processing runs across all instances
@@ -34,11 +33,9 @@ const STARTUP_DELAY_MS = 20000; // 20 seconds
 class PendingEmailService {
   private intervalId: NodeJS.Timeout | null = null;
   private startupTimeoutId: NodeJS.Timeout | null = null;
-  private lockRenewalId: NodeJS.Timeout | null = null;
   private processIntervalMs: number;
   private instanceId: string;
-  // FIX P1/P2: Track lock validity to prevent continued processing after lock loss
-  private lockValid: boolean = true;
+  private lockedRunner: LockedTaskRunner;
   private stats = {
     totalProcessed: 0,
     totalSent: 0,
@@ -54,6 +51,14 @@ class PendingEmailService {
     // Generate unique instance ID for distributed lock ownership
     // Combines process ID with timestamp to ensure uniqueness
     this.instanceId = `${process.pid}-${Date.now().toString(36)}`;
+
+    this.lockedRunner = new LockedTaskRunner({
+      lockKey: PENDING_EMAIL_LOCK.KEY,
+      lockTtlSeconds: PENDING_EMAIL_LOCK.TTL_SECONDS,
+      renewalIntervalMs: PENDING_EMAIL_LOCK.RENEWAL_INTERVAL_MS,
+      instanceId: this.instanceId,
+      context: 'pending-email',
+    });
 
     const envInterval = process.env.PENDING_EMAIL_INTERVAL_MS
       ? parseInt(process.env.PENDING_EMAIL_INTERVAL_MS, 10)
@@ -104,214 +109,76 @@ class PendingEmailService {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    this.stopLockRenewal();
-    // Release lock on shutdown (best effort)
-    this.releaseInstanceLock().catch(() => {});
     logger.info({ instanceId: this.instanceId }, 'Pending email service stopped');
   }
 
   /**
-   * Try to acquire the distributed lock
-   * Returns true if lock acquired, false if another instance holds it
-   *
-   * FIX: Improved error handling to distinguish between:
-   * - Lock exists (another instance holds it) -> return false
-   * - Redis unavailable on startup (no connection) -> allow single-instance mode
-   * - Redis connection lost mid-operation -> deny to prevent duplicates
+   * Safe wrapper for processing that catches errors.
+   * Uses LockedTaskRunner for distributed lock management.
    */
-  private async tryAcquireLock(): Promise<boolean> {
-    try {
-      const result = await redis.set(
-        PENDING_EMAIL_LOCK.KEY,
-        this.instanceId,
-        'EX',
-        PENDING_EMAIL_LOCK.TTL_SECONDS,
-        'NX'
-      );
-      return result === 'OK';
-    } catch (err) {
-      // Check if this is a "Redis not available" error (startup scenario)
-      // vs a connection lost error (mid-operation scenario)
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      const isRedisUnavailable = errorMessage.includes('Redis not available');
+  private async runSafeProcess(trigger: 'startup' | 'scheduled' | 'manual'): Promise<
+    { sent: number; failed: number; queueDepth?: number; batchSize?: number } | undefined
+  > {
+    const processId = Date.now().toString(36);
 
-      if (isRedisUnavailable) {
-        // Check if we're explicitly in single-instance mode
-        // In production multi-instance deployments, we should fail closed to prevent duplicates
-        const isSingleInstanceMode = process.env.SINGLE_INSTANCE_MODE === 'true';
+    const taskResult = await this.lockedRunner.run(async (ctx) => {
+      logger.debug({ processId, trigger, instanceId: this.instanceId }, 'Processing pending emails');
+      return emailProcessingService.processPendingEmails(processId, ctx.isLockValid);
+    });
 
-        if (isSingleInstanceMode) {
-          // Explicitly configured for single-instance - allow processing without Redis
-          logger.warn(
-            { err: errorMessage, instanceId: this.instanceId },
-            'Redis not available but SINGLE_INSTANCE_MODE=true - proceeding without distributed lock'
-          );
-          return true;
-        }
-
-        // Production default: fail closed to prevent duplicates in multi-instance deployment
-        // If this is actually single-instance, set SINGLE_INSTANCE_MODE=true
-        logger.error(
-          { err: errorMessage, instanceId: this.instanceId },
-          'Redis not available for distributed lock - DENYING to prevent duplicates (set SINGLE_INSTANCE_MODE=true to override)'
-        );
-        return false;
-      }
-
-      // Redis connection was lost or other error - deny to prevent duplicates
-      // Another instance might have acquired the lock before we lost connection
-      logger.error(
-        { err, instanceId: this.instanceId },
-        'Redis lock operation failed - denying to prevent duplicate processing'
-      );
-      return false;
-    }
-  }
-
-  /**
-   * Release the distributed lock (only if we own it)
-   */
-  private async releaseInstanceLock(): Promise<void> {
-    await releaseLock(PENDING_EMAIL_LOCK.KEY, this.instanceId, 'pending-email');
-  }
-
-  /**
-   * Start lock renewal to keep the lock alive during long processing
-   * FIX P1/P2: Now tracks lock validity to stop processing when lock is lost
-   */
-  private startLockRenewal(): void {
-    this.lockValid = true; // Reset on new lock acquisition
-    this.lockRenewalId = setInterval(async () => {
-      const renewed = await renewLock(PENDING_EMAIL_LOCK.KEY, this.instanceId, PENDING_EMAIL_LOCK.TTL_SECONDS);
-      if (!renewed) {
-        // FIX P1/P2: Mark lock as invalid so processing can check and abort
-        this.lockValid = false;
-        logger.warn(
-          { instanceId: this.instanceId },
-          'Lock renewal failed - lock was taken by another instance'
-        );
-        this.stopLockRenewal();
-      }
-    }, PENDING_EMAIL_LOCK.RENEWAL_INTERVAL_MS);
-  }
-
-  /**
-   * FIX P1/P2: Check if we still hold the lock (for aborting processing early)
-   */
-  isLockValid(): boolean {
-    return this.lockValid;
-  }
-
-  /**
-   * Stop the lock renewal interval
-   */
-  private stopLockRenewal(): void {
-    if (this.lockRenewalId) {
-      clearInterval(this.lockRenewalId);
-      this.lockRenewalId = null;
-    }
-  }
-
-  /**
-   * Safe wrapper for processing that catches errors
-   * Uses distributed lock for multi-instance safety
-   */
-  private async runSafeProcess(trigger: 'startup' | 'scheduled' | 'manual'): Promise<void> {
-    // Try to acquire distributed lock
-    const acquired = await this.tryAcquireLock();
-    if (!acquired) {
+    if (!taskResult.acquired) {
       logger.debug(
         { instanceId: this.instanceId, trigger },
         'Skipping pending email processing - another instance holds the lock'
       );
-      return;
+      return undefined;
     }
 
-    // Start lock renewal
-    this.startLockRenewal();
-    const processId = Date.now().toString(36);
-
-    try {
-      logger.debug({ processId, trigger, instanceId: this.instanceId }, 'Processing pending emails');
-
-      // Pass a lock validity checker so email processing can abort if lock is lost mid-batch
-      const result = await emailProcessingService.processPendingEmails(processId, () => this.isLockValid());
-
-      // Update stats with new queue metrics
-      this.stats.totalProcessed += result.sent + result.failed;
-      this.stats.totalSent += result.sent;
-      this.stats.totalFailed += result.failed;
-      this.stats.lastRunTime = new Date();
-      this.stats.lastRunSent = result.sent;
-      this.stats.lastRunFailed = result.failed;
-      this.stats.lastQueueDepth = result.queueDepth ?? 0;
-      this.stats.lastBatchSize = result.batchSize ?? 0;
-
-      if (result.sent > 0 || result.failed > 0) {
-        logger.info(
-          {
-            processId,
-            trigger,
-            sent: result.sent,
-            failed: result.failed,
-            queueDepth: result.queueDepth,
-            batchSize: result.batchSize,
-          },
-          'Pending email processing complete'
-        );
-      } else {
-        logger.debug({ processId, trigger }, 'No pending emails to process');
-      }
-    } catch (error) {
+    if (taskResult.error) {
       logger.error(
-        { processId, trigger, error },
+        { processId, trigger, error: taskResult.error },
         'Error processing pending emails - will retry next interval'
       );
-    } finally {
-      this.stopLockRenewal();
-      await this.releaseInstanceLock();
+      return undefined;
     }
+
+    const result = taskResult.result!;
+
+    // Update stats
+    this.stats.totalProcessed += result.sent + result.failed;
+    this.stats.totalSent += result.sent;
+    this.stats.totalFailed += result.failed;
+    this.stats.lastRunTime = new Date();
+    this.stats.lastRunSent = result.sent;
+    this.stats.lastRunFailed = result.failed;
+    this.stats.lastQueueDepth = result.queueDepth ?? 0;
+    this.stats.lastBatchSize = result.batchSize ?? 0;
+
+    if (result.sent > 0 || result.failed > 0) {
+      logger.info(
+        {
+          processId,
+          trigger,
+          sent: result.sent,
+          failed: result.failed,
+          queueDepth: result.queueDepth,
+          batchSize: result.batchSize,
+        },
+        'Pending email processing complete'
+      );
+    } else {
+      logger.debug({ processId, trigger }, 'No pending emails to process');
+    }
+
+    return result;
   }
 
   /**
    * Manually trigger pending email processing
    */
   async triggerManualProcess(): Promise<{ sent: number; failed: number }> {
-    const acquired = await this.tryAcquireLock();
-    if (!acquired) {
-      logger.info(
-        { instanceId: this.instanceId },
-        'Manual process requested but another instance is processing'
-      );
-      return { sent: 0, failed: 0 };
-    }
-
-    this.startLockRenewal();
-    const processId = Date.now().toString(36);
-
-    try {
-      logger.info({ processId, instanceId: this.instanceId }, 'Manual pending email processing triggered');
-      // Pass a lock validity checker so email processing can abort if lock is lost mid-batch
-      const result = await emailProcessingService.processPendingEmails(processId, () => this.isLockValid());
-
-      this.stats.totalProcessed += result.sent + result.failed;
-      this.stats.totalSent += result.sent;
-      this.stats.totalFailed += result.failed;
-      this.stats.lastRunTime = new Date();
-      this.stats.lastRunSent = result.sent;
-      this.stats.lastRunFailed = result.failed;
-      this.stats.lastQueueDepth = result.queueDepth ?? 0;
-      this.stats.lastBatchSize = result.batchSize ?? 0;
-
-      logger.info({ processId, sent: result.sent, failed: result.failed }, 'Manual processing complete');
-      return result;
-    } catch (error) {
-      logger.error({ processId, error }, 'Manual processing failed');
-      throw error;
-    } finally {
-      this.stopLockRenewal();
-      await this.releaseInstanceLock();
-    }
+    const result = await this.runSafeProcess('manual');
+    return result ?? { sent: 0, failed: 0 };
   }
 
   /**

@@ -1,6 +1,6 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { releaseLock, renewLock, acquireLock } from '../utils/redis-locks';
+import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
@@ -23,15 +23,28 @@ class StaleCheckService {
   private intervalId: NodeJS.Timeout | null = null;
   private retentionIntervalId: NodeJS.Timeout | null = null;
   private startupTimeoutId: NodeJS.Timeout | null = null;
-  private isCheckRunning = false; // Guard against overlapping checks (local)
-  private isRetentionRunning = false; // Guard against overlapping retention cleanup (local)
   private instanceId: string;
-  private staleCheckRenewalId: NodeJS.Timeout | null = null;
-  private retentionRenewalId: NodeJS.Timeout | null = null;
+  private staleCheckRunner: LockedTaskRunner;
+  private retentionRunner: LockedTaskRunner;
 
   constructor() {
-    // Unique instance ID for distributed lock ownership
     this.instanceId = `${process.pid}-${Date.now().toString(36)}-stale`;
+
+    this.staleCheckRunner = new LockedTaskRunner({
+      lockKey: STALE_CHECK_LOCK.KEY,
+      lockTtlSeconds: STALE_CHECK_LOCK.TTL_SECONDS,
+      renewalIntervalMs: STALE_CHECK_LOCK.RENEWAL_INTERVAL_MS,
+      instanceId: this.instanceId,
+      context: 'stale-check',
+    });
+
+    this.retentionRunner = new LockedTaskRunner({
+      lockKey: RETENTION_CLEANUP_LOCK.KEY,
+      lockTtlSeconds: RETENTION_CLEANUP_LOCK.TTL_SECONDS,
+      renewalIntervalMs: RETENTION_CLEANUP_LOCK.RENEWAL_INTERVAL_MS,
+      instanceId: this.instanceId,
+      context: 'retention-cleanup',
+    });
   }
 
   /**
@@ -45,10 +58,10 @@ class StaleCheckService {
 
     logger.info('Starting stale check service (runs every hour)');
 
-    // Run immediately on startup (wrapped in try-catch to prevent crash)
+    // Run immediately on startup
     this.runSafeCheck();
 
-    // Then run every hour (wrapped in try-catch to prevent interval from breaking)
+    // Then run every hour
     this.intervalId = setInterval(() => {
       this.runSafeCheck();
     }, CHECK_INTERVAL_MS);
@@ -68,80 +81,27 @@ class StaleCheckService {
   }
 
   /**
-   * Attempt to acquire the distributed lock for stale check
-   */
-  private async tryAcquireStaleCheckLock(): Promise<boolean> {
-    return acquireLock(STALE_CHECK_LOCK.KEY, this.instanceId, STALE_CHECK_LOCK.TTL_SECONDS);
-  }
-
-  /**
-   * Release the stale check lock only if we own it
-   */
-  private async releaseStaleCheckLock(): Promise<void> {
-    await releaseLock(STALE_CHECK_LOCK.KEY, this.instanceId, 'stale-check');
-  }
-
-  /**
-   * Start lock renewal for stale check
-   * FIX E3: Reset isCheckRunning when lock is lost to prevent permanent blocking
-   */
-  private startStaleCheckLockRenewal(): void {
-    this.staleCheckRenewalId = setInterval(async () => {
-      const renewed = await renewLock(STALE_CHECK_LOCK.KEY, this.instanceId, STALE_CHECK_LOCK.TTL_SECONDS);
-      if (!renewed) {
-        logger.warn('Stale check lock lost - another instance may have taken over');
-        // FIX E3: Reset isCheckRunning so we can acquire lock again next interval
-        this.isCheckRunning = false;
-        this.stopStaleCheckLockRenewal();
-      }
-    }, STALE_CHECK_LOCK.RENEWAL_INTERVAL_MS);
-  }
-
-  /**
-   * Stop lock renewal for stale check
-   */
-  private stopStaleCheckLockRenewal(): void {
-    if (this.staleCheckRenewalId) {
-      clearInterval(this.staleCheckRenewalId);
-      this.staleCheckRenewalId = null;
-    }
-  }
-
-  /**
-   * Safe wrapper for checkAndMarkStale that catches and logs errors
-   * without crashing the interval. Uses distributed lock for multi-instance safety.
+   * Safe wrapper for checkAndMarkStale using LockedTaskRunner.
    */
   private async runSafeCheck(): Promise<void> {
-    // Local guard against overlapping checks
-    if (this.isCheckRunning) {
-      logger.warn('Stale check already running locally - skipping this interval');
-      return;
-    }
+    const startTime = Date.now();
 
-    // Try to acquire distributed lock
-    const lockAcquired = await this.tryAcquireStaleCheckLock();
-    if (!lockAcquired) {
+    const taskResult = await this.staleCheckRunner.run(async () => {
+      await this.checkAndMarkStale();
+    });
+
+    if (!taskResult.acquired) {
       logger.debug('Stale check lock held by another instance - skipping');
       return;
     }
 
-    this.isCheckRunning = true;
-    this.startStaleCheckLockRenewal();
-    const startTime = Date.now();
+    if (taskResult.error) {
+      logger.error({ error: taskResult.error }, 'Unhandled error in stale check - will retry next interval');
+    }
 
-    try {
-      await this.checkAndMarkStale();
-    } catch (error) {
-      logger.error({ error }, 'Unhandled error in stale check - will retry next interval');
-    } finally {
-      this.stopStaleCheckLockRenewal();
-      await this.releaseStaleCheckLock();
-      this.isCheckRunning = false;
-      const durationMs = Date.now() - startTime;
-      if (durationMs > 60000) {
-        // Log warning if check took more than 1 minute
-        logger.warn({ durationMs }, 'Stale check took longer than expected');
-      }
+    const durationMs = Date.now() - startTime;
+    if (durationMs > 60000) {
+      logger.warn({ durationMs }, 'Stale check took longer than expected');
     }
   }
 
@@ -169,88 +129,33 @@ class StaleCheckService {
    */
   getStatus(): {
     running: boolean;
-    checkInProgress: boolean;
-    retentionInProgress: boolean;
   } {
     return {
       running: this.intervalId !== null,
-      checkInProgress: this.isCheckRunning,
-      retentionInProgress: this.isRetentionRunning,
     };
   }
 
   /**
-   * Attempt to acquire the distributed lock for retention cleanup
-   */
-  private async tryAcquireRetentionLock(): Promise<boolean> {
-    return acquireLock(RETENTION_CLEANUP_LOCK.KEY, this.instanceId, RETENTION_CLEANUP_LOCK.TTL_SECONDS);
-  }
-
-  /**
-   * Release the retention lock only if we own it
-   */
-  private async releaseRetentionLock(): Promise<void> {
-    await releaseLock(RETENTION_CLEANUP_LOCK.KEY, this.instanceId, 'retention-cleanup');
-  }
-
-  /**
-   * Start lock renewal for retention cleanup
-   * FIX E3: Same fix as stale check - reset flag when lock is lost
-   */
-  private startRetentionLockRenewal(): void {
-    this.retentionRenewalId = setInterval(async () => {
-      const renewed = await renewLock(RETENTION_CLEANUP_LOCK.KEY, this.instanceId, RETENTION_CLEANUP_LOCK.TTL_SECONDS);
-      if (!renewed) {
-        logger.warn('Retention lock lost - another instance may have taken over');
-        // FIX E3: Reset isRetentionRunning so we can acquire lock again next interval
-        this.isRetentionRunning = false;
-        this.stopRetentionLockRenewal();
-      }
-    }, RETENTION_CLEANUP_LOCK.RENEWAL_INTERVAL_MS);
-  }
-
-  /**
-   * Stop lock renewal for retention cleanup
-   */
-  private stopRetentionLockRenewal(): void {
-    if (this.retentionRenewalId) {
-      clearInterval(this.retentionRenewalId);
-      this.retentionRenewalId = null;
-    }
-  }
-
-  /**
-   * Safe wrapper for data retention cleanup with distributed lock
+   * Safe wrapper for data retention cleanup using LockedTaskRunner.
    */
   private async runSafeRetentionCleanup(): Promise<void> {
-    // Local guard
-    if (this.isRetentionRunning) {
-      logger.warn('Retention cleanup already running locally - skipping');
-      return;
-    }
+    const startTime = Date.now();
 
-    // Try to acquire distributed lock
-    const lockAcquired = await this.tryAcquireRetentionLock();
-    if (!lockAcquired) {
+    const taskResult = await this.retentionRunner.run(async () => {
+      await this.cleanupOldData();
+    });
+
+    if (!taskResult.acquired) {
       logger.debug('Retention cleanup lock held by another instance - skipping');
       return;
     }
 
-    this.isRetentionRunning = true;
-    this.startRetentionLockRenewal();
-    const startTime = Date.now();
-
-    try {
-      await this.cleanupOldData();
-    } catch (error) {
-      logger.error({ error }, 'Unhandled error in retention cleanup - will retry next interval');
-    } finally {
-      this.stopRetentionLockRenewal();
-      await this.releaseRetentionLock();
-      this.isRetentionRunning = false;
-      const durationMs = Date.now() - startTime;
-      logger.debug({ durationMs }, 'Retention cleanup completed');
+    if (taskResult.error) {
+      logger.error({ error: taskResult.error }, 'Unhandled error in retention cleanup - will retry next interval');
     }
+
+    const durationMs = Date.now() - startTime;
+    logger.debug({ durationMs }, 'Retention cleanup completed');
   }
 
   /**

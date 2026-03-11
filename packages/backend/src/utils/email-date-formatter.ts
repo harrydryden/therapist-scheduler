@@ -13,42 +13,13 @@
 
 import { getSettingValue } from '../services/settings.service';
 import { logger } from './logger';
-
-const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const MONTHS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
-
-/**
- * Get ordinal suffix for a day number (1st, 2nd, 3rd, 4th...)
- */
-function getOrdinalSuffix(n: number): string {
-  const s = ['th', 'st', 'nd', 'rd'];
-  const v = n % 100;
-  return s[(v - 20) % 10] || s[v] || s[0];
-}
-
-/**
- * Format time in 24-hour format: "09:30", "13:45"
- */
-function formatTime24(date: Date): string {
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  return `${hours}:${minutes}`;
-}
-
-/**
- * Format time in 12-hour format: "9:30am", "1:45pm"
- */
-function formatTime12(date: Date): string {
-  let hours = date.getHours();
-  const minutes = date.getMinutes();
-  const ampm = hours >= 12 ? 'pm' : 'am';
-  hours = hours % 12 || 12;
-  const minuteStr = minutes.toString().padStart(2, '0');
-  return `${hours}:${minuteStr}${ampm}`;
-}
+import {
+  DAYS_LONG as DAYS,
+  MONTHS,
+  getOrdinalSuffix,
+  formatTime24,
+  formatTime12,
+} from './date-formatting';
 
 /**
  * Get the start of a day (midnight) for a given date in the specified timezone
