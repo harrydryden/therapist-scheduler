@@ -35,7 +35,7 @@ export default function AppointmentSummarySection({ summary }: AppointmentSummar
   if (!summary) {
     return (
       <div className="px-4 py-3 border-b border-slate-100">
-        <p className="text-sm text-slate-400 italic">Awaiting first message.</p>
+        <p className="text-sm text-slate-400 italic">No summary available yet.</p>
       </div>
     );
   }

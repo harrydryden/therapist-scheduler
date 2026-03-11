@@ -259,6 +259,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             gmailThreadId: true,
             therapistGmailThreadId: true,
             conversationState: true,
+            messageCount: true,
             humanControlEnabled: true,
             humanControlTakenBy: true,
             humanControlTakenAt: true,

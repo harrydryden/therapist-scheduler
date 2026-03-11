@@ -53,6 +53,18 @@ export function parseRawConversationState(
   }
 }
 
+/**
+ * Derive messageCount from rawState messages when the denormalized column is missing.
+ */
+function resolveMessageCount(
+  rawState: Record<string, unknown> | null,
+  appointment: SummaryAppointment,
+): number {
+  if (typeof appointment.messageCount === 'number') return appointment.messageCount;
+  const messages = rawState?.messages as unknown[] | undefined;
+  return Array.isArray(messages) ? messages.length : 0;
+}
+
 export function buildAppointmentSummary(
   rawState: Record<string, unknown> | null,
   appointment: SummaryAppointment,
@@ -140,7 +152,7 @@ export function buildAppointmentSummary(
     stage,
     nextAction,
     keyFacts,
-    messageCount: appointment.messageCount,
+    messageCount: resolveMessageCount(rawState, appointment),
     lastActivityAt,
     flags,
   };
