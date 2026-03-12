@@ -11,49 +11,12 @@ import {
 import { aiService } from './ai.service';
 import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
+import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
+
+// Re-export for consumers
+export type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes };
 
 const notion = new Client({ auth: config.notionApiKey });
-
-// Category with evidence for explainability
-export interface CategoryWithEvidence {
-  type: string;
-  evidence: string;  // Direct quote from source text (max ~100 chars)
-  reasoning: string; // Brief explanation (max ~50 chars)
-}
-
-export interface ExtractedTherapistProfile {
-  name: string;
-  email: string;
-  bio: string;
-  // Categorization system with evidence
-  approach: CategoryWithEvidence[];
-  style: CategoryWithEvidence[];
-  areasOfFocus: CategoryWithEvidence[];
-  availability: {
-    timezone: string;
-    slots: Array<{
-      day: string;
-      start: string;
-      end: string;
-    }>;
-  } | null;
-  qualifications?: string[];
-  yearsExperience?: number;
-}
-
-export interface AdminNotes {
-  additionalInfo?: string; // Free text field for admin to add missing info
-  overrideEmail?: string; // Override extracted email if needed
-  // Category overrides
-  overrideApproach?: string[];
-  overrideStyle?: string[];
-  overrideAreasOfFocus?: string[];
-  overrideAvailability?: {
-    timezone: string;
-    slots: Array<{ day: string; start: string; end: string }>;
-  };
-  notes?: string; // Internal admin notes (not shown to users)
-}
 
 interface IngestionResult {
   success: boolean;

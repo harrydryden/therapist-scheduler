@@ -12,6 +12,7 @@ import { notionUsersService } from '../services/notion-users.service';
 import { backfillMissingTrackingCodes, fixDuplicateTrackingCodes, migrateLegacyTrackingCodes } from '../utils/tracking-code';
 import { backfillUsers, backfillTherapists, linkAppointmentsToEntities, getOrCreateTherapist, getOrCreateUser } from '../utils/unique-id';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { sendSuccess, Errors } from '../utils/response';
 
 export async function adminDataRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', verifyWebhookSecret);
@@ -43,20 +44,14 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
           'Manual feedback sync completed'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             transitioned: result.synced,
             errors: result.errors,
             message: `Sync completed: ${result.synced} appointments transitioned`,
-          },
-        });
+          });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to trigger feedback sync');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to trigger feedback sync',
-        });
+        return Errors.internal(reply, 'Failed to trigger feedback sync');
       }
     }
   );
@@ -104,9 +99,7 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
           'Tracking code fix operation complete'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             migration: {
               appointmentsMigrated: migrateResult.migrated,
               errors: migrateResult.errors,
@@ -121,14 +114,10 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
               errors: fixResult.errors,
             },
             message: `Migrated ${migrateResult.migrated} legacy codes, backfilled ${backfillResult.updated} appointments, fixed ${fixResult.fixed} duplicate codes`,
-          },
-        });
+          });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to fix tracking codes');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fix tracking codes',
-        });
+        return Errors.internal(reply, 'Failed to fix tracking codes');
       }
     }
   );
@@ -174,9 +163,7 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
           'Entity backfill operation complete'
         );
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             users: {
               created: userResult.created,
               skipped: userResult.skipped,
@@ -192,14 +179,10 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
               errors: linkResult.errors,
             },
             message: `Created ${userResult.created} users, ${therapistResult.created} therapists, linked ${linkResult.linked} appointments`,
-          },
-        });
+          });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to backfill entities');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to backfill entities',
-        });
+        return Errors.internal(reply, 'Failed to backfill entities');
       }
     }
   );
@@ -354,9 +337,7 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
 
         const totalUsersSynced = usersCreated + usersSynced;
 
-        return reply.send({
-          success: true,
-          data: {
+        return sendSuccess(reply, {
             users: {
               total: allNotionUsers.length,
               created: usersCreated,
@@ -372,14 +353,10 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
               errors: therapistErrors,
             },
             message: `Synced ${totalUsersSynced} users and ${therapistsSynced + therapistsCreated} therapists to Notion`,
-          },
-        });
+          });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to sync IDs to Notion');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to sync IDs to Notion',
-        });
+        return Errors.internal(reply, 'Failed to sync IDs to Notion');
       }
     }
   );

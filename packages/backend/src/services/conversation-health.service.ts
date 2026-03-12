@@ -15,11 +15,10 @@
  */
 
 import { STALE_THRESHOLDS, STALL_DETECTION, APPOINTMENT_STATUS } from '../constants';
+import type { HealthStatus } from '@therapist-scheduler/shared';
 
-/**
- * Health status levels
- */
-export type HealthStatus = 'green' | 'yellow' | 'red';
+// Re-export for consumers
+export type { HealthStatus };
 
 /**
  * Detailed health status with contributing factors

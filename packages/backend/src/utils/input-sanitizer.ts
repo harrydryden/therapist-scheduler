@@ -126,47 +126,6 @@ export function sanitizeName(name: string): string {
 }
 
 /**
- * Sanitize email-related content (subject, body preview)
- * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer for AI-bound content.
- */
-export function sanitizeEmailContent(content: string): string {
-  return sanitizeString(content, {
-    maxLength: 50000, // Allow longer for email bodies
-    allowNewlines: true,
-    allowHtml: false,
-    stripPromptInjection: true, // Important for AI processing
-    trim: true,
-  });
-}
-
-/**
- * Sanitize feedback/notes that might be displayed
- * @deprecated Unused in production code. Use sanitizeString() directly with appropriate options.
- */
-export function sanitizeFeedback(feedback: string): string {
-  return sanitizeString(feedback, {
-    maxLength: 5000,
-    allowNewlines: true,
-    allowHtml: false,
-    trim: true,
-  });
-}
-
-/**
- * Sanitize content before sending to AI agent
- * @deprecated Unused in production code. Use checkForInjection() + wrapUntrustedContent() from content-sanitizer instead.
- */
-export function sanitizeForAI(content: string): string {
-  return sanitizeString(content, {
-    maxLength: 100000,
-    allowNewlines: true,
-    allowHtml: false,
-    stripPromptInjection: true,
-    trim: true,
-  });
-}
-
-/**
  * Sanitize a JSON object's string values recursively
  */
 export function sanitizeObject<T extends Record<string, unknown>>(
@@ -196,36 +155,3 @@ export function sanitizeObject<T extends Record<string, unknown>>(
   return result as T;
 }
 
-/**
- * Check if a string contains potential prompt injection
- * @deprecated Unused in production code. Use checkForInjection() from content-sanitizer instead,
- * which provides Unicode normalization and detailed detection results.
- */
-export function detectPromptInjection(input: string): boolean {
-  if (typeof input !== 'string') return false;
-
-  for (const pattern of INJECTION_PATTERNS) {
-    if (pattern.test(input)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Escape HTML entities for safe display
- * @deprecated Unused in production code. email-templates.ts has its own private escapeHtml.
- */
-export function escapeHtml(input: string): string {
-  const htmlEntities: Record<string, string> = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#x27;',
-    '/': '&#x2F;',
-  };
-
-  return input.replace(/[&<>"'/]/g, char => htmlEntities[char] || char);
-}

@@ -18,21 +18,10 @@ import {
   getOrdinalSuffix,
   formatTime12Compact,
 } from './date-formatting';
+import type { AvailabilitySlot, TherapistAvailability } from '../types';
 
-export interface AvailabilitySlot {
-  day: string; // "Monday", "Tuesday", etc.
-  start: string; // "09:00"
-  end: string; // "17:00"
-}
-
-export interface TherapistAvailability {
-  timezone?: string;
-  slots: AvailabilitySlot[];
-  exceptions?: Array<{
-    date: string; // "2024-02-14"
-    available: boolean;
-  }>;
-}
+// Re-export for consumers
+export type { AvailabilitySlot, TherapistAvailability };
 
 export interface FormattedSlot {
   datetime: Date;
@@ -351,7 +340,7 @@ function normalizeAvailability(
 
     if (slots.length > 0) {
       return {
-        timezone: (raw as any).timezone,
+        timezone: (raw as any).timezone || 'Europe/London',
         slots,
       };
     }
