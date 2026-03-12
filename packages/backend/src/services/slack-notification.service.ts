@@ -981,6 +981,20 @@ class SlackNotificationService {
       reportText += `\n\n📝 *Feedback:* ${stats.feedbackSubmissions} submission${stats.feedbackSubmissions === 1 ? '' : 's'} received`;
     }
 
+    // Slack section text has a 3000-character limit.
+    // The work report is naturally compact (~500 chars) but add safety truncation
+    // to match the defensive pattern used in sendAlert.
+    const SLACK_SECTION_TEXT_LIMIT = 3000;
+    if (reportText.length > SLACK_SECTION_TEXT_LIMIT) {
+      const truncated = reportText.substring(0, SLACK_SECTION_TEXT_LIMIT - 20);
+      const lastNewline = truncated.lastIndexOf('\n');
+      reportText = lastNewline > 0
+        ? truncated.substring(0, lastNewline) + '\n_…report truncated_'
+        : truncated + '…';
+    }
+
+    const contextText = `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/work-reports')}|View Reports> | <${this.adminDashboardBaseUrl}|Dashboard>`;
+
     const blocks: SlackTextBlock[] = [
       {
         type: 'section',
@@ -994,14 +1008,16 @@ class SlackNotificationService {
         elements: [
           {
             type: 'mrkdwn',
-            text: `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/work-reports')}|View Reports> | <${this.adminDashboardBaseUrl}|Dashboard>`,
+            text: contextText.length > 3000 ? contextText.substring(0, 2997) + '...' : contextText,
           },
         ],
       },
     ];
 
+    const fallbackText = `📋 Daily Work Report: ${stats.emailsSent} emails sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`;
+
     return this.sendToSlack({
-      text: `📋 Daily Work Report: ${stats.emailsSent} emails sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`,
+      text: fallbackText.length > 3000 ? fallbackText.substring(0, 2997) + '...' : fallbackText,
       blocks,
     });
   }
