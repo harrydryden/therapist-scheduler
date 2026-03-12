@@ -210,6 +210,7 @@ export default function AdminWorkReportsPage() {
   const generateMutation = useMutation({
     mutationFn: generateReport,
     onSuccess: () => {
+      setPage(1); // Navigate to page 1 so the new report is visible
       queryClient.invalidateQueries({ queryKey: ['work-reports'] });
     },
   });

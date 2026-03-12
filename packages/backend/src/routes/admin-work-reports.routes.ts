@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 import { sendSuccess, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { workReportService } from '../services/work-report.service';
+import { RATE_LIMITS } from '../constants';
 
 export async function adminWorkReportRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', verifyWebhookSecret);
@@ -85,6 +86,14 @@ export async function adminWorkReportRoutes(fastify: FastifyInstance) {
    */
   fastify.post(
     '/api/admin/work-reports/generate',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const requestId = request.id;
       logger.info({ requestId }, 'Manual work report generation triggered');

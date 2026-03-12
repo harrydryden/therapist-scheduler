@@ -43,31 +43,51 @@ class WorkReportService extends PeriodicService {
     super.start();
   }
 
+  /**
+   * Extract the current UK hour and weekday using Intl.DateTimeFormat (handles BST/GMT correctly).
+   */
+  private getUkTimeParts(now: Date): { hour: number; dayOfWeek: number; dateStr: string } {
+    const ukParts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+
+    const get = (type: string) => ukParts.find(p => p.type === type)?.value || '';
+    const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const dayOfWeek = dayMap[get('weekday')] ?? 0;
+    const hour = parseInt(get('hour'));
+    const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+
+    return { hour, dayOfWeek, dateStr };
+  }
+
   protected async runCheck(): Promise<void> {
-    // Get current time in UK timezone
     const now = new Date();
-    const ukTime = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
-    const day = ukTime.getDay();
-    const hour = ukTime.getHours();
+    const { hour, dayOfWeek, dateStr } = this.getUkTimeParts(now);
 
-    // Only run on weekdays (Mon=1 to Fri=5) at 9am
-    if (day < 1 || day > 5 || hour !== WORK_REPORT.REPORT_HOUR) {
+    // Only run on weekdays (Mon=1 to Fri=5) at 9am UK time
+    if (dayOfWeek < 1 || dayOfWeek > 5 || hour !== WORK_REPORT.REPORT_HOUR) {
       return;
     }
 
-    // Check if we already generated today
-    const lastReportDate = await redis.get(WORK_REPORT.LAST_REPORT_KEY);
-    const today = ukTime.toISOString().split('T')[0];
-
-    if (lastReportDate === today) {
-      logger.debug('Work report already generated today');
-      return;
-    }
-
+    // Acquire distributed lock BEFORE checking cache to prevent race conditions
+    // where two instances both pass the cache check simultaneously
     const taskResult = await this.lockedRunner.run(async () => {
+      // Re-check inside lock to prevent duplicate generation
+      const lastReportDate = await redis.get(WORK_REPORT.LAST_REPORT_KEY);
+      if (lastReportDate === dateStr) {
+        logger.debug('Work report already generated today');
+        return;
+      }
+
       await this.generateAndSendReport();
-      // Mark as generated
-      await redis.set(WORK_REPORT.LAST_REPORT_KEY, today, 'EX', 7 * 24 * 60 * 60);
+      await redis.set(WORK_REPORT.LAST_REPORT_KEY, dateStr, 'EX', 7 * 24 * 60 * 60);
     });
 
     if (!taskResult.acquired) {
@@ -89,21 +109,17 @@ class WorkReportService extends PeriodicService {
    * and builds the UTC equivalent of "9am UK time on the target day".
    */
   private getPeriodStart(now: Date): Date {
-    // Determine the current UK date/time parts
+    const { dayOfWeek } = this.getUkTimeParts(now);
+
+    // Extract UK date parts for date arithmetic
     const ukParts = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Europe/London',
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
-      weekday: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
     }).formatToParts(now);
 
     const get = (type: string) => ukParts.find(p => p.type === type)?.value || '';
-    const ukDay = now.toLocaleDateString('en-US', { timeZone: 'Europe/London', weekday: 'short' });
-    const dayOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(ukDay);
     const daysBack = dayOfWeek === 1 ? 3 : 1; // Monday → back to Friday, else → yesterday
 
     // Build "target day 09:00 UK time" as an ISO string, then compute UTC offset
