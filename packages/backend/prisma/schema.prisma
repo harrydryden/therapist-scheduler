@@ -456,3 +456,52 @@ model SideEffectLog {
   @@index([status, lastAttempt]) // For retry queries
   @@map("side_effect_logs")
 }
+
+// ============================================
+// Work Reports (Daily Agent Activity Summary)
+// ============================================
+
+// Stores daily work reports generated at 9am UK time on weekdays (Mon-Fri).
+// Each report summarises agent activity since the previous report.
+// Monday reports cover Fri 9am → Mon 9am (including the weekend).
+model WorkReport {
+  id        String   @id @default(uuid())
+
+  // Time window covered by this report
+  periodStart DateTime @map("period_start")
+  periodEnd   DateTime @map("period_end")
+
+  // Email metrics
+  emailsSent     Int @default(0) @map("emails_sent")
+  emailsReceived Int @default(0) @map("emails_received")
+
+  // Appointment lifecycle metrics
+  appointmentsCreated   Int @default(0) @map("appointments_created")
+  appointmentsConfirmed Int @default(0) @map("appointments_confirmed")
+  appointmentsCompleted Int @default(0) @map("appointments_completed")
+  appointmentsCancelled Int @default(0) @map("appointments_cancelled")
+
+  // Alert & escalation metrics
+  staleConversationsFlagged Int @default(0) @map("stale_conversations_flagged")
+  humanControlTakeovers     Int @default(0) @map("human_control_takeovers")
+  chaseFollowUpsSent        Int @default(0) @map("chase_follow_ups_sent")
+  closureRecommendations    Int @default(0) @map("closure_recommendations")
+
+  // Current pipeline snapshot at report time
+  pipelinePending      Int @default(0) @map("pipeline_pending")
+  pipelineContacted    Int @default(0) @map("pipeline_contacted")
+  pipelineNegotiating  Int @default(0) @map("pipeline_negotiating")
+  pipelineConfirmed    Int @default(0) @map("pipeline_confirmed")
+
+  // Feedback received in period
+  feedbackSubmissions Int @default(0) @map("feedback_submissions")
+
+  // Slack delivery tracking
+  slackSentAt DateTime? @map("slack_sent_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([periodEnd])
+  @@index([createdAt])
+  @@map("work_reports")
+}

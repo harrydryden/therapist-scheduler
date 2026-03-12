@@ -23,6 +23,7 @@ import { adminDashboardRoutes } from './routes/admin-dashboard.routes';
 import { adminKnowledgeRoutes } from './routes/admin-knowledge.routes';
 import { adminSettingsRoutes } from './routes/admin-settings.routes';
 import { adminFormsRoutes } from './routes/admin-forms.routes';
+import { adminWorkReportRoutes } from './routes/admin-work-reports.routes';
 import { ingestionRoutes } from './routes/ingestion.routes';
 
 // ATS Integration routes (versioned, webhook secret auth required)
@@ -40,6 +41,7 @@ import { pendingEmailService } from './services/email-queue.service';
 import { postBookingFollowupService } from './services/post-booking-followup.service';
 import { weeklyMailingListService } from './services/weekly-mailing-list.service';
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
+import { workReportService } from './services/work-report.service';
 import { notionSyncManager } from './services/notion-sync-manager.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
@@ -315,6 +317,7 @@ async function buildServer() {
   await fastify.register(adminKnowledgeRoutes);     // Knowledge base CRUD
   await fastify.register(adminSettingsRoutes);      // System settings CRUD, alerts, health
   await fastify.register(adminFormsRoutes);         // Feedback form config & submissions
+  await fastify.register(adminWorkReportRoutes);   // Daily work reports
   await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion
 
   // --- ATS Integration routes (versioned API for external ATS system) ---
@@ -411,6 +414,7 @@ async function start() {
       postBookingFollowupService.stop();
       weeklyMailingListService.stop();
       slackWeeklySummaryService.stop();
+      workReportService.stop();
       notionSyncManager.stop();
 
       // Give services a moment to release locks
@@ -519,6 +523,7 @@ async function start() {
     weeklyMailingListService.start(); // Weekly promotional mailing list
     notionSyncManager.start(); // Unified Notion sync (therapist freeze, users, feedback read/write)
     slackWeeklySummaryService.start(); // Weekly Slack summary (Monday 9am)
+    workReportService.start(); // Daily work report (weekdays 9am)
 
     // Recover any emails buffered in Redis WAL during database downtime
     emailQueueService.recoverFromWAL().catch((err) => {

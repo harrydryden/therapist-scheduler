@@ -28,6 +28,7 @@ import {
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { getSettingValue } from './settings.service';
+import { auditEventService } from './audit-event.service';
 import { POST_BOOKING, APPOINTMENT_STATUS } from '../constants';
 
 // Batch size for processing to prevent memory issues
@@ -582,6 +583,11 @@ class PostBookingFollowupService extends PeriodicService {
       try {
         await this.sendMeetingLinkCheckEmail(appointment);
 
+        // Log follow_up_sent audit event
+        auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
+          followUpType: 'meeting_link_check',
+        });
+
         // FIX B5: Use atomic update with sentinel check to verify we still own the lock
         // This prevents race condition where update fails silently after email sent
         const updateResult = await prisma.appointmentRequest.updateMany({
@@ -735,6 +741,11 @@ class PostBookingFollowupService extends PeriodicService {
 
         // Send therapist feedback notification (same trigger as user feedback form)
         await this.sendTherapistFeedbackNotificationEmail(appointment);
+
+        // Log follow_up_sent audit event
+        auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
+          followUpType: 'feedback_form',
+        });
 
         // FIX B5: Use atomic update with sentinel check to verify we still own the lock
         // Only update feedbackFormSentAt here - status transition handled by lifecycle service
@@ -1017,6 +1028,11 @@ class PostBookingFollowupService extends PeriodicService {
 
       try {
         await this.sendFeedbackReminderEmail(appointment);
+
+        // Log follow_up_sent audit event
+        auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
+          followUpType: 'feedback_reminder',
+        });
 
         // Atomic update with sentinel check
         const updateResult = await prisma.appointmentRequest.updateMany({

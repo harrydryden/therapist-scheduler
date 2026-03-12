@@ -23,6 +23,7 @@ import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../service
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
+import { auditEventService } from '../services/audit-event.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 
 // Schema for listing all appointments (admin page)
@@ -388,6 +389,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           { requestId, appointmentId: id, adminId, reason },
           'Human control enabled for appointment'
         );
+
+        // Log human_control audit event
+        auditEventService.log(id, 'human_control', 'admin', {
+          enabled: true,
+          adminEmail: adminId,
+          reason: reason || 'Manual admin takeover',
+        });
 
         sseService.emitHumanControl(id, true, adminId);
 

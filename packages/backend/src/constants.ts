@@ -254,6 +254,19 @@ export const WEEKLY_MAILING = {
   LAST_SEND_KEY: 'weekly-mailing:last-send-date',
 } as const;
 
+// Daily work report settings
+export const WORK_REPORT = {
+  // Work report: weekdays at 9am (Europe/London timezone)
+  REPORT_HOUR: 9,
+  // Check interval: every 30 minutes
+  CHECK_INTERVAL_MS: 30 * 60 * 1000,
+  // Distributed lock for work report generation
+  LOCK_KEY: 'work-report:processing-lock',
+  LOCK_TTL_SECONDS: 120,
+  // Key to track last report date
+  LAST_REPORT_KEY: 'work-report:last-send-date',
+} as const;
+
 // Slack notification settings
 export const SLACK_NOTIFICATIONS = {
   // Weekly summary: Monday at 9am (Europe/London timezone)
