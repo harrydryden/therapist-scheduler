@@ -38,10 +38,8 @@ class WorkReportService extends PeriodicService {
   }
 
   start(): void {
-    if (!slackNotificationService.isEnabled()) {
-      logger.info('Work report service not starting - Slack notifications disabled');
-      return;
-    }
+    // Always start — reports are saved to the database for admin panel viewing
+    // even if Slack is not configured. Slack delivery is best-effort.
     super.start();
   }
 
@@ -83,24 +81,44 @@ class WorkReportService extends PeriodicService {
   }
 
   /**
-   * Calculate the start of the report period.
-   * For Mon reports: previous Friday 9am UK.
-   * For Tue–Fri: previous day 9am UK.
+   * Calculate the start of the report period as a UTC Date.
+   * For Mon reports: previous Friday 9am UK time.
+   * For Tue–Fri: previous day 9am UK time.
+   *
+   * Uses Intl.DateTimeFormat to determine the current UK offset (handles BST/GMT)
+   * and builds the UTC equivalent of "9am UK time on the target day".
    */
-  private getPeriodStart(ukNow: Date): Date {
-    const day = ukNow.getDay();
-    const daysBack = day === 1 ? 3 : 1; // Monday = 3 days back (to Friday), otherwise 1
+  private getPeriodStart(now: Date): Date {
+    // Determine the current UK date/time parts
+    const ukParts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
 
-    const periodStart = new Date(ukNow);
-    periodStart.setDate(periodStart.getDate() - daysBack);
-    periodStart.setHours(WORK_REPORT.REPORT_HOUR, 0, 0, 0);
+    const get = (type: string) => ukParts.find(p => p.type === type)?.value || '';
+    const ukDay = now.toLocaleDateString('en-US', { timeZone: 'Europe/London', weekday: 'short' });
+    const dayOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(ukDay);
+    const daysBack = dayOfWeek === 1 ? 3 : 1; // Monday → back to Friday, else → yesterday
 
-    // Convert back to UTC for database queries
-    // Create the date in UK timezone and get its UTC equivalent
-    const ukDateStr = periodStart.toLocaleString('en-US', { timeZone: 'Europe/London' });
-    const ukDate = new Date(ukDateStr);
-    const utcOffset = ukDate.getTime() - periodStart.getTime();
-    return new Date(periodStart.getTime() - utcOffset);
+    // Build "target day 09:00 UK time" as an ISO string, then compute UTC offset
+    const year = parseInt(get('year'));
+    const month = parseInt(get('month')) - 1;
+    const day = parseInt(get('day')) - daysBack;
+
+    // Create a date at 09:00 UK time by using the UK-to-UTC offset
+    // First, get the UTC time that corresponds to this UK local time
+    const candidateUtc = new Date(Date.UTC(year, month, day, WORK_REPORT.REPORT_HOUR, 0, 0));
+    // What UK time does this UTC correspond to?
+    const ukCheck = new Date(candidateUtc.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+    const offsetMs = ukCheck.getTime() - candidateUtc.getTime();
+    // Subtract the offset to get the UTC equivalent of 9am UK
+    return new Date(candidateUtc.getTime() - offsetMs);
   }
 
   /**
@@ -110,11 +128,20 @@ class WorkReportService extends PeriodicService {
     logger.info('Generating daily work report');
 
     const now = new Date();
-    const ukNow = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
-    const periodStart = this.getPeriodStart(ukNow);
+    const periodStart = this.getPeriodStart(now);
     const periodEnd = now; // Current time
 
-    // Query all metrics in parallel
+    // Query all metrics in parallel.
+    //
+    // Data source strategy:
+    // - Emails: audit events (email_sent/email_received are reliably logged)
+    // - Appointment lifecycle: appointment table fields (confirmedAt, updatedAt+status)
+    //   rather than audit event JSON payloads, which use inconsistent key names
+    //   (toStatus in lifecycle service vs newStatus in agent tools)
+    // - Stale/human control: appointment table fields (isStale, humanControlTakenAt)
+    //   because audit events for these operations are not consistently created
+    // - Chase/closure: appointment table fields (chaseSentAt, closureRecommendedAt)
+    // - Pipeline: appointment table status counts (point-in-time snapshot)
     const [
       emailsSent,
       emailsReceived,
@@ -132,7 +159,7 @@ class WorkReportService extends PeriodicService {
       pipelineConfirmed,
       feedbackSubmissions,
     ] = await Promise.all([
-      // Emails sent by agent in period
+      // Emails sent by agent in period (audit events are reliably created for emails)
       prisma.appointmentAuditEvent.count({
         where: {
           eventType: 'email_sent',
@@ -153,46 +180,39 @@ class WorkReportService extends PeriodicService {
           createdAt: { gte: periodStart, lte: periodEnd },
         },
       }),
-      // Appointments confirmed in period
+      // Appointments confirmed in period (confirmedAt is set atomically on confirmation)
       prisma.appointmentRequest.count({
         where: {
           confirmedAt: { gte: periodStart, lte: periodEnd },
         },
       }),
-      // Appointments completed in period
-      prisma.appointmentAuditEvent.count({
+      // Appointments completed in period (updatedAt tracks the status transition time)
+      prisma.appointmentRequest.count({
         where: {
-          eventType: 'status_change',
-          createdAt: { gte: periodStart, lte: periodEnd },
-          payload: {
-            path: ['newStatus'],
-            equals: 'completed',
-          },
+          status: 'completed',
+          updatedAt: { gte: periodStart, lte: periodEnd },
         },
       }),
       // Appointments cancelled in period
-      prisma.appointmentAuditEvent.count({
+      prisma.appointmentRequest.count({
         where: {
-          eventType: 'status_change',
-          createdAt: { gte: periodStart, lte: periodEnd },
-          payload: {
-            path: ['newStatus'],
-            equals: 'cancelled',
-          },
+          status: 'cancelled',
+          updatedAt: { gte: periodStart, lte: periodEnd },
         },
       }),
-      // Stale conversations flagged in period
-      prisma.appointmentAuditEvent.count({
+      // Conversations newly flagged stale in period.
+      // conversationStallAlertAt is set by stale-check.service when a conversation stalls;
+      // isStale alone would also catch 48h inactivity but stall alerts better represent
+      // "needing attention" events the admin cares about.
+      prisma.appointmentRequest.count({
         where: {
-          eventType: 'stale_flagged',
-          createdAt: { gte: periodStart, lte: periodEnd },
+          conversationStallAlertAt: { gte: periodStart, lte: periodEnd },
         },
       }),
-      // Human control takeovers in period
-      prisma.appointmentAuditEvent.count({
+      // Human control takeovers in period (humanControlTakenAt is set on each takeover)
+      prisma.appointmentRequest.count({
         where: {
-          eventType: 'human_control',
-          createdAt: { gte: periodStart, lte: periodEnd },
+          humanControlTakenAt: { gte: periodStart, lte: periodEnd },
         },
       }),
       // Chase follow-ups sent in period
