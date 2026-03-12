@@ -6,6 +6,7 @@ import FeedbackFormPage from './pages/FeedbackFormPage';
 import Layout from './components/Layout';
 import AdminLayout from './components/AdminLayout';
 import ErrorBoundary from './components/ErrorBoundary';
+import { AuthProvider } from './context/AuthContext';
 
 // Lazy-load admin pages to reduce initial bundle size for public users
 const AdminHomePage = lazy(() => import('./pages/AdminHomePage'));
@@ -50,7 +51,7 @@ function App() {
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
         {/* Admin routes with sidebar layout - lazy loaded */}
-        <Route path="/admin" element={<AdminLayout />}>
+        <Route path="/admin" element={<AuthProvider><AdminLayout /></AuthProvider>}>
           <Route index element={<Suspense fallback={<AdminLoadingFallback />}><AdminHomePage /></Suspense>} />
           <Route path="dashboard" element={<Suspense fallback={<AdminLoadingFallback />}><AdminDashboardPage /></Suspense>} />
           <Route path="appointments" element={<Suspense fallback={<AdminLoadingFallback />}><AdminAppointmentsPage /></Suspense>} />

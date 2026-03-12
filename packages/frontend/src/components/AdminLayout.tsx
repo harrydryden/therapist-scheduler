@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Link, useLocation, Outlet } from 'react-router-dom';
-import { getAdminSecret, setAdminSecret } from '../config/env';
+import { useAuth } from '../context/AuthContext';
+import AdminLogin from './AdminLogin';
 
 interface NavItem {
   name: string;
@@ -56,66 +57,13 @@ const navItems: NavItem[] = [
 
 export default function AdminLayout() {
   const location = useLocation();
-  // FIX #3: Prompt for admin secret if not yet stored in sessionStorage
-  const [secretInput, setSecretInput] = useState('');
-  const [hasSecret, setHasSecret] = useState(() => !!getAdminSecret());
+  const { isAuthenticated } = useAuth();
   // FIX #41: Mobile sidebar toggle state
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Listen for auth failures from fetchAdminApi — when the secret is wrong
-  // or the IP is locked out, clear state and show the login screen again
-  useEffect(() => {
-    const handleAuthFailed = () => {
-      setHasSecret(false);
-      setSecretInput('');
-    };
-    window.addEventListener('admin-auth-failed', handleAuthFailed);
-    return () => window.removeEventListener('admin-auth-failed', handleAuthFailed);
-  }, []);
-
-  // If no admin secret in sessionStorage, show login prompt
-  if (!hasSecret) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-sm w-full">
-          <h1 className="text-xl font-bold text-slate-900 mb-2">Admin Login</h1>
-          <p className="text-sm text-slate-500 mb-6">
-            Enter the admin secret to access the admin panel.
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (secretInput.trim()) {
-                setAdminSecret(secretInput.trim());
-                setHasSecret(true);
-              }
-            }}
-          >
-            <input
-              type="password"
-              value={secretInput}
-              onChange={(e) => setSecretInput(e.target.value)}
-              placeholder="Admin secret"
-              className="w-full px-4 py-3 border border-slate-200 rounded-lg mb-4 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
-              autoFocus
-            />
-            <button
-              type="submit"
-              disabled={!secretInput.trim()}
-              className="w-full px-4 py-3 bg-spill-blue-800 text-white rounded-lg font-medium hover:bg-spill-blue-900 disabled:opacity-50 transition-colors"
-            >
-              Enter
-            </button>
-          </form>
-          <Link
-            to="/"
-            className="block mt-4 text-center text-sm text-slate-500 hover:text-slate-700 transition-colors"
-          >
-            Back to booking site
-          </Link>
-        </div>
-      </div>
-    );
+  // If not authenticated, show login prompt
+  if (!isAuthenticated) {
+    return <AdminLogin />;
   }
 
   return (

@@ -4,24 +4,6 @@
  */
 
 /**
- * Decode quoted-printable encoded text (RFC 2045)
- *
- * Quoted-printable encoding represents non-ASCII and special characters as =XX
- * where XX is the hexadecimal value. Soft line breaks are represented as =\r\n or =\n.
- *
- * @deprecated Unused in production code. Gmail API returns base64-encoded bodies, not quoted-printable.
- */
-export function decodeQuotedPrintable(text: string): string {
-  return text
-    // First, join soft line breaks (lines ending with =)
-    .replace(/=\r?\n/g, '')
-    // Then decode =XX hex sequences
-    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) =>
-      String.fromCharCode(parseInt(hex, 16))
-    );
-}
-
-/**
  * Decode common HTML entities to their character equivalents
  *
  * IMPORTANT: Order matters - specific entities first, then numeric
@@ -86,18 +68,6 @@ export function encodeEmailHeader(value: string): string {
   }
   // Use RFC 2047 Base64 encoding for non-ASCII
   return `=?UTF-8?B?${Buffer.from(value, 'utf-8').toString('base64')}?=`;
-}
-
-/**
- * Normalize line endings to CRLF as required by email RFC 5322
- * @deprecated Unused in production code. Gmail API handles line ending normalization.
- */
-export function normalizeLineEndings(text: string): string {
-  return text
-    .replace(/\r\n/g, '\n')  // First normalize all to LF
-    .replace(/\r/g, '\n')    // Handle standalone CR
-    .split('\n')
-    .join('\r\n');           // Convert all to CRLF
 }
 
 /**

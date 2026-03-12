@@ -102,9 +102,6 @@ export interface InternalAppointmentListItem {
   humanControlTakenBy: string | null;
 }
 
-/** @deprecated Use InternalAppointmentListItem — kept for backwards compatibility */
-export type AppointmentListItem = InternalAppointmentListItem;
-
 export interface InternalAppointmentDetail extends Omit<InternalAppointmentListItem, 'messageCount'> {
   conversation: ConversationState | null;
   therapistAvailability: import('@therapist-scheduler/shared').TherapistAvailability | null;
@@ -113,9 +110,6 @@ export interface InternalAppointmentDetail extends Omit<InternalAppointmentListI
   humanControlTakenAt: Date | null;
   humanControlReason: string | null;
 }
-
-/** @deprecated Use InternalAppointmentDetail — kept for backwards compatibility */
-export type AppointmentDetail = InternalAppointmentDetail;
 
 // ============================================
 // Backend-internal email types

@@ -8,6 +8,8 @@ import {
 } from '../api/client';
 import type { KnowledgeEntry, KnowledgeAudience } from '../types';
 import { getAudienceColor } from '../config/color-mappings';
+import { useEditableItem } from '../hooks/useEditableItem';
+import { useDeleteConfirmation } from '../hooks/useDeleteConfirmation';
 
 const audienceLabels: Record<KnowledgeAudience, string> = {
   therapist: 'Therapist',
@@ -17,7 +19,6 @@ const audienceLabels: Record<KnowledgeAudience, string> = {
 
 export default function AdminKnowledgePage() {
   const queryClient = useQueryClient();
-  const [editingEntry, setEditingEntry] = useState<KnowledgeEntry | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const formRef = useRef<HTMLDivElement>(null);
   // FIX B-3: Track scrollToForm timeout for cleanup on unmount
@@ -47,29 +48,40 @@ export default function AdminKnowledgePage() {
     },
   });
 
-  // Update mutation
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Parameters<typeof updateKnowledgeEntry>[1] }) =>
-      updateKnowledgeEntry(id, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['knowledge-entries'] });
-      resetForm();
-    },
+  // Edit/save state via shared hook
+  const {
+    editingId,
+    startEditing,
+    cancelEditing,
+    updateMutation,
+  } = useEditableItem<{ id: string; data: Parameters<typeof updateKnowledgeEntry>[1] }>({
+    queryKey: ['knowledge-entries'],
+    updateFn: ({ id, data }) => updateKnowledgeEntry(id, data),
+    onSuccess: () => resetForm(),
   });
 
-  // Delete mutation
-  const deleteMutation = useMutation({
-    mutationFn: deleteKnowledgeEntry,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['knowledge-entries'] });
-    },
+  // Delete confirmation via shared hook
+  const {
+    pendingDelete: deleteConfirmEntry,
+    requestDelete: handleDelete,
+    cancelDelete,
+    confirmDelete,
+    deleteMutation,
+  } = useDeleteConfirmation<KnowledgeEntry>({
+    queryKey: ['knowledge-entries'],
+    deleteFn: deleteKnowledgeEntry,
   });
+
+  // Derive the full editing entry object from editingId for form population
+  const editingEntry = editingId && entries
+    ? entries.find((e) => e.id === editingId) ?? null
+    : null;
 
   const resetForm = () => {
     setTitle('');
     setContent('');
     setAudience('both');
-    setEditingEntry(null);
+    cancelEditing();
     setIsCreating(false);
   };
 
@@ -93,7 +105,7 @@ export default function AdminKnowledgePage() {
   };
 
   const handleEdit = (entry: KnowledgeEntry) => {
-    setEditingEntry(entry);
+    startEditing(entry.id);
     setTitle(entry.title || '');
     setContent(entry.content);
     setAudience(entry.audience as KnowledgeAudience);
@@ -103,7 +115,7 @@ export default function AdminKnowledgePage() {
 
   const handleCreate = () => {
     setIsCreating(true);
-    setEditingEntry(null);
+    cancelEditing();
     setTitle('');
     setContent('');
     setAudience('both');
@@ -136,20 +148,6 @@ export default function AdminKnowledgePage() {
       id: entry.id,
       data: { active: !entry.active },
     });
-  };
-
-  // Delete confirmation state
-  const [deleteConfirmEntry, setDeleteConfirmEntry] = useState<KnowledgeEntry | null>(null);
-
-  const handleDelete = (entry: KnowledgeEntry) => {
-    setDeleteConfirmEntry(entry);
-  };
-
-  const confirmDelete = () => {
-    if (deleteConfirmEntry) {
-      deleteMutation.mutate(deleteConfirmEntry.id);
-      setDeleteConfirmEntry(null);
-    }
   };
 
   const isFormOpen = isCreating || editingEntry !== null;
@@ -440,8 +438,8 @@ export default function AdminKnowledgePage() {
       {deleteConfirmEntry && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={() => setDeleteConfirmEntry(null)}
-          onKeyDown={(e) => { if (e.key === 'Escape') setDeleteConfirmEntry(null); }}
+          onClick={cancelDelete}
+          onKeyDown={(e) => { if (e.key === 'Escape') cancelDelete(); }}
         >
           <div
             role="dialog"
@@ -458,7 +456,7 @@ export default function AdminKnowledgePage() {
             </p>
             <div className="flex gap-3 justify-end">
               <button
-                onClick={() => setDeleteConfirmEntry(null)}
+                onClick={cancelDelete}
                 className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
               >
                 Cancel

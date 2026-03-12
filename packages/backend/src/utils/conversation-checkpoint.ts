@@ -8,22 +8,10 @@
  */
 
 import { logger } from './logger';
+import type { ConversationStage } from '@therapist-scheduler/shared';
 
-/**
- * Conversation stages in the booking flow
- */
-export type ConversationStage =
-  | 'initial_contact'           // First email sent
-  | 'awaiting_therapist_availability' // Waiting for therapist to provide slots
-  | 'awaiting_user_slot_selection'    // User has slots, waiting for selection
-  | 'awaiting_therapist_confirmation' // User selected, waiting for therapist
-  | 'awaiting_meeting_link'     // Confirmed, waiting for therapist to send link
-  | 'confirmed'                 // Booking complete
-  | 'rescheduling'              // Rescheduling in progress
-  | 'cancelled'                 // Cancelled
-  | 'stalled'                   // No progress for extended period
-  | 'chased'                    // Follow-up chase sent, awaiting response
-  | 'closure_recommended';      // Chase unanswered, admin should close
+// Re-export for consumers
+export type { ConversationStage };
 
 /**
  * Actions that can be taken in the conversation

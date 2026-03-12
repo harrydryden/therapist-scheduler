@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { RATE_LIMITS } from '../constants';
 import { knowledgeService } from '../services/knowledge.service';
+import { sendSuccess, Errors } from '../utils/response';
 
 // FIX M8: Add validation limits for content length and title
 const KNOWLEDGE_LIMITS = {
@@ -51,16 +52,10 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
       });
 
-      return reply.send({
-        success: true,
-        data: entries,
-      });
+      return sendSuccess(reply, entries);
     } catch (err) {
       logger.error({ err, requestId }, 'Failed to fetch knowledge entries');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to fetch knowledge entries',
-      });
+      return Errors.internal(reply, 'Failed to fetch knowledge entries');
     }
   });
 
@@ -83,11 +78,7 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
 
     const validation = createKnowledgeSchema.safeParse(request.body);
     if (!validation.success) {
-      return reply.status(400).send({
-        success: false,
-        error: 'Invalid request body',
-        details: validation.error.errors,
-      });
+      return Errors.validationFailed(reply, validation.error.errors);
     }
 
     const { title, content, audience, sortOrder } = validation.data;
@@ -106,16 +97,10 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
       knowledgeService.invalidateCache();
       logger.info({ requestId, entryId: entry.id }, 'Created knowledge entry');
 
-      return reply.status(201).send({
-        success: true,
-        data: entry,
-      });
+      return sendSuccess(reply, entry, { statusCode: 201 });
     } catch (err) {
       logger.error({ err, requestId }, 'Failed to create knowledge entry');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to create knowledge entry',
-      });
+      return Errors.internal(reply, 'Failed to create knowledge entry');
     }
   });
 
@@ -139,11 +124,7 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
 
       const validation = updateKnowledgeSchema.safeParse(request.body);
       if (!validation.success) {
-        return reply.status(400).send({
-          success: false,
-          error: 'Invalid request body',
-          details: validation.error.errors,
-        });
+        return Errors.validationFailed(reply, validation.error.errors);
       }
 
       try {
@@ -153,10 +134,7 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
         });
 
         if (!existing) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Knowledge entry not found',
-          });
+          return Errors.notFound(reply, 'Knowledge entry');
         }
 
         const entry = await prisma.knowledgeBase.update({
@@ -167,16 +145,10 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
         knowledgeService.invalidateCache();
         logger.info({ requestId, entryId: id }, 'Updated knowledge entry');
 
-        return reply.send({
-          success: true,
-          data: entry,
-        });
+        return sendSuccess(reply, entry);
       } catch (err) {
         logger.error({ err, requestId, entryId: id }, 'Failed to update knowledge entry');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to update knowledge entry',
-        });
+        return Errors.internal(reply, 'Failed to update knowledge entry');
       }
     }
   );
@@ -206,10 +178,7 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
         });
 
         if (!existing) {
-          return reply.status(404).send({
-            success: false,
-            error: 'Knowledge entry not found',
-          });
+          return Errors.notFound(reply, 'Knowledge entry');
         }
 
         await prisma.knowledgeBase.delete({
@@ -219,16 +188,10 @@ export async function adminKnowledgeRoutes(fastify: FastifyInstance) {
         knowledgeService.invalidateCache();
         logger.info({ requestId, entryId: id }, 'Deleted knowledge entry');
 
-        return reply.send({
-          success: true,
-          message: 'Knowledge entry deleted',
-        });
+        return sendSuccess(reply, null, { message: 'Knowledge entry deleted' });
       } catch (err) {
         logger.error({ err, requestId, entryId: id }, 'Failed to delete knowledge entry');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to delete knowledge entry',
-        });
+        return Errors.internal(reply, 'Failed to delete knowledge entry');
       }
     }
   );

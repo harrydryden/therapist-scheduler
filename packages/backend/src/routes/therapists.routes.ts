@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { notionService, Therapist } from '../services/notion.service';
+import { notionService, InternalTherapist } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { prisma } from '../utils/database';
 import { getOrCreateTherapist } from '../utils/unique-id';
@@ -176,7 +176,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
   );
 }
 
-function formatAvailabilitySummary(availability: Therapist['availability']): string {
+function formatAvailabilitySummary(availability: InternalTherapist['availability']): string {
   if (!availability || !availability.slots || availability.slots.length === 0) {
     return 'Contact for availability';
   }

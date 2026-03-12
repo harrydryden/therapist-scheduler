@@ -477,7 +477,7 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
   );
 
   // ==========================================
-  // Admin Alert Endpoints (FIX TODO)
+  // Admin Alert Endpoints
   // ==========================================
 
   /**

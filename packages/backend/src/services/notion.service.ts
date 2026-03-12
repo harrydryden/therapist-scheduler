@@ -36,7 +36,7 @@ const CACHE_LOCK_MAX_WAIT_MS = 5000; // Max time to wait for lock
  * (email, frozen status, odId). The shared Therapist type in @therapist-scheduler/shared
  * represents the public API contract.
  */
-export interface Therapist {
+export interface InternalTherapist {
   id: string;
   odId: string | null;
   name: string;
@@ -84,7 +84,7 @@ class NotionService {
     logger.debug({ key, ttl }, 'Cache set');
   }
 
-  private parseTherapistFromPage(page: NotionPage): Therapist {
+  private parseTherapistFromPage(page: NotionPage): InternalTherapist {
     const properties = page.properties;
 
     // Extract name (title property)
@@ -230,9 +230,9 @@ class NotionService {
     }
   }
 
-  async fetchTherapists(): Promise<Therapist[]> {
+  async fetchTherapists(): Promise<InternalTherapist[]> {
     // Check cache first
-    const cached = await this.getFromCache<Therapist[]>(CACHE_KEY_ALL);
+    const cached = await this.getFromCache<InternalTherapist[]>(CACHE_KEY_ALL);
     if (cached) {
       return cached;
     }
@@ -242,7 +242,7 @@ class NotionService {
     const shouldFetch = await this.acquireCacheLock(CACHE_KEY_ALL);
     if (!shouldFetch) {
       // Another process populated the cache while we waited
-      const nowCached = await this.getFromCache<Therapist[]>(CACHE_KEY_ALL);
+      const nowCached = await this.getFromCache<InternalTherapist[]>(CACHE_KEY_ALL);
       if (nowCached) {
         return nowCached;
       }
@@ -291,10 +291,10 @@ class NotionService {
     }
   }
 
-  async getTherapist(id: string, bypassCache: boolean = false): Promise<Therapist | null> {
+  async getTherapist(id: string, bypassCache: boolean = false): Promise<InternalTherapist | null> {
     const cacheKey = CACHE_KEY_SINGLE + id;
     if (!bypassCache) {
-      const cached = await this.getFromCache<Therapist>(cacheKey);
+      const cached = await this.getFromCache<InternalTherapist>(cacheKey);
       if (cached) {
         return cached;
       }
