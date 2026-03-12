@@ -861,9 +861,9 @@ class AppointmentLifecycleService {
           eventType: 'status_change',
           actor: source === 'admin' ? `admin:${adminId || 'unknown'}` : source,
           payload: {
-            fromStatus: previousStatus,
-            toStatus: APPOINTMENT_STATUS.COMPLETED,
-            note,
+            previousStatus,
+            newStatus: APPOINTMENT_STATUS.COMPLETED,
+            reason: note,
           },
         },
       });
@@ -1133,8 +1133,8 @@ class AppointmentLifecycleService {
           eventType: 'status_change',
           actor: source === 'admin' ? `admin:${adminId || 'unknown'}` : source,
           payload: {
-            fromStatus: previousStatus,
-            toStatus: APPOINTMENT_STATUS.CANCELLED,
+            previousStatus,
+            newStatus: APPOINTMENT_STATUS.CANCELLED,
             reason,
             cancelledBy,
           },

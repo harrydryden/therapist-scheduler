@@ -8,6 +8,7 @@ import { emailQueueService } from './email-queue.service';
 import { STALE_THRESHOLDS, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK } from '../constants';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
+import { auditEventService } from './audit-event.service';
 
 // Convert hours to milliseconds (used for isStale flag - visual indicator only)
 const STALE_THRESHOLD_MS = STALE_THRESHOLDS.MARK_STALE_HOURS * 60 * 60 * 1000;
@@ -431,6 +432,21 @@ class StaleCheckService {
 
       if (result.count > 0) {
         logger.info({ checkId, markedStale: result.count }, 'Marked conversations as stale');
+
+        // Log stale_flagged audit events for each newly stale appointment
+        const newlyStale = await prisma.appointmentRequest.findMany({
+          where: {
+            lastActivityAt: { lt: staleThreshold },
+            status: { in: ['pending', 'contacted', 'negotiating'] },
+            isStale: true,
+          },
+          select: { id: true },
+        });
+        for (const apt of newlyStale) {
+          auditEventService.log(apt.id, 'stale_flagged', 'system', {
+            reason: 'No activity for configured threshold',
+          });
+        }
       }
 
       // Also unmark stale if activity has resumed
@@ -544,6 +560,11 @@ class StaleCheckService {
             stallHours,
             apt.lastToolFailureReason || undefined
           );
+
+          // Log stale_flagged audit event for stalled conversation
+          auditEventService.log(apt.id, 'stale_flagged', 'system', {
+            reason: `Conversation stalled - activity but no tool execution for ${stallHours}h`,
+          });
         }
       }
 
@@ -698,6 +719,14 @@ class StaleCheckService {
           autoEscalatedAt: now,
         },
       });
+
+      // Log human_control audit events for auto-escalated appointments
+      for (const appointment of candidates) {
+        auditEventService.log(appointment.id, 'human_control', 'system', {
+          enabled: true,
+          reason: 'Auto-escalated: stalled conversation with no tool execution progress',
+        });
+      }
 
       // Send Slack notifications concurrently (fire-and-forget with error isolation)
       const notificationPromises = candidates.map(async (appointment) => {

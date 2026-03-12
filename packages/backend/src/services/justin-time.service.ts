@@ -1735,6 +1735,12 @@ ${formatClassificationForPrompt(emailClassification)}`;
       'Human control enabled - appointment flagged for review'
     );
 
+    // Log human_control audit event
+    auditEventService.log(context.appointmentRequestId, 'human_control', 'agent', {
+      enabled: true,
+      reason: controlReason,
+    });
+
     // Send Slack notification for human review flagged
     await slackNotificationService.notifyHumanReviewFlagged(
       context.appointmentRequestId,
@@ -1777,6 +1783,12 @@ ${formatClassificationForPrompt(emailClassification)}`;
         closureRecommendationActioned: false,
       },
       select: { id: true },
+    });
+
+    // Log human_control audit event
+    auditEventService.log(context.appointmentRequestId, 'human_control', 'agent', {
+      enabled: true,
+      reason: `Cancel match recommended: ${reason}`,
     });
 
     // Send targeted Slack notification recommending match cancellation
