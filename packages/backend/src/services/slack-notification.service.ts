@@ -916,6 +916,97 @@ class SlackNotificationService {
   }
 
   /**
+   * Send a daily work report summary
+   */
+  async sendWorkReport(stats: {
+    periodStart: Date;
+    periodEnd: Date;
+    emailsSent: number;
+    emailsReceived: number;
+    appointmentsCreated: number;
+    appointmentsConfirmed: number;
+    appointmentsCompleted: number;
+    appointmentsCancelled: number;
+    staleConversationsFlagged: number;
+    humanControlTakeovers: number;
+    chaseFollowUpsSent: number;
+    closureRecommendations: number;
+    pipelinePending: number;
+    pipelineContacted: number;
+    pipelineNegotiating: number;
+    pipelineConfirmed: number;
+    feedbackSubmissions: number;
+  }): Promise<boolean> {
+    const ukOptions: Intl.DateTimeFormatOptions = {
+      timeZone: 'Europe/London',
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+    };
+    const periodLabel = `${stats.periodStart.toLocaleString('en-GB', ukOptions)} — ${stats.periodEnd.toLocaleString('en-GB', ukOptions)}`;
+
+    const totalPipeline = stats.pipelinePending + stats.pipelineContacted + stats.pipelineNegotiating + stats.pipelineConfirmed;
+
+    let reportText = `📋 *Daily Work Report*\n`;
+    reportText += `_${periodLabel}_\n\n`;
+
+    // Messages
+    reportText += `*Messages*\n`;
+    reportText += `Sent: *${stats.emailsSent}* | Received: *${stats.emailsReceived}*\n\n`;
+
+    // Appointments
+    reportText += `*Appointments*\n`;
+    reportText += `New: *${stats.appointmentsCreated}* | Confirmed: *${stats.appointmentsConfirmed}* | Completed: *${stats.appointmentsCompleted}* | Cancelled: *${stats.appointmentsCancelled}*\n\n`;
+
+    // Pipeline
+    reportText += `*Current Pipeline* (${totalPipeline} active)\n`;
+    reportText += `Pending: ${stats.pipelinePending} | Contacted: ${stats.pipelineContacted} | Negotiating: ${stats.pipelineNegotiating} | Confirmed: ${stats.pipelineConfirmed}\n`;
+
+    // Alerts (only show if there are any)
+    const totalAlerts = stats.staleConversationsFlagged + stats.humanControlTakeovers + stats.chaseFollowUpsSent + stats.closureRecommendations;
+    if (totalAlerts > 0) {
+      reportText += `\n⚠️ *Alerts & Escalations*\n`;
+      const alertParts: string[] = [];
+      if (stats.staleConversationsFlagged > 0) alertParts.push(`Stale: ${stats.staleConversationsFlagged}`);
+      if (stats.humanControlTakeovers > 0) alertParts.push(`Human takeover: ${stats.humanControlTakeovers}`);
+      if (stats.chaseFollowUpsSent > 0) alertParts.push(`Chase sent: ${stats.chaseFollowUpsSent}`);
+      if (stats.closureRecommendations > 0) alertParts.push(`Closure recommended: ${stats.closureRecommendations}`);
+      reportText += alertParts.join(' | ');
+    }
+
+    // Feedback
+    if (stats.feedbackSubmissions > 0) {
+      reportText += `\n\n📝 *Feedback:* ${stats.feedbackSubmissions} submission${stats.feedbackSubmissions === 1 ? '' : 's'} received`;
+    }
+
+    const blocks: SlackTextBlock[] = [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: reportText,
+        },
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/work-reports')}|View Reports> | <${this.adminDashboardBaseUrl}|Dashboard>`,
+          },
+        ],
+      },
+    ];
+
+    return this.sendToSlack({
+      text: `📋 Daily Work Report: ${stats.emailsSent} emails sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`,
+      blocks,
+    });
+  }
+
+  /**
    * Simple text notification (for quick alerts)
    */
   async sendSimpleMessage(text: string, urgent: boolean = false): Promise<boolean> {

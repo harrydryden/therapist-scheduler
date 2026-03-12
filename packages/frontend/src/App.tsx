@@ -16,6 +16,7 @@ const AdminKnowledgePage = lazy(() => import('./pages/AdminKnowledgePage'));
 const AdminSettingsPage = lazy(() => import('./pages/AdminSettingsPage'));
 const AdminFormsPage = lazy(() => import('./pages/AdminFormsPage'));
 const AdminAppointmentsPage = lazy(() => import('./pages/AdminAppointmentsPage'));
+const AdminWorkReportsPage = lazy(() => import('./pages/AdminWorkReportsPage'));
 
 function AdminLoadingFallback() {
   return (
@@ -59,6 +60,7 @@ function App() {
           <Route path="knowledge" element={<Suspense fallback={<AdminLoadingFallback />}><AdminKnowledgePage /></Suspense>} />
           <Route path="forms" element={<Suspense fallback={<AdminLoadingFallback />}><AdminFormsPage /></Suspense>} />
           <Route path="settings" element={<Suspense fallback={<AdminLoadingFallback />}><AdminSettingsPage /></Suspense>} />
+          <Route path="work-reports" element={<Suspense fallback={<AdminLoadingFallback />}><AdminWorkReportsPage /></Suspense>} />
         </Route>
 
         {/* 404 catch-all route */}
