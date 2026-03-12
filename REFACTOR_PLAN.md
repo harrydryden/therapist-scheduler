@@ -215,7 +215,14 @@ unsubscribe.routes.ts
 |------|---------------|-------------------|--------|
 | `HealthStatus` | `shared/types/index.ts:115` | `conversation-health.service.ts:22` | Remove backend duplicate, import from shared |
 | `ConversationStage` | `shared/types/index.ts:102-113` | `conversation-checkpoint.ts:15-26` | Remove backend duplicate, import from shared |
+| `ExtractedTherapistProfile` | `shared/types/index.ts:311-321` | `pdf-ingestion.service.ts:24-42` | Remove backend duplicate, import from shared |
+| `CategoryWithEvidence` | `shared/types/index.ts:305-309` | `pdf-ingestion.service.ts:18-22` | Remove backend duplicate, import from shared |
+| `AdminNotes` | `shared/types/index.ts:350-358` | `pdf-ingestion.service.ts:44-51` | Remove backend duplicate, import from shared |
+| `TherapistAvailability` | `shared/types/index.ts:23-27` | `availability-formatter.ts:28-35` | Remove backend duplicate, import from shared |
+| `AvailabilitySlot` | `shared/types/index.ts:12-16` | `availability-formatter.ts:22-26` | Remove backend duplicate, import from shared |
 | `KnowledgeEntry` | `shared/types/index.ts:238-247` | `backend/types/index.ts:146-155` | Acceptable — backend uses `Date` objects internally vs `string` in API contract |
+
+Additionally, `notion.service.ts:39-50` defines an internal `Therapist` type that includes `email`, `odId`, and `frozen` fields not in the shared public API type. This should be renamed to `InternalTherapist` to avoid confusion.
 
 ### 4.2 Unused Exports
 
