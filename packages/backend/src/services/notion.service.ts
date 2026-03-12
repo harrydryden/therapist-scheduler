@@ -51,9 +51,6 @@ export interface InternalTherapist {
   frozen: boolean;
 }
 
-/** @deprecated Use InternalTherapist — kept for backwards compatibility */
-export type Therapist = InternalTherapist;
-
 const CACHE_TTL = 300; // 5 minutes for general data
 // FIX M3: Shorter cache for availability-critical data to reduce staleness
 // NOTE: A therapist who removes availability in Notion could still receive bookings

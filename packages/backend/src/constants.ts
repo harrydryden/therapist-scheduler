@@ -78,12 +78,6 @@ export const TIMEOUTS = {
   SYSTEM_PROMPT_BUILD_MS: 10000, // 10 seconds total for system prompt building
 } as const;
 
-// Cache settings
-export const CACHE = {
-  THERAPIST_TTL_SECONDS: 300, // 5 minutes
-  THERAPIST_KEY: 'therapists:all',
-} as const;
-
 // Redis keys
 export const REDIS_KEYS = {
   EMAIL_LOCK_PREFIX: 'email-lock:',

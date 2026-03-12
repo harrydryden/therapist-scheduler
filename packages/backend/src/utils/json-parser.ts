@@ -116,18 +116,6 @@ export function safeJsonParse<T>(
 }
 
 /**
- * @deprecated Use safeJsonParse with schema option instead
- * Legacy function for backward compatibility
- */
-export function safeJsonParseUnsafe<T>(
-  json: string | null | undefined,
-  fallback: T,
-  context?: string
-): T {
-  return safeJsonParse(json, fallback, { context });
-}
-
-/**
  * Parse conversation state from database JSON with Zod validation
  * PERFORMANCE FIX: Added size limit to prevent memory exhaustion
  */

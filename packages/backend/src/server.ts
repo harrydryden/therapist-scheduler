@@ -31,9 +31,6 @@ import { atsIntegrationRoutes } from './routes/ats-integration.routes';
 // Webhook receivers (Gmail, Slack — external service callbacks)
 import { emailWebhookRoutes } from './routes/email-webhook.routes';
 
-// Legacy routes (deprecated — maintained for backward compatibility)
-import { webhookRoutes } from './routes/webhooks.routes';
-
 // --- Services ---
 import { notionService } from './services/notion.service';
 import { staleCheckService } from './services/stale-check.service';
@@ -325,9 +322,6 @@ async function buildServer() {
 
   // --- External webhook receivers ---
   await fastify.register(emailWebhookRoutes);       // Gmail Pub/Sub push notifications
-
-  // --- Legacy routes (deprecated — remove after ATS migration) ---
-  await fastify.register(webhookRoutes);            // POST /api/webhooks/appointment-request (use /api/v1/ats/appointments instead)
 
   // In production, serve the frontend SPA build
   if (config.env === 'production') {

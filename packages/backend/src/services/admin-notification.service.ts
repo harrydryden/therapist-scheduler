@@ -9,9 +9,6 @@
  *
  * This service provides a unified interface for the admin dashboard to
  * retrieve and manage all types of alerts across the system.
- *
- * FIX TODO: Previously, flagged issues were not delivered to admin in a
- * consolidated way. This service resolves that by aggregating all alert types.
  */
 
 import { prisma } from '../utils/database';

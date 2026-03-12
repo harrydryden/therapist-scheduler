@@ -1,41 +1,14 @@
 /**
  * Tests for email encoding/decoding utilities
- * Covers: decodeQuotedPrintable, decodeHtmlEntities, stripHtml,
- *         encodeEmailHeader, normalizeLineEndings, truncateText
+ * Covers: decodeHtmlEntities, stripHtml, encodeEmailHeader, truncateText
  */
 
 import {
-  decodeQuotedPrintable,
   decodeHtmlEntities,
   stripHtml,
   encodeEmailHeader,
-  normalizeLineEndings,
   truncateText,
 } from '../utils/email-encoding';
-
-describe('decodeQuotedPrintable', () => {
-  it('joins soft line breaks (lines ending with =)', () => {
-    expect(decodeQuotedPrintable('hello=\r\nworld')).toBe('helloworld');
-    expect(decodeQuotedPrintable('hello=\nworld')).toBe('helloworld');
-  });
-
-  it('decodes =XX hex sequences', () => {
-    expect(decodeQuotedPrintable('=3D')).toBe('=');
-    expect(decodeQuotedPrintable('=0D=0A')).toBe('\r\n');
-  });
-
-  it('decodes mixed content', () => {
-    expect(decodeQuotedPrintable('Hello=20World=21')).toBe('Hello World!');
-  });
-
-  it('handles text without encoding', () => {
-    expect(decodeQuotedPrintable('plain text')).toBe('plain text');
-  });
-
-  it('decodes equals sign (=3D)', () => {
-    expect(decodeQuotedPrintable('a=3Db')).toBe('a=b');
-  });
-});
 
 describe('decodeHtmlEntities', () => {
   it('decodes &nbsp;', () => {
@@ -136,27 +109,6 @@ describe('encodeEmailHeader', () => {
       const decoded = Buffer.from(match[1], 'base64').toString('utf-8');
       expect(decoded).toBe(original);
     }
-  });
-});
-
-describe('normalizeLineEndings', () => {
-  it('converts LF to CRLF', () => {
-    expect(normalizeLineEndings('line1\nline2')).toBe('line1\r\nline2');
-  });
-
-  it('keeps existing CRLF intact (no duplication)', () => {
-    expect(normalizeLineEndings('line1\r\nline2')).toBe('line1\r\nline2');
-  });
-
-  it('converts standalone CR to CRLF', () => {
-    expect(normalizeLineEndings('line1\rline2')).toBe('line1\r\nline2');
-  });
-
-  it('handles mixed line endings', () => {
-    const input = 'line1\nline2\r\nline3\rline4';
-    const result = normalizeLineEndings(input);
-    const lines = result.split('\r\n');
-    expect(lines).toEqual(['line1', 'line2', 'line3', 'line4']);
   });
 });
 
