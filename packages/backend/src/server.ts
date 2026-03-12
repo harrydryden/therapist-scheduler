@@ -39,7 +39,7 @@ import { notionService } from './services/notion.service';
 import { staleCheckService } from './services/stale-check.service';
 import { emailPollingService } from './services/email-polling.service';
 import { gmailWatchService } from './services/gmail-watch.service';
-import { pendingEmailService } from './services/pending-email.service';
+import { pendingEmailService } from './services/email-queue.service';
 import { postBookingFollowupService } from './services/post-booking-followup.service';
 import { weeklyMailingListService } from './services/weekly-mailing-list.service';
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
