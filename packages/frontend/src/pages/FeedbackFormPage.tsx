@@ -37,7 +37,8 @@ async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<
     throw new Error(data.error || 'Failed to load feedback form');
   }
 
-  return data;
+  // Backend wraps responses in { success, data } envelope via sendSuccess()
+  return data.data ?? data;
 }
 
 async function submitFeedback(data: {
@@ -57,7 +58,8 @@ async function submitFeedback(data: {
     throw new Error(result.error || result.message || 'Failed to submit feedback');
   }
 
-  return result;
+  // Backend wraps responses in { success, data, message } envelope via sendSuccess()
+  return { success: result.success, submissionId: result.data?.submissionId, message: result.message };
 }
 
 // ============================================
