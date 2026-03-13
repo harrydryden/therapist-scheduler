@@ -433,36 +433,26 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
             feedbackData,
           });
           logger.info({ appointmentId: appointment.id, skipped: result.skipped }, 'Appointment transitioned to completed after feedback');
-
-          // If transition was skipped (already completed), the lifecycle service
-          // won't send the Slack notification. Send it directly so feedback is always reported.
-          if (result.skipped) {
-            runBackgroundTask(
-              () => slackNotificationService.notifyAppointmentCompleted(
-                appointment!.id,
-                appointment!.userName,
-                appointment!.therapistName,
-                submission.id,
-                feedbackData,
-              ),
-              { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-            );
-          }
         } catch (error) {
           // Log but don't fail the feedback submission.
-          // Still send Slack notification so feedback isn't silently lost.
           logger.error({ error, appointmentId: appointment.id }, 'Failed to transition appointment to completed');
-          runBackgroundTask(
-            () => slackNotificationService.notifyAppointmentCompleted(
-              appointment!.id,
-              appointment!.userName,
-              appointment!.therapistName,
-              submission.id,
-              feedbackData,
-            ),
-            { name: 'slack-notify-feedback-received-fallback', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
-          );
         }
+
+        // Always send Slack notification directly from the form route so feedback
+        // is never silently lost. Previously, the normal success path relied on the
+        // lifecycle service's un-awaited fire-and-forget notifyCompleted() call,
+        // which could silently fail. The notification dedup mechanism (120s window)
+        // prevents duplicates if the lifecycle service also sends one.
+        runBackgroundTask(
+          () => slackNotificationService.notifyAppointmentCompleted(
+            appointment!.id,
+            appointment!.userName,
+            appointment!.therapistName,
+            submission.id,
+            feedbackData,
+          ),
+          { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
+        );
       }
 
       return sendSuccess(reply, { submissionId: submission.id }, { statusCode: 201, message: 'Thank you for your feedback!' });

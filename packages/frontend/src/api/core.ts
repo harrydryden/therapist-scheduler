@@ -67,6 +67,20 @@ export async function fetchWithTimeout(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  // Forward the caller's abort signal (e.g. from React useEffect cleanup)
+  // so that both external cancellation and our timeout trigger the same controller.
+  const externalSignal = options.signal;
+  let onExternalAbort: (() => void) | undefined;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(timeoutId);
+      controller.abort();
+    } else {
+      onExternalAbort = () => controller.abort();
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
   try {
     const response = await fetch(url, {
       ...options,
@@ -75,11 +89,20 @@ export async function fetchWithTimeout(
     return response;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
+      // If the external signal triggered the abort, re-throw as AbortError
+      // (not a timeout) so the caller can distinguish cancellation from timeout.
+      if (externalSignal?.aborted) {
+        throw error;
+      }
       throw new Error('Request timed out. Please try again.');
     }
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    // Clean up the listener to prevent memory leaks
+    if (externalSignal && onExternalAbort) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
