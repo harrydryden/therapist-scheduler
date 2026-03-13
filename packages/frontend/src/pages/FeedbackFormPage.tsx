@@ -25,20 +25,47 @@ interface FeedbackFormResponse {
 
 const FEEDBACK_TIMEOUT_MS = 30000;
 
+const FORM_LOAD_MAX_RETRIES = 3;
+
 async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<FeedbackFormResponse> {
   const endpoint = splCode
     ? `${API_BASE}/feedback/form/${splCode}`
     : `${API_BASE}/feedback/form`;
 
-  const response = await fetchWithTimeout(endpoint, signal ? { signal } : {}, FEEDBACK_TIMEOUT_MS);
-  const data = await response.json();
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    throw new Error(data.error || 'Failed to load feedback form');
+  for (let attempt = 0; attempt < FORM_LOAD_MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetchWithTimeout(endpoint, signal ? { signal } : {}, FEEDBACK_TIMEOUT_MS);
+      const data = await response.json();
+
+      if (!response.ok) {
+        const err = new Error(data.error || 'Failed to load feedback form');
+        // Don't retry client errors (4xx) — they won't succeed on retry
+        if (response.status >= 400 && response.status < 500) throw err;
+        lastError = err;
+        if (attempt < FORM_LOAD_MAX_RETRIES - 1) {
+          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+          continue;
+        }
+        throw err;
+      }
+
+      // Backend wraps responses in { success, data } envelope via sendSuccess()
+      return data.data ?? data;
+    } catch (err) {
+      // Don't retry if the component unmounted (external abort)
+      if (signal?.aborted) throw err;
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Don't retry client-level errors (already thrown above for 4xx)
+      if (attempt < FORM_LOAD_MAX_RETRIES - 1) {
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+        continue;
+      }
+    }
   }
 
-  // Backend wraps responses in { success, data } envelope via sendSuccess()
-  return data.data ?? data;
+  throw lastError || new Error('Failed to load form');
 }
 
 async function submitFeedback(data: {
