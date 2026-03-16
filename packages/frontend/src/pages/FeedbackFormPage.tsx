@@ -4,6 +4,7 @@ import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
+import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions } from '@therapist-scheduler/shared/utils/form-utils';
 
 interface PrefilledData {
   trackingCode: string;
@@ -169,12 +170,6 @@ function ChoiceQuestion({
   );
 }
 
-function requiresExplanation(value: string | null, requireExplanationFor: string[]): boolean {
-  if (!value) return false;
-  const lower = value.toLowerCase();
-  return requireExplanationFor.some((opt) => opt.toLowerCase() === lower);
-}
-
 function ChoiceWithTextQuestion({
   question,
   choiceValue,
@@ -191,7 +186,7 @@ function ChoiceWithTextQuestion({
   onTextChange: (value: string) => void;
 }) {
   const options = question.options || [];
-  const textRequired = requiresExplanation(choiceValue, requireExplanationFor);
+  const textRequired = requiresExplanationCheck(choiceValue, requireExplanationFor);
 
   return (
     <div className="space-y-4">
@@ -315,14 +310,7 @@ export default function FeedbackFormPage() {
 
   // Compute which questions are visible based on conditional logic
   const visibleQuestions = formConfig
-    ? formConfig.questions.filter((q) => {
-        if (!q.conditionalOn) return true;
-        const parentVal = responses[q.conditionalOn.questionId];
-        if (typeof parentVal !== 'string') return false;
-        return q.conditionalOn.values.some(
-          (v) => v.toLowerCase() === parentVal.toLowerCase()
-        );
-      })
+    ? getVisibleQuestions(formConfig.questions, responses)
     : [];
 
   // Handle response changes
@@ -335,10 +323,7 @@ export default function FeedbackFormPage() {
       if (formConfig && typeof value === 'string') {
         for (const q of formConfig.questions) {
           if (q.conditionalOn?.questionId === questionId) {
-            const conditionMet = q.conditionalOn.values.some(
-              (v) => v.toLowerCase() === value.toLowerCase()
-            );
-            if (!conditionMet) {
+            if (!isConditionMet(q, updated)) {
               delete updated[q.id];
               delete updated[`${q.id}_text`];
             }
@@ -441,7 +426,7 @@ export default function FeedbackFormPage() {
 
     // For choice_with_text, require explanation for configured answers
     // (applies even for non-required questions — if they chose to answer, they must explain)
-    if (currentQuestion.type === 'choice_with_text' && requiresExplanation(response as string, formConfig.requireExplanationFor)) {
+    if (currentQuestion.type === 'choice_with_text' && requiresExplanationCheck(response as string, formConfig.requireExplanationFor)) {
       const textResponse = responses[`${currentQuestion.id}_text`] as string | undefined;
       if (!textResponse || !textResponse.trim()) return false;
     }

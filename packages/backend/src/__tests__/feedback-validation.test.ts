@@ -8,71 +8,11 @@
  * - Edge cases: case-insensitivity, empty arrays, back-and-forth answers
  */
 
-/**
- * Pure function extracted to match the validation logic used in both
- * the frontend (requiresExplanation) and the backend submission route.
- */
-function requiresExplanation(value: string | null | undefined, requireExplanationFor: string[]): boolean {
-  if (!value || typeof value !== 'string') return false;
-  const lower = value.toLowerCase();
-  return requireExplanationFor.some((opt) => opt.toLowerCase() === lower);
-}
+import { requiresExplanation, validateResponses } from '@therapist-scheduler/shared/utils/form-utils';
+import type { FormQuestion } from '@therapist-scheduler/shared/types/feedback';
 
-interface TestQuestion {
-  id: string;
-  type: string;
-  question: string;
-  required?: boolean;
-  conditionalOn?: { questionId: string; values: string[] };
-}
-
-/**
- * Simulates the server-side validation loop from feedback-form.routes.ts
- * Returns an error message if validation fails, or null if valid.
- */
-function validateResponses(
-  responses: Record<string, string | number>,
-  questions: TestQuestion[],
-  requireExplanationFor: string[]
-): string | null {
-  const isConditionMet = (q: TestQuestion): boolean => {
-    if (!q.conditionalOn) return true;
-    const parentVal = responses[q.conditionalOn.questionId];
-    if (typeof parentVal !== 'string') return false;
-    return q.conditionalOn.values.some(
-      (v) => v.toLowerCase() === parentVal.toLowerCase()
-    );
-  };
-
-  for (const q of questions) {
-    // Skip conditional questions whose condition is not met
-    if (!isConditionMet(q)) continue;
-
-    // Validate required fields
-    if (q.required) {
-      const val = responses[q.id];
-      if (val === undefined || val === null || (typeof val === 'string' && !val.trim())) {
-        return `Please answer "${q.question}"`;
-      }
-    }
-
-    // For choice_with_text, enforce explanation text
-    if (q.type === 'choice_with_text') {
-      const choiceVal = responses[q.id];
-      if (typeof choiceVal !== 'string') continue;
-      const needsExplanation = requireExplanationFor.some(
-        (opt) => opt.toLowerCase() === choiceVal.toLowerCase()
-      );
-      if (needsExplanation) {
-        const textVal = responses[`${q.id}_text`];
-        if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
-          return `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`;
-        }
-      }
-    }
-  }
-  return null;
-}
+/** Minimal subset of FormQuestion used by test fixtures — compatible with FormQuestion */
+type TestQuestion = Pick<FormQuestion, 'id' | 'type' | 'question' | 'required' | 'conditionalOn'> & Partial<FormQuestion>;
 
 // ============================================
 // Tests
@@ -134,7 +74,7 @@ describe('validateResponses (server-side submission validation)', () => {
   const questions: TestQuestion[] = [
     { id: 'comfortable', type: 'choice_with_text', question: 'Did you feel comfortable?', required: true },
     { id: 'heard', type: 'choice_with_text', question: 'Did you feel heard?', required: true },
-    { id: 'takeaways', type: 'text', question: 'Key takeaways' },
+    { id: 'takeaways', type: 'text', question: 'Key takeaways', required: false },
   ];
   const defaultConfig = ['No', 'Unsure'];
 

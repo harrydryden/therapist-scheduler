@@ -5,6 +5,7 @@ import { fetchAdminApi } from '../api/client';
 import { API_BASE, getAdminSecret } from '../config/env';
 import { HEADERS } from '../config/constants';
 import type { FormQuestion, FormConfig } from '../types/feedback';
+import { getVisibleQuestions } from '@therapist-scheduler/shared/utils/form-utils';
 
 // ============================================
 // Types (page-specific; shared types in ../types/feedback.ts)
@@ -371,14 +372,7 @@ function FormPreview({ config }: { config: Partial<AdminFormConfig> }) {
   const questions = config.questions || [];
 
   // Compute visible questions based on preview responses
-  const visibleQuestions = questions.filter((q) => {
-    if (!q.conditionalOn) return true;
-    const parentVal = previewResponses[q.conditionalOn.questionId];
-    if (!parentVal) return false;
-    return q.conditionalOn.values.some(
-      (v) => v.toLowerCase() === parentVal.toLowerCase()
-    );
-  });
+  const visibleQuestions = getVisibleQuestions(questions, previewResponses);
 
   const resetPreview = () => {
     setScreen('welcome');
