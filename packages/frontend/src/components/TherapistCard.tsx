@@ -272,7 +272,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
   const isExpanded = (section: string) => expandedSections.has(section);
 
   return (
-    <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 grid grid-rows-subgrid row-span-7 group">
+    <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 grid grid-rows-subgrid row-span-8 group">
       {/* Row 1: Teal accent bar */}
       <div className="h-1.5 bg-spill-teal-400" />
 
@@ -329,11 +329,15 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         />
       </div>
 
-      {/* Row 6: Availability */}
+      {/* Row 6: Availability title */}
       <div className="px-6 self-end">
-        <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
+        <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block">
           Availability
         </span>
+      </div>
+
+      {/* Row 7: Availability content */}
+      <div className="px-6">
         <AvailabilityDisplay
           availability={therapist.availability}
           isExpanded={isExpanded('availability')}
@@ -341,7 +345,7 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         />
       </div>
 
-      {/* Row 7: Bottom action bar */}
+      {/* Row 8: Bottom action bar */}
       <div className="px-6 pb-5">
         {mutation.isSuccess ? (
           <div className="text-center py-3 bg-spill-teal-100 rounded-xl">
