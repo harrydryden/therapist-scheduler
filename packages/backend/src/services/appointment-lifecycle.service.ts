@@ -1208,6 +1208,39 @@ class AppointmentLifecycleService {
           appointment.therapistNotionId
         );
 
+        // Deactivate therapist if they have NO other active appointments.
+        // Previously missing from cancellation path: if a therapist's last active
+        // appointment was cancelled (not completed), they were never deactivated.
+        const otherActiveAppointments = await prisma.appointmentRequest.count({
+          where: {
+            therapistNotionId: appointment.therapistNotionId,
+            id: { not: appointmentId },
+            status: {
+              in: [
+                APPOINTMENT_STATUS.PENDING,
+                APPOINTMENT_STATUS.CONTACTED,
+                APPOINTMENT_STATUS.NEGOTIATING,
+                APPOINTMENT_STATUS.CONFIRMED,
+                APPOINTMENT_STATUS.SESSION_HELD,
+                APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+              ],
+            },
+          },
+        });
+
+        if (otherActiveAppointments === 0) {
+          await notionService.updateTherapistActive(appointment.therapistNotionId, false);
+          logger.info(
+            { ...logContext, therapistNotionId: appointment.therapistNotionId },
+            'Marked therapist as inactive after last appointment cancelled'
+          );
+        } else {
+          logger.info(
+            { ...logContext, therapistNotionId: appointment.therapistNotionId, otherActiveAppointments },
+            'Therapist still has active appointments after cancellation - keeping active'
+          );
+        }
+
         // Sync frozen status to Notion
         await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
       } catch (err) {
@@ -1536,8 +1569,10 @@ class AppointmentLifecycleService {
           );
         }
 
-        // For completed: conditionally deactivate therapist if no other active appointments
-        if (nowCompleted) {
+        // Conditionally deactivate therapist if no other active appointments
+        // Applies to both completed AND cancelled - either terminal status should
+        // trigger deactivation when it's the therapist's last active appointment.
+        if (nowCompleted || nowCancelled) {
           const otherActiveAppointments = await prisma.appointmentRequest.count({
             where: {
               therapistNotionId: appointment.therapistNotionId,
@@ -1559,7 +1594,7 @@ class AppointmentLifecycleService {
             await notionService.updateTherapistActive(appointment.therapistNotionId, false);
             logger.info(
               { ...logContext, therapistNotionId: appointment.therapistNotionId },
-              'Marked therapist as inactive after admin force-completed last appointment'
+              `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`
             );
           }
         }
