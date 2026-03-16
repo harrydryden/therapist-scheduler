@@ -16,12 +16,17 @@
     "./config/therapist-categories": {
       "types": "./dist/config/therapist-categories.d.ts",
       "default": "./dist/config/therapist-categories.js"
+    },
+    "./utils/form-utils": {
+      "types": "./dist/utils/form-utils.d.ts",
+      "default": "./dist/utils/form-utils.js"
     }
   },
   "typesVersions": {
     "*": {
       "types/feedback": ["dist/types/feedback.d.ts"],
-      "config/therapist-categories": ["dist/config/therapist-categories.d.ts"]
+      "config/therapist-categories": ["dist/config/therapist-categories.d.ts"],
+      "utils/form-utils": ["dist/utils/form-utils.d.ts"]
     }
   },
   "scripts": {
