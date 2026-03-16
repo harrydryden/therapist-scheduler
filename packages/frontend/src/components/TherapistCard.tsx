@@ -314,22 +314,24 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           onToggle={() => toggleSection('style')}
         />
 
-        <div className="pt-1">
+        {/* Areas of Focus badges */}
+        <CategorySection
+          label={CATEGORY_LABELS.areasOfFocus}
+          items={therapist.areasOfFocus || []}
+          categoryType="areasOfFocus"
+          isExpanded={isExpanded('areasOfFocus')}
+          onToggle={() => toggleSection('areasOfFocus')}
+        />
+
+        {/* Availability — pushed to bottom with mt-auto for consistent alignment */}
+        <div className="mt-auto pt-3 border-t border-spill-grey-100">
+          <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
+            Availability
+          </span>
           <AvailabilityDisplay
             availability={therapist.availability}
             isExpanded={isExpanded('availability')}
             onToggle={() => toggleSection('availability')}
-          />
-        </div>
-
-        {/* Areas of Focus badges */}
-        <div className="pt-2">
-          <CategorySection
-            label={CATEGORY_LABELS.areasOfFocus}
-            items={therapist.areasOfFocus || []}
-            categoryType="areasOfFocus"
-            isExpanded={isExpanded('areasOfFocus')}
-            onToggle={() => toggleSection('areasOfFocus')}
           />
         </div>
       </div>
