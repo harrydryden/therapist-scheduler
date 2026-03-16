@@ -1186,15 +1186,11 @@ function SubmissionCard({
           {/* Quick summary badges for choice questions */}
           <div className="hidden md:flex gap-1.5 flex-wrap">
             {questions
-              .filter(q => q.type === 'choice' || q.type === 'choice_with_text')
+              .filter(q => (q.type === 'choice' || q.type === 'choice_with_text') && responses[q.id] && typeof responses[q.id] === 'string')
               .slice(0, 4)
-              .map((q) => {
-                const val = responses[q.id];
-                if (!val || typeof val !== 'string') return null;
-                return (
-                  <ChoiceBadge key={q.id} value={val} />
-                );
-              })}
+              .map((q) => (
+                <ChoiceBadge key={q.id} value={responses[q.id] as string} />
+              ))}
           </div>
         </div>
         <div className="flex items-center gap-2">
