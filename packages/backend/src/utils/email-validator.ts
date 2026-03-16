@@ -188,14 +188,19 @@ export async function verifyMxRecords(email: string): Promise<boolean | null> {
   try {
     // PERFORMANCE FIX: Race between MX lookup and timeout
     // Prevents request handlers from hanging on slow/unresponsive DNS
+    let timeoutId: NodeJS.Timeout;
     const timeoutPromise = new Promise<dns.MxRecord[]>((_, reject) => {
-      setTimeout(() => reject(new Error('DNS_TIMEOUT')), DNS_TIMEOUT_MS);
+      timeoutId = setTimeout(() => reject(new Error('DNS_TIMEOUT')), DNS_TIMEOUT_MS);
     });
 
     const mxPromise = resolveMx(domain);
 
-    const records = await Promise.race([mxPromise, timeoutPromise]);
-    return records && records.length > 0;
+    try {
+      const records = await Promise.race([mxPromise, timeoutPromise]);
+      return records && records.length > 0;
+    } finally {
+      clearTimeout(timeoutId!);
+    }
   } catch (error: any) {
     // ENODATA or ENOTFOUND means no MX records
     if (error.code === 'ENODATA' || error.code === 'ENOTFOUND') {
