@@ -9,98 +9,10 @@
  *  - Truncation limits are respected
  */
 
-interface TestFormQuestion {
-  id: string;
-  type: 'text' | 'scale' | 'choice' | 'choice_with_text';
-  question: string;
-  required: boolean;
-  options?: string[];
-  scaleMax?: number;
-  conditionalOn?: { questionId: string; values: string[] };
-}
+import { buildFeedbackDataForSlack } from '@therapist-scheduler/shared/utils/form-utils';
+import type { FormQuestion } from '@therapist-scheduler/shared/types/feedback';
 
-/**
- * Pure extraction of the feedback-to-Slack parsing logic from
- * feedback-form.routes.ts so it can be unit-tested without DB/HTTP.
- */
-function buildFeedbackDataForSlack(
-  formQuestions: TestFormQuestion[],
-  responses: Record<string, string | number>
-): Record<string, string> {
-  const LABEL_MAX = 50;
-  const CHOICE_TEXT_MAX = 80;
-  const FREE_TEXT_MAX = 100;
-
-  const isConditionMet = (q: TestFormQuestion): boolean => {
-    if (!q.conditionalOn) return true;
-    const parentVal = responses[q.conditionalOn.questionId];
-    if (typeof parentVal !== 'string') return false;
-    return q.conditionalOn.values.some(
-      (v) => v.toLowerCase() === parentVal.toLowerCase()
-    );
-  };
-
-  const questionById = new Map(formQuestions.map(q => [q.id, q]));
-  const mergedTextChildren = new Set<string>();
-
-  // First pass: identify conditional text sub-questions that merge with parent
-  for (const q of formQuestions) {
-    if (
-      q.type === 'text' &&
-      q.conditionalOn &&
-      isConditionMet(q) &&
-      responses[q.id] != null &&
-      responses[q.id] !== ''
-    ) {
-      const parent = questionById.get(q.conditionalOn.questionId);
-      if (parent && (parent.type === 'choice' || parent.type === 'choice_with_text')) {
-        mergedTextChildren.add(q.id);
-      }
-    }
-  }
-
-  const feedbackData: Record<string, string> = {};
-  for (const q of formQuestions) {
-    const val = responses[q.id];
-    if (val == null || val === '') continue;
-    if (!isConditionMet(q)) continue;
-    if (mergedTextChildren.has(q.id)) continue;
-
-    const isSubQuestion = !!q.conditionalOn;
-    const rawLabel = q.question.length > LABEL_MAX ? q.question.slice(0, LABEL_MAX - 3) + '...' : q.question;
-    const label = isSubQuestion ? `↳ ${rawLabel}` : rawLabel;
-
-    if (q.type === 'scale') {
-      feedbackData[label] = `${val}/${q.scaleMax ?? 5}`;
-    } else if (q.type === 'choice' || q.type === 'choice_with_text') {
-      let answer = String(val);
-
-      const textVal = responses[`${q.id}_text`];
-      if (textVal && typeof textVal === 'string' && textVal.trim()) {
-        const truncated = textVal.length > CHOICE_TEXT_MAX ? textVal.slice(0, CHOICE_TEXT_MAX - 3) + '...' : textVal;
-        answer += ` — "${truncated}"`;
-      }
-
-      if (!isSubQuestion) {
-        for (const child of formQuestions) {
-          if (mergedTextChildren.has(child.id) && child.conditionalOn?.questionId === q.id) {
-            const childVal = String(responses[child.id]);
-            const truncated = childVal.length > CHOICE_TEXT_MAX ? childVal.slice(0, CHOICE_TEXT_MAX - 3) + '...' : childVal;
-            answer += ` — "${truncated}"`;
-            break;
-          }
-        }
-      }
-
-      feedbackData[label] = answer;
-    } else if (q.type === 'text') {
-      const strVal = String(val);
-      feedbackData[label] = strVal.length > FREE_TEXT_MAX ? strVal.slice(0, FREE_TEXT_MAX - 3) + '...' : strVal;
-    }
-  }
-
-  return feedbackData;
-}
+type TestFormQuestion = Pick<FormQuestion, 'id' | 'type' | 'question' | 'required' | 'options' | 'scaleMax' | 'conditionalOn'> & Partial<FormQuestion>;
 
 // Default questions matching admin-forms.routes.ts
 const DEFAULT_QUESTIONS: TestFormQuestion[] = [

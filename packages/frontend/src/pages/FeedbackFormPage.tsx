@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
+import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions } from '@therapist-scheduler/shared/utils/form-utils';
 
 interface PrefilledData {
   trackingCode: string;
@@ -169,12 +170,6 @@ function ChoiceQuestion({
   );
 }
 
-function requiresExplanation(value: string | null, requireExplanationFor: string[]): boolean {
-  if (!value) return false;
-  const lower = value.toLowerCase();
-  return requireExplanationFor.some((opt) => opt.toLowerCase() === lower);
-}
-
 function ChoiceWithTextQuestion({
   question,
   choiceValue,
@@ -191,7 +186,7 @@ function ChoiceWithTextQuestion({
   onTextChange: (value: string) => void;
 }) {
   const options = question.options || [];
-  const textRequired = requiresExplanation(choiceValue, requireExplanationFor);
+  const textRequired = requiresExplanationCheck(choiceValue, requireExplanationFor);
 
   return (
     <div className="space-y-4">
@@ -254,9 +249,15 @@ export default function FeedbackFormPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isSubmitError, setIsSubmitError] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+
+  // Ref-based guard to prevent concurrent submissions from rapid double-clicks.
+  // React state (isSubmitting) doesn't update synchronously, so two clicks in the
+  // same render frame would both see isSubmitting=false and fire two requests.
+  const submitLockRef = useRef(false);
 
   // Load form on mount with cleanup to prevent state updates after unmount
   useEffect(() => {
@@ -309,14 +310,7 @@ export default function FeedbackFormPage() {
 
   // Compute which questions are visible based on conditional logic
   const visibleQuestions = formConfig
-    ? formConfig.questions.filter((q) => {
-        if (!q.conditionalOn) return true;
-        const parentVal = responses[q.conditionalOn.questionId];
-        if (typeof parentVal !== 'string') return false;
-        return q.conditionalOn.values.some(
-          (v) => v.toLowerCase() === parentVal.toLowerCase()
-        );
-      })
+    ? getVisibleQuestions(formConfig.questions, responses)
     : [];
 
   // Handle response changes
@@ -329,10 +323,7 @@ export default function FeedbackFormPage() {
       if (formConfig && typeof value === 'string') {
         for (const q of formConfig.questions) {
           if (q.conditionalOn?.questionId === questionId) {
-            const conditionMet = q.conditionalOn.values.some(
-              (v) => v.toLowerCase() === value.toLowerCase()
-            );
-            if (!conditionMet) {
+            if (!isConditionMet(q, updated)) {
               delete updated[q.id];
               delete updated[`${q.id}_text`];
             }
@@ -387,11 +378,13 @@ export default function FeedbackFormPage() {
 
   // Submit form
   const handleSubmit = async () => {
-    if (!formConfig) return;
+    if (!formConfig || submitLockRef.current) return;
+    submitLockRef.current = true;
 
     try {
       setIsSubmitting(true);
       setError(null);
+      setIsSubmitError(false);
 
       // Get therapist name from responses or prefilled
       const therapistName = responses.therapist_confirmation as string || prefilled?.therapistName || '';
@@ -411,10 +404,12 @@ export default function FeedbackFormPage() {
       if (errorCode === 'ALREADY_SUBMITTED' || errorMessage.includes('already submitted')) {
         setAlreadySubmitted(true);
       } else {
+        setIsSubmitError(true);
         setError(errorMessage);
       }
     } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
@@ -431,7 +426,7 @@ export default function FeedbackFormPage() {
 
     // For choice_with_text, require explanation for configured answers
     // (applies even for non-required questions — if they chose to answer, they must explain)
-    if (currentQuestion.type === 'choice_with_text' && requiresExplanation(response as string, formConfig.requireExplanationFor)) {
+    if (currentQuestion.type === 'choice_with_text' && requiresExplanationCheck(response as string, formConfig.requireExplanationFor)) {
       const textResponse = responses[`${currentQuestion.id}_text`] as string | undefined;
       if (!textResponse || !textResponse.trim()) return false;
     }
@@ -478,13 +473,19 @@ export default function FeedbackFormPage() {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
         <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className={`w-16 h-16 ${isSubmitError ? 'bg-yellow-100' : 'bg-red-100'} rounded-full flex items-center justify-center mx-auto mb-4`}>
+            <svg className={`w-8 h-8 ${isSubmitError ? 'text-yellow-600' : 'text-red-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Unable to Load Form</h2>
-          <p className="text-gray-600 mb-6">{error || 'The feedback form is not available at this time.'}</p>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">
+            {isSubmitError ? 'Submission Error' : 'Unable to Load Form'}
+          </h2>
+          <p className="text-gray-600 mb-6">
+            {isSubmitError
+              ? 'There was a problem submitting your feedback. Your responses may have been saved — please do not resubmit. If the issue persists, contact support.'
+              : (error || 'The feedback form is not available at this time.')}
+          </p>
           <Link
             to="/"
             className="inline-block px-6 py-3 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
@@ -543,7 +544,15 @@ export default function FeedbackFormPage() {
           )}
 
           <button
-            onClick={() => setCurrentQuestionIndex(0)}
+            onClick={() => {
+              // Navigate to the first *visible* question's real index, rather than
+              // hardcoding 0. If a future form config has a conditional first question,
+              // index 0 would land on an invisible question.
+              const firstRealIdx = visibleQuestions.length > 0
+                ? formConfig.questions.findIndex((q) => q.id === visibleQuestions[0].id)
+                : 0;
+              setCurrentQuestionIndex(firstRealIdx);
+            }}
             className="w-full py-3 px-6 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
           >
             Start Feedback

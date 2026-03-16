@@ -32,6 +32,7 @@ import { runBackgroundTask } from '../utils/background-task';
 import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
 import { STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
+import { parseFormQuestions } from '@therapist-scheduler/shared/utils/form-utils';
 import type {
   ATSAppointmentRecord,
   ATSFeedbackSubmission,
@@ -739,7 +740,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         const formConfig: ATSFeedbackFormConfig = {
           formName: config.formName,
           description: config.description,
-          questions: config.questions as any,
+          questions: parseFormQuestions(config.questions),
           isActive: config.isActive,
           questionsVersion: config.questionsVersion,
           requireExplanationFor: (config.requireExplanationFor as string[]) ?? ['No', 'Unsure'],
