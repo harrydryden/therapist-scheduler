@@ -153,27 +153,11 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
   );
 }
 
-// Icon components for feature list items
-function UserIcon() {
-  return (
-    <svg className="w-4 h-4 text-spill-grey-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-    </svg>
-  );
-}
-
+// Icon components
 function CalendarIcon() {
   return (
     <svg className="w-4 h-4 text-spill-grey-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-    </svg>
-  );
-}
-
-function ClockIcon() {
-  return (
-    <svg className="w-4 h-4 text-spill-grey-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
 }
@@ -286,11 +270,6 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
 
   const isExpanded = (section: string) => expandedSections.has(section);
 
-  // Summarize approach items for the feature list
-  const approachSummary = therapist.approach && therapist.approach.length > 0
-    ? therapist.approach.slice(0, 2).join(', ')
-    : 'General approach';
-
   return (
     <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 flex flex-col group">
       {/* Teal accent bar at top — Spill design pattern */}
@@ -317,34 +296,42 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         )}
       </div>
 
-      {/* Feature list with icons — Spill card pattern */}
+      {/* Feature list with icons + category badges with tooltips */}
       <div className="px-6 py-4 space-y-2.5 flex-1">
-        <div className="flex items-start gap-2.5">
-          <UserIcon />
-          <span className="text-sm text-spill-grey-600">{approachSummary}</span>
-        </div>
-        <div className="flex items-start gap-2.5">
-          <ClockIcon />
-          <span className="text-sm text-spill-grey-600">
-            {therapist.style && therapist.style.length > 0
-              ? therapist.style.slice(0, 2).join(', ')
-              : 'Flexible style'}
-          </span>
-        </div>
-        <AvailabilityDisplay
-          availability={therapist.availability}
-          isExpanded={isExpanded('availability')}
-          onToggle={() => toggleSection('availability')}
+        <CategorySection
+          label={CATEGORY_LABELS.approach}
+          items={therapist.approach || []}
+          categoryType="approach"
+          isExpanded={isExpanded('approach')}
+          onToggle={() => toggleSection('approach')}
+        />
+
+        <CategorySection
+          label={CATEGORY_LABELS.style}
+          items={therapist.style || []}
+          categoryType="style"
+          isExpanded={isExpanded('style')}
+          onToggle={() => toggleSection('style')}
         />
 
         {/* Areas of Focus badges */}
-        <div className="pt-2">
-          <CategorySection
-            label={CATEGORY_LABELS.areasOfFocus}
-            items={therapist.areasOfFocus || []}
-            categoryType="areasOfFocus"
-            isExpanded={isExpanded('areasOfFocus')}
-            onToggle={() => toggleSection('areasOfFocus')}
+        <CategorySection
+          label={CATEGORY_LABELS.areasOfFocus}
+          items={therapist.areasOfFocus || []}
+          categoryType="areasOfFocus"
+          isExpanded={isExpanded('areasOfFocus')}
+          onToggle={() => toggleSection('areasOfFocus')}
+        />
+
+        {/* Availability — pushed to bottom with mt-auto for consistent alignment */}
+        <div className="mt-auto pt-3 border-t border-spill-grey-100">
+          <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
+            Availability
+          </span>
+          <AvailabilityDisplay
+            availability={therapist.availability}
+            isExpanded={isExpanded('availability')}
+            onToggle={() => toggleSection('availability')}
           />
         </div>
       </div>
