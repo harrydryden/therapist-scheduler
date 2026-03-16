@@ -114,14 +114,11 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
   const hasMore = hiddenCount > 0;
 
   return (
-    <div className="mb-3">
+    <div>
       <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
         {label}
       </span>
-      <div
-        className="flex flex-wrap gap-1.5 items-start content-start"
-        style={{ minHeight: `${UI.CATEGORY_SECTION_HEIGHT}px` }}
-      >
+      <div className="flex flex-wrap gap-1.5 items-start content-start">
         {hasItems ? (
           <>
             {visibleItems.map((item) => (
@@ -274,16 +271,15 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
   const isExpanded = (section: string) => expandedSections.has(section);
 
   return (
-    <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 flex flex-col group">
-      {/* Teal accent bar at top — Spill design pattern */}
+    <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 grid grid-rows-subgrid row-span-7 group">
+      {/* Row 1: Teal accent bar */}
       <div className="h-1.5 bg-spill-teal-400" />
 
-      {/* Card header */}
-      <div className="px-6 pt-5 pb-0">
+      {/* Row 2: Card header */}
+      <div className="px-6 pt-5">
         <h3 className="text-lg font-bold text-spill-black leading-tight mb-1">
           {therapist.name}
         </h3>
-        {/* Bio as subtitle description — like Spill card descriptions */}
         <p className={`text-sm text-spill-grey-400 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
           {therapist.bio}
         </p>
@@ -299,8 +295,8 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
         )}
       </div>
 
-      {/* Feature list with icons + category badges with tooltips */}
-      <div className="px-6 py-4 space-y-2.5 flex-1">
+      {/* Row 3: Approach */}
+      <div className="px-6">
         <CategorySection
           label={CATEGORY_LABELS.approach}
           items={therapist.approach || []}
@@ -308,7 +304,10 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           isExpanded={isExpanded('approach')}
           onToggle={() => toggleSection('approach')}
         />
+      </div>
 
+      {/* Row 4: Style */}
+      <div className="px-6">
         <CategorySection
           label={CATEGORY_LABELS.style}
           items={therapist.style || []}
@@ -316,8 +315,10 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           isExpanded={isExpanded('style')}
           onToggle={() => toggleSection('style')}
         />
+      </div>
 
-        {/* Areas of Focus badges */}
+      {/* Row 5: Areas of Focus */}
+      <div className="px-6">
         <CategorySection
           label={CATEGORY_LABELS.areasOfFocus}
           items={therapist.areasOfFocus || []}
@@ -325,21 +326,21 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
           isExpanded={isExpanded('areasOfFocus')}
           onToggle={() => toggleSection('areasOfFocus')}
         />
-
-        {/* Availability — pushed to bottom with mt-auto for consistent alignment */}
-        <div className="mt-auto pt-3 border-t border-spill-grey-100">
-          <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
-            Availability
-          </span>
-          <AvailabilityDisplay
-            availability={therapist.availability}
-            isExpanded={isExpanded('availability')}
-            onToggle={() => toggleSection('availability')}
-          />
-        </div>
       </div>
 
-      {/* Bottom action bar — Spill card pattern with button + tags */}
+      {/* Row 6: Availability */}
+      <div className="px-6 self-end">
+        <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
+          Availability
+        </span>
+        <AvailabilityDisplay
+          availability={therapist.availability}
+          isExpanded={isExpanded('availability')}
+          onToggle={() => toggleSection('availability')}
+        />
+      </div>
+
+      {/* Row 7: Bottom action bar */}
       <div className="px-6 pb-5">
         {mutation.isSuccess ? (
           <div className="text-center py-3 bg-spill-teal-100 rounded-xl">

@@ -159,7 +159,7 @@ export default function TherapistsPage() {
             Showing {filteredTherapists.length} therapist{filteredTherapists.length !== 1 ? 's' : ''}
             {selectedCategory && ` for "${selectedCategory}"`}
           </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 items-stretch">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-5 gap-y-8">
             {filteredTherapists.map((therapist) => (
               <TherapistCard key={therapist.id} therapist={therapist} />
             ))}
