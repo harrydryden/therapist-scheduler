@@ -33,35 +33,13 @@ import {
   stageFromAction,
   wouldRegress,
 } from '../utils/conversation-checkpoint';
+import { truncateMessageContent } from './ai-conversation.service';
 import type { ToolExecutionResult, SchedulingContext } from './justin-time.service';
 import type { ConversationState } from '../types';
 
 const MAX_TOOL_ITERATIONS = 5;
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
-
-/**
- * Truncate message content to prevent state size bombs.
- */
-function truncateMessageContent(content: string): string {
-  // Import dynamically would create a circular dep, so inline the constant
-  const MAX_MESSAGE_LENGTH = 50000;
-  const TRUNCATION_SUFFIX = '\n\n[Content truncated due to length]';
-
-  if (content.length <= MAX_MESSAGE_LENGTH) {
-    return content;
-  }
-
-  const truncatedLength = MAX_MESSAGE_LENGTH - TRUNCATION_SUFFIX.length;
-  const truncated = content.slice(0, truncatedLength) + TRUNCATION_SUFFIX;
-
-  logger.warn(
-    { originalLength: content.length, truncatedLength: MAX_MESSAGE_LENGTH },
-    'Message content truncated to prevent state size bomb'
-  );
-
-  return truncated;
-}
 
 /** Scheduling tools definition — passed to Claude */
 export const schedulingTools: Anthropic.Tool[] = [

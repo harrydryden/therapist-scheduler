@@ -135,6 +135,20 @@ export interface ClaudeResponsePayload extends BasePayload {
 }
 
 /**
+ * Payload for follow-up sent events (post-booking follow-ups)
+ */
+export interface FollowUpPayload extends BasePayload {
+  followUpType: 'meeting_link_check' | 'feedback_form' | 'feedback_reminder' | 'session_reminder';
+}
+
+/**
+ * Payload for stale/flagged events
+ */
+export interface StaleFlaggedPayload extends BasePayload {
+  reason: string;
+}
+
+/**
  * Union type for all payloads
  */
 export type AuditEventPayload =
@@ -146,6 +160,8 @@ export type AuditEventPayload =
   | FactsPayload
   | ErrorPayload
   | ClaudeResponsePayload
+  | FollowUpPayload
+  | StaleFlaggedPayload
   | BasePayload;
 
 /**

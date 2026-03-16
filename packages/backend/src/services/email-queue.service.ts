@@ -243,21 +243,6 @@ class EmailQueueService {
   private async processJob(job: Job<EmailJobData>): Promise<void> {
     const { pendingEmailId, to, subject, body, threadId } = job.data;
 
-    // Skip internal retry markers (JustinTime failure signals stored as PendingEmail)
-    try {
-      const parsed = JSON.parse(body);
-      if (parsed?.type === 'RETRY_JUSTINTIME_START') {
-        logger.info({ jobId: job.id, pendingEmailId }, 'Skipping JustinTime retry marker');
-        await prisma.pendingEmail.update({
-          where: { id: pendingEmailId },
-          data: { status: 'sent', sentAt: new Date() },
-        });
-        return;
-      }
-    } catch {
-      // Not JSON — normal email body
-    }
-
     // Resolve thread ID from appointment if not provided directly
     let resolvedThreadId = threadId;
     if (!resolvedThreadId && job.data.appointmentId) {

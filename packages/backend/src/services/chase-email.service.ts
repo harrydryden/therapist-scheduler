@@ -350,9 +350,10 @@ class ChaseEmailService {
             ? appointment.therapistName
             : (appointment.userName || appointment.userEmail);
 
-          const reason = `No response from ${appointment.chaseSentTo} (${chasedParty}) after chase follow-up sent ${Math.round(
-            (Date.now() - (appointment.chaseSentAt?.getTime() || 0)) / (60 * 60 * 1000)
-          )}h ago. Total inactivity: ${inactiveHours}h.`;
+          const hoursSinceChase = Math.round(
+            (Date.now() - appointment.chaseSentAt!.getTime()) / (60 * 60 * 1000)
+          );
+          const reason = `No response from ${appointment.chaseSentTo} (${chasedParty}) after chase follow-up sent ${hoursSinceChase}h ago. Total inactivity: ${inactiveHours}h.`;
 
           await prisma.appointmentRequest.update({
             where: { id: appointment.id },

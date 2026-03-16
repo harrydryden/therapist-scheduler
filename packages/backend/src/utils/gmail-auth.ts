@@ -10,6 +10,7 @@
 import { OAuth2Client } from 'google-auth-library';
 import { redis } from './redis';
 import { logger } from './logger';
+import { RELEASE_LOCK_SCRIPT } from './redis-locks';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -28,22 +29,6 @@ const TOKEN_REFRESH_LOCK_KEY = 'gmail:token_refresh_lock';
 const TOKEN_REFRESH_LOCK_TTL_SECONDS = 30;
 const TOKEN_REFRESH_WAIT_MS = 100;
 const TOKEN_REFRESH_MAX_WAIT_MS = 10000;
-
-/**
- * Lua script for ownership-safe lock release.
- * Only releases if the caller still owns the lock.
- */
-const TOKEN_LOCK_RELEASE_SCRIPT = `
-local lockKey = KEYS[1]
-local expectedValue = ARGV[1]
-local currentValue = redis.call('GET', lockKey)
-if currentValue == expectedValue then
-  redis.call('DEL', lockKey)
-  return 1
-else
-  return 0
-end
-`;
 
 /**
  * Load Gmail credentials from environment variables (base64-encoded).
@@ -164,7 +149,7 @@ export async function acquireTokenRefreshLock(traceId: string): Promise<string |
 export async function releaseTokenRefreshLock(lockValue: string | null): Promise<void> {
   if (!lockValue) return;
   try {
-    await redis.eval(TOKEN_LOCK_RELEASE_SCRIPT, 1, TOKEN_REFRESH_LOCK_KEY, lockValue);
+    await redis.eval(RELEASE_LOCK_SCRIPT, 1, TOKEN_REFRESH_LOCK_KEY, lockValue);
   } catch {
     // Ignore - lock will expire naturally
   }
