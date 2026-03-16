@@ -559,7 +559,15 @@ export default function FeedbackFormPage() {
           )}
 
           <button
-            onClick={() => setCurrentQuestionIndex(0)}
+            onClick={() => {
+              // Navigate to the first *visible* question's real index, rather than
+              // hardcoding 0. If a future form config has a conditional first question,
+              // index 0 would land on an invisible question.
+              const firstRealIdx = visibleQuestions.length > 0
+                ? formConfig.questions.findIndex((q) => q.id === visibleQuestions[0].id)
+                : 0;
+              setCurrentQuestionIndex(firstRealIdx);
+            }}
             className="w-full py-3 px-6 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
           >
             Start Feedback

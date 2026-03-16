@@ -37,7 +37,10 @@ interface PrefilledData {
 
 const submitFeedbackSchema = z.object({
   trackingCode: z.string().optional(),
-  therapistName: z.string().min(1, 'Therapist name is required'),
+  // therapistName may be empty for non-SPL submissions where no prefilled data
+  // is available. The fallback chain at storage time resolves it:
+  // submitted value → appointment.therapistName → 'Unknown'.
+  therapistName: z.string().default(''),
   responses: z.record(z.string(), z.union([z.string(), z.number()])),
 });
 
@@ -64,7 +67,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         welcomeMessage: config.welcomeMessage,
         thankYouTitle: config.thankYouTitle,
         thankYouMessage: config.thankYouMessage,
-        questions: config.questions as unknown as FormQuestion[],
+        questions: Array.isArray(config.questions) ? (config.questions as unknown as FormQuestion[]) : [],
         isActive: config.isActive,
         requireExplanationFor: (config.requireExplanationFor as string[]) ?? ['No', 'Unsure'],
       };
@@ -129,7 +132,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           welcomeMessage: config.welcomeMessage,
           thankYouTitle: config.thankYouTitle,
           thankYouMessage: config.thankYouMessage,
-          questions: config.questions as unknown as FormQuestion[],
+          questions: Array.isArray(config.questions) ? (config.questions as unknown as FormQuestion[]) : [],
           isActive: config.isActive,
           requireExplanationFor: (config.requireExplanationFor as string[]) ?? ['No', 'Unsure'],
         };
@@ -218,7 +221,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
 
       // Server-side validation: enforce required fields and explanation text
       const requireExplanationFor = (formConfig?.requireExplanationFor as string[]) ?? ['No', 'Unsure'];
-      if (formConfig?.questions) {
+      if (formConfig?.questions && Array.isArray(formConfig.questions)) {
         const questions = formConfig.questions as unknown as FormQuestion[];
 
         // Helper: check if a conditional question's condition is met
@@ -347,7 +350,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         const CHOICE_TEXT_MAX = 80;
         const FREE_TEXT_MAX = 100;
 
-        const formQuestions = (formConfig?.questions as unknown as FormQuestion[]) || [];
+        const formQuestions = Array.isArray(formConfig?.questions)
+          ? (formConfig.questions as unknown as FormQuestion[])
+          : [];
 
         // Helper: check if a conditional question's parent condition is met
         const isSlackConditionMet = (q: FormQuestion): boolean => {
