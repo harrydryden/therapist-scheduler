@@ -240,6 +240,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
             {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more days`}
           </button>
         )}
+        <p className="text-xs text-spill-grey-400 mt-1.5 ml-[26px]">More times available upon request</p>
       </div>
     </div>
   );
