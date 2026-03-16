@@ -118,7 +118,10 @@ function CategorySection({ label, items, categoryType, isExpanded, onToggle }: C
       <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
         {label}
       </span>
-      <div className="flex flex-wrap gap-1.5 items-start content-start">
+      <div
+        className="flex flex-wrap gap-1.5 items-start content-start"
+        style={{ minHeight: `${UI.CATEGORY_SECTION_HEIGHT}px` }}
+      >
         {hasItems ? (
           <>
             {visibleItems.map((item) => (
