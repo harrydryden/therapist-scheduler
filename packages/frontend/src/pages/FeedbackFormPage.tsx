@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
@@ -259,6 +259,11 @@ export default function FeedbackFormPage() {
   const [isComplete, setIsComplete] = useState(false);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
 
+  // Ref-based guard to prevent concurrent submissions from rapid double-clicks.
+  // React state (isSubmitting) doesn't update synchronously, so two clicks in the
+  // same render frame would both see isSubmitting=false and fire two requests.
+  const submitLockRef = useRef(false);
+
   // Load form on mount with cleanup to prevent state updates after unmount
   useEffect(() => {
     const controller = new AbortController();
@@ -388,11 +393,13 @@ export default function FeedbackFormPage() {
 
   // Submit form
   const handleSubmit = async () => {
-    if (!formConfig) return;
+    if (!formConfig || submitLockRef.current) return;
+    submitLockRef.current = true;
 
     try {
       setIsSubmitting(true);
       setError(null);
+      setIsSubmitError(false);
 
       // Get therapist name from responses or prefilled
       const therapistName = responses.therapist_confirmation as string || prefilled?.therapistName || '';
@@ -417,6 +424,7 @@ export default function FeedbackFormPage() {
       }
     } finally {
       setIsSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
