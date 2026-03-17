@@ -277,6 +277,7 @@ export interface SystemSetting {
   minValue: number | null;
   maxValue: number | null;
   defaultValue: string | number | boolean;
+  allowedValues?: string[];
   isDefault: boolean;
   updatedAt: string | null;
   updatedBy: string | null;

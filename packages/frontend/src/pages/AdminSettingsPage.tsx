@@ -24,7 +24,7 @@ const categoryInfo: Record<SettingCategory, { label: string; description: string
   },
   agent: {
     label: 'AI Agent',
-    description: 'Configure the Justin Time scheduling agent behavior',
+    description: 'Configure the scheduling agent behavior',
     icon: 'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',
   },
   retention: {
@@ -49,7 +49,106 @@ const categoryInfo: Record<SettingCategory, { label: string; description: string
   },
 };
 
-// Slack Diagnostics Panel Component
+// ─── Number Stepper Component ────────────────────────────────────────────────
+
+function NumberStepper({
+  value,
+  onChange,
+  min,
+  max,
+  label,
+}: {
+  value: number;
+  onChange: (val: number) => void;
+  min?: number | null;
+  max?: number | null;
+  label?: string;
+}) {
+  const numVal = Number(value) || 0;
+  const canDecrement = min == null || numVal > min;
+  const canIncrement = max == null || numVal < max;
+
+  return (
+    <div>
+      {label && <p className="text-xs text-slate-500 mb-1.5">{label}</p>}
+      <div className="inline-flex items-center border border-slate-200 rounded-lg overflow-hidden">
+        <button
+          type="button"
+          onClick={() => canDecrement && onChange(numVal - 1)}
+          disabled={!canDecrement}
+          className="w-10 h-10 flex items-center justify-center text-slate-600 hover:bg-slate-50 disabled:text-slate-300 disabled:cursor-not-allowed transition-colors border-r border-slate-200"
+          aria-label="Decrease value"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" />
+          </svg>
+        </button>
+        <input
+          type="number"
+          value={numVal}
+          onChange={(e) => onChange(Number(e.target.value))}
+          min={min ?? undefined}
+          max={max ?? undefined}
+          className="w-16 h-10 text-center text-sm font-medium text-slate-900 border-0 outline-none focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+        />
+        <button
+          type="button"
+          onClick={() => canIncrement && onChange(numVal + 1)}
+          disabled={!canIncrement}
+          className="w-10 h-10 flex items-center justify-center text-slate-600 hover:bg-slate-50 disabled:text-slate-300 disabled:cursor-not-allowed transition-colors border-l border-slate-200"
+          aria-label="Increase value"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+        </button>
+      </div>
+      {(min != null || max != null) && (
+        <p className="text-xs text-slate-400 mt-1">
+          {min != null && `Min: ${min}`}
+          {min != null && max != null && ' · '}
+          {max != null && `Max: ${max}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── Toggle Switch Component ─────────────────────────────────────────────────
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (val: boolean) => void;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`
+        relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200
+        ${checked ? 'bg-spill-blue-800' : 'bg-slate-200'}
+      `}
+    >
+      <span
+        className={`
+          inline-block h-4 w-4 rounded-full bg-white transition-transform duration-200 shadow-sm
+          ${checked ? 'translate-x-6' : 'translate-x-1'}
+        `}
+      />
+    </button>
+  );
+}
+
+// ─── Slack Diagnostics Panel ────────────────────────────────────────────────
+
 function SlackDiagnosticsPanel({
   status,
   isLoading,
@@ -75,7 +174,6 @@ function SlackDiagnosticsPanel({
   const isHealthy = circuitState === 'CLOSED';
   const isOpen = circuitState === 'OPEN';
 
-  // Aggregate background task stats
   const taskStats = status?.backgroundTasks
     ? Object.values(status.backgroundTasks).reduce(
         (acc, t) => ({
@@ -88,7 +186,6 @@ function SlackDiagnosticsPanel({
       )
     : null;
 
-  // Collect recent errors across all tasks
   const recentErrors = status?.backgroundTasks
     ? Object.entries(status.backgroundTasks)
         .flatMap(([name, t]) => t.recentErrors.map(e => ({ ...e, taskName: name })))
@@ -97,122 +194,73 @@ function SlackDiagnosticsPanel({
     : [];
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-      {/* Header */}
-      <div className="p-4 border-b border-slate-100 bg-slate-50">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary-50 rounded-lg flex items-center justify-center">
-              <svg className="w-5 h-5 text-spill-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div>
-              <h2 className="font-semibold text-slate-900">Slack Integration Status</h2>
-              <p className="text-sm text-slate-500">
-                Circuit breaker, queue, and delivery health
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={onRefresh}
-            aria-label="Refresh Slack status"
-            className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
+    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-slate-900">Slack Integration</h2>
+          <p className="text-sm text-slate-500">Circuit breaker, queue, and delivery health</p>
         </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          aria-label="Refresh Slack status"
+          className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
       </div>
 
-      <div className="p-4">
+      <div className="px-6 py-4">
         {isLoading ? (
           <div className="text-center py-4">
-            <div className="animate-spin rounded-full h-6 w-6 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>
-            <p className="text-sm text-slate-500 mt-2">Loading Slack status...</p>
+            <div className="animate-spin rounded-full h-6 w-6 border-2 border-slate-200 border-t-spill-blue-800 mx-auto"></div>
+            <p className="text-sm text-slate-500 mt-2">Loading...</p>
           </div>
         ) : status ? (
           <div className="space-y-4">
-            {/* Status Overview */}
+            {/* Status grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {/* Circuit Breaker State */}
-              <div className={`rounded-lg p-3 border ${
-                isHealthy ? 'bg-emerald-50 border-emerald-200' :
-                isOpen ? 'bg-red-50 border-red-200' :
-                'bg-amber-50 border-amber-200'
-              }`}>
-                <p className="text-xs font-medium text-slate-500 mb-1">Circuit Breaker</p>
-                <p className={`text-sm font-semibold ${
-                  isHealthy ? 'text-emerald-700' :
-                  isOpen ? 'text-red-700' :
-                  'text-amber-700'
-                }`}>
-                  {circuitState}
-                </p>
-              </div>
-
-              {/* Webhook */}
-              <div className={`rounded-lg p-3 border ${
-                status.webhookConfigured ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'
-              }`}>
-                <p className="text-xs font-medium text-slate-500 mb-1">Webhook</p>
-                <p className={`text-sm font-semibold ${
-                  status.webhookConfigured ? 'text-emerald-700' : 'text-red-700'
-                }`}>
-                  {status.webhookConfigured ? 'Configured' : 'Not Set'}
-                </p>
-              </div>
-
-              {/* Queue */}
-              <div className={`rounded-lg p-3 border ${
-                status.queue.inMemory === 0 ? 'bg-slate-50 border-slate-200' : 'bg-amber-50 border-amber-200'
-              }`}>
-                <p className="text-xs font-medium text-slate-500 mb-1">Queued</p>
-                <p className={`text-sm font-semibold ${
-                  status.queue.inMemory === 0 ? 'text-slate-700' : 'text-amber-700'
-                }`}>
-                  {status.queue.inMemory} pending
-                </p>
-              </div>
-
-              {/* Success Rate */}
-              <div className="rounded-lg p-3 border bg-slate-50 border-slate-200">
-                <p className="text-xs font-medium text-slate-500 mb-1">Delivery</p>
-                <p className="text-sm font-semibold text-slate-700">
-                  {taskStats && taskStats.total > 0
-                    ? `${Math.round((taskStats.success / taskStats.total) * 100)}%`
-                    : 'No data'}
-                </p>
-              </div>
+              <StatusCard
+                label="Circuit Breaker"
+                value={circuitState || 'Unknown'}
+                variant={isHealthy ? 'success' : isOpen ? 'error' : 'warning'}
+              />
+              <StatusCard
+                label="Webhook"
+                value={status.webhookConfigured ? 'Configured' : 'Not Set'}
+                variant={status.webhookConfigured ? 'success' : 'error'}
+              />
+              <StatusCard
+                label="Queued"
+                value={`${status.queue.inMemory} pending`}
+                variant={status.queue.inMemory === 0 ? 'neutral' : 'warning'}
+              />
+              <StatusCard
+                label="Delivery"
+                value={taskStats && taskStats.total > 0 ? `${Math.round((taskStats.success / taskStats.total) * 100)}%` : 'No data'}
+                variant="neutral"
+              />
             </div>
 
-            {/* Failure Details (if circuit is not healthy) */}
             {!isHealthy && (
-              <div className={`rounded-lg p-3 border ${isOpen ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'}`}>
-                <p className={`text-sm font-medium ${isOpen ? 'text-red-800' : 'text-amber-800'} mb-1`}>
-                  {isOpen
-                    ? 'Circuit breaker is OPEN — all notifications are being rejected'
-                    : 'Circuit breaker is testing recovery — limited notifications allowed'}
+              <div className={`rounded-lg p-3 text-sm ${isOpen ? 'bg-red-50 text-red-800 border border-red-100' : 'bg-amber-50 text-amber-800 border border-amber-100'}`}>
+                <p className="font-medium">
+                  {isOpen ? 'Circuit breaker is OPEN — notifications are being rejected' : 'Circuit breaker is testing recovery'}
                 </p>
-                <p className="text-xs text-slate-600">
-                  Failures: {status.circuitBreaker.failures} |
-                  Rejected: {status.circuitBreaker.rejectedRequests}
-                  {status.circuitBreaker.lastFailure && (
-                    <> | Last failure: {new Date(status.circuitBreaker.lastFailure).toLocaleString()}</>
-                  )}
+                <p className="text-xs mt-1 opacity-80">
+                  Failures: {status.circuitBreaker.failures} | Rejected: {status.circuitBreaker.rejectedRequests}
                 </p>
               </div>
             )}
 
-            {/* Recent Errors */}
             {recentErrors.length > 0 && (
               <div>
                 <p className="text-xs font-medium text-slate-500 mb-2">Recent Errors</p>
                 <div className="space-y-1">
                   {recentErrors.map((err, i) => (
-                    <div key={i} className="text-xs bg-red-50 border border-red-100 rounded px-2 py-1 font-mono text-red-700 truncate">
+                    <div key={i} className="text-xs bg-red-50 border border-red-100 rounded-lg px-3 py-1.5 font-mono text-red-700 truncate">
                       <span className="text-red-400">{new Date(err.timestamp).toLocaleTimeString()}</span>{' '}
                       [{err.taskName}] {err.error}
                     </div>
@@ -221,49 +269,63 @@ function SlackDiagnosticsPanel({
               </div>
             )}
 
-            {/* Actions */}
-            <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+            <div className="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
               <button
                 type="button"
                 onClick={onTest}
                 disabled={testPending}
-                className="px-3 py-1.5 text-sm bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
+                className="px-4 py-2 text-sm font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50"
               >
-                {testPending ? 'Sending...' : 'Send Test Notification'}
+                {testPending ? 'Sending...' : 'Send Test'}
               </button>
               {!isHealthy && (
                 <button
                   type="button"
                   onClick={onResetCircuit}
                   disabled={resetPending}
-                  className="px-3 py-1.5 text-sm border border-orange-300 text-orange-700 rounded-lg hover:bg-orange-50 transition-colors disabled:opacity-50"
+                  className="px-4 py-2 text-sm font-medium border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
                 >
-                  {resetPending ? 'Resetting...' : 'Reset Circuit Breaker'}
+                  {resetPending ? 'Resetting...' : 'Reset Circuit'}
                 </button>
               )}
             </div>
 
-            {/* Test Result Feedback */}
             {testResult === 'success' && (
-              <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+              <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-4 py-2.5">
                 Test notification sent — check your Slack channel.
               </div>
             )}
             {testResult === 'error' && (
-              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                Failed to send test notification.{testError ? ` ${testError}` : ''} Check your webhook URL.
+              <div className="text-sm text-red-700 bg-red-50 border border-red-100 rounded-lg px-4 py-2.5">
+                Failed to send test.{testError ? ` ${testError}` : ''}
               </div>
             )}
           </div>
         ) : (
-          <p className="text-sm text-slate-500 text-center py-4">
-            Unable to load Slack status.
-          </p>
+          <p className="text-sm text-slate-500 text-center py-4">Unable to load Slack status.</p>
         )}
       </div>
     </div>
   );
 }
+
+function StatusCard({ label, value, variant }: { label: string; value: string; variant: 'success' | 'error' | 'warning' | 'neutral' }) {
+  const styles = {
+    success: 'bg-emerald-50 border-emerald-100 text-emerald-700',
+    error: 'bg-red-50 border-red-100 text-red-700',
+    warning: 'bg-amber-50 border-amber-100 text-amber-700',
+    neutral: 'bg-slate-50 border-slate-100 text-slate-700',
+  };
+
+  return (
+    <div className={`rounded-lg p-3 border ${styles[variant]}`}>
+      <p className="text-xs font-medium text-slate-500 mb-0.5">{label}</p>
+      <p className="text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
+
+// ─── Main Settings Page ──────────────────────────────────────────────────────
 
 export default function AdminSettingsPage() {
   const queryClient = useQueryClient();
@@ -272,7 +334,6 @@ export default function AdminSettingsPage() {
   const [activeCategory, setActiveCategory] = useState<SettingCategory | 'all'>('all');
   const adminId = useMemo(() => getAdminId(), []);
 
-  // Fetch settings
   const {
     data: settingsData,
     isLoading,
@@ -282,7 +343,6 @@ export default function AdminSettingsPage() {
     queryFn: getSettings,
   });
 
-  // Update mutation
   const updateMutation = useMutation({
     mutationFn: ({ key, value }: { key: string; value: string | number | boolean }) =>
       updateSetting(key, { value, adminId }),
@@ -293,7 +353,6 @@ export default function AdminSettingsPage() {
     },
   });
 
-  // Reset mutation
   const resetMutation = useMutation({
     mutationFn: resetSetting,
     onSuccess: () => {
@@ -308,21 +367,15 @@ export default function AdminSettingsPage() {
 
   const handleSave = (setting: SystemSetting) => {
     let value: string | number | boolean = editValue;
-
-    // Convert to appropriate type
     if (setting.valueType === 'number') {
       value = Number(editValue);
-      if (isNaN(value)) {
-        return; // Invalid number
-      }
+      if (isNaN(value)) return;
     } else if (setting.valueType === 'boolean') {
       value = editValue === 'true';
     }
-
     updateMutation.mutate({ key: setting.key, value });
   };
 
-  // Reset confirmation state
   const [resetConfirmSetting, setResetConfirmSetting] = useState<SystemSetting | null>(null);
 
   const handleReset = useCallback((setting: SystemSetting) => {
@@ -341,12 +394,10 @@ export default function AdminSettingsPage() {
     setEditValue('');
   };
 
-  // Filter settings by category
   const filteredSettings = settingsData?.settings.filter(
     s => activeCategory === 'all' || s.category === activeCategory
   ) || [];
 
-  // Group filtered settings by category for display
   const groupedSettings = filteredSettings.reduce((acc, setting) => {
     if (!acc[setting.category]) {
       acc[setting.category] = [];
@@ -357,7 +408,6 @@ export default function AdminSettingsPage() {
 
   const isPending = updateMutation.isPending || resetMutation.isPending;
 
-  // Slack diagnostics - visible when Notifications category is active
   const showSlackDiagnostics = activeCategory === 'all' || activeCategory === 'notifications';
 
   const {
@@ -383,68 +433,45 @@ export default function AdminSettingsPage() {
   });
 
   return (
-    <div className="min-h-screen bg-slate-50 py-8 px-4">
+    <div className="py-8 px-6">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-900">Settings</h1>
-          <p className="text-slate-600 mt-1">
-            Configure system settings for the scheduling agent and automation
-          </p>
+          <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
+          <p className="text-slate-500 mt-1">Configure system settings for the scheduling agent and automation</p>
         </div>
 
-        {/* Error State */}
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
-            <p className="text-red-600">
-              {error instanceof Error ? error.message : 'Failed to load settings'}
-            </p>
+          <div className="bg-red-50 border border-red-100 rounded-lg p-4 mb-6">
+            <p className="text-red-600 text-sm">{error instanceof Error ? error.message : 'Failed to load settings'}</p>
           </div>
         )}
 
         {/* Category Filter */}
         <div className="mb-6 flex flex-wrap gap-2">
-          <button
-            type="button"
+          <CategoryPill
+            active={activeCategory === 'all'}
             onClick={() => setActiveCategory('all')}
-            aria-pressed={activeCategory === 'all'}
-            aria-label="Show all settings categories"
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-colors border ${
-              activeCategory === 'all'
-                ? 'bg-spill-blue-200 text-spill-blue-900 border-spill-blue-200'
-                : 'bg-white border-spill-grey-200 text-spill-grey-600 hover:bg-spill-grey-100'
-            }`}
-          >
-            All Settings
-          </button>
+            label="All Settings"
+          />
           {(Array.isArray(settingsData?.categories) ? settingsData.categories : []).map((cat) => (
-            <button
+            <CategoryPill
               key={cat}
-              type="button"
+              active={activeCategory === cat}
               onClick={() => setActiveCategory(cat)}
-              aria-pressed={activeCategory === cat}
-              aria-label={`Filter to ${categoryInfo[cat]?.label || cat} settings`}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors border ${
-                activeCategory === cat
-                  ? 'bg-spill-blue-200 text-spill-blue-900 border-spill-blue-200'
-                  : 'bg-white border-spill-grey-200 text-spill-grey-600 hover:bg-spill-grey-100'
-              }`}
-            >
-              {categoryInfo[cat]?.label || cat}
-            </button>
+              label={categoryInfo[cat]?.label || cat}
+            />
           ))}
         </div>
 
-        {/* Loading State */}
+        {/* Loading */}
         {isLoading ? (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-8 text-center">
-            <div className="animate-spin rounded-full h-8 w-8 border-2 border-spill-grey-200 border-t-spill-blue-800 mx-auto"></div>
-            <p className="text-sm text-slate-500 mt-2">Loading settings...</p>
+          <div className="bg-white rounded-xl border border-slate-200 p-12 text-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-2 border-slate-200 border-t-spill-blue-800 mx-auto"></div>
+            <p className="text-sm text-slate-500 mt-3">Loading settings...</p>
           </div>
         ) : (
-          /* Settings Groups */
           <div className="space-y-6">
-            {/* Slack Diagnostics Panel */}
             {showSlackDiagnostics && (
               <SlackDiagnosticsPanel
                 status={slackStatus}
@@ -458,36 +485,20 @@ export default function AdminSettingsPage() {
                 resetPending={resetCircuitMutation.isPending}
               />
             )}
+
             {Object.entries(groupedSettings).map(([category, settings]) => (
-              <div
-                key={category}
-                className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden"
-              >
+              <div key={category} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 {/* Category Header */}
-                <div className="p-4 border-b border-slate-100 bg-slate-50">
+                <div className="px-6 py-4 border-b border-slate-100">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-primary-50 rounded-lg flex items-center justify-center">
-                      <svg
-                        className="w-5 h-5 text-spill-blue-800"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d={categoryInfo[category as SettingCategory]?.icon || 'M12 6v6m0 0v6m0-6h6m-6 0H6'}
-                        />
+                    <div className="w-8 h-8 bg-spill-blue-100 rounded-lg flex items-center justify-center">
+                      <svg className="w-4 h-4 text-spill-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={categoryInfo[category as SettingCategory]?.icon || 'M12 6v6m0 0v6m0-6h6m-6 0H6'} />
                       </svg>
                     </div>
                     <div>
-                      <h2 className="font-semibold text-slate-900">
-                        {categoryInfo[category as SettingCategory]?.label || category}
-                      </h2>
-                      <p className="text-sm text-slate-500">
-                        {categoryInfo[category as SettingCategory]?.description}
-                      </p>
+                      <h2 className="text-base font-semibold text-slate-900">{categoryInfo[category as SettingCategory]?.label || category}</h2>
+                      <p className="text-sm text-slate-500">{categoryInfo[category as SettingCategory]?.description}</p>
                     </div>
                   </div>
                 </div>
@@ -495,81 +506,84 @@ export default function AdminSettingsPage() {
                 {/* Settings List */}
                 <div className="divide-y divide-slate-100">
                   {settings.map((setting) => (
-                    <div key={setting.key} className="p-4">
-                      <div className="flex items-start justify-between gap-4">
+                    <div key={setting.key} className="px-6 py-5">
+                      <div className="flex items-start justify-between gap-6">
                         <div className="flex-1 min-w-0">
+                          {/* Label + badges */}
                           <div className="flex items-center gap-2 mb-1">
-                            <h3 className="font-medium text-slate-900">{setting.label}</h3>
-                            {setting.isDefault && (
-                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-slate-100 text-slate-500">
-                                Default
-                              </span>
-                            )}
-                            {!setting.isDefault && (
-                              <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-primary-50 text-primary-700">
-                                Custom
-                              </span>
+                            <h3 className="text-sm font-semibold text-slate-900">{setting.label}</h3>
+                            {setting.isDefault ? (
+                              <span className="px-2 py-0.5 text-[11px] font-medium rounded-full bg-slate-100 text-slate-500">Default</span>
+                            ) : (
+                              <span className="px-2 py-0.5 text-[11px] font-medium rounded-full bg-spill-blue-100 text-spill-blue-800">Custom</span>
                             )}
                           </div>
                           {setting.description && (
-                            <p className="text-sm text-slate-500 mb-2">{setting.description}</p>
+                            <p className="text-sm text-slate-500 mb-3">{setting.description}</p>
                           )}
 
-                          {/* Value Display/Edit */}
+                          {/* Edit mode */}
                           {editingKey === setting.key ? (
-                            <div className={`mt-2 ${setting.key.endsWith('Body') ? 'space-y-2' : 'flex items-center gap-2'}`}>
+                            <div className="mt-3">
                               {setting.valueType === 'boolean' ? (
-                                <select
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  className="px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
-                                >
-                                  <option value="true">Enabled</option>
-                                  <option value="false">Disabled</option>
-                                </select>
+                                <div className="flex items-center gap-3">
+                                  <ToggleSwitch
+                                    checked={editValue === 'true'}
+                                    onChange={(val) => setEditValue(String(val))}
+                                    label={setting.label}
+                                  />
+                                  <span className="text-sm text-slate-600">{editValue === 'true' ? 'Enabled' : 'Disabled'}</span>
+                                </div>
+                              ) : setting.valueType === 'number' ? (
+                                <NumberStepper
+                                  value={Number(editValue)}
+                                  onChange={(val) => setEditValue(String(val))}
+                                  min={setting.minValue}
+                                  max={setting.maxValue}
+                                />
                               ) : setting.key.endsWith('Body') || setting.category === 'frontend' ? (
-                                /* Multi-line textarea for email body templates and frontend content */
-                                <div className="w-full">
+                                <div>
                                   <textarea
                                     value={editValue}
                                     onChange={(e) => setEditValue(e.target.value)}
                                     rows={setting.category === 'frontend' ? 16 : 12}
-                                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none resize-y"
-                                    placeholder={setting.category === 'frontend' ? "Markdown content..." : "Email template body..."}
+                                    className="w-full px-4 py-3 border border-slate-200 rounded-lg text-sm font-mono focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none resize-y bg-white"
+                                    placeholder={setting.category === 'frontend' ? 'Markdown content...' : 'Email template body...'}
                                   />
-                                  <p className="text-xs text-slate-500 mt-1">
+                                  <p className="text-xs text-slate-400 mt-1.5">
                                     {setting.category === 'frontend' ? (
-                                      <>Supports Markdown formatting: <code className="bg-slate-100 px-1 rounded">**bold**</code>, <code className="bg-slate-100 px-1 rounded">### headings</code></>
+                                      <>Supports Markdown: <code className="bg-slate-100 px-1 rounded text-xs">**bold**</code>, <code className="bg-slate-100 px-1 rounded text-xs">### headings</code></>
                                     ) : setting.description?.match(/Variables: (.+)/)?.[1] ? (
-                                      <>Available variables: <code className="bg-slate-100 px-1 rounded">{setting.description.match(/Variables: (.+)/)?.[1]}</code></>
+                                      <>Variables: <code className="bg-slate-100 px-1 rounded text-xs">{setting.description.match(/Variables: (.+)/)?.[1]}</code></>
                                     ) : null}
                                   </p>
                                 </div>
-                              ) : (
-                                <input
-                                  type={setting.valueType === 'number' ? 'number' : 'text'}
+                              ) : setting.allowedValues ? (
+                                <select
                                   value={editValue}
                                   onChange={(e) => setEditValue(e.target.value)}
-                                  min={setting.minValue ?? undefined}
-                                  max={setting.maxValue ?? undefined}
-                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-32'} px-3 py-1.5 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none`}
+                                  className="px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none bg-white"
+                                >
+                                  {setting.allowedValues.map((v: string) => (
+                                    <option key={v} value={v}>{v}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={editValue}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  className={`${setting.category === 'emailTemplates' ? 'w-full' : 'w-64'} px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none`}
                                 />
                               )}
-                              {setting.valueType === 'number' && (
-                                <span className="text-xs text-slate-400">
-                                  {setting.minValue !== null && `Min: ${setting.minValue}`}
-                                  {setting.minValue !== null && setting.maxValue !== null && ' | '}
-                                  {setting.maxValue !== null && `Max: ${setting.maxValue}`}
-                                </span>
-                              )}
-                              <div className={`flex gap-2 ${setting.key.endsWith('Body') ? '' : ''}`}>
+
+                              {/* Save / Cancel buttons */}
+                              <div className="flex gap-2 mt-3">
                                 <button
                                   type="button"
                                   onClick={() => handleSave(setting)}
                                   disabled={isPending}
-                                  aria-label={`Save changes to ${setting.label}`}
-                                  aria-busy={isPending}
-                                  className="px-3 py-1.5 bg-spill-blue-800 text-white text-sm rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
+                                  className="px-4 py-2 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50"
                                 >
                                   Save
                                 </button>
@@ -577,45 +591,48 @@ export default function AdminSettingsPage() {
                                   type="button"
                                   onClick={handleCancel}
                                   disabled={isPending}
-                                  aria-label="Cancel editing"
-                                  className="px-3 py-1.5 border border-slate-200 text-slate-600 text-sm rounded-lg hover:bg-slate-50 transition-colors"
+                                  className="px-4 py-2 border border-slate-200 text-slate-600 text-sm font-medium rounded-lg hover:bg-slate-50 transition-colors"
                                 >
                                   Cancel
                                 </button>
                               </div>
                             </div>
                           ) : (
+                            /* Display mode */
                             <div className={`mt-2 ${setting.key.endsWith('Body') || setting.category === 'frontend' ? '' : 'flex items-center gap-3'}`}>
                               {setting.key.endsWith('Body') || setting.category === 'frontend' ? (
-                                /* Email body template or frontend content preview */
-                                <div className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                                  <pre className="text-sm font-mono text-slate-600 whitespace-pre-wrap max-h-32 overflow-y-auto">
+                                <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                                  <pre className="text-sm font-mono text-slate-600 whitespace-pre-wrap max-h-28 overflow-y-auto leading-relaxed">
                                     {String(setting.value).slice(0, 300)}{String(setting.value).length > 300 ? '...' : ''}
                                   </pre>
-                                  {!setting.isDefault && (
-                                    <p className="text-xs text-spill-yellow-600 mt-2">
-                                      ✎ Customized (click Edit to see full content)
-                                    </p>
-                                  )}
+                                </div>
+                              ) : setting.valueType === 'boolean' ? (
+                                <div className="flex items-center gap-2">
+                                  <span className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full ${
+                                    setting.value
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                      : 'bg-slate-100 text-slate-500'
+                                  }`}>
+                                    {setting.value ? 'Enabled' : 'Disabled'}
+                                  </span>
                                 </div>
                               ) : (
                                 <>
-                                  <div className="flex items-center gap-2">
-                                    <span className={`${setting.category === 'emailTemplates' ? 'text-sm' : 'text-lg'} font-mono text-slate-700`}>
-                                      {setting.valueType === 'boolean'
-                                        ? setting.value ? 'Enabled' : 'Disabled'
-                                        : String(setting.value)}
-                                    </span>
-                                    {setting.valueType === 'number' && setting.key.includes('Hours') && (
-                                      <span className="text-sm text-slate-400">hours</span>
-                                    )}
-                                    {setting.valueType === 'number' && setting.key.includes('Days') && (
-                                      <span className="text-sm text-slate-400">days</span>
-                                    )}
-                                  </div>
+                                  <span className="text-base font-mono font-medium text-slate-800">
+                                    {String(setting.value)}
+                                  </span>
+                                  {setting.valueType === 'number' && setting.key.includes('Hours') && (
+                                    <span className="text-sm text-slate-400">hours</span>
+                                  )}
+                                  {setting.valueType === 'number' && setting.key.includes('Days') && (
+                                    <span className="text-sm text-slate-400">days</span>
+                                  )}
+                                  {setting.valueType === 'number' && setting.key.includes('Minutes') && (
+                                    <span className="text-sm text-slate-400">minutes</span>
+                                  )}
                                   {!setting.isDefault && (
                                     <span className="text-xs text-slate-400">
-                                      (default: {String(setting.defaultValue).slice(0, 50)}{String(setting.defaultValue).length > 50 ? '...' : ''})
+                                      (default: {String(setting.defaultValue).slice(0, 50)})
                                     </span>
                                   )}
                                 </>
@@ -623,23 +640,21 @@ export default function AdminSettingsPage() {
                             </div>
                           )}
 
-                          {/* Updated info */}
                           {setting.updatedAt && !setting.isDefault && (
                             <p className="text-xs text-slate-400 mt-2">
-                              Last updated: {new Date(setting.updatedAt).toLocaleString()}
+                              Updated {new Date(setting.updatedAt).toLocaleDateString()}
                               {setting.updatedBy && ` by ${setting.updatedBy}`}
                             </p>
                           )}
                         </div>
 
-                        {/* Actions */}
+                        {/* Action buttons */}
                         {editingKey !== setting.key && (
-                          <div className="flex gap-2 flex-shrink-0">
+                          <div className="flex gap-2 flex-shrink-0 pt-0.5">
                             <button
                               type="button"
                               onClick={() => handleEdit(setting)}
-                              aria-label={`Edit ${setting.label} setting`}
-                              className="px-3 py-1.5 text-sm border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors"
+                              className="px-3 py-1.5 text-sm font-medium border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
                             >
                               Edit
                             </button>
@@ -648,8 +663,7 @@ export default function AdminSettingsPage() {
                                 type="button"
                                 onClick={() => handleReset(setting)}
                                 disabled={isPending}
-                                aria-label={`Reset ${setting.label} to default value`}
-                                className="px-3 py-1.5 text-sm border border-orange-200 text-orange-600 rounded-lg hover:bg-orange-50 transition-colors disabled:opacity-50"
+                                className="px-3 py-1.5 text-sm font-medium border border-slate-200 text-slate-500 rounded-lg hover:bg-slate-50 hover:text-orange-600 hover:border-orange-200 transition-colors disabled:opacity-50"
                               >
                                 Reset
                               </button>
@@ -667,7 +681,7 @@ export default function AdminSettingsPage() {
 
         {/* Mutation Errors */}
         {(updateMutation.isError || resetMutation.isError) && (
-          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
+          <div className="mt-4 bg-red-50 border border-red-100 rounded-lg p-4">
             <p className="text-red-600 text-sm">
               {updateMutation.error instanceof Error
                 ? updateMutation.error.message
@@ -678,22 +692,14 @@ export default function AdminSettingsPage() {
           </div>
         )}
 
-        {/* Help Text */}
-        <div className="mt-8 p-4 bg-slate-100 rounded-xl">
-          <h3 className="font-medium text-slate-700 mb-2">About Settings</h3>
-          <ul className="text-sm text-slate-600 space-y-1">
-            <li>
-              <strong>Default values</strong> are built into the application code and used when no custom value is set.
-            </li>
-            <li>
-              <strong>Custom values</strong> override defaults and persist across deployments.
-            </li>
-            <li>
-              <strong>Resetting</strong> removes the custom value and reverts to the default.
-            </li>
-            <li>
-              Changes take effect immediately after saving (may take up to 1 minute for caching to refresh).
-            </li>
+        {/* Help */}
+        <div className="mt-8 p-5 bg-white border border-slate-200 rounded-xl">
+          <h3 className="text-sm font-semibold text-slate-700 mb-2">About Settings</h3>
+          <ul className="text-sm text-slate-500 space-y-1.5">
+            <li><strong className="text-slate-600">Default values</strong> are built into the application and used when no custom value is set.</li>
+            <li><strong className="text-slate-600">Custom values</strong> override defaults and persist across deployments.</li>
+            <li><strong className="text-slate-600">Resetting</strong> removes the custom value and reverts to the default.</li>
+            <li>Changes take effect immediately (may take up to 1 minute for cache refresh).</li>
           </ul>
         </div>
       </div>
@@ -701,7 +707,7 @@ export default function AdminSettingsPage() {
       {/* Reset Confirmation Dialog */}
       {resetConfirmSetting && (
         <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
           onClick={() => setResetConfirmSetting(null)}
           onKeyDown={(e) => { if (e.key === 'Escape') setResetConfirmSetting(null); }}
         >
@@ -709,26 +715,26 @@ export default function AdminSettingsPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="reset-confirm-title"
-            className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+            className="bg-white rounded-xl shadow-lg max-w-md w-full mx-4 p-6"
             onClick={(e) => e.stopPropagation()}
             ref={(el) => el?.focus()}
             tabIndex={-1}
           >
             <h3 id="reset-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Reset Setting</h3>
-            <p className="text-slate-600 mb-6">
+            <p className="text-slate-500 mb-6 text-sm">
               Reset "{resetConfirmSetting.label}" to default value ({String(resetConfirmSetting.defaultValue).slice(0, 100)})?
             </p>
             <div className="flex gap-3 justify-end">
               <button
                 onClick={() => setResetConfirmSetting(null)}
-                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
+                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmReset}
                 disabled={resetMutation.isPending}
-                className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors disabled:opacity-50"
+                className="px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50 text-sm font-medium"
               >
                 {resetMutation.isPending ? 'Resetting...' : 'Reset to Default'}
               </button>
@@ -737,5 +743,22 @@ export default function AdminSettingsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function CategoryPill({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors border ${
+        active
+          ? 'bg-spill-blue-100 text-spill-blue-900 border-spill-blue-200'
+          : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+      }`}
+    >
+      {label}
+    </button>
   );
 }
