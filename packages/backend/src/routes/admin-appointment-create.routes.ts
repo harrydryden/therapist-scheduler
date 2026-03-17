@@ -16,6 +16,10 @@ import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS } from '../constants
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
+import { notionUsersService } from '../services/notion-users.service';
+import { slackNotificationService } from '../services/slack-notification.service';
+import { getSettingValue } from '../services/settings.service';
+import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../utils/tracking-code';
 import { JustinTimeService } from '../services/justin-time.service';
@@ -91,6 +95,20 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
         // 5. Create appointment inside Serializable transaction
         const appointmentRequest = await prisma.$transaction(
           async (tx) => {
+            // Check for duplicate: same user + therapist with active appointment
+            const existingRequest = await tx.appointmentRequest.findFirst({
+              where: {
+                userEmail,
+                therapistNotionId,
+                status: { in: ['pending', 'contacted', 'negotiating'] },
+              },
+              select: { id: true, status: true },
+            });
+
+            if (existingRequest) {
+              throw new Error('DUPLICATE_REQUEST');
+            }
+
             // Generate tracking code inside transaction to prevent duplicates
             const trackingCode = await getOrCreateTrackingCode(userEmail, therapistEmail, tx);
 
@@ -148,6 +166,35 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
         notionSyncManager.syncSingleTherapist(therapistNotionId).catch((err) => {
           logger.error({ err, requestId, therapistNotionId }, 'Failed to sync therapist freeze to Notion (non-critical)');
         });
+
+        // Ensure user exists in Notion users database (non-blocking)
+        notionUsersService.ensureUserExists({ email: userEmail, name: userName }).catch((err) => {
+          logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
+        });
+
+        // Send Slack notification for new appointment request (non-blocking, respects settings)
+        getSettingValue<boolean>('notifications.slack.requested')
+          .then((enabled) => {
+            if (enabled !== false) {
+              runBackgroundTask(
+                () => slackNotificationService.notifyAppointmentCreated(
+                  appointmentRequest.id,
+                  userName,
+                  therapistName,
+                  userEmail
+                ),
+                {
+                  name: 'slack-notify-admin-created',
+                  context: { requestId, appointmentId: appointmentRequest.id },
+                  retry: true,
+                  maxRetries: 2,
+                }
+              );
+            }
+          })
+          .catch((err) => {
+            logger.error({ err, requestId }, 'Failed to check Slack notification settings (non-critical)');
+          });
 
         // 6. Walk through lifecycle transitions up to the target stage
         // pending → contacted → negotiating → confirmed → session_held → feedback_requested
@@ -230,6 +277,16 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
           confirmedDateTime: finalAppointment?.confirmedDateTime || confirmedDateTime,
         }, { statusCode: 201 });
       } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+
+        if (errorMessage === 'DUPLICATE_REQUEST') {
+          logger.info(
+            { requestId, userEmail, therapistNotionId },
+            'Admin duplicate appointment request detected'
+          );
+          return Errors.badRequest(reply, 'This user already has an active appointment with this therapist.');
+        }
+
         logger.error({ err, requestId }, 'Failed to create admin appointment');
         return Errors.internal(reply, 'Failed to create appointment');
       }
