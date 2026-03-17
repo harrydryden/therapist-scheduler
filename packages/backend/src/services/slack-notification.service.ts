@@ -115,13 +115,13 @@ function escapeSlackMrkdwn(text: string): string {
 class SlackNotificationService {
   private webhookUrl: string | null = null;
   private webhookUrlUrgent: string | null = null;
-  private adminDashboardBaseUrl: string = 'https://free.spill.app/admin/dashboard';
+  private adminDashboardBaseUrl: string = 'https://free.spill.app/admin';
   private enabled: boolean = false;
 
   constructor() {
     this.webhookUrl = process.env.SLACK_WEBHOOK_URL || null;
     this.webhookUrlUrgent = process.env.SLACK_WEBHOOK_URL_URGENT || null;
-    this.adminDashboardBaseUrl = process.env.ADMIN_DASHBOARD_URL || 'https://free.spill.app/admin/dashboard';
+    this.adminDashboardBaseUrl = process.env.ADMIN_DASHBOARD_URL || 'https://free.spill.app/admin';
     this.enabled = !!this.webhookUrl;
 
     if (this.enabled) {
@@ -403,7 +403,7 @@ class SlackNotificationService {
    * Build appointment link for admin dashboard
    */
   private getAppointmentLink(appointmentId: string): string {
-    return `${this.adminDashboardBaseUrl}/appointments/${appointmentId}`;
+    return `${this.adminDashboardBaseUrl}/dashboard?appointment=${encodeURIComponent(appointmentId)}`;
   }
 
   /**
@@ -518,7 +518,7 @@ class SlackNotificationService {
         elements: [
           {
             type: 'mrkdwn',
-            text: `${severity.toUpperCase()} | ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | ${appointmentId ? `<${this.getAppointmentLink(appointmentId)}|View> | ` : ''}<${this.adminDashboardBaseUrl}|Dashboard>`,
+            text: `${severity.toUpperCase()} | ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | ${appointmentId ? `<${this.getAppointmentLink(appointmentId)}|View> | ` : ''}<${this.adminDashboardBaseUrl}/dashboard|Dashboard>`,
           },
         ],
       },
@@ -769,7 +769,7 @@ class SlackNotificationService {
     feedbackSubmissionId?: string,
     feedbackData?: Record<string, string>
   ): Promise<boolean> {
-    const formsUrl = this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/forms');
+    const formsUrl = `${this.adminDashboardBaseUrl}/forms`;
 
     let details = feedbackSubmissionId
       ? `Session completed, feedback received. <${formsUrl}|View Feedback>`
@@ -903,7 +903,7 @@ class SlackNotificationService {
         elements: [
           {
             type: 'mrkdwn',
-            text: `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl}|Dashboard>`,
+            text: `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl}/dashboard|Dashboard>`,
           },
         ],
       },
@@ -993,7 +993,7 @@ class SlackNotificationService {
         : truncated + '…';
     }
 
-    const contextText = `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl.replace(/\/dashboard\/?$/, '/work-reports')}|View Reports> | <${this.adminDashboardBaseUrl}|Dashboard>`;
+    const contextText = `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl}/work-reports|View Reports> | <${this.adminDashboardBaseUrl}/dashboard|Dashboard>`;
 
     const blocks: SlackTextBlock[] = [
       {
