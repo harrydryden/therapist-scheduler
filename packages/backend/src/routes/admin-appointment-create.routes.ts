@@ -14,6 +14,8 @@ import { sendSuccess, Errors } from '../utils/response';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS } from '../constants';
 import { notionService } from '../services/notion.service';
+import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
+import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../utils/tracking-code';
 import { JustinTimeService } from '../services/justin-time.service';
@@ -112,6 +114,15 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
               },
             });
 
+            // Record request for freeze tracking inside transaction
+            // This ensures the therapist is frozen and can't be booked by other users
+            await therapistBookingStatusService.recordNewRequest(
+              therapistNotionId,
+              therapistName,
+              userEmail,
+              tx
+            );
+
             return newRequest;
           },
           {
@@ -132,6 +143,11 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
           },
           'Admin appointment created, walking through lifecycle transitions'
         );
+
+        // Sync therapist frozen status to Notion immediately (non-blocking)
+        notionSyncManager.syncSingleTherapist(therapistNotionId).catch((err) => {
+          logger.error({ err, requestId, therapistNotionId }, 'Failed to sync therapist freeze to Notion (non-critical)');
+        });
 
         // 6. Walk through lifecycle transitions up to the target stage
         // pending → contacted → negotiating → confirmed → session_held → feedback_requested
