@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import {
   getAppointments,
   getAppointmentDetail,
@@ -26,7 +27,21 @@ export default function AdminDashboardPage() {
     sortBy: 'updatedAt',
     sortOrder: 'desc',
   });
-  const [selectedAppointment, setSelectedAppointment] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selectedAppointment, setSelectedAppointment] = useState<string | null>(
+    searchParams.get('appointment') || null
+  );
+
+  // Sync URL search param when selection changes
+  useEffect(() => {
+    const currentParam = searchParams.get('appointment');
+    if (selectedAppointment && currentParam !== selectedAppointment) {
+      setSearchParams({ appointment: selectedAppointment }, { replace: true });
+    } else if (!selectedAppointment && currentParam) {
+      searchParams.delete('appointment');
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, [selectedAppointment, searchParams, setSearchParams]);
   const [hideConfirmed, setHideConfirmed] = useState(true);
   const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
   const [quickFilter, setQuickFilter] = useState<'red' | 'human' | 'post-session' | 'cancelled' | null>(null);

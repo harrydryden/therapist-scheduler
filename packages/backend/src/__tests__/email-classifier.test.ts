@@ -72,12 +72,23 @@ describe('classifyEmail', () => {
 
     it('detects urgent intent', () => {
       const result = classifyEmail(
-        'This is urgent! I need to see someone today ASAP. Very important.',
+        'This is urgent! I need to see someone ASAP. Very important.',
         USER_EMAIL,
         THERAPIST_EMAIL,
         USER_EMAIL
       );
       expect(result.intent).toBe('urgent');
+    });
+
+    it('does NOT classify "today" alone as urgent', () => {
+      const result = classifyEmail(
+        'I am available today if that works for you.',
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.intent).not.toBe('urgent');
+      expect(result.urgencyLevel).not.toBe('high');
     });
 
     it('returns unknown for ambiguous content', () => {
@@ -349,12 +360,32 @@ describe('classifyEmail', () => {
   describe('flags', () => {
     it('detects out-of-office replies', () => {
       const result = classifyEmail(
-        'I am out of office until February 20th. I will respond when I return.',
+        "I'm out of office until February 20th. I will respond when I return.",
         THERAPIST_EMAIL,
         THERAPIST_EMAIL,
         USER_EMAIL
       );
       expect(result.flags.isOutOfOffice).toBe(true);
+    });
+
+    it('detects auto-reply headers as OOO', () => {
+      const result = classifyEmail(
+        'Automatic reply: I am currently on leave and will return March 1st.',
+        THERAPIST_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.flags.isOutOfOffice).toBe(true);
+    });
+
+    it('does NOT flag casual mention of holiday as OOO', () => {
+      const result = classifyEmail(
+        'I was on holiday last week but I am back now. Monday at 10am works.',
+        THERAPIST_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.flags.isOutOfOffice).toBe(false);
     });
 
     it('detects preferences mentioned', () => {
@@ -399,12 +430,20 @@ describe('needsSpecialHandling', () => {
     ...overrides,
   });
 
-  it('flags out-of-office', () => {
+  it('flags out-of-office when intent is unknown', () => {
     const result = needsSpecialHandling(
-      makeClassification({ flags: { ...makeClassification({}).flags, isOutOfOffice: true } })
+      makeClassification({ intent: 'unknown', flags: { ...makeClassification({}).flags, isOutOfOffice: true } })
     );
     expect(result.needsAttention).toBe(true);
     expect(result.reason).toBe('out_of_office');
+  });
+
+  it('does NOT flag out-of-office when email has a specific intent', () => {
+    const result = needsSpecialHandling(
+      makeClassification({ intent: 'confirmation', flags: { ...makeClassification({}).flags, isOutOfOffice: true } })
+    );
+    // OOO flag present but intent is confirmation — should not override
+    expect(result.reason).not.toBe('out_of_office');
   });
 
   it('flags urgent messages', () => {

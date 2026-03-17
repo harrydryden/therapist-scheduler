@@ -115,7 +115,7 @@ const INTENT_PATTERNS: Record<EmailIntent, RegExp[]> = {
     /(?:wrong (?:person|email|address))/i,
   ],
   urgent: [
-    /(?:urgent|asap|emergency|immediately|today)/i,
+    /(?:urgent|asap|emergency|immediately)/i,
     /(?:very important|time.?sensitive|critical)/i,
     /(?:as soon as possible|right away)/i,
   ],
@@ -147,7 +147,7 @@ const SENTIMENT_PATTERNS: Record<EmailSentiment, RegExp[]> = {
   ],
   urgent: [
     /(?:urgent|asap|emergency|immediately)/i,
-    /(?:today|right now|within the hour)/i,
+    /(?:right now|within the hour)/i,
     /(?:time.?sensitive|critical|pressing)/i,
   ],
 };
@@ -222,11 +222,23 @@ const CONFIRMATION_PATTERNS = {
 };
 
 // Out of office detection
+// These patterns must indicate an actual auto-reply, not a casual mention of
+// being away. "I was on holiday last week" should NOT trigger OOO.
+// Require present/future tense markers or auto-reply headers.
 const OUT_OF_OFFICE_PATTERNS = [
-  /(?:out of (?:the )?office|ooo|on (?:leave|vacation|holiday))/i,
-  /(?:away from (?:my )?(?:desk|email))/i,
+  // "I am out of office" / "I'm out of the office" (present tense)
+  /(?:i(?:'m| am)\s+(?:currently\s+)?out of (?:the )?office)/i,
+  // "I will be out of office" / "I'll be on leave" (future tense)
+  /(?:i(?:'ll| will)\s+be\s+(?:out of (?:the )?office|on (?:leave|vacation|holiday)|away))/i,
+  // Auto-reply headers (strongest signal)
   /(?:automatic reply|auto-?reply|auto-?response)/i,
+  // "Currently on leave/vacation/holiday" (requires "currently" or "am on")
+  /(?:(?:i(?:'m| am)\s+)?currently\s+on\s+(?:leave|vacation|holiday))/i,
+  /(?:i(?:'m| am)\s+on\s+(?:leave|vacation|holiday))/i,
+  // "Limited access to email" (common in OOO)
   /(?:limited access to email)/i,
+  // "OOO" as standalone abbreviation
+  /\booo\b/i,
 ];
 
 /**
@@ -432,8 +444,8 @@ function calculateUrgency(
   if (intent === 'reschedule_request') return 'medium';
   if (intent === 'meeting_link_issue') return 'medium';
 
-  // Check for time-sensitive language
-  const urgentPhrases = /(?:today|asap|urgent|immediately|within \d+ hour)/i;
+  // Check for time-sensitive language (not "today" alone — too common in normal scheduling)
+  const urgentPhrases = /(?:asap|urgent|immediately|within \d+ hour)/i;
   if (urgentPhrases.test(text)) return 'high';
 
   return 'low';
@@ -560,10 +572,7 @@ export function needsSpecialHandling(classification: EmailClassification): {
   needsAttention: boolean;
   reason?: string;
 } {
-  if (classification.flags.isOutOfOffice) {
-    return { needsAttention: true, reason: 'out_of_office' };
-  }
-
+  // Check urgent/frustrated first — these are higher priority than OOO
   if (classification.urgencyLevel === 'high') {
     return { needsAttention: true, reason: 'urgent' };
   }
@@ -574,6 +583,13 @@ export function needsSpecialHandling(classification: EmailClassification): {
 
   if (classification.intent === 'cancellation') {
     return { needsAttention: true, reason: 'cancellation_request' };
+  }
+
+  // OOO is informational — only flag if the email doesn't have a more
+  // specific intent (e.g., a therapist who mentions being on holiday
+  // but is also confirming a slot shouldn't be flagged as OOO)
+  if (classification.flags.isOutOfOffice && classification.intent === 'unknown') {
+    return { needsAttention: true, reason: 'out_of_office' };
   }
 
   return { needsAttention: false };
