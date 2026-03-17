@@ -465,7 +465,9 @@ class AppointmentLifecycleService {
       }
       if (reschedule.resetFollowUpFlags) {
         updateData.meetingLinkCheckSentAt = null;
+        updateData.reminderSentAt = null;
         updateData.feedbackFormSentAt = null;
+        updateData.feedbackReminderSentAt = null;
       }
     }
 
@@ -843,13 +845,16 @@ class AppointmentLifecycleService {
           : note
         : appointment.notes;
 
-      // Update appointment record within transaction
+      // Update appointment record within transaction.
+      // Clear rescheduling state — completion is terminal, no reschedule should remain active.
       await tx.appointmentRequest.update({
         where: { id: appointmentId },
         data: {
           status: APPOINTMENT_STATUS.COMPLETED,
           notes: updatedNotes,
           updatedAt: new Date(),
+          reschedulingInProgress: false,
+          reschedulingInitiatedBy: null,
         },
         select: { id: true },
       });
@@ -1115,13 +1120,18 @@ class AppointmentLifecycleService {
         ? `${cancellationNote}\n\n${appointment.notes}`
         : cancellationNote;
 
-      // Update appointment record within transaction
+      // Update appointment record within transaction.
+      // Clear rescheduling state and follow-up sentinels — cancellation is terminal,
+      // so no rescheduling or follow-up should remain active.
       await tx.appointmentRequest.update({
         where: { id: appointmentId },
         data: {
           status: APPOINTMENT_STATUS.CANCELLED,
           notes: updatedNotes,
           updatedAt: new Date(),
+          // Clear rescheduling state — cancellation supersedes any in-progress reschedule
+          reschedulingInProgress: false,
+          reschedulingInitiatedBy: null,
         },
         select: { id: true },
       });
@@ -1452,6 +1462,14 @@ class AppointmentLifecycleService {
           updateData.feedbackFormSentAt = null;
           updateData.feedbackReminderSentAt = null;
         }
+      }
+
+      // Terminal statuses (completed/cancelled) supersede any in-progress reschedule.
+      // Clear rescheduling state so the record is clean. Note: cancelled is not in
+      // LIFECYCLE_STATUS_ORDER so the movingBackwards logic above doesn't cover it.
+      if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
+        updateData.reschedulingInProgress = false;
+        updateData.reschedulingInitiatedBy = null;
       }
     }
 
