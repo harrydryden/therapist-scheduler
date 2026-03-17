@@ -688,20 +688,33 @@ ${formatClassificationForPrompt(emailClassification)}`;
           'Status transitioned to negotiating via lifecycle service'
         );
       } else if (appointmentRequest.status === 'confirmed') {
-        // Confirmed appointment received an email - likely a rescheduling request
-        // Set the reschedulingInProgress flag to track this
+        // Confirmed appointment received an email - likely a rescheduling request.
+        // Clear the confirmed date/time so that:
+        // 1. The old date doesn't mislead admins on the dashboard
+        // 2. Follow-up services (reminders, meeting link checks, feedback forms) don't
+        //    fire based on the stale date
+        // 3. The lifecycle tick doesn't auto-transition to session_held when the old
+        //    date passes while rescheduling is still in progress
+        // Also reset follow-up sentinel flags so they re-fire once the new date is set.
         await prisma.appointmentRequest.update({
           where: { id: appointmentRequestId },
           data: {
             reschedulingInProgress: true,
             reschedulingInitiatedBy: fromEmail,
             previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
+            confirmedDateTime: null,
+            confirmedDateTimeParsed: null,
+            // Reset follow-up sentinels so they re-trigger for the new date
+            meetingLinkCheckSentAt: null,
+            reminderSentAt: null,
+            feedbackFormSentAt: null,
+            feedbackReminderSentAt: null,
           },
           select: { id: true },
         });
         logger.info(
-          { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail },
-          'Email received for confirmed appointment - marked as rescheduling in progress'
+          { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
+          'Email received for confirmed appointment - marked as rescheduling in progress, cleared stale date/time'
         );
       } else if (appointmentRequest.status === 'cancelled') {
         // Log warning if trying to process email for a cancelled appointment
