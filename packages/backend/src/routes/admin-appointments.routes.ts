@@ -19,7 +19,7 @@ import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
 import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
-import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
+import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';
 import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
@@ -173,13 +173,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         ]);
 
         // FIX #21: Use denormalized columns directly — no need to parse the full blob
+        const healthThresholds = await getHealthThresholds();
         const appointmentsWithMeta = appointments.map((apt) => {
           const checkpointStage = (apt.checkpointStage as ConversationStage) || null;
           const checkpointProgress = checkpointStage
             ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
             : 0;
 
-          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt));
+          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt), healthThresholds);
 
           return {
             id: apt.id,
@@ -1252,12 +1253,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           prisma.appointmentRequest.count({ where }),
         ]);
 
+        const atsHealthThresholds = await getHealthThresholds();
         const appointmentsWithMeta = appointments.map((apt) => {
           const checkpointStage = (apt.checkpointStage as ConversationStage) || null;
           const checkpointProgress = checkpointStage
             ? (STAGE_COMPLETION_PERCENTAGE[checkpointStage] || 0)
             : 0;
-          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt));
+          const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt), atsHealthThresholds);
 
           return {
             id: apt.id,

@@ -260,7 +260,7 @@ export class AIToolExecutorService {
 
           // FIX RSA-2: Validate that confirmed_datetime contains a parseable date/time
           // Either party (user or therapist) can confirm, but a datetime must be provided
-          const validationError = availabilityResolver.validateMarkComplete(completeData.confirmed_datetime);
+          const validationError = await availabilityResolver.validateMarkComplete(completeData.confirmed_datetime);
           if (validationError) {
             logger.warn(
               { traceId: this.traceId, confirmedDateTime: completeData.confirmed_datetime, error: validationError },

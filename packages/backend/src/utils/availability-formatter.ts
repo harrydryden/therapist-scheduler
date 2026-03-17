@@ -43,11 +43,21 @@ export interface FormattedAvailability {
   therapistTimezone: string;
 }
 
-// Configuration
-const MAX_SLOTS_PER_GROUP = 6; // Limit to reduce decision fatigue
-const MAX_TOTAL_SLOTS = 12; // Maximum slots to show
-const SLOT_DURATION_MINUTES = 50; // Standard therapy session length
-const SLOT_INTERVAL_MINUTES = 60; // Generate slots every hour within availability window
+// Default configuration (can be overridden via SlotConfig parameter)
+const DEFAULT_MAX_SLOTS_PER_GROUP = 6; // Limit to reduce decision fatigue
+const DEFAULT_MAX_TOTAL_SLOTS = 12; // Maximum slots to show
+const DEFAULT_SLOT_DURATION_MINUTES = 50; // Standard therapy session length
+const DEFAULT_SLOT_INTERVAL_MINUTES = 60; // Generate slots every hour within availability window
+
+/**
+ * Configuration for slot generation and display, overridable via admin settings.
+ */
+export interface SlotConfig {
+  maxSlotsPerGroup?: number;
+  maxTotalSlots?: number;
+  sessionDurationMinutes?: number;
+  slotIntervalMinutes?: number;
+}
 
 /**
  * Day name to day-of-week index mapping
@@ -124,7 +134,9 @@ function isExceptionDay(
 function generateSlots(
   availability: TherapistAvailability,
   referenceDate: Date = new Date(),
-  weeksAhead: number = 3
+  weeksAhead: number = 3,
+  durationMinutes: number = DEFAULT_SLOT_DURATION_MINUTES,
+  intervalMinutes: number = DEFAULT_SLOT_INTERVAL_MINUTES,
 ): Date[] {
   const slots: Date[] = [];
   const now = new Date();
@@ -149,7 +161,7 @@ function generateSlots(
 
     // Calculate the last valid slot start time (must allow full session before window closes)
     const windowEndMinutes = endHour * 60 + endMinute;
-    const lastSlotStartMinutes = windowEndMinutes - SLOT_DURATION_MINUTES;
+    const lastSlotStartMinutes = windowEndMinutes - durationMinutes;
 
     // Find first occurrence of this day
     let currentDay = new Date(referenceDate);
@@ -180,7 +192,7 @@ function generateSlots(
           }
 
           // Move to next hourly slot
-          slotTime = new Date(slotTime.getTime() + SLOT_INTERVAL_MINUTES * 60 * 1000);
+          slotTime = new Date(slotTime.getTime() + intervalMinutes * 60 * 1000);
         }
       }
 
@@ -205,8 +217,13 @@ function generateSlots(
 export function formatAvailabilityForUser(
   availability: TherapistAvailability | Record<string, unknown> | null,
   userTimezone: string = 'Europe/London',
-  referenceDate: Date = new Date()
+  referenceDate: Date = new Date(),
+  slotConfig: SlotConfig = {}
 ): FormattedAvailability {
+  const maxSlotsPerGroup = slotConfig.maxSlotsPerGroup ?? DEFAULT_MAX_SLOTS_PER_GROUP;
+  const maxTotalSlots = slotConfig.maxTotalSlots ?? DEFAULT_MAX_TOTAL_SLOTS;
+  const sessionDurationMinutes = slotConfig.sessionDurationMinutes ?? DEFAULT_SLOT_DURATION_MINUTES;
+  const slotIntervalMinutes = slotConfig.slotIntervalMinutes ?? DEFAULT_SLOT_INTERVAL_MINUTES;
   const result: FormattedAvailability = {
     thisWeek: [],
     nextWeek: [],
@@ -233,7 +250,7 @@ export function formatAvailabilityForUser(
   result.therapistTimezone = normalizedAvailability.timezone || 'Europe/London';
 
   // Generate concrete slots using provided reference date for consistency
-  const slots = generateSlots(normalizedAvailability, referenceDate);
+  const slots = generateSlots(normalizedAvailability, referenceDate, 3, sessionDurationMinutes, slotIntervalMinutes);
 
   if (slots.length === 0) {
     result.summary = 'No available slots in the next 3 weeks. Consider asking the therapist for updated availability.';
@@ -251,7 +268,7 @@ export function formatAvailabilityForUser(
   let slotsAdded = 0;
 
   for (const slotDate of slots) {
-    if (slotsAdded >= MAX_TOTAL_SLOTS) break;
+    if (slotsAdded >= maxTotalSlots) break;
 
     const formatted: FormattedSlot = {
       datetime: slotDate,
@@ -271,17 +288,17 @@ export function formatAvailabilityForUser(
     // Note: When a group is full, we still count the slot for accurate totalSlots
     // but skip adding to avoid array overflow
     if (formatted.isThisWeek) {
-      if (result.thisWeek.length < MAX_SLOTS_PER_GROUP) {
+      if (result.thisWeek.length < maxSlotsPerGroup) {
         result.thisWeek.push(formatted);
       }
       slotsAdded++;
     } else if (formatted.isNextWeek) {
-      if (result.nextWeek.length < MAX_SLOTS_PER_GROUP) {
+      if (result.nextWeek.length < maxSlotsPerGroup) {
         result.nextWeek.push(formatted);
       }
       slotsAdded++;
     } else {
-      if (result.later.length < MAX_SLOTS_PER_GROUP) {
+      if (result.later.length < maxSlotsPerGroup) {
         result.later.push(formatted);
       }
       slotsAdded++;

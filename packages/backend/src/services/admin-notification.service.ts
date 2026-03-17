@@ -16,6 +16,7 @@ import { logger } from '../utils/logger';
 import {
   calculateConversationHealth,
   calculateHealthStats,
+  getHealthThresholds,
   type ConversationHealth,
   type HealthSummaryStats,
   type AppointmentForHealth,
@@ -301,7 +302,8 @@ class AdminNotificationService {
       orderBy: { lastActivityAt: 'desc' },
     });
 
-    // Calculate health for each conversation
+    // Calculate health for each conversation (using admin-configured thresholds)
+    const thresholds = await getHealthThresholds();
     const conversationsWithHealth = appointments.map((apt) => {
       const healthInput: AppointmentForHealth = {
         id: apt.id,
@@ -324,7 +326,7 @@ class AdminNotificationService {
         userName: apt.userName,
         therapistName: apt.therapistName,
         status: apt.status,
-        health: calculateConversationHealth(healthInput),
+        health: calculateConversationHealth(healthInput, thresholds),
       };
     });
 
@@ -390,7 +392,8 @@ class AdminNotificationService {
       isStale: apt.isStale,
     };
 
-    return calculateConversationHealth(healthInput);
+    const aptThresholds = await getHealthThresholds();
+    return calculateConversationHealth(healthInput, aptThresholds);
   }
 
   /**

@@ -16,7 +16,8 @@
  */
 
 import { logger } from '../utils/logger';
-import { parseConfirmedDateTime, isTooSoonToBook, MIN_BOOKING_LEAD_HOURS } from '../utils/date-parser';
+import { parseConfirmedDateTime, isTooSoonToBook } from '../utils/date-parser';
+import { getSettingValue } from './settings.service';
 
 export class AvailabilityResolverService {
   /**
@@ -28,7 +29,7 @@ export class AvailabilityResolverService {
    *
    * @returns Error message if validation fails, null if valid
    */
-  validateMarkComplete(confirmedDateTime: string): string | null {
+  async validateMarkComplete(confirmedDateTime: string): Promise<string | null> {
     if (!confirmedDateTime || confirmedDateTime.trim().length === 0) {
       return 'confirmed_datetime is required';
     }
@@ -60,14 +61,15 @@ export class AvailabilityResolverService {
       );
     }
 
-    // FIX: Reject appointments that are in the past or too soon (< 4 hours from now)
+    // FIX: Reject appointments that are in the past or too soon
+    const leadHours = await getSettingValue<number>('general.minBookingLeadHours');
     const parsedDate = parseConfirmedDateTime(confirmedDateTime);
-    if (parsedDate && isTooSoonToBook(parsedDate)) {
+    if (parsedDate && isTooSoonToBook(parsedDate, leadHours)) {
       logger.warn(
         { confirmedDateTime, parsed: parsedDate.toISOString() },
-        'Rejected confirmed_datetime: appointment is in the past or less than 4 hours from now'
+        `Rejected confirmed_datetime: appointment is in the past or less than ${leadHours} hours from now`
       );
-      return `confirmed_datetime "${confirmedDateTime}" is in the past or less than ${MIN_BOOKING_LEAD_HOURS} hours from now. Please suggest a time that is at least ${MIN_BOOKING_LEAD_HOURS} hours in the future.`;
+      return `confirmed_datetime "${confirmedDateTime}" is in the past or less than ${leadHours} hours from now. Please suggest a time that is at least ${leadHours} hours in the future.`;
     }
 
     return null; // Valid

@@ -20,7 +20,7 @@ import { logger } from '../utils/logger';
 import { TIMEOUTS } from '../constants';
 import { knowledgeService } from './knowledge.service';
 import { getSettingValues } from './settings.service';
-import { formatAvailabilityForUser } from '../utils/availability-formatter';
+import { formatAvailabilityForUser, type SlotConfig } from '../utils/availability-formatter';
 import { checkForInjection } from '../utils/content-sanitizer';
 import {
   type ConversationCheckpoint,
@@ -95,6 +95,11 @@ export async function buildSystemPrompt(
     'email.slotConfirmationToTherapistBody',
     'agent.languageStyle',
     'agent.toneStyle',
+    'agent.fromName',
+    'agent.sessionDurationMinutes',
+    'agent.maxSlotsPerGroup',
+    'agent.maxTotalSlots',
+    'general.timezone',
   ]);
   const initialClientSubject = settingsMap.get('email.initialClientWithAvailabilitySubject')!;
   const initialClientBody = settingsMap.get('email.initialClientWithAvailabilityBody')!;
@@ -107,6 +112,11 @@ export async function buildSystemPrompt(
   const languageStyle = settingsMap.get('agent.languageStyle')!;
   const toneStyle = settingsMap.get('agent.toneStyle')!;
   const toneGuidance = getToneGuidance(toneStyle as string);
+  const agentName = settingsMap.get('agent.fromName')! as string;
+  const sessionDuration = settingsMap.get('agent.sessionDurationMinutes')! as unknown as number;
+  const maxSlotsPerGroup = settingsMap.get('agent.maxSlotsPerGroup')! as unknown as number;
+  const maxTotalSlots = settingsMap.get('agent.maxTotalSlots')! as unknown as number;
+  const timezone = settingsMap.get('general.timezone')! as string;
 
   const hasAvailability = context.therapistAvailability &&
     (context.therapistAvailability as any).slots &&
@@ -116,7 +126,11 @@ export async function buildSystemPrompt(
   const referenceDate = new Date();
 
   const formattedAvailability = hasAvailability
-    ? formatAvailabilityForUser(context.therapistAvailability, 'Europe/London', referenceDate)
+    ? formatAvailabilityForUser(context.therapistAvailability, timezone, referenceDate, {
+        maxSlotsPerGroup,
+        maxTotalSlots,
+        sessionDurationMinutes: sessionDuration,
+      })
     : null;
 
   const availabilityText = formattedAvailability
@@ -147,12 +161,12 @@ ${getValidActionsForStage(currentStage)}
 `;
   const factsSection = facts ? formatFactsForPrompt(facts) : '';
 
-  return `# Justin Time - Scheduling Coordinator
+  return `# ${agentName} - Scheduling Coordinator
 
-You are Justin Time, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
+You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
 ${factsSection}${stageGuidance}${knowledgeSection}
 ## Your Identity
-- **Name:** Justin Time
+- **Name:** ${agentName}
 - **Role:** Scheduling Coordinator
 - **Email:** scheduling@spill.chat
 - **Language:** Use ${languageStyle} English spelling and grammar (e.g., ${languageStyle === 'UK' ? '"organise", "colour", "centre", "favour"' : '"organize", "color", "center", "favor"'})
@@ -190,9 +204,9 @@ ${workflowInstructions}
 - **SIGNATURE FORMATTING**: Always format your sign-off with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
 
 Best wishes
-Justin
+${agentName}
 
-Never write "Best wishes, Justin" or "Best wishes Justin" on a single line. The closing phrase and your name must each be on their own line.
+Never write "Best wishes, ${agentName}" or "Best wishes ${agentName}" on a single line. The closing phrase and your name must each be on their own line.
 
 ## Appointment Rescheduling
 
@@ -252,6 +266,9 @@ Use flag_for_human_review when:
 - The situation feels unusual and you're not confident in the next step
 
 **It's always better to flag for review than to stall or send an inappropriate response.**
+
+## Session Configuration
+- **Standard session duration:** ${sessionDuration} minutes
 
 Begin now based on whether availability exists or not.`;
 }

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
 import { THERAPIST_BOOKING } from '../constants';
+import { getSettingValue } from './settings.service';
 import { notionService } from './notion.service';
 
 // Type for transaction client
@@ -63,6 +64,7 @@ class TherapistBookingStatusService {
     tx?: TransactionClient
   ): Promise<TherapistAvailabilityStatus> {
     const client: PrismaClient | TransactionClient = tx || prisma;
+    const maxRequests = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
 
     try {
       const status = await client.therapistBookingStatus.findUnique({
@@ -94,8 +96,8 @@ class TherapistBookingStatusService {
         return { canAcceptNewRequests: true, reason: 'available' };
       }
 
-      // Already at max unique requests (2) - fully frozen
-      if (status.uniqueRequestCount >= THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS) {
+      // Already at max unique requests - fully frozen
+      if (status.uniqueRequestCount >= maxRequests) {
         return {
           canAcceptNewRequests: false,
           reason: 'frozen',
@@ -475,14 +477,16 @@ class TherapistBookingStatusService {
     let flaggedCount = 0;
     let unfrozenCount = 0;
 
+    const maxReqs = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
+
     try {
-      // 1. Flag therapists with 2+ threads where ALL are inactive
+      // 1. Flag therapists with max+ threads where ALL are inactive
       // These need admin attention (might want to cancel stale conversations)
       const flaggedResult = await prisma.$executeRaw`
         UPDATE therapist_booking_status tbs
         SET admin_alert_at = ${now}, updated_at = ${now}
         WHERE tbs.has_confirmed_booking = false
-          AND tbs.unique_request_count >= ${THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS}
+          AND tbs.unique_request_count >= ${maxReqs}
           AND tbs.admin_alert_at IS NULL
           AND EXISTS (
             SELECT 1 FROM appointment_requests ar
@@ -722,6 +726,7 @@ class TherapistBookingStatusService {
   async recalculateUniqueRequestCount(therapistNotionId: string): Promise<void> {
     const MAX_ATTEMPTS = 2;
     let lastError: unknown = null;
+    const maxReqsThreshold = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
@@ -766,7 +771,7 @@ class TherapistBookingStatusService {
               data: {
                 uniqueRequestCount: uniqueCount,
                 // Reset admin alert if count drops below threshold
-                ...(uniqueCount < THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS && {
+                ...(uniqueCount < maxReqsThreshold && {
                   adminAlertAt: null,
                   adminAlertAcknowledged: false,
                 }),

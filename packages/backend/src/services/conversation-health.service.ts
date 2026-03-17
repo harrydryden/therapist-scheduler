@@ -15,6 +15,7 @@
  */
 
 import { STALE_THRESHOLDS, STALL_DETECTION, APPOINTMENT_STATUS } from '../constants';
+import { getSettingValues } from './settings.service';
 import type { HealthStatus } from '@therapist-scheduler/shared';
 
 // Re-export for consumers
@@ -42,25 +43,32 @@ export interface HealthFactor {
 }
 
 /**
- * Health thresholds configuration
- * Yellow thresholds are typically 75% of the red threshold
+ * Health thresholds resolved at runtime from admin settings.
  */
-export const HEALTH_THRESHOLDS = {
-  // Inactivity thresholds (hours)
+export interface HealthThresholds {
+  INACTIVITY: { RED_HOURS: number; YELLOW_HOURS: number };
+  STALL: { RED_HOURS: number; YELLOW_HOURS: number };
+  WEIGHTS: {
+    INACTIVITY: number;
+    STALL: number;
+    THREAD_DIVERGENCE: number;
+    TOOL_FAILURE: number;
+    HUMAN_CONTROL: number;
+  };
+}
+
+/**
+ * Default health thresholds (used as fallback when settings unavailable)
+ */
+const DEFAULT_HEALTH_THRESHOLDS: HealthThresholds = {
   INACTIVITY: {
-    // Red: at stale threshold (48h)
     RED_HOURS: STALE_THRESHOLDS.MARK_STALE_HOURS,
-    // Yellow: 75% of stale threshold (36h)
     YELLOW_HOURS: Math.floor(STALE_THRESHOLDS.MARK_STALE_HOURS * 0.75),
   },
-  // Stall thresholds (hours since last tool execution)
   STALL: {
-    // Red: at stall threshold (24h)
     RED_HOURS: STALL_DETECTION.STALL_THRESHOLD_HOURS,
-    // Yellow: 75% of stall threshold (18h)
     YELLOW_HOURS: Math.floor(STALL_DETECTION.STALL_THRESHOLD_HOURS * 0.75),
   },
-  // Weights for scoring (sum to 100)
   WEIGHTS: {
     INACTIVITY: 30,
     STALL: 25,
@@ -68,7 +76,41 @@ export const HEALTH_THRESHOLDS = {
     TOOL_FAILURE: 15,
     HUMAN_CONTROL: 10,
   },
-} as const;
+};
+
+/**
+ * Kept for backward compatibility — use getHealthThresholds() for runtime values.
+ */
+export const HEALTH_THRESHOLDS = DEFAULT_HEALTH_THRESHOLDS;
+
+/**
+ * Fetch health thresholds from admin settings at runtime.
+ * Resolves stale and stall hours from SystemSettings so admin changes take effect.
+ */
+export async function getHealthThresholds(): Promise<HealthThresholds> {
+  try {
+    const settings = await getSettingValues<number>([
+      'general.staleThresholdHours',
+      'notifications.stallDetectionHours',
+    ]);
+    const staleHours = settings.get('general.staleThresholdHours')!;
+    const stallHours = settings.get('notifications.stallDetectionHours')!;
+
+    return {
+      INACTIVITY: {
+        RED_HOURS: staleHours,
+        YELLOW_HOURS: Math.floor(staleHours * 0.75),
+      },
+      STALL: {
+        RED_HOURS: stallHours,
+        YELLOW_HOURS: Math.floor(stallHours * 0.75),
+      },
+      WEIGHTS: DEFAULT_HEALTH_THRESHOLDS.WEIGHTS,
+    };
+  } catch {
+    return DEFAULT_HEALTH_THRESHOLDS;
+  }
+}
 
 /**
  * Appointment data needed for health calculation
@@ -102,10 +144,13 @@ const STATUSES_NOT_REQUIRING_MONITORING: string[] = [
 ];
 
 /**
- * Calculate health status for a single conversation
+ * Calculate health status for a single conversation.
+ * Accepts optional thresholds; when omitted, uses compile-time defaults.
+ * For runtime accuracy, callers should fetch thresholds via getHealthThresholds().
  */
 export function calculateConversationHealth(
-  appointment: AppointmentForHealth
+  appointment: AppointmentForHealth,
+  thresholds: HealthThresholds = DEFAULT_HEALTH_THRESHOLDS
 ): ConversationHealth {
   const factors: HealthFactor[] = [];
   const now = new Date();
@@ -122,14 +167,15 @@ export function calculateConversationHealth(
   }
 
   // 1. Inactivity factor
-  const inactivityFactor = calculateInactivityFactor(appointment.lastActivityAt, now);
+  const inactivityFactor = calculateInactivityFactor(appointment.lastActivityAt, now, thresholds);
   factors.push(inactivityFactor);
 
   // 2. Stall factor (tool execution)
   const stallFactor = calculateStallFactor(
     appointment.lastActivityAt,
     appointment.lastToolExecutedAt,
-    now
+    now,
+    thresholds
   );
   factors.push(stallFactor);
 
@@ -153,7 +199,7 @@ export function calculateConversationHealth(
 
   // Calculate overall status and score
   const overallStatus = determineOverallStatus(factors);
-  const score = calculateHealthScore(factors);
+  const score = calculateHealthScore(factors, thresholds);
   const summary = generateHealthSummary(factors, overallStatus);
 
   return {
@@ -167,13 +213,13 @@ export function calculateConversationHealth(
 /**
  * Calculate inactivity health factor
  */
-function calculateInactivityFactor(lastActivityAt: Date, now: Date): HealthFactor {
+function calculateInactivityFactor(lastActivityAt: Date, now: Date, thresholds: HealthThresholds): HealthFactor {
   const hoursSinceActivity = (now.getTime() - lastActivityAt.getTime()) / (1000 * 60 * 60);
 
   let status: HealthStatus;
-  if (hoursSinceActivity >= HEALTH_THRESHOLDS.INACTIVITY.RED_HOURS) {
+  if (hoursSinceActivity >= thresholds.INACTIVITY.RED_HOURS) {
     status = 'red';
-  } else if (hoursSinceActivity >= HEALTH_THRESHOLDS.INACTIVITY.YELLOW_HOURS) {
+  } else if (hoursSinceActivity >= thresholds.INACTIVITY.YELLOW_HOURS) {
     status = 'yellow';
   } else {
     status = 'green';
@@ -183,7 +229,7 @@ function calculateInactivityFactor(lastActivityAt: Date, now: Date): HealthFacto
     name: 'Inactivity',
     status,
     value: `${Math.round(hoursSinceActivity)}h since last activity`,
-    threshold: `${HEALTH_THRESHOLDS.INACTIVITY.RED_HOURS}h`,
+    threshold: `${thresholds.INACTIVITY.RED_HOURS}h`,
     description:
       status === 'red'
         ? 'Conversation is stale - no activity for extended period'
@@ -199,12 +245,13 @@ function calculateInactivityFactor(lastActivityAt: Date, now: Date): HealthFacto
 function calculateStallFactor(
   lastActivityAt: Date,
   lastToolExecutedAt: Date | null,
-  now: Date
+  now: Date,
+  thresholds: HealthThresholds
 ): HealthFactor {
   const hoursSinceActivity = (now.getTime() - lastActivityAt.getTime()) / (1000 * 60 * 60);
 
   // If no recent activity, stall check doesn't apply
-  if (hoursSinceActivity >= HEALTH_THRESHOLDS.INACTIVITY.YELLOW_HOURS) {
+  if (hoursSinceActivity >= thresholds.INACTIVITY.YELLOW_HOURS) {
     return {
       name: 'Progress',
       status: 'green',
@@ -223,9 +270,9 @@ function calculateStallFactor(
   }
 
   let status: HealthStatus;
-  if (hoursSinceTool >= HEALTH_THRESHOLDS.STALL.RED_HOURS) {
+  if (hoursSinceTool >= thresholds.STALL.RED_HOURS) {
     status = 'red';
-  } else if (hoursSinceTool >= HEALTH_THRESHOLDS.STALL.YELLOW_HOURS) {
+  } else if (hoursSinceTool >= thresholds.STALL.YELLOW_HOURS) {
     status = 'yellow';
   } else {
     status = 'green';
@@ -237,7 +284,7 @@ function calculateStallFactor(
     value: lastToolExecutedAt
       ? `${Math.round(hoursSinceTool)}h since last tool execution`
       : 'No tool executions yet',
-    threshold: `${HEALTH_THRESHOLDS.STALL.RED_HOURS}h`,
+    threshold: `${thresholds.STALL.RED_HOURS}h`,
     description:
       status === 'red'
         ? 'Conversation stalled - activity without progress'
@@ -344,8 +391,8 @@ function determineOverallStatus(factors: HealthFactor[]): HealthStatus {
 /**
  * Calculate numerical health score (0-100)
  */
-function calculateHealthScore(factors: HealthFactor[]): number {
-  const weights = HEALTH_THRESHOLDS.WEIGHTS;
+function calculateHealthScore(factors: HealthFactor[], thresholds: HealthThresholds = DEFAULT_HEALTH_THRESHOLDS): number {
+  const weights = thresholds.WEIGHTS;
   const factorWeightMap: Record<string, number> = {
     Inactivity: weights.INACTIVITY,
     Progress: weights.STALL,
@@ -396,12 +443,13 @@ function generateHealthSummary(factors: HealthFactor[], status: HealthStatus): s
  * Batch calculate health for multiple appointments
  */
 export function calculateBatchHealth(
-  appointments: AppointmentForHealth[]
+  appointments: AppointmentForHealth[],
+  thresholds: HealthThresholds = DEFAULT_HEALTH_THRESHOLDS
 ): Map<string, ConversationHealth> {
   const healthMap = new Map<string, ConversationHealth>();
 
   for (const apt of appointments) {
-    healthMap.set(apt.id, calculateConversationHealth(apt));
+    healthMap.set(apt.id, calculateConversationHealth(apt, thresholds));
   }
 
   return healthMap;
@@ -497,8 +545,8 @@ export function toAppointmentForHealth(apt: {
 export function computeAppointmentHealthMeta(apt: AppointmentForHealth & {
   threadDivergedAt: Date | null;
   threadDivergenceAcknowledged: boolean;
-}) {
-  const health = calculateConversationHealth(apt);
+}, thresholds: HealthThresholds = DEFAULT_HEALTH_THRESHOLDS) {
+  const health = calculateConversationHealth(apt, thresholds);
   return {
     healthStatus: health.status as HealthStatus,
     healthScore: health.score,
