@@ -41,32 +41,26 @@ export const RATE_LIMITS = {
   },
 } as const;
 
-// Inactivity thresholds (simplified - single threshold for admin alert + auto-unfreeze)
+// Inactivity thresholds — DEFAULTS ONLY, runtime values come from admin settings:
+// notifications.inactivityAlertHours
 export const INACTIVITY_THRESHOLDS = {
-  // Alert admin and auto-unfreeze therapist after this many hours of inactivity
-  // Default 72 hours - configurable via notifications.inactivityAlertHours
   ALERT_HOURS: 72,
 } as const;
 
-// FIX #45: Cleaned up stale alias. MARK_STALE_HOURS is actively used by conversation-health.
+// Stale thresholds — DEFAULTS ONLY, runtime value: general.staleThresholdHours
 export const STALE_THRESHOLDS = {
   MARK_STALE_HOURS: 48,
   ADMIN_ALERT_HOURS: INACTIVITY_THRESHOLDS.ALERT_HOURS,
 } as const;
 
-// Conversation stall detection thresholds
-// A "stall" is different from inactivity - stall means activity is happening
-// but no forward progress (tool executions) is being made
+// Stall detection — DEFAULTS ONLY, runtime value: notifications.stallDetectionHours
 export const STALL_DETECTION = {
-  // Flag as stalled if no tool executed in 24h despite activity
   STALL_THRESHOLD_HOURS: 24,
 } as const;
 
-// Therapist booking freeze settings
+// Therapist booking freeze — DEFAULTS ONLY, runtime value: general.maxBookingRequestsPerTherapist
 export const THERAPIST_BOOKING = {
-  // Use single inactivity threshold for unfreezing
   INACTIVITY_ALERT_HOURS: INACTIVITY_THRESHOLDS.ALERT_HOURS,
-  // Max unique requests allowed (after which therapist is fully frozen)
   MAX_UNIQUE_REQUESTS: 2,
 } as const;
 
@@ -120,25 +114,21 @@ export {
   POST_SESSION_STATUSES,
 } from '@therapist-scheduler/shared';
 
-// Post-booking follow-up settings
+// Post-booking follow-up — DEFAULTS ONLY, runtime values come from postBooking.* settings
 export const POST_BOOKING = {
   MEETING_LINK_CHECK_DELAY_HOURS: 24,
   MEETING_LINK_CHECK_MIN_BEFORE_HOURS: 4,
   FEEDBACK_FORM_DELAY_HOURS: 1,
-  FEEDBACK_REMINDER_DELAY_HOURS: 48, // Hours after feedback form to send reminder
-  CHECK_INTERVAL_MS: 15 * 60 * 1000, // 15 minutes
-  SESSION_REMINDER_HOURS_BEFORE: 4, // Hours before session to send reminder (Edge Case #6)
+  FEEDBACK_REMINDER_DELAY_HOURS: 48,
+  CHECK_INTERVAL_MS: 15 * 60 * 1000, // Infrastructure interval, not admin-configurable
+  SESSION_REMINDER_HOURS_BEFORE: 4,
 } as const;
 
-// Chase follow-up and closure recommendation settings
+// Chase follow-up — DEFAULTS ONLY, runtime values come from chase.* settings
 export const CHASE_FOLLOWUP = {
-  // Send a chase email after this many hours of inactivity on a stale thread
   CHASE_AFTER_STALE_HOURS: 72,
-  // Recommend closure to admin if no response after this many hours post-chase
   CLOSURE_RECOMMENDATION_HOURS: 48,
-  // Maximum conversations to chase per cycle (to avoid email rate limiting)
   MAX_CHASE_BATCH_SIZE: 10,
-  // Maximum conversations to recommend closure per cycle
   MAX_CLOSURE_BATCH_SIZE: 20,
 } as const;
 

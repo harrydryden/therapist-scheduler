@@ -2,7 +2,6 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
-import { CHASE_FOLLOWUP } from '../constants';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
@@ -65,7 +64,7 @@ class ChaseEmailService {
           lastActivityAt: true,
           conversationState: true,
         },
-        take: CHASE_FOLLOWUP.MAX_CHASE_BATCH_SIZE,
+        take: await getSettingValue<number>('chase.maxChaseBatchSize'),
       });
 
       if (candidates.length === 0) {
@@ -332,7 +331,7 @@ class ChaseEmailService {
           lastActivityAt: true,
           status: true,
         },
-        take: CHASE_FOLLOWUP.MAX_CLOSURE_BATCH_SIZE,
+        take: await getSettingValue<number>('chase.maxClosureBatchSize'),
       });
 
       if (candidates.length === 0) {
@@ -433,7 +432,7 @@ class ChaseEmailService {
           userName: true,
           therapistName: true,
         },
-        take: CHASE_FOLLOWUP.MAX_CLOSURE_BATCH_SIZE,
+        take: await getSettingValue<number>('chase.maxClosureBatchSize'),
       });
 
       if (candidates.length === 0) {

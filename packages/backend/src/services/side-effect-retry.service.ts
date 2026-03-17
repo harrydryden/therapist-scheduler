@@ -19,6 +19,7 @@ import { prisma } from '../utils/database';
 import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
 import { notionSyncManager } from './notion-sync-manager.service';
+import { getSettingValue } from './settings.service';
 
 // Lock settings
 const LOCK_KEY = 'side-effect-retry:processing-lock';
@@ -226,12 +227,14 @@ class SideEffectRetryService {
       throw new Error(`Appointment ${effect.appointmentId} not found - cannot retry side effect`);
     }
 
+    const agentName = await getSettingValue<string>('agent.fromName');
+
     switch (effect.effectType) {
       case 'email_client_confirmation':
         await emailQueueService.enqueue({
           to: appointment.userEmail,
           subject: `Your therapy session with ${appointment.therapistName} is confirmed`,
-          body: `Hi ${(appointment.userName || 'there').split(' ')[0]},\n\nYour session with ${appointment.therapistName} has been confirmed for ${appointment.confirmedDateTime}.\n\nBest regards,\nJustin Time`,
+          body: `Hi ${(appointment.userName || 'there').split(' ')[0]},\n\nYour session with ${appointment.therapistName} has been confirmed for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentName}`,
           appointmentId: appointment.id,
         });
         break;
@@ -241,7 +244,7 @@ class SideEffectRetryService {
           await emailQueueService.enqueue({
             to: appointment.therapistEmail,
             subject: `Session confirmed: ${appointment.confirmedDateTime}`,
-            body: `Hi ${(appointment.therapistName || 'there').split(' ')[0]},\n\nA session has been confirmed with ${(appointment.userName || 'the client').split(' ')[0]} (${appointment.userEmail}) for ${appointment.confirmedDateTime}.\n\nBest regards,\nJustin Time`,
+            body: `Hi ${(appointment.therapistName || 'there').split(' ')[0]},\n\nA session has been confirmed with ${(appointment.userName || 'the client').split(' ')[0]} (${appointment.userEmail}) for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentName}`,
             appointmentId: appointment.id,
           });
         }

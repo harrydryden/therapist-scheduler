@@ -338,18 +338,22 @@ export function isInPast(date: Date): boolean {
   return date < new Date();
 }
 
-/** Minimum hours in the future an appointment must be to allow booking */
+/**
+ * Default minimum hours in the future an appointment must be to allow booking.
+ * Can be overridden at runtime via the general.minBookingLeadHours admin setting.
+ */
 export const MIN_BOOKING_LEAD_HOURS = 4;
 
 /**
  * Check if a datetime is too soon (or in the past) to book.
- * Appointments must be at least MIN_BOOKING_LEAD_HOURS in the future.
+ * Appointments must be at least `leadHours` in the future.
  *
  * @param date - The proposed appointment date
- * @returns True if the date is less than MIN_BOOKING_LEAD_HOURS from now (i.e. too soon / past)
+ * @param leadHours - Minimum lead time in hours (defaults to MIN_BOOKING_LEAD_HOURS)
+ * @returns True if the date is less than leadHours from now (i.e. too soon / past)
  */
-export function isTooSoonToBook(date: Date): boolean {
-  const minBookingTime = new Date(Date.now() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
+export function isTooSoonToBook(date: Date, leadHours: number = MIN_BOOKING_LEAD_HOURS): boolean {
+  const minBookingTime = new Date(Date.now() + leadHours * 60 * 60 * 1000);
   return date < minBookingTime;
 }
 

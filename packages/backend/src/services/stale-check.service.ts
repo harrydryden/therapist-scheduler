@@ -5,13 +5,10 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
-import { STALE_THRESHOLDS, DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK } from '../constants';
+import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK } from '../constants';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
 import { auditEventService } from './audit-event.service';
-
-// Convert hours to milliseconds (used for isStale flag - visual indicator only)
-const STALE_THRESHOLD_MS = STALE_THRESHOLDS.MARK_STALE_HOURS * 60 * 60 * 1000;
 
 // Check interval: every hour
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -412,7 +409,8 @@ class StaleCheckService {
     logger.info({ checkId }, 'Running stale check');
 
     try {
-      const staleThreshold = new Date(Date.now() - STALE_THRESHOLD_MS);
+      const staleHours = await getSettingValue<number>('general.staleThresholdHours');
+      const staleThreshold = new Date(Date.now() - staleHours * 60 * 60 * 1000);
 
       // Find conversations that should be marked stale:
       // - lastActivityAt > 48 hours ago

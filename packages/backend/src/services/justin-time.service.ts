@@ -8,9 +8,10 @@ import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
-import { parseConfirmedDateTime, areDatetimesEqual, isTooSoonToBook, MIN_BOOKING_LEAD_HOURS } from '../utils/date-parser';
+import { parseConfirmedDateTime, areDatetimesEqual, isTooSoonToBook } from '../utils/date-parser';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
+import { getSettingValue } from './settings.service';
 import { emailQueueService } from './email-queue.service';
 import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
 import {
@@ -884,7 +885,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
 
           // FIX RSA-2: Validate that confirmed_datetime contains a parseable date/time
           // Either party (user or therapist) can confirm, but a datetime must be provided
-          const validationError = this.validateMarkComplete(completeData.confirmed_datetime);
+          const validationError = await this.validateMarkComplete(completeData.confirmed_datetime);
           if (validationError) {
             logger.warn(
               { traceId: this.traceId, confirmedDateTime: completeData.confirmed_datetime, error: validationError },
@@ -1380,7 +1381,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
    *
    * @returns Error message if validation fails, null if valid
    */
-  private validateMarkComplete(confirmedDateTime: string): string | null {
+  private async validateMarkComplete(confirmedDateTime: string): Promise<string | null> {
     if (!confirmedDateTime || confirmedDateTime.trim().length === 0) {
       return 'confirmed_datetime is required';
     }
@@ -1412,14 +1413,15 @@ ${formatClassificationForPrompt(emailClassification)}`;
       );
     }
 
-    // FIX: Reject appointments that are in the past or too soon (< 4 hours from now)
+    // FIX: Reject appointments that are in the past or too soon
+    const leadHours = await getSettingValue<number>('general.minBookingLeadHours');
     const parsedDate = parseConfirmedDateTime(confirmedDateTime);
-    if (parsedDate && isTooSoonToBook(parsedDate)) {
+    if (parsedDate && isTooSoonToBook(parsedDate, leadHours)) {
       logger.warn(
         { confirmedDateTime, parsed: parsedDate.toISOString() },
-        'Rejected confirmed_datetime: appointment is in the past or less than 4 hours from now'
+        `Rejected confirmed_datetime: appointment is in the past or less than ${leadHours} hours from now`
       );
-      return `confirmed_datetime "${confirmedDateTime}" is in the past or less than ${MIN_BOOKING_LEAD_HOURS} hours from now. Please suggest a time that is at least ${MIN_BOOKING_LEAD_HOURS} hours in the future.`;
+      return `confirmed_datetime "${confirmedDateTime}" is in the past or less than ${leadHours} hours from now. Please suggest a time that is at least ${leadHours} hours in the future.`;
     }
 
     return null; // Valid

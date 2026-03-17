@@ -305,7 +305,7 @@ export class AIConversationService {
       const bookingUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
 
       // Build lightweight inquiry system prompt
-      const systemPrompt = this.buildInquirySystemPrompt(
+      const systemPrompt = await this.buildInquirySystemPrompt(
         inquiry.userName || 'User',
         bookingUrl
       );
@@ -532,10 +532,13 @@ Please answer their question helpfully and direct them to the booking URL to sch
   /**
    * Build a lightweight system prompt for inquiry handling (not booking)
    */
-  private buildInquirySystemPrompt(userName: string, bookingUrl: string): string {
-    return `# Justin Time - Inquiry Handler
+  private async buildInquirySystemPrompt(userName: string, bookingUrl: string): Promise<string> {
+    const agentName = await getSettingValue<string>('agent.fromName');
+    const sessionDuration = await getSettingValue<number>('agent.sessionDurationMinutes');
 
-You are Justin Time, a friendly assistant responding to someone who replied to Spill's weekly promotional email.
+    return `# ${agentName} - Inquiry Handler
+
+You are ${agentName}, a friendly assistant responding to someone who replied to Spill's weekly promotional email.
 
 ## Your Role
 This is an INQUIRY channel only - you answer questions and direct users to the booking website. You do NOT handle bookings here.
@@ -559,7 +562,7 @@ Example responses for booking requests:
 
 ## Key Information About Spill
 - Spill provides professional therapy sessions
-- Sessions are typically 50 minutes
+- Sessions are typically ${sessionDuration} minutes
 - Users can book at their convenience through the web app
 - All sessions are confidential
 
@@ -571,7 +574,7 @@ Example responses for booking requests:
 - Be warm and encouraging without being pushy
 - For questions about therapy approaches, specific therapists, or pricing, suggest they explore the booking page or book a session
 - **Always** include the booking URL in your response
-- Sign off as "Justin" or "The Spill Team"
+- Sign off as "${agentName.split(' ')[0]}" or "The Spill Team"
 
 ## What You Can Help With
 - General questions about Spill's therapy services

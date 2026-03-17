@@ -29,7 +29,7 @@ import { JustinTimeService } from '../services/justin-time.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
-import { toAppointmentForHealth, computeAppointmentHealthMeta } from '../services/conversation-health.service';
+import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
 import { STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import { parseFormQuestions } from '@therapist-scheduler/shared/utils/form-utils';
@@ -135,13 +135,13 @@ function mapAppointmentToATS(apt: {
   threadDivergenceAcknowledged: boolean;
   conversationStallAlertAt: Date | null;
   conversationStallAcknowledged: boolean;
-}): ATSAppointmentRecord {
+}, healthThresholds?: import('../services/conversation-health.service').HealthThresholds): ATSAppointmentRecord {
   const healthApt = toAppointmentForHealth(apt);
   const healthMeta = computeAppointmentHealthMeta({
     ...healthApt,
     threadDivergedAt: apt.threadDivergedAt,
     threadDivergenceAcknowledged: apt.threadDivergenceAcknowledged,
-  });
+  }, healthThresholds);
 
   return {
     id: apt.id,
@@ -332,7 +332,8 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           prisma.appointmentRequest.count({ where }),
         ]);
 
-        const mapped = appointments.map(mapAppointmentToATS);
+        const ht = await getHealthThresholds();
+        const mapped = appointments.map(a => mapAppointmentToATS(a, ht));
 
         return sendSuccess(reply, {
           appointments: mapped,
@@ -378,7 +379,8 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           return Errors.notFound(reply, 'Appointment');
         }
 
-        return sendSuccess(reply, mapAppointmentToATS(appointment));
+        const singleHt = await getHealthThresholds();
+        return sendSuccess(reply, mapAppointmentToATS(appointment, singleHt));
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'ATS: Failed to get appointment');
         return Errors.internal(reply, 'Failed to get appointment');
@@ -1037,7 +1039,8 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           take: limit,
         });
 
-        const mapped = appointments.map(mapAppointmentToATS);
+        const cursorHt = await getHealthThresholds();
+        const mapped = appointments.map(a => mapAppointmentToATS(a, cursorHt));
         const lastRecord = appointments.length > 0 ? appointments[appointments.length - 1] : null;
         const nextCursor = lastRecord
           ? `${lastRecord.updatedAt.toISOString()}|${lastRecord.id}`
