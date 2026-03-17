@@ -62,6 +62,9 @@ export interface EmailClassification {
     mentionsConstraints: boolean;
     mentionsRescheduling: boolean;
     mentionsCancellation: boolean;
+    isAutoReply: boolean;          // Actual auto-reply/OOO response — sender is unreachable
+    mentionsFutureAbsence: boolean; // Sender mentions upcoming absence — scheduling context only
+    /** @deprecated Use isAutoReply instead */
     isOutOfOffice: boolean;
   };
 }
@@ -221,24 +224,35 @@ const CONFIRMATION_PATTERNS = {
   ],
 };
 
-// Out of office detection
-// These patterns must indicate an actual auto-reply, not a casual mention of
-// being away. "I was on holiday last week" should NOT trigger OOO.
-// Require present/future tense markers or auto-reply headers.
-const OUT_OF_OFFICE_PATTERNS = [
-  // "I am out of office" / "I'm out of the office" (present tense)
-  /(?:i(?:'m| am)\s+(?:currently\s+)?out of (?:the )?office)/i,
-  // "I will be out of office" / "I'll be on leave" (future tense)
-  /(?:i(?:'ll| will)\s+be\s+(?:out of (?:the )?office|on (?:leave|vacation|holiday)|away))/i,
-  // Auto-reply headers (strongest signal)
+// Auto-reply detection — the sender's mailbox auto-responded.
+// They are currently unreachable and won't see our emails until they return.
+// This is the signal that needs special handling / alerting.
+const AUTO_REPLY_PATTERNS = [
+  // Auto-reply headers (strongest signal — almost always present in real OOO)
   /(?:automatic reply|auto-?reply|auto-?response)/i,
-  // "Currently on leave/vacation/holiday" (requires "currently" or "am on")
+  // "I am currently out of office" — present tense indicates they're away NOW
+  /(?:i(?:'m| am)\s+(?:currently\s+)?out of (?:the )?office)/i,
+  // "Currently on leave/vacation/holiday"
   /(?:(?:i(?:'m| am)\s+)?currently\s+on\s+(?:leave|vacation|holiday))/i,
   /(?:i(?:'m| am)\s+on\s+(?:leave|vacation|holiday))/i,
-  // "Limited access to email" (common in OOO)
+  // "Limited access to email" (common in OOO auto-replies)
   /(?:limited access to email)/i,
-  // "OOO" as standalone abbreviation
+  // "OOO" as standalone abbreviation (typically only used in auto-replies)
   /\booo\b/i,
+];
+
+// Future absence mention — the sender is still engaged and replying,
+// but mentions they will be away at some point. This is scheduling context
+// for the agent, NOT a reason to alert. They are still reachable right now.
+const FUTURE_ABSENCE_PATTERNS = [
+  // "I will be out of office / on leave / on holiday / away"
+  /(?:i(?:'ll| will)\s+be\s+(?:out of (?:the )?office|on (?:leave|vacation|holiday)|away))/i,
+  // "I'm going on holiday/vacation/leave"
+  /(?:i(?:'m| am)\s+going\s+on\s+(?:leave|vacation|holiday))/i,
+  // "I'm away next week / from [date]"
+  /(?:i(?:'m| am|'ll| will)\s+(?:be\s+)?away\s+(?:next|from|starting|after|until))/i,
+  // "I won't be available / I'm not available [future]"
+  /(?:i\s+(?:won't|will not|won't)\s+be\s+available\s+(?:next|from|starting|after|until|on))/i,
 ];
 
 /**
@@ -420,11 +434,17 @@ function detectSentiment(text: string): EmailSentiment {
 }
 
 /**
- * Check if email is an out-of-office auto-reply
+ * Check if email is an actual auto-reply (sender is unreachable)
  */
-function isOutOfOffice(text: string): boolean {
-  const textLower = text.toLowerCase();
-  return OUT_OF_OFFICE_PATTERNS.some(pattern => pattern.test(textLower));
+function isAutoReply(text: string): boolean {
+  return AUTO_REPLY_PATTERNS.some(pattern => pattern.test(text));
+}
+
+/**
+ * Check if email mentions a future absence (scheduling context, sender is still engaged)
+ */
+function hasFutureAbsenceMention(text: string): boolean {
+  return FUTURE_ABSENCE_PATTERNS.some(pattern => pattern.test(text));
 }
 
 /**
@@ -489,8 +509,12 @@ function generateSuggestedAction(classification: Omit<EmailClassification, 'sugg
     return 'User may be frustrated. Respond promptly and empathetically.';
   }
 
-  if (classification.flags.isOutOfOffice) {
-    return 'This is an auto-reply. No response needed now; user will respond when back.';
+  if (classification.flags.isAutoReply) {
+    return 'This is an auto-reply. Sender is currently unreachable. Do not reply — wait for them to return.';
+  }
+
+  if (classification.flags.mentionsFutureAbsence) {
+    return 'Sender mentions upcoming absence. Factor this into scheduling but they are still engaged right now.';
   }
 
   return undefined;
@@ -521,13 +545,18 @@ export function classifyEmail(
 
   const textLower = emailBody.toLowerCase();
 
+  const autoReply = isAutoReply(emailBody);
+  const futureAbsence = hasFutureAbsenceMention(emailBody);
+
   const flags = {
     mentionsMultipleSlots: extractedSlots.length > 1,
     mentionsPreferences: /(?:prefer|rather|better for me|works? better)/i.test(textLower),
     mentionsConstraints: /(?:can(?:'t|not)|busy|unavailable|only available|except|not on)/i.test(textLower),
     mentionsRescheduling: /(?:reschedule|change|move|different time)/i.test(textLower),
     mentionsCancellation: /(?:cancel|call off|no longer)/i.test(textLower),
-    isOutOfOffice: isOutOfOffice(emailBody),
+    isAutoReply: autoReply,
+    mentionsFutureAbsence: futureAbsence && !autoReply, // Don't double-flag auto-replies
+    isOutOfOffice: autoReply, // Deprecated: kept for backward compat, use isAutoReply
   };
 
   const baseClassification: Omit<EmailClassification, 'suggestedAction'> = {
@@ -585,10 +614,9 @@ export function needsSpecialHandling(classification: EmailClassification): {
     return { needsAttention: true, reason: 'cancellation_request' };
   }
 
-  // OOO is informational — only flag if the email doesn't have a more
-  // specific intent (e.g., a therapist who mentions being on holiday
-  // but is also confirming a slot shouldn't be flagged as OOO)
-  if (classification.flags.isOutOfOffice && classification.intent === 'unknown') {
+  // Auto-reply means the sender is unreachable — always flag this.
+  // Future absence mentions are just scheduling context and don't need alerting.
+  if (classification.flags.isAutoReply) {
     return { needsAttention: true, reason: 'out_of_office' };
   }
 
@@ -619,6 +647,13 @@ export function formatClassificationForPrompt(classification: EmailClassificatio
 
   // Urgency
   lines.push(`- Urgency: ${classification.urgencyLevel}`);
+
+  // Auto-reply / future absence flags
+  if (classification.flags.isAutoReply) {
+    lines.push(`- ⚠️ AUTO-REPLY: This is an automated out-of-office response. Sender is currently unreachable.`);
+  } else if (classification.flags.mentionsFutureAbsence) {
+    lines.push(`- Note: Sender mentions upcoming absence. Factor this into scheduling availability.`);
+  }
 
   // Extracted times
   if (classification.extractedSlots.length > 0) {

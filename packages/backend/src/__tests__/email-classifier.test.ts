@@ -358,34 +358,75 @@ describe('classifyEmail', () => {
   });
 
   describe('flags', () => {
-    it('detects out-of-office replies', () => {
-      const result = classifyEmail(
-        "I'm out of office until February 20th. I will respond when I return.",
-        THERAPIST_EMAIL,
-        THERAPIST_EMAIL,
-        USER_EMAIL
-      );
-      expect(result.flags.isOutOfOffice).toBe(true);
-    });
+    describe('auto-reply vs future absence', () => {
+      it('detects auto-reply when sender says they are currently out of office', () => {
+        const result = classifyEmail(
+          "I'm out of office until February 20th. I will respond when I return.",
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(true);
+        expect(result.flags.mentionsFutureAbsence).toBe(false); // Don't double-flag
+        expect(result.flags.isOutOfOffice).toBe(true); // Backward compat
+      });
 
-    it('detects auto-reply headers as OOO', () => {
-      const result = classifyEmail(
-        'Automatic reply: I am currently on leave and will return March 1st.',
-        THERAPIST_EMAIL,
-        THERAPIST_EMAIL,
-        USER_EMAIL
-      );
-      expect(result.flags.isOutOfOffice).toBe(true);
-    });
+      it('detects auto-reply from automatic reply header', () => {
+        const result = classifyEmail(
+          'Automatic reply: I am currently on leave and will return March 1st.',
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(true);
+        expect(result.flags.isOutOfOffice).toBe(true);
+      });
 
-    it('does NOT flag casual mention of holiday as OOO', () => {
-      const result = classifyEmail(
-        'I was on holiday last week but I am back now. Monday at 10am works.',
-        THERAPIST_EMAIL,
-        THERAPIST_EMAIL,
-        USER_EMAIL
-      );
-      expect(result.flags.isOutOfOffice).toBe(false);
+      it('detects future absence when sender mentions upcoming holiday', () => {
+        const result = classifyEmail(
+          "Thanks for the options. I'll be on holiday from March 20th so let's do something before then.",
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(false);
+        expect(result.flags.mentionsFutureAbsence).toBe(true);
+        expect(result.flags.isOutOfOffice).toBe(false); // Not an auto-reply
+      });
+
+      it('detects future absence for "I will be away"', () => {
+        const result = classifyEmail(
+          "I'm away next week so could we do this week instead?",
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(false);
+        expect(result.flags.mentionsFutureAbsence).toBe(true);
+      });
+
+      it('does NOT flag casual past-tense mention of holiday', () => {
+        const result = classifyEmail(
+          'I was on holiday last week but I am back now. Monday at 10am works.',
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(false);
+        expect(result.flags.mentionsFutureAbsence).toBe(false);
+        expect(result.flags.isOutOfOffice).toBe(false);
+      });
+
+      it('does NOT flag normal scheduling email as auto-reply or future absence', () => {
+        const result = classifyEmail(
+          'Monday at 10am works for me. Looking forward to it.',
+          THERAPIST_EMAIL,
+          THERAPIST_EMAIL,
+          USER_EMAIL
+        );
+        expect(result.flags.isAutoReply).toBe(false);
+        expect(result.flags.mentionsFutureAbsence).toBe(false);
+      });
     });
 
     it('detects preferences mentioned', () => {
@@ -425,25 +466,26 @@ describe('needsSpecialHandling', () => {
       mentionsConstraints: false,
       mentionsRescheduling: false,
       mentionsCancellation: false,
+      isAutoReply: false,
+      mentionsFutureAbsence: false,
       isOutOfOffice: false,
     },
     ...overrides,
   });
 
-  it('flags out-of-office when intent is unknown', () => {
+  it('flags auto-reply as out_of_office', () => {
     const result = needsSpecialHandling(
-      makeClassification({ intent: 'unknown', flags: { ...makeClassification({}).flags, isOutOfOffice: true } })
+      makeClassification({ flags: { ...makeClassification({}).flags, isAutoReply: true, isOutOfOffice: true } })
     );
     expect(result.needsAttention).toBe(true);
     expect(result.reason).toBe('out_of_office');
   });
 
-  it('does NOT flag out-of-office when email has a specific intent', () => {
+  it('does NOT flag future absence mentions', () => {
     const result = needsSpecialHandling(
-      makeClassification({ intent: 'confirmation', flags: { ...makeClassification({}).flags, isOutOfOffice: true } })
+      makeClassification({ flags: { ...makeClassification({}).flags, mentionsFutureAbsence: true } })
     );
-    // OOO flag present but intent is confirmation — should not override
-    expect(result.reason).not.toBe('out_of_office');
+    expect(result.needsAttention).toBe(false);
   });
 
   it('flags urgent messages', () => {
