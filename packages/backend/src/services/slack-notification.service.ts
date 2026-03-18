@@ -32,6 +32,13 @@ const SLACK_QUEUE_TTL = 86400; // 24 hours
 // after a Slack webhook timeout where the message was actually delivered.
 const NOTIFICATION_DEDUP_TTL_SECONDS = 120;
 
+// Appointment-scoped deduplication: suppress the same notification *type* for the
+// same appointment within a longer window (24 hours). This prevents duplicate
+// notifications when the same logical event re-triggers across periodic runs —
+// e.g. repeated OOO auto-replies from the same therapist, or the AI agent
+// re-flagging the same appointment for human review on each email processing cycle.
+const APPOINTMENT_DEDUP_TTL_SECONDS = 86400; // 24 hours
+
 // Slack circuit breaker configuration
 const SLACK_CIRCUIT_CONFIG = {
   name: 'slack-webhook',
@@ -191,14 +198,26 @@ class SlackNotificationService {
     try {
       const persisted = await cacheManager.getJson<QueuedNotification[]>(SLACK_QUEUE_KEY);
       if (persisted && persisted.length > 0) {
-        // Restore to in-memory queue
+        // Restore to in-memory queue, dropping stale items that are older than
+        // the appointment-scoped dedup window. Sending day-old notifications
+        // after a restart causes confusing duplicates.
+        const maxAgeMs = APPOINTMENT_DEDUP_TTL_SECONDS * 1000;
+        let dropped = 0;
         for (const item of persisted) {
+          const age = Date.now() - new Date(item.queuedAt).getTime();
+          if (age > maxAgeMs) {
+            dropped++;
+            continue;
+          }
           if (notificationQueue.length < MAX_QUEUE_SIZE) {
             notificationQueue.push({
               ...item,
               queuedAt: new Date(item.queuedAt),
             });
           }
+        }
+        if (dropped > 0) {
+          logger.info({ dropped }, 'Dropped stale Slack notifications from persisted queue (older than 24h)');
         }
 
         // Clear Redis queue after loading to prevent duplicate loading on rapid restarts
@@ -410,13 +429,21 @@ class SlackNotificationService {
    * Check whether an identical alert was recently sent and, if not, mark it as sent.
    * Returns true when this is a duplicate that should be suppressed.
    *
-   * The dedup key is a SHA-256 hash of the alert's title + appointmentId + details,
-   * which are the fields that uniquely identify the "same" notification. Severity
-   * and additional fields are intentionally excluded so that minor presentation
-   * changes don't bypass dedup.
+   * Two layers of deduplication:
+   *
+   * 1. **Exact-match (120s)**: SHA-256 of title + appointmentId + details.
+   *    Catches race conditions from Pub/Sub re-delivery, push+poll overlap,
+   *    and queue retry after a Slack timeout where the message was delivered.
+   *
+   * 2. **Appointment-scoped (24h)**: Keyed on title + appointmentId only,
+   *    ignoring details. Prevents the same notification *type* from firing
+   *    more than once per day per appointment — e.g. repeated OOO auto-replies
+   *    from the same therapist, or the AI re-flagging human review on each
+   *    email processing cycle. Only applies when appointmentId is present.
    */
   private async isDuplicateAlert(options: SlackAlertOptions): Promise<boolean> {
     try {
+      // Layer 1: Exact-match dedup (short TTL, catches race conditions)
       const raw = `${options.title}|${options.appointmentId || ''}|${options.details}`;
       const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
       const key = `slack:dedup:${hash}`;
@@ -426,10 +453,29 @@ class SlackNotificationService {
       if (result === 'EXISTS') {
         logger.info(
           { title: options.title, appointmentId: options.appointmentId },
-          'Suppressed duplicate Slack notification'
+          'Suppressed duplicate Slack notification (exact match)'
         );
         return true;
       }
+
+      // Layer 2: Appointment-scoped dedup (24h TTL, catches re-triggered events)
+      // Only applies when an appointmentId is present — global notifications
+      // (e.g. weekly summaries, unmatched emails) are not appointment-scoped.
+      if (options.appointmentId) {
+        const scopedRaw = `${options.title}|${options.appointmentId}`;
+        const scopedHash = createHash('sha256').update(scopedRaw).digest('hex').slice(0, 16);
+        const scopedKey = `slack:dedup:apt:${scopedHash}`;
+
+        const scopedResult = await cacheManager.setNX(scopedKey, '1', APPOINTMENT_DEDUP_TTL_SECONDS);
+        if (scopedResult === 'EXISTS') {
+          logger.info(
+            { title: options.title, appointmentId: options.appointmentId },
+            'Suppressed duplicate Slack notification (appointment-scoped, 24h window)'
+          );
+          return true;
+        }
+      }
+
       return false;
     } catch (err) {
       // Redis failure should never block a real notification
