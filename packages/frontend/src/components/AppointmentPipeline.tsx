@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react';
-import type { DashboardStats, AppointmentListItem, HealthStatus } from '../types';
+import type { DashboardStats, AppointmentListItem } from '../types';
 import { PRE_BOOKING_STATUSES } from '../types';
 
 export type DashboardTileFilter =

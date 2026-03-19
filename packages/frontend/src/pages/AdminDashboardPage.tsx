@@ -233,7 +233,7 @@ export default function AdminDashboardPage() {
               <select
                 value={filters.sortBy || 'updatedAt'}
                 onChange={(e) =>
-                  setFilters((prev) => ({ ...prev, sortBy: e.target.value, page: 1 }))
+                  setFilters((prev) => ({ ...prev, sortBy: e.target.value as AppointmentFilters['sortBy'], page: 1 }))
                 }
                 className="text-xs px-2 py-1 border border-slate-200 rounded-lg text-slate-500 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
               >
