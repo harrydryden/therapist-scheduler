@@ -77,6 +77,19 @@ function isTokenExpired(token: string, expiryDays: number = 14): boolean | null 
   return Date.now() - timestamp > maxAge;
 }
 
+/**
+ * Get the expiry date from a voucher token.
+ */
+function getExpiresAt(token: string, expiryDays: number = 14): Date | null {
+  const parts = token.split(':');
+  if (parts.length !== 4) return null;
+
+  const timestamp = parseInt(parts[1], 36);
+  if (isNaN(timestamp)) return null;
+
+  return new Date(timestamp + expiryDays * 24 * 60 * 60 * 1000);
+}
+
 export interface VoucherState {
   /** The full HMAC token to send to the backend */
   voucherToken: string | null;
@@ -84,6 +97,8 @@ export interface VoucherState {
   displayCode: string | null;
   /** Whether the voucher has expired (client-side check) */
   isExpired: boolean;
+  /** When the voucher expires */
+  expiresAt: Date | null;
   /** Clear the stored voucher */
   clearVoucher: () => void;
 }
@@ -132,6 +147,7 @@ export function useVoucher(): VoucherState {
 
   const displayCode = voucherToken ? getDisplayCodeFromToken(voucherToken) : null;
   const expired = voucherToken ? isTokenExpired(voucherToken) : null;
+  const expiresAt = voucherToken ? getExpiresAt(voucherToken) : null;
 
   const clearVoucher = () => {
     try {
@@ -146,6 +162,7 @@ export function useVoucher(): VoucherState {
     voucherToken,
     displayCode,
     isExpired: expired === true,
+    expiresAt,
     clearVoucher,
   };
 }

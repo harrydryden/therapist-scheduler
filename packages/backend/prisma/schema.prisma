@@ -529,5 +529,6 @@ model VoucherTracking {
 
   @@index([strikeCount])
   @@index([lastVoucherSentAt])
+  @@index([unsubscribedAt])
   @@map("voucher_tracking")
 }

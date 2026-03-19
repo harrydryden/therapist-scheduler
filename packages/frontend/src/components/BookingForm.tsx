@@ -94,6 +94,14 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
           We've received your appointment request. Our scheduling coordinator {APP.COORDINATOR_NAME} will email you shortly to find a
           time that works for both you and {therapist.name}.
         </p>
+        {voucher?.displayCode && (
+          <p className="text-sm text-green-600 mt-3">
+            Your session code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
+            {voucher.expiresAt && (
+              <> It expires on {voucher.expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.</>
+            )}
+          </p>
+        )}
       </div>
     );
   }
@@ -136,11 +144,18 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
       </div>
 
       {voucher?.displayCode && (
-        <div className="mb-4 flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-md">
-          <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="text-sm text-green-800 font-medium">Session code: {voucher.displayCode}</span>
+        <div className="mb-4 px-3 py-2 bg-green-50 border border-green-200 rounded-md">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-sm text-green-800 font-medium">Session code: {voucher.displayCode}</span>
+          </div>
+          {voucher.expiresAt && (
+            <p className="text-xs text-green-600 mt-1 ml-6">
+              Expires {voucher.expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+            </p>
+          )}
         </div>
       )}
 

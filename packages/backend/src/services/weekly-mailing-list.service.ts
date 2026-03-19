@@ -28,7 +28,7 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
-import { generateVoucherToken, generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
+import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
 import { WEEKLY_MAILING } from '../constants';
 
 // Check interval: every hour

@@ -11,7 +11,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getSettingValue } from '../services/settings.service';
-import { generateVoucherToken, generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
+import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderTemplate } from '../utils/email-templates';
 import { emailProcessingService } from '../services/email-processing.service';
