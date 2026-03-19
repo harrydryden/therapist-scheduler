@@ -186,6 +186,19 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             });
           }
 
+          // Check if voucher has been revoked by admin (token cleared from DB)
+          const voucherTracking = await prisma.voucherTracking.findUnique({
+            where: { id: userEmail.toLowerCase() },
+            select: { lastVoucherToken: true },
+          });
+          if (voucherTracking && voucherTracking.lastVoucherToken !== voucherToken) {
+            logger.info({ requestId, userEmail }, 'Revoked voucher token submitted');
+            return reply.status(400).send({
+              success: false,
+              error: 'This session code is no longer valid. Check your email for a new one.',
+            });
+          }
+
           voucherDisplayCode = getDisplayCodeFromToken(voucherToken);
           logger.info({ requestId, userEmail, voucherDisplayCode }, 'Valid voucher token accepted');
         } else if (voucherRequired) {

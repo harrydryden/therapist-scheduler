@@ -72,12 +72,14 @@ function Toast({ message, type, onClose }: { message: string; type: 'success' | 
 function useToast() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
+  const dismiss = useCallback(() => setToast(null), []);
+
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 4000);
   }, []);
 
-  return { toast, showToast };
+  return { toast, showToast, dismiss };
 }
 
 // ============================================
@@ -261,10 +263,6 @@ function RowActions({ record, onAction }: { record: VoucherRecord; onAction: (me
 
   const resetMutation = useMutation({
     mutationFn: () => resetStrikes(record.email),
-    onMutate: async () => {
-      // Optimistic: immediately update cache
-      await queryClient.cancelQueries({ queryKey: ['vouchers'] });
-    },
     onSuccess: () => { invalidate(); onAction(`Strikes reset for ${record.email}`); },
     onError: () => { invalidate(); },
   });
@@ -409,7 +407,7 @@ export default function AdminVouchersPage() {
   const [showIssueModal, setShowIssueModal] = useState(false);
   const debouncedSearch = useDebounce(searchInput, 300);
   const queryClient = useQueryClient();
-  const { toast, showToast } = useToast();
+  const { toast, showToast, dismiss } = useToast();
 
   const effectiveFilters = { ...filters, search: debouncedSearch || undefined };
 
@@ -420,7 +418,7 @@ export default function AdminVouchersPage() {
   });
 
   const setStatus = useCallback((status: string) => {
-    setFilters((prev) => ({ ...prev, status, page: 1 }));
+    setFilters((prev) => ({ ...prev, status, page: 1, minStrikes: undefined }));
   }, []);
 
   const setPage = useCallback((page: number) => {
@@ -600,7 +598,7 @@ export default function AdminVouchersPage() {
       )}
 
       {/* Toast */}
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => {}} />}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={dismiss} />}
     </div>
   );
 }

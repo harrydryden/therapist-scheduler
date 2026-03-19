@@ -35,6 +35,42 @@ const issueVoucherSchema = z.object({
   sendEmail: z.boolean().default(true),
 });
 
+// Helper to format a DB record into the API response shape
+function formatRecord(
+  r: { id: string; lastVoucherToken: string | null; strikeCount: number; lastVoucherSentAt: Date | null; lastVoucherUsedAt: Date | null; reminderSentAt: Date | null; unsubscribedAt: Date | null; createdAt: Date },
+  status: string,
+  expiryDays: number,
+  maxStrikes: number,
+) {
+  const expiresAt = r.lastVoucherSentAt
+    ? new Date(r.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000)
+    : null;
+  return {
+    email: r.id,
+    displayCode: r.lastVoucherToken ? getDisplayCodeFromToken(r.lastVoucherToken) : null,
+    status,
+    strikeCount: r.strikeCount,
+    maxStrikes,
+    lastVoucherSentAt: r.lastVoucherSentAt?.toISOString() || null,
+    lastVoucherUsedAt: r.lastVoucherUsedAt?.toISOString() || null,
+    expiresAt: expiresAt?.toISOString() || null,
+    reminderSentAt: r.reminderSentAt?.toISOString() || null,
+    unsubscribedAt: r.unsubscribedAt?.toISOString() || null,
+    createdAt: r.createdAt.toISOString(),
+  };
+}
+
+// Format raw SQL bigint summary into numbers
+function formatSummary(raw: { total: bigint; active: bigint; used: bigint; at_risk: bigint; unsubscribed: bigint }) {
+  return {
+    total: Number(raw.total),
+    active: Number(raw.active),
+    used: Number(raw.used),
+    atRisk: Number(raw.at_risk),
+    unsubscribed: Number(raw.unsubscribed),
+  };
+}
+
 export async function adminVoucherRoutes(fastify: FastifyInstance) {
   // Auth middleware - require webhook secret for admin access
   fastify.addHook('preHandler', verifyWebhookSecret);
@@ -49,10 +85,9 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
 
     const expiryDays = await getSettingValue<number>('voucher.expiryDays');
     const maxStrikes = await getSettingValue<number>('voucher.maxStrikes');
-    const now = new Date();
-    const expiryThreshold = new Date(now.getTime() - expiryDays * 24 * 60 * 60 * 1000);
+    const expiryThreshold = new Date(Date.now() - expiryDays * 24 * 60 * 60 * 1000);
 
-    // Helper to compute derived status from a record
+    // Compute derived status from a record - single source of truth
     const computeStatus = (r: { lastVoucherSentAt: Date | null; lastVoucherUsedAt: Date | null; lastVoucherToken: string | null; unsubscribedAt: Date | null }) => {
       if (r.unsubscribedAt) return 'unsubscribed';
       const isUsed = r.lastVoucherUsedAt && r.lastVoucherSentAt && r.lastVoucherUsedAt > r.lastVoucherSentAt;
@@ -62,118 +97,113 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
       return 'expired';
     };
 
-    // Build where clause
-    const where: Record<string, unknown> = {};
+    // Summary stats via single raw SQL query with CASE expressions
+    // This avoids loading any records into memory just for counts
+    const summaryResult = await prisma.$queryRaw<Array<{
+      total: bigint;
+      active: bigint;
+      used: bigint;
+      at_risk: bigint;
+      unsubscribed: bigint;
+    }>>`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE
+          unsubscribed_at IS NULL
+          AND last_voucher_sent_at IS NOT NULL
+          AND last_voucher_sent_at >= ${expiryThreshold}
+          AND last_voucher_token IS NOT NULL
+          AND (last_voucher_used_at IS NULL OR last_voucher_used_at <= last_voucher_sent_at)
+        ) AS active,
+        COUNT(*) FILTER (WHERE
+          unsubscribed_at IS NULL
+          AND last_voucher_used_at IS NOT NULL
+          AND last_voucher_sent_at IS NOT NULL
+          AND last_voucher_used_at > last_voucher_sent_at
+        ) AS used,
+        COUNT(*) FILTER (WHERE
+          unsubscribed_at IS NULL
+          AND strike_count >= ${maxStrikes - 1}
+        ) AS at_risk,
+        COUNT(*) FILTER (WHERE unsubscribed_at IS NOT NULL) AS unsubscribed
+      FROM voucher_tracking
+    `;
+    const summary = summaryResult[0];
 
+    // Build Prisma where clause for search + minStrikes (these are DB-level filters)
+    const baseWhere: Record<string, unknown> = {};
     if (search) {
-      where.id = { contains: search.toLowerCase(), mode: 'insensitive' };
+      baseWhere.id = { contains: search.toLowerCase(), mode: 'insensitive' };
     }
-
     if (minStrikes !== undefined) {
-      where.strikeCount = { gte: minStrikes };
+      baseWhere.strikeCount = { gte: minStrikes };
     }
 
-    // Pre-filter statuses that can be determined at the DB level
+    // For 'all' and 'unsubscribed', we can paginate directly in the DB
+    // For computed statuses (active/expired/used), we must post-filter
+    const canPaginateInDb = status === 'all' || status === 'unsubscribed';
+
     if (status === 'unsubscribed') {
-      where.unsubscribedAt = { not: null };
-    } else if (status === 'used') {
-      // Used = lastVoucherUsedAt > lastVoucherSentAt (approximated: has both fields set)
-      where.lastVoucherUsedAt = { not: null };
-      where.unsubscribedAt = null;
-    } else if (status === 'active') {
+      baseWhere.unsubscribedAt = { not: null };
+    }
+
+    if (canPaginateInDb) {
+      const [records, total] = await Promise.all([
+        prisma.voucherTracking.findMany({
+          where: baseWhere,
+          orderBy: { [sortBy === 'email' ? 'id' : sortBy]: sortOrder },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.voucherTracking.count({ where: baseWhere }),
+      ]);
+
+      const items = records.map((r) => formatRecord(r, computeStatus(r), expiryDays, maxStrikes));
+
+      return reply.send({
+        success: true,
+        data: {
+          items,
+          summary: formatSummary(summary),
+          pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+        },
+      });
+    }
+
+    // Computed status filter: narrow the DB query as much as possible, then post-filter
+    const where = { ...baseWhere };
+    // Exclude unsubscribed for all computed statuses
+    where.unsubscribedAt = null;
+
+    if (status === 'active') {
+      // Must have token, sent after threshold
       where.lastVoucherSentAt = { gte: expiryThreshold };
       where.lastVoucherToken = { not: null };
-      where.unsubscribedAt = null;
-    } else if (status === 'expired') {
-      where.unsubscribedAt = null;
+    } else if (status === 'used') {
+      where.lastVoucherUsedAt = { not: null };
+      where.lastVoucherSentAt = { not: null };
     }
+    // 'expired' has no useful DB-level narrowing beyond unsubscribedAt=null
 
-    // For computed statuses (active/expired/used), we need to over-fetch and post-filter
-    // to get accurate pagination. Fetch a larger window and slice.
-    const needsPostFilter = status === 'active' || status === 'expired' || status === 'used';
-    const fetchLimit = needsPostFilter ? limit * 4 : limit; // Over-fetch for post-filtering
-    const fetchSkip = needsPostFilter ? 0 : (page - 1) * limit;
-
-    const [records, dbTotal] = await Promise.all([
-      prisma.voucherTracking.findMany({
-        where,
-        orderBy: { [sortBy === 'email' ? 'id' : sortBy]: sortOrder },
-        skip: fetchSkip,
-        take: needsPostFilter ? undefined : fetchLimit, // Fetch all for post-filter statuses
-      }),
-      prisma.voucherTracking.count({ where }),
-    ]);
-
-    // Compute derived fields and apply post-filtering
-    const allItems = records.map((r) => {
-      const expiresAt = r.lastVoucherSentAt
-        ? new Date(r.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000)
-        : null;
-
-      return {
-        email: r.id,
-        displayCode: r.lastVoucherToken ? getDisplayCodeFromToken(r.lastVoucherToken) : null,
-        status: computeStatus(r),
-        strikeCount: r.strikeCount,
-        maxStrikes,
-        lastVoucherSentAt: r.lastVoucherSentAt?.toISOString() || null,
-        lastVoucherUsedAt: r.lastVoucherUsedAt?.toISOString() || null,
-        expiresAt: expiresAt?.toISOString() || null,
-        reminderSentAt: r.reminderSentAt?.toISOString() || null,
-        unsubscribedAt: r.unsubscribedAt?.toISOString() || null,
-        createdAt: r.createdAt.toISOString(),
-      };
+    // Fetch all matching records for this status filter (they need post-computation)
+    // Ordered so we can slice for pagination after filtering
+    const records = await prisma.voucherTracking.findMany({
+      where,
+      orderBy: { [sortBy === 'email' ? 'id' : sortBy]: sortOrder },
     });
 
-    // Post-filter for computed statuses, then paginate in memory
-    let filtered = allItems;
-    if (needsPostFilter) {
-      filtered = allItems.filter((item) => item.status === status);
-    }
-
-    const filteredTotal = needsPostFilter ? filtered.length : dbTotal;
-    const paginatedItems = needsPostFilter
-      ? filtered.slice((page - 1) * limit, page * limit)
-      : filtered;
-
-    // Compute summary stats using efficient COUNT queries instead of loading all records
-    const [totalCount, unsubscribedCount, atRiskCount] = await Promise.all([
-      prisma.voucherTracking.count(),
-      prisma.voucherTracking.count({ where: { unsubscribedAt: { not: null } } }),
-      prisma.voucherTracking.count({ where: { strikeCount: { gte: maxStrikes - 1 }, unsubscribedAt: null } }),
-    ]);
-
-    // Active/used counts still need computed status, but use targeted queries
-    const recentRecords = await prisma.voucherTracking.findMany({
-      where: { unsubscribedAt: null, lastVoucherSentAt: { not: null } },
-      select: { lastVoucherSentAt: true, lastVoucherUsedAt: true, lastVoucherToken: true, unsubscribedAt: true },
-    });
-
-    let activeCount = 0;
-    let usedCount = 0;
-    for (const r of recentRecords) {
-      const s = computeStatus(r);
-      if (s === 'active') activeCount++;
-      else if (s === 'used') usedCount++;
-    }
+    // Post-filter to exact computed status
+    const filtered = records.filter((r) => computeStatus(r) === status);
+    const total = filtered.length;
+    const paged = filtered.slice((page - 1) * limit, page * limit);
+    const items = paged.map((r) => formatRecord(r, status, expiryDays, maxStrikes));
 
     return reply.send({
       success: true,
       data: {
-        items: paginatedItems,
-        summary: {
-          total: totalCount,
-          active: activeCount,
-          used: usedCount,
-          atRisk: atRiskCount,
-          unsubscribed: unsubscribedCount,
-        },
-        pagination: {
-          page,
-          limit,
-          total: filteredTotal,
-          totalPages: Math.ceil(filteredTotal / limit),
-        },
+        items,
+        summary: formatSummary(summary),
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       },
     });
   });
@@ -237,6 +267,13 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
     const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
     const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);
 
+    // Check if user was previously unsubscribed (need to re-subscribe in Notion too)
+    const existingRecord = await prisma.voucherTracking.findUnique({
+      where: { id: emailLower },
+      select: { unsubscribedAt: true },
+    });
+    const wasUnsubscribed = existingRecord?.unsubscribedAt != null;
+
     // Upsert tracking record - also clear unsubscribedAt so admin-issued vouchers
     // reactivate unsubscribed users without requiring a separate resubscribe step
     const now = new Date();
@@ -253,8 +290,22 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         lastVoucherToken: voucherResult.token,
         reminderSentAt: null,
         unsubscribedAt: null,
+        strikeCount: 0,
       },
     });
+
+    // If user was unsubscribed, re-subscribe in Notion so they get future weekly emails
+    if (wasUnsubscribed) {
+      try {
+        const notionUser = await notionUsersService.findUserByEmail(emailLower);
+        if (notionUser) {
+          await notionUsersService.updateSubscription(notionUser.pageId, true);
+          logger.info({ email: emailLower }, 'Re-subscribed user in Notion via voucher issuance');
+        }
+      } catch (error) {
+        logger.error({ error, email: emailLower }, 'Failed to re-subscribe in Notion (voucher still created)');
+      }
+    }
 
     // Optionally send email - track success/failure accurately
     let emailSent = false;
