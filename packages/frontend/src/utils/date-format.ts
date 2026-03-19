@@ -24,6 +24,21 @@ export function formatDateTime(dateStr: string | null): string {
 }
 
 /**
+ * Format a date/timestamp as relative time (e.g., "5m ago", "2h ago", "3d ago")
+ */
+export function formatTimeAgo(dateOrTimestamp: string | number): string {
+  const time = typeof dateOrTimestamp === 'number' ? dateOrTimestamp : new Date(dateOrTimestamp).getTime();
+  const diffMs = Date.now() - time;
+  const diffMins = Math.floor(diffMs / 60_000);
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
+/**
  * Format a Date or ISO string to datetime-local input value (YYYY-MM-DDTHH:mm)
  * Used for <input type="datetime-local"> fields.
  */

@@ -4,6 +4,7 @@ import type { AppointmentListItem, AppointmentFilters, PaginationInfo } from '..
 import { getStatusColor, getStageLabel } from '../config/color-mappings';
 import HealthStatusBadge from './HealthStatusBadge';
 import TherapistGroupSkeleton from './skeletons/TherapistGroupSkeleton';
+import Pagination from './Pagination';
 
 // Group appointments by therapist
 interface TherapistGroup {
@@ -321,34 +322,11 @@ export default memo(function TherapistGroupList({
         </div>
       )}
 
-      {/* Pagination */}
-      {pagination && pagination.total > (filters.limit ?? 20) && (
-        <div className="px-4 py-2 border-t border-slate-100 flex items-center justify-between">
-          <span className="text-xs text-slate-400">
-            Page {filters.page ?? 1} of {Math.ceil(pagination.total / (filters.limit ?? 20))}
-          </span>
-          <div className="flex gap-1">
-            <button
-              onClick={() => onPageChange((filters.page ?? 1) - 1)}
-              disabled={(filters.page ?? 1) <= 1}
-              aria-label="Previous page"
-              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              Prev
-            </button>
-            <button
-              onClick={() => onPageChange((filters.page ?? 1) + 1)}
-              disabled={
-                (filters.page ?? 1) >= Math.ceil(pagination.total / (filters.limit ?? 20))
-              }
-              aria-label="Next page"
-              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
+      <Pagination
+        page={filters.page ?? 1}
+        totalPages={Math.ceil((pagination?.total ?? 0) / (filters.limit ?? 20))}
+        onPageChange={onPageChange}
+      />
     </div>
   );
 });

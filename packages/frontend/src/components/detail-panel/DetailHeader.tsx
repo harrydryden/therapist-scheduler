@@ -1,5 +1,5 @@
 import type { AppointmentDetail } from '../../types';
-import { getStatusColor } from '../../config/color-mappings';
+import StatusBadge from '../StatusBadge';
 
 interface DetailHeaderProps {
   appointment: AppointmentDetail;
@@ -15,11 +15,7 @@ export default function DetailHeader({ appointment }: DetailHeaderProps) {
           </h2>
           <p className="text-sm text-slate-500">{appointment.userEmail}</p>
         </div>
-        <span
-          className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(appointment.status)}`}
-        >
-          {appointment.status}
-        </span>
+        <StatusBadge status={appointment.status} />
       </div>
       <div className="mt-3 text-sm text-slate-600">
         <p>

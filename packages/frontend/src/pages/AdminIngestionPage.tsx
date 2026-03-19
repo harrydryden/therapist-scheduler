@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { previewTherapistCV, createTherapistFromCV } from '../api/client';
+import ConfirmDialog from '../components/ConfirmDialog';
 import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability, CategoryWithEvidence } from '../types';
 import {
   APPROACH_OPTIONS,
@@ -51,61 +52,6 @@ function Toast({ message, onClose }: { message: string; onClose: () => void }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
         </svg>
       </button>
-    </div>
-  );
-}
-
-// Confirmation modal component
-function ConfirmModal({
-  title,
-  message,
-  onConfirm,
-  onCancel,
-  isLoading,
-}: {
-  title: string;
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-  isLoading?: boolean;
-}) {
-  return (
-    <div
-      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-      onClick={onCancel}
-      onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirm-modal-title"
-        className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
-        onClick={(e) => e.stopPropagation()}
-        ref={(el) => el?.focus()}
-        tabIndex={-1}
-      >
-        <h3 id="confirm-modal-title" className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
-        <p className="text-slate-600 mb-6">{message}</p>
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={onCancel}
-            disabled={isLoading}
-            aria-label="Cancel and close dialog"
-            className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConfirm}
-            disabled={isLoading}
-            aria-label="Confirm and create therapist"
-            aria-busy={isLoading}
-            className="px-4 py-2 bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-400 transition-colors disabled:opacity-50"
-          >
-            {isLoading ? 'Creating...' : 'Confirm'}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -1034,13 +980,15 @@ export default function AdminIngestionPage() {
 
       {/* Confirmation modal for creating therapist */}
       {showConfirmModal && (
-        <ConfirmModal
+        <ConfirmDialog
           title="Create Therapist"
-          message="This will add the therapist to the Notion database. Are you sure you want to proceed?"
+          confirmLabel={createMutation.isPending ? 'Creating...' : 'Confirm'}
+          isPending={createMutation.isPending}
           onConfirm={handleConfirmCreate}
           onCancel={() => setShowConfirmModal(false)}
-          isLoading={createMutation.isPending}
-        />
+        >
+          <p className="text-slate-600">This will add the therapist to the Notion database. Are you sure you want to proceed?</p>
+        </ConfirmDialog>
       )}
     </div>
   );
