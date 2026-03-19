@@ -877,6 +877,91 @@ Justin`,
     maxValue: 168,
     defaultValue: STALL_DETECTION.STALL_THRESHOLD_HOURS,
   },
+
+  // === VOUCHER SYSTEM ===
+  'voucher.enabled': {
+    category: 'weeklyMailing',
+    label: 'Enable Voucher Codes',
+    description: 'Enable expiring voucher codes in weekly promotional emails. When enabled, each email includes a personal code valid for 14 days.',
+    valueType: 'boolean',
+    defaultValue: false,
+  },
+  'voucher.expiryDays': {
+    category: 'weeklyMailing',
+    label: 'Voucher Expiry (days)',
+    description: 'Number of days each voucher code is valid for',
+    valueType: 'number',
+    minValue: 7,
+    maxValue: 30,
+    defaultValue: 14,
+  },
+  'voucher.maxStrikes': {
+    category: 'weeklyMailing',
+    label: 'Max Expired Vouchers Before Unsubscribe',
+    description: 'Auto-unsubscribe users from mailing list after this many consecutive expired (unused) voucher codes',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 10,
+    defaultValue: 3,
+  },
+  'voucher.required': {
+    category: 'weeklyMailing',
+    label: 'Require Voucher to Book',
+    description: 'If enabled, users must have a valid voucher code to submit a booking request. Users without a code see a message directing them to check their email.',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
+
+  // === VOUCHER EMAIL TEMPLATES ===
+  'email.voucherReminderSubject': {
+    category: 'emailTemplates',
+    label: 'Voucher Reminder - Subject',
+    description: 'Subject line for voucher reminder email (sent when code is unused after 1 week). Variables: {userName}, {voucherCode}',
+    valueType: 'string',
+    defaultValue: 'Your session code expires soon — book now',
+  },
+  'email.voucherReminderBody': {
+    category: 'emailTemplates',
+    label: 'Voucher Reminder - Body',
+    description: 'Email body for voucher reminder. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}, {unsubscribeUrl}',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+Just a reminder — your personal session code {voucherCode} expires on {voucherExpiry}.
+
+Don't miss out on your free therapy session. Book before your code expires:
+
+[Book your session]({webAppUrl})
+
+Best wishes,
+
+Justin
+
+---
+You're receiving this because you've indicated you are interested in free therapy. To unsubscribe from these reminders, simply reply to this email asking to be removed.`,
+  },
+  'email.voucherFinalNoticeSubject': {
+    category: 'emailTemplates',
+    label: 'Voucher Final Notice - Subject',
+    description: 'Subject line for final notice before auto-unsubscribe. Variables: {userName}',
+    valueType: 'string',
+    defaultValue: 'We\'re freeing up your therapy spot',
+  },
+  'email.voucherFinalNoticeBody': {
+    category: 'emailTemplates',
+    label: 'Voucher Final Notice - Body',
+    description: 'Email body sent when user is auto-unsubscribed after consecutive expired vouchers. Variables: {userName}, {unsubscribeUrl}',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+We've noticed you haven't used your session codes recently, so we're freeing up your spot for someone else.
+
+If you'd like to start receiving session codes again, just reply to this email and we'll re-subscribe you.
+
+Best wishes,
+
+Justin`,
+  },
 };
 
 export type SettingKey = keyof typeof SETTING_DEFINITIONS;

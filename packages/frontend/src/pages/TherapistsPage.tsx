@@ -4,8 +4,10 @@ import ReactMarkdown from 'react-markdown';
 import { getTherapists, getFrontendSettings } from '../api/client';
 import TherapistCard from '../components/TherapistCard';
 import FilterBar from '../components/FilterBar';
+import { useVoucher } from '../hooks/useVoucher';
 
 export default function TherapistsPage() {
+  const voucher = useVoucher();
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [isIntroExpanded, setIsIntroExpanded] = useState(false);
 
@@ -161,7 +163,7 @@ export default function TherapistsPage() {
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-5 gap-y-8">
             {filteredTherapists.map((therapist) => (
-              <TherapistCard key={therapist.id} therapist={therapist} />
+              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucher} />
             ))}
           </div>
         </>

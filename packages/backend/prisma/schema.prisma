@@ -92,6 +92,9 @@ model AppointmentRequest {
   initialMessageId       String? @map("initial_message_id")
   therapistGmailThreadId String? @map("therapist_gmail_thread_id") // Thread with the therapist
 
+  // Voucher code used at booking time (what3words-style display code for analytics)
+  voucherCode String? @map("voucher_code")
+
   // Tracking code for deterministic email matching (embedded in subjects)
   // Format: SPL<number> (e.g., SPL1, SPL42) - UNIQUE per appointment
   // Each appointment gets its own tracking code for feedback forms and email matching
@@ -504,4 +507,27 @@ model WorkReport {
   @@index([periodEnd])
   @@index([createdAt])
   @@map("work_reports")
+}
+
+// ============================================
+// Voucher Tracking (Use-It-or-Lose-It Lifecycle)
+// ============================================
+
+// Tracks per-user voucher lifecycle state for the weekly mailing voucher system.
+// Each user (keyed by email) has at most one active voucher at a time.
+// Strike counting drives auto-unsubscribe after consecutive expired vouchers.
+model VoucherTracking {
+  id                 String    @id                                         // User email (lowercase)
+  strikeCount        Int       @default(0) @map("strike_count")            // Consecutive expired vouchers
+  lastVoucherSentAt  DateTime? @map("last_voucher_sent_at")                // When current voucher was issued
+  lastVoucherToken   String?   @map("last_voucher_token") @db.Text         // Full HMAC token (reused in reminder emails)
+  lastVoucherUsedAt  DateTime? @map("last_voucher_used_at")                // When user last booked with a voucher
+  reminderSentAt     DateTime? @map("reminder_sent_at")                    // When mid-cycle reminder was sent
+  unsubscribedAt     DateTime? @map("unsubscribed_at")                     // When auto-unsubscribed (audit)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([strikeCount])
+  @@index([lastVoucherSentAt])
+  @@map("voucher_tracking")
 }

@@ -19,6 +19,7 @@
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
+import { prisma } from '../utils/database';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { notionUsersService, NotionUser } from './notion-users.service';
 import { notionService } from './notion.service';
@@ -27,6 +28,7 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
+import { generateVoucherToken, generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
 import { WEEKLY_MAILING } from '../constants';
 
 // Check interval: every hour
@@ -399,48 +401,290 @@ class WeeklyMailingListService {
   /**
    * Fetch email template settings once (call before the send loop, not per-user)
    */
-  private async fetchEmailSettings(): Promise<{ subjectTemplate: string; bodyTemplate: string; webAppUrl: string }> {
-    const settingsMap = await getSettingValues<string>([
+  private async fetchEmailSettings(): Promise<EmailSettings> {
+    const settingsMap = await getSettingValues([
       'email.weeklyMailingSubject',
       'email.weeklyMailingBody',
+      'email.voucherReminderSubject',
+      'email.voucherReminderBody',
+      'email.voucherFinalNoticeSubject',
+      'email.voucherFinalNoticeBody',
       'weeklyMailing.webAppUrl',
+      'voucher.enabled',
+      'voucher.expiryDays',
+      'voucher.maxStrikes',
     ]);
     return {
-      subjectTemplate: settingsMap.get('email.weeklyMailingSubject')!,
-      bodyTemplate: settingsMap.get('email.weeklyMailingBody')!,
-      webAppUrl: settingsMap.get('weeklyMailing.webAppUrl')!,
+      subjectTemplate: settingsMap.get('email.weeklyMailingSubject') as string,
+      bodyTemplate: settingsMap.get('email.weeklyMailingBody') as string,
+      reminderSubjectTemplate: settingsMap.get('email.voucherReminderSubject') as string,
+      reminderBodyTemplate: settingsMap.get('email.voucherReminderBody') as string,
+      finalNoticeSubjectTemplate: settingsMap.get('email.voucherFinalNoticeSubject') as string,
+      finalNoticeBodyTemplate: settingsMap.get('email.voucherFinalNoticeBody') as string,
+      webAppUrl: settingsMap.get('weeklyMailing.webAppUrl') as string,
+      voucherEnabled: settingsMap.get('voucher.enabled') as boolean,
+      voucherExpiryDays: settingsMap.get('voucher.expiryDays') as number,
+      voucherMaxStrikes: settingsMap.get('voucher.maxStrikes') as number,
     };
   }
 
   /**
-   * Send weekly email to a single user
+   * Send weekly email to a single user.
+   * When vouchers are enabled, implements the use-it-or-lose-it lifecycle:
+   * - If no active voucher (or used/expired): issue a new code
+   * - If active voucher still valid and unused: send reminder
+   * - If voucher was used: reward with a fresh code immediately
+   * - After N consecutive expired codes: auto-unsubscribe and send final notice
    */
   private async sendWeeklyEmail(
     user: NotionUser,
-    emailSettings: { subjectTemplate: string; bodyTemplate: string; webAppUrl: string },
+    emailSettings: EmailSettings,
   ): Promise<void> {
-    const { subjectTemplate, bodyTemplate, webAppUrl } = emailSettings;
+    const { webAppUrl } = emailSettings;
 
     // Generate unsubscribe URL using configured backend URL
     const unsubscribeUrl = generateUnsubscribeUrl(user.email, config.backendUrl);
 
-    // Render templates
-    const subject = renderTemplate(subjectTemplate, { userName: user.name });
-    const body = renderTemplate(bodyTemplate, {
+    if (!emailSettings.voucherEnabled) {
+      // Original non-voucher flow
+      const subject = renderTemplate(emailSettings.subjectTemplate, { userName: user.name });
+      const body = renderTemplate(emailSettings.bodyTemplate, {
+        userName: user.name,
+        webAppUrl,
+        unsubscribeUrl,
+      });
+
+      await emailProcessingService.sendEmail({ to: user.email, subject, body });
+      logger.info({ email: user.email }, 'Sent weekly mailing email (no voucher)');
+      return;
+    }
+
+    // === Voucher-enabled flow ===
+    const emailLower = user.email.toLowerCase();
+    const expiryDays = emailSettings.voucherExpiryDays;
+    const maxStrikes = emailSettings.voucherMaxStrikes;
+
+    // Get or create voucher tracking record
+    let tracking = await prisma.voucherTracking.findUnique({ where: { id: emailLower } });
+
+    // Determine voucher state
+    const now = new Date();
+    const hasActiveVoucher = tracking?.lastVoucherSentAt &&
+      (now.getTime() - tracking.lastVoucherSentAt.getTime()) < expiryDays * 24 * 60 * 60 * 1000;
+    const voucherUsed = tracking?.lastVoucherUsedAt && tracking?.lastVoucherSentAt &&
+      tracking.lastVoucherUsedAt > tracking.lastVoucherSentAt;
+
+    if (hasActiveVoucher && !voucherUsed) {
+      // Active voucher, not yet used → send REMINDER email
+      const existingToken = tracking!.lastVoucherToken;
+      if (!existingToken) {
+        logger.warn({ email: emailLower }, 'Voucher tracking has no stored token, issuing new one');
+        await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
+        return;
+      }
+
+      const displayCode = getDisplayCodeFromToken(existingToken) || 'your code';
+      const expiresAt = new Date(tracking!.lastVoucherSentAt!.getTime() + expiryDays * 24 * 60 * 60 * 1000);
+      const voucherExpiry = formatExpiryDate(expiresAt);
+
+      // Build reminder URL with existing token
+      const separator = webAppUrl.includes('?') ? '&' : '?';
+      const voucherWebAppUrl = `${webAppUrl}${separator}voucher=${encodeURIComponent(existingToken)}`;
+
+      const subject = renderTemplate(emailSettings.reminderSubjectTemplate, {
+        userName: user.name,
+        voucherCode: displayCode,
+      });
+      const body = renderTemplate(emailSettings.reminderBodyTemplate, {
+        userName: user.name,
+        voucherCode: displayCode,
+        voucherExpiry,
+        webAppUrl: voucherWebAppUrl,
+        unsubscribeUrl,
+      });
+
+      await emailProcessingService.sendEmail({ to: user.email, subject, body });
+
+      // Update tracking
+      await prisma.voucherTracking.update({
+        where: { id: emailLower },
+        data: { reminderSentAt: now },
+      });
+
+      logger.info({ email: emailLower, displayCode }, 'Sent voucher reminder email');
+      return;
+    }
+
+    // Either no active voucher, voucher expired, or voucher was used → issue new code
+    // First check if the previous voucher expired unused (strike)
+    if (tracking?.lastVoucherSentAt && !voucherUsed && !hasActiveVoucher) {
+      // Previous voucher expired without being used → increment strike
+      const newStrikeCount = (tracking.strikeCount || 0) + 1;
+
+      if (newStrikeCount >= maxStrikes) {
+        // Auto-unsubscribe: send final notice and stop
+        await this.sendFinalNoticeAndUnsubscribe(user, emailSettings, unsubscribeUrl, tracking, newStrikeCount);
+        return;
+      }
+
+      // Update strike count
+      await prisma.voucherTracking.update({
+        where: { id: emailLower },
+        data: { strikeCount: newStrikeCount },
+      });
+
+      tracking = { ...tracking, strikeCount: newStrikeCount };
+      logger.info(
+        { email: emailLower, strikeCount: newStrikeCount, maxStrikes },
+        'Voucher expired unused, strike incremented'
+      );
+    }
+
+    // If voucher was used → reset strikes (reward)
+    if (voucherUsed && tracking) {
+      await prisma.voucherTracking.update({
+        where: { id: emailLower },
+        data: { strikeCount: 0 },
+      });
+      tracking = { ...tracking, strikeCount: 0 };
+      logger.info({ email: emailLower }, 'Voucher was used, strike count reset');
+    }
+
+    // Issue new voucher
+    await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
+  }
+
+  /**
+   * Generate and send a new voucher code email
+   */
+  private async sendNewVoucherEmail(
+    user: NotionUser,
+    emailSettings: EmailSettings,
+    unsubscribeUrl: string,
+    tracking: { id: string; strikeCount: number } | null,
+  ): Promise<void> {
+    const emailLower = user.email.toLowerCase();
+    const expiryDays = emailSettings.voucherExpiryDays;
+    const { webAppUrl } = emailSettings;
+
+    // Generate new voucher
+    const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);
+    const voucherExpiry = formatExpiryDate(voucherResult.expiresAt);
+
+    const subject = renderTemplate(emailSettings.subjectTemplate, {
       userName: user.name,
-      webAppUrl,
+      voucherCode: voucherResult.displayCode,
+    });
+    const body = renderTemplate(emailSettings.bodyTemplate, {
+      userName: user.name,
+      voucherCode: voucherResult.displayCode,
+      voucherExpiry,
+      webAppUrl: voucherResult.url,
       unsubscribeUrl,
     });
 
-    // Send email using the emailProcessingService
-    await emailProcessingService.sendEmail({
-      to: user.email,
-      subject,
-      body,
+    await emailProcessingService.sendEmail({ to: user.email, subject, body });
+
+    // Upsert tracking record
+    const now = new Date();
+    await prisma.voucherTracking.upsert({
+      where: { id: emailLower },
+      create: {
+        id: emailLower,
+        lastVoucherSentAt: now,
+        lastVoucherToken: voucherResult.token,
+        strikeCount: 0,
+        reminderSentAt: null,
+      },
+      update: {
+        lastVoucherSentAt: now,
+        lastVoucherToken: voucherResult.token,
+        reminderSentAt: null,
+      },
     });
 
-    logger.info({ email: user.email }, 'Sent weekly mailing email');
+    logger.info(
+      { email: emailLower, displayCode: voucherResult.displayCode, expiresAt: voucherResult.expiresAt.toISOString() },
+      'Sent new voucher email'
+    );
   }
+
+  /**
+   * Send final notice email and auto-unsubscribe the user
+   */
+  private async sendFinalNoticeAndUnsubscribe(
+    user: NotionUser,
+    emailSettings: EmailSettings,
+    unsubscribeUrl: string,
+    tracking: { id: string; strikeCount: number },
+    newStrikeCount: number,
+  ): Promise<void> {
+    const emailLower = user.email.toLowerCase();
+
+    // Send final notice email
+    const subject = renderTemplate(emailSettings.finalNoticeSubjectTemplate, { userName: user.name });
+    const body = renderTemplate(emailSettings.finalNoticeBodyTemplate, {
+      userName: user.name,
+      unsubscribeUrl,
+    });
+
+    await emailProcessingService.sendEmail({ to: user.email, subject, body });
+
+    // Update tracking with final strike count and unsubscribe timestamp
+    const now = new Date();
+    await prisma.voucherTracking.update({
+      where: { id: emailLower },
+      data: {
+        strikeCount: newStrikeCount,
+        unsubscribedAt: now,
+        lastVoucherToken: null,
+      },
+    });
+
+    // Unsubscribe from mailing list in Notion
+    if (user.pageId) {
+      try {
+        await notionUsersService.updateSubscription(user.pageId, false);
+        logger.info(
+          { email: emailLower, strikeCount: newStrikeCount },
+          'Auto-unsubscribed user after consecutive expired vouchers'
+        );
+      } catch (error) {
+        logger.error(
+          { error, email: emailLower },
+          'Failed to auto-unsubscribe user in Notion (voucher tracking updated)'
+        );
+      }
+    }
+  }
+}
+
+// ============================================
+// Types and Helpers
+// ============================================
+
+interface EmailSettings {
+  subjectTemplate: string;
+  bodyTemplate: string;
+  reminderSubjectTemplate: string;
+  reminderBodyTemplate: string;
+  finalNoticeSubjectTemplate: string;
+  finalNoticeBodyTemplate: string;
+  webAppUrl: string;
+  voucherEnabled: boolean;
+  voucherExpiryDays: number;
+  voucherMaxStrikes: number;
+}
+
+/**
+ * Format a date for display in emails (e.g., "2 April 2026")
+ */
+function formatExpiryDate(date: Date): string {
+  return date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
 }
 
 export const weeklyMailingListService = new WeeklyMailingListService();

@@ -17,9 +17,11 @@ interface UseBookingFormOptions {
   therapistNotionId: string;
   therapistName?: string;
   onSuccess?: () => void;
+  /** HMAC-signed voucher token from weekly email (optional) */
+  voucherToken?: string | null;
 }
 
-export function useBookingForm({ therapistNotionId, therapistName, onSuccess }: UseBookingFormOptions) {
+export function useBookingForm({ therapistNotionId, therapistName, onSuccess, voucherToken }: UseBookingFormOptions) {
   const [firstName, setFirstName] = useState('');
   const [email, setEmail] = useState('');
 
@@ -39,6 +41,7 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess }: 
       userEmail: email.trim(),
       therapistNotionId,
       therapistName,
+      ...(voucherToken ? { voucherToken } : {}),
     });
   };
 
