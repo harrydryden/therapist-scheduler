@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -10,20 +10,15 @@ import type { AppointmentFilters } from '../types';
 import { useDebounce } from '../hooks/useDebounce';
 import { useSSE } from '../hooks/useSSE';
 import AppointmentPipeline from '../components/AppointmentPipeline';
-import AppointmentFiltersBar from '../components/AppointmentFilters';
+import type { DashboardTileFilter } from '../components/AppointmentPipeline';
 import TherapistGroupList from '../components/TherapistGroupList';
 import type { TherapistGroup } from '../components/TherapistGroupList';
 import AppointmentDetailPanel from '../components/AppointmentDetailPanel';
 
-// FIX #36: Decomposed from a single ~1400-line file into focused sub-components:
-// - AppointmentPipeline (stats + health/control overview)
-// - AppointmentFilters (filter bar)
-// - TherapistGroupList (grouped appointment list)
-// - AppointmentDetailPanel (detail + human control panel)
 export default function AdminDashboardPage() {
   const [filters, setFilters] = useState<AppointmentFilters>({
     page: 1,
-    limit: 100, // Load more to enable proper grouping
+    limit: 100,
     sortBy: 'updatedAt',
     sortOrder: 'desc',
   });
@@ -31,6 +26,8 @@ export default function AdminDashboardPage() {
   const [selectedAppointment, setSelectedAppointment] = useState<string | null>(
     searchParams.get('appointment') || null
   );
+  const [selectedTile, setSelectedTile] = useState<DashboardTileFilter>('active');
+  const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
 
   // Sync URL search param when selection changes
   useEffect(() => {
@@ -42,20 +39,13 @@ export default function AdminDashboardPage() {
       setSearchParams(searchParams, { replace: true });
     }
   }, [selectedAppointment, searchParams, setSearchParams]);
-  const [hideConfirmed, setHideConfirmed] = useState(true);
-  const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
-  const [quickFilter, setQuickFilter] = useState<'red' | 'human' | 'post-session' | 'cancelled' | null>(null);
 
-  // Debounce filter changes (date range, sort) to avoid excessive API calls
-  // Quick filter pills and page changes apply immediately via the non-debounced filters
   const debouncedFilters = useDebounce(filters, 300);
 
-  // SSE: real-time updates from server push events
-  // Invalidates React Query caches on status/health/control changes
-  // Polling remains as fallback if SSE connection fails
+  // SSE: real-time updates
   useSSE();
 
-  // Fetch appointments list with auto-refresh
+  // Fetch appointments list
   const {
     data: appointmentsData,
     isLoading: loadingList,
@@ -65,10 +55,10 @@ export default function AdminDashboardPage() {
     queryFn: () => getAppointments(debouncedFilters),
     refetchInterval: 30000,
     staleTime: 30000,
-    refetchOnWindowFocus: false, // Polling handles freshness; avoid duplicate requests on tab switch
+    refetchOnWindowFocus: false,
   });
 
-  // Fetch stats with auto-refresh every 30 seconds
+  // Fetch stats
   const { data: stats } = useQuery({
     queryKey: ['dashboard-stats'],
     queryFn: getDashboardStats,
@@ -89,30 +79,38 @@ export default function AdminDashboardPage() {
     staleTime: 30000,
   });
 
-  // Group appointments by therapist
-  const therapistGroups = useMemo(() => {
+  // Filter appointments based on selected tile
+  const filteredAppointments = useMemo(() => {
     if (!Array.isArray(appointmentsData?.data)) return [];
 
-    let filteredAppointments = appointmentsData.data;
+    const all = appointmentsData.data;
 
-    if (hideConfirmed) {
-      filteredAppointments = filteredAppointments.filter((apt) =>
-        ['pending', 'contacted', 'negotiating'].includes(apt.status)
-      );
+    switch (selectedTile) {
+      case 'active':
+        return all.filter((apt) =>
+          ['pending', 'contacted', 'negotiating'].includes(apt.status)
+        );
+      case 'confirmed':
+        return all.filter((apt) => apt.status === 'confirmed');
+      case 'post-session':
+        return all.filter((apt) =>
+          ['session_held', 'feedback_requested', 'completed'].includes(apt.status)
+        );
+      case 'attention':
+        return all.filter(
+          (apt) =>
+            apt.healthStatus === 'red' &&
+            ['pending', 'contacted', 'negotiating'].includes(apt.status)
+        );
+      case 'human':
+        return all.filter((apt) => apt.humanControlEnabled);
+      default:
+        return all;
     }
+  }, [appointmentsData?.data, selectedTile]);
 
-    if (quickFilter === 'red') {
-      filteredAppointments = filteredAppointments.filter((apt) => apt.healthStatus === 'red');
-    } else if (quickFilter === 'human') {
-      filteredAppointments = filteredAppointments.filter((apt) => apt.humanControlEnabled);
-    } else if (quickFilter === 'post-session') {
-      filteredAppointments = filteredAppointments.filter((apt) =>
-        ['session_held', 'feedback_requested', 'completed'].includes(apt.status)
-      );
-    } else if (quickFilter === 'cancelled') {
-      filteredAppointments = filteredAppointments.filter((apt) => apt.status === 'cancelled');
-    }
-
+  // Group filtered appointments by therapist
+  const therapistGroups = useMemo(() => {
     const groups = new Map<string, TherapistGroup>();
 
     for (const apt of filteredAppointments) {
@@ -140,11 +138,21 @@ export default function AdminDashboardPage() {
         group.negotiatingCount++;
       } else if (apt.status === 'confirmed') {
         group.confirmedCount++;
-      } else if (apt.status === 'completed' || apt.status === 'session_held' || apt.status === 'feedback_requested') {
+      } else if (
+        apt.status === 'completed' ||
+        apt.status === 'session_held' ||
+        apt.status === 'feedback_requested'
+      ) {
         group.completedCount++;
       }
 
-      const terminalStatuses = ['confirmed', 'cancelled', 'completed', 'session_held', 'feedback_requested'];
+      const terminalStatuses = [
+        'confirmed',
+        'cancelled',
+        'completed',
+        'session_held',
+        'feedback_requested',
+      ];
       if (!terminalStatuses.includes(apt.status)) {
         if (apt.healthStatus === 'red') {
           group.healthRed++;
@@ -163,9 +171,9 @@ export default function AdminDashboardPage() {
       if (a.pendingCount !== b.pendingCount) return b.pendingCount - a.pendingCount;
       return b.negotiatingCount - a.negotiatingCount;
     });
-  }, [appointmentsData?.data, hideConfirmed, quickFilter]);
+  }, [filteredAppointments]);
 
-  const toggleTherapistExpanded = (therapistId: string) => {
+  const toggleTherapistExpanded = useCallback((therapistId: string) => {
     setExpandedTherapists((prev) => {
       const next = new Set(prev);
       if (next.has(therapistId)) {
@@ -175,87 +183,88 @@ export default function AdminDashboardPage() {
       }
       return next;
     });
-  };
+  }, []);
 
-  const handleFilterChange = (key: keyof AppointmentFilters, value: string) => {
-    setFilters((prev) => ({ ...prev, [key]: value || undefined, page: 1 }));
+  // Tile label for list header
+  const tileLabel: Record<string, string> = {
+    active: 'Active (Pre-booking)',
+    confirmed: 'Confirmed',
+    'post-session': 'Post-Session',
+    attention: 'Needs Attention',
+    human: 'Human Control',
   };
 
   return (
     <div className="min-h-screen bg-slate-50 py-8 px-4">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-slate-900">Scheduling Dashboard</h1>
-          <p className="text-slate-600 mt-1">Monitor and manage appointment requests</p>
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-slate-900">Scheduling Dashboard</h1>
         </div>
 
-        {/* Pipeline Stats + Health/Control Overview */}
+        {/* Summary Tiles */}
         <AppointmentPipeline
           stats={stats}
           appointments={appointmentsData?.data}
-        />
-
-        {/* Filter Bar */}
-        <AppointmentFiltersBar
-          filters={filters}
-          appointments={appointmentsData?.data}
-          hideConfirmed={hideConfirmed}
-          quickFilter={quickFilter}
-          onFilterChange={handleFilterChange}
-          onHideConfirmedChange={setHideConfirmed}
-          onQuickFilterChange={setQuickFilter}
+          selectedTile={selectedTile}
+          onTileSelect={setSelectedTile}
         />
 
         {/* Error State */}
         {listError && (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
-            <p className="text-red-600">
+          <div className="bg-spill-red-100 border border-spill-red-200 rounded-xl p-4 mb-6">
+            <p className="text-spill-red-600 text-sm">
               {listError instanceof Error ? listError.message : 'Failed to load appointments'}
             </p>
           </div>
         )}
 
         {/* Main Content: List + Detail */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <TherapistGroupList
-            therapistGroups={therapistGroups}
-            filters={filters}
-            pagination={appointmentsData?.pagination}
-            loadingList={loadingList}
-            selectedAppointment={selectedAppointment}
-            expandedTherapists={expandedTherapists}
-            onSelectAppointment={setSelectedAppointment}
-            onToggleTherapist={toggleTherapistExpanded}
-            onPageChange={(page) => setFilters(prev => ({ ...prev, page }))}
-          />
-
-          <AppointmentDetailPanel
-            selectedAppointment={selectedAppointment}
-            appointmentDetail={appointmentDetail}
-            loadingDetail={loadingDetail}
-            detailError={detailError}
-            onClearSelection={() => setSelectedAppointment(null)}
-          />
-        </div>
-
-        {/* Top Users */}
-        {stats && stats.topUsers && stats.topUsers.length > 0 && (
-          <div className="mt-8 bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
-            <h2 className="font-semibold text-slate-900 mb-4">Top Users by Bookings</h2>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-              {stats.topUsers.slice(0, 5).map((user, idx) => (
-                <div key={user.email} className="text-center">
-                  <div className="w-12 h-12 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-2">
-                    <span className="text-lg font-bold text-slate-600">#{idx + 1}</span>
-                  </div>
-                  <p className="font-medium text-slate-900 text-sm">{user.name}</p>
-                  <p className="text-xs text-slate-500">{user.bookingCount} bookings</p>
-                </div>
-              ))}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            {/* Sort control */}
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-medium text-slate-700">
+                {selectedTile ? tileLabel[selectedTile] || 'All' : 'All Appointments'}
+                <span className="text-slate-400 font-normal ml-1.5">
+                  ({filteredAppointments.length})
+                </span>
+              </h2>
+              <select
+                value={filters.sortBy || 'updatedAt'}
+                onChange={(e) =>
+                  setFilters((prev) => ({ ...prev, sortBy: e.target.value as AppointmentFilters['sortBy'], page: 1 }))
+                }
+                className="text-xs px-2 py-1 border border-slate-200 rounded-lg text-slate-500 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              >
+                <option value="updatedAt">Last updated</option>
+                <option value="createdAt">Date created</option>
+              </select>
             </div>
+
+            <TherapistGroupList
+              therapistGroups={therapistGroups}
+              filters={filters}
+              pagination={appointmentsData?.pagination}
+              loadingList={loadingList}
+              selectedAppointment={selectedAppointment}
+              expandedTherapists={expandedTherapists}
+              onSelectAppointment={setSelectedAppointment}
+              onToggleTherapist={toggleTherapistExpanded}
+              onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
+            />
           </div>
-        )}
+
+          <div className="lg:sticky lg:top-4 lg:self-start">
+            <AppointmentDetailPanel
+              selectedAppointment={selectedAppointment}
+              appointmentDetail={appointmentDetail}
+              loadingDetail={loadingDetail}
+              detailError={detailError}
+              onClearSelection={() => setSelectedAppointment(null)}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

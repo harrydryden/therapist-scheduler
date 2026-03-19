@@ -16,22 +16,16 @@ import {
   STATUS_LABELS,
   ALL_STATUSES,
 } from '../types';
-import { getStatusColor } from '../config/color-mappings';
 import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
+import StatusBadge from '../components/StatusBadge';
+import { useDebounce } from '../hooks/useDebounce';
+import Pagination from '../components/Pagination';
 
 const STAGE_OPTIONS: { value: AdminAppointmentStage; label: string }[] = [
   { value: 'confirmed', label: 'Confirmed' },
   { value: 'session_held', label: 'Session Held' },
   { value: 'feedback_requested', label: 'Feedback Requested' },
 ];
-
-function StatusBadge({ status }: { status: string }) {
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-      {STATUS_LABELS[status as keyof typeof STATUS_LABELS] || status}
-    </span>
-  );
-}
 
 // ============================================
 // Editable Status Dropdown
@@ -600,7 +594,7 @@ function AppointmentsTable() {
   const [showCompleted, setShowCompleted] = useState(false);
   const [showCancelled, setShowCancelled] = useState(false);
   const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const debouncedSearch = useDebounce(search, 300);
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
@@ -608,18 +602,11 @@ function AppointmentsTable() {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const limit = 20;
   const queryClient = useQueryClient();
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Debounce search input to avoid firing API calls on every keystroke
+  // Reset page when debounced search changes
   useEffect(() => {
-    searchTimerRef.current = setTimeout(() => {
-      setDebouncedSearch(search);
-      setPage(1);
-    }, 300);
-    return () => {
-      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
-    };
-  }, [search]);
+    setPage(1);
+  }, [debouncedSearch]);
 
   const statusFilter = useMemo(() => {
     const statuses = ALL_STATUSES.filter((s) => {
@@ -854,46 +841,14 @@ function AppointmentsTable() {
       )}
 
       {/* Pagination */}
-      {pagination && pagination.totalPages > 1 && (
-        <div className="px-6 py-3 border-t border-slate-100 flex items-center justify-between">
-          <div className="text-xs text-slate-500">
-            Showing {((pagination.page - 1) * pagination.limit) + 1}–{Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total}
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setPage(Math.max(1, page - 1))}
-              disabled={page <= 1}
-              className="px-2.5 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Prev
-            </button>
-            {Array.from({ length: Math.min(5, pagination.totalPages) }, (_, i) => {
-              const startPage = Math.max(1, Math.min(page - 2, pagination.totalPages - 4));
-              const pageNum = startPage + i;
-              if (pageNum > pagination.totalPages) return null;
-              return (
-                <button
-                  key={pageNum}
-                  onClick={() => setPage(pageNum)}
-                  className={`px-2.5 py-1 text-xs border rounded ${
-                    pageNum === page
-                      ? 'bg-spill-blue-800 text-white border-spill-blue-800'
-                      : 'border-slate-200 hover:bg-slate-50'
-                  }`}
-                >
-                  {pageNum}
-                </button>
-              );
-            })}
-            <button
-              onClick={() => setPage(Math.min(pagination.totalPages, page + 1))}
-              disabled={page >= pagination.totalPages}
-              className="px-2.5 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Next
-            </button>
-          </div>
-        </div>
+      {pagination && (
+        <Pagination
+          page={page}
+          totalPages={pagination.totalPages}
+          total={pagination.total}
+          limit={pagination.limit}
+          onPageChange={setPage}
+        />
       )}
     </div>
   );

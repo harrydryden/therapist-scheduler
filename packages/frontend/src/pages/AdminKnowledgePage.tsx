@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import ConfirmDialog from '../components/ConfirmDialog';
 import {
   getKnowledgeEntries,
   createKnowledgeEntry,
@@ -436,41 +437,18 @@ export default function AdminKnowledgePage() {
 
       {/* Delete Confirmation Dialog */}
       {deleteConfirmEntry && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={cancelDelete}
-          onKeyDown={(e) => { if (e.key === 'Escape') cancelDelete(); }}
+        <ConfirmDialog
+          title="Delete Entry"
+          confirmLabel={deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+          confirmVariant="danger"
+          isPending={deleteMutation.isPending}
+          onConfirm={confirmDelete}
+          onCancel={cancelDelete}
         >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="delete-confirm-title"
-            className="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
-            onClick={(e) => e.stopPropagation()}
-            ref={(el) => el?.focus()}
-            tabIndex={-1}
-          >
-            <h3 id="delete-confirm-title" className="text-lg font-semibold text-slate-900 mb-2">Delete Entry</h3>
-            <p className="text-slate-600 mb-6">
-              Are you sure you want to delete {deleteConfirmEntry.title ? `"${deleteConfirmEntry.title}"` : 'this entry'}? This cannot be undone.
-            </p>
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={cancelDelete}
-                className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmDelete}
-                disabled={deleteMutation.isPending}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
-              >
-                {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
-              </button>
-            </div>
-          </div>
-        </div>
+          <p className="text-slate-600">
+            Are you sure you want to delete {deleteConfirmEntry.title ? `"${deleteConfirmEntry.title}"` : 'this entry'}? This cannot be undone.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

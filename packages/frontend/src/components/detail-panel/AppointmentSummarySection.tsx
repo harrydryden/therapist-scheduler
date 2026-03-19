@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { AppointmentSummary } from '../../types';
+import { formatTimeAgo } from '../../utils/date-format';
 
 interface AppointmentSummarySectionProps {
   summary: AppointmentSummary | null;
@@ -12,16 +13,6 @@ const flagLabels: Record<string, { label: string; color: string }> = {
   closure_recommended: { label: 'Close', color: 'bg-red-100 text-red-700' },
 };
 
-function formatTimeAgo(isoDate: string): string {
-  const diffMs = Date.now() - new Date(isoDate).getTime();
-  const diffMins = Math.floor(diffMs / 60_000);
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  const diffHours = Math.floor(diffMins / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
-}
 
 export default function AppointmentSummarySection({ summary }: AppointmentSummarySectionProps) {
   // Re-render every 60s to keep relative timestamps fresh
