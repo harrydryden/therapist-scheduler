@@ -51,6 +51,36 @@ function StrikeIndicator({ count, max }: { count: number; max: number }) {
 }
 
 // ============================================
+// Toast Notification
+// ============================================
+
+function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
+  return (
+    <div className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${
+      type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
+    }`}>
+      <span>{message}</span>
+      <button type="button" onClick={onClose} className="text-white/80 hover:text-white">
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+function useToast() {
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 4000);
+  }, []);
+
+  return { toast, showToast };
+}
+
+// ============================================
 // Relative Time Helper
 // ============================================
 
@@ -82,18 +112,68 @@ function formatDate(dateStr: string | null): string {
 // Issue Voucher Modal
 // ============================================
 
-function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+interface IssueResult {
+  displayCode: string;
+  email: string;
+  expiresAt: string;
+  emailSent: boolean;
+}
+
+function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (result: IssueResult) => void }) {
   const [email, setEmail] = useState('');
   const [expiryDays, setExpiryDays] = useState(14);
   const [sendEmail, setSendEmail] = useState(true);
+  const [result, setResult] = useState<IssueResult | null>(null);
 
   const mutation = useMutation({
     mutationFn: () => issueVoucher({ email: email.trim(), expiryDays, sendEmail }),
-    onSuccess: () => {
-      onSuccess();
-      onClose();
+    onSuccess: (data) => {
+      setResult(data);
+      onSuccess(data);
     },
   });
+
+  // Show result screen after successful creation
+  if (result) {
+    return (
+      <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+          <div className="text-center">
+            <svg className="w-12 h-12 text-green-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1">Voucher Issued</h3>
+            <p className="text-sm text-slate-500 mb-4">{result.email}</p>
+
+            <div className="bg-slate-50 rounded-lg p-4 mb-4">
+              <p className="text-xs text-slate-500 mb-1">Session Code</p>
+              <code className="text-lg font-mono font-bold text-slate-900">{result.displayCode}</code>
+              <p className="text-xs text-slate-500 mt-2">
+                Expires {new Date(result.expiresAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+              </p>
+            </div>
+
+            {!result.emailSent && sendEmail && (
+              <p className="text-sm text-amber-600 mb-3">
+                Email sending failed — voucher was still created. Share the code manually.
+              </p>
+            )}
+            {result.emailSent && (
+              <p className="text-sm text-green-600 mb-3">Email sent to {result.email}</p>
+            )}
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm font-medium text-white bg-spill-blue-800 rounded-lg hover:bg-spill-blue-400 transition-colors"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -173,26 +253,55 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
 // Row Actions Dropdown
 // ============================================
 
-function RowActions({ record, onAction }: { record: VoucherRecord; onAction: () => void }) {
+function RowActions({ record, onAction }: { record: VoucherRecord; onAction: (message: string) => void }) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
 
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['vouchers'] });
+
   const resetMutation = useMutation({
     mutationFn: () => resetStrikes(record.email),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['vouchers'] }); onAction(); },
+    onMutate: async () => {
+      // Optimistic: immediately update cache
+      await queryClient.cancelQueries({ queryKey: ['vouchers'] });
+    },
+    onSuccess: () => { invalidate(); onAction(`Strikes reset for ${record.email}`); },
+    onError: () => { invalidate(); },
   });
 
   const revokeMutation = useMutation({
     mutationFn: () => revokeVoucher(record.email),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['vouchers'] }); onAction(); },
+    onSuccess: () => { invalidate(); onAction(`Voucher revoked for ${record.email}`); },
+    onError: () => { invalidate(); },
   });
 
   const resubMutation = useMutation({
     mutationFn: () => resubscribeUser(record.email),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['vouchers'] }); onAction(); },
+    onSuccess: () => { invalidate(); onAction(`${record.email} resubscribed with fresh voucher`); },
+    onError: () => { invalidate(); },
   });
 
   const isPending = resetMutation.isPending || revokeMutation.isPending || resubMutation.isPending;
+
+  const handleAction = (action: 'reset' | 'revoke' | 'resubscribe') => {
+    setOpen(false);
+
+    if (action === 'reset') {
+      resetMutation.mutate();
+      return;
+    }
+
+    if (action === 'revoke') {
+      if (!window.confirm(`Revoke the active voucher for ${record.email}? They won't be able to book until a new code is issued.`)) return;
+      revokeMutation.mutate();
+      return;
+    }
+
+    if (action === 'resubscribe') {
+      if (!window.confirm(`Resubscribe ${record.email}? This will reset strikes and issue a fresh voucher.`)) return;
+      resubMutation.mutate();
+    }
+  };
 
   return (
     <div className="relative">
@@ -221,7 +330,7 @@ function RowActions({ record, onAction }: { record: VoucherRecord; onAction: () 
             {record.strikeCount > 0 && (
               <button
                 type="button"
-                onClick={() => { resetMutation.mutate(); setOpen(false); }}
+                onClick={() => handleAction('reset')}
                 className="w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
               >
                 Reset Strikes
@@ -230,7 +339,7 @@ function RowActions({ record, onAction }: { record: VoucherRecord; onAction: () 
             {record.displayCode && record.status !== 'unsubscribed' && (
               <button
                 type="button"
-                onClick={() => { revokeMutation.mutate(); setOpen(false); }}
+                onClick={() => handleAction('revoke')}
                 className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50"
               >
                 Revoke Voucher
@@ -239,7 +348,7 @@ function RowActions({ record, onAction }: { record: VoucherRecord; onAction: () 
             {record.status === 'unsubscribed' && (
               <button
                 type="button"
-                onClick={() => { resubMutation.mutate(); setOpen(false); }}
+                onClick={() => handleAction('resubscribe')}
                 className="w-full px-3 py-2 text-left text-sm text-green-700 hover:bg-green-50"
               >
                 Resubscribe
@@ -300,6 +409,7 @@ export default function AdminVouchersPage() {
   const [showIssueModal, setShowIssueModal] = useState(false);
   const debouncedSearch = useDebounce(searchInput, 300);
   const queryClient = useQueryClient();
+  const { toast, showToast } = useToast();
 
   const effectiveFilters = { ...filters, search: debouncedSearch || undefined };
 
@@ -452,7 +562,7 @@ export default function AdminVouchersPage() {
                       <VoucherRow
                         key={record.email}
                         record={record}
-                        onAction={() => queryClient.invalidateQueries({ queryKey: ['vouchers'] })}
+                        onAction={(msg) => showToast(msg)}
                       />
                     ))}
                   </tbody>
@@ -478,9 +588,19 @@ export default function AdminVouchersPage() {
       {showIssueModal && (
         <IssueVoucherModal
           onClose={() => setShowIssueModal(false)}
-          onSuccess={() => queryClient.invalidateQueries({ queryKey: ['vouchers'] })}
+          onSuccess={(result) => {
+            queryClient.invalidateQueries({ queryKey: ['vouchers'] });
+            if (result.emailSent) {
+              showToast(`Voucher ${result.displayCode} issued and emailed to ${result.email}`);
+            } else {
+              showToast(`Voucher ${result.displayCode} created for ${result.email} (email not sent)`, 'error');
+            }
+          }}
         />
       )}
+
+      {/* Toast */}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => {}} />}
     </div>
   );
 }
@@ -489,7 +609,7 @@ export default function AdminVouchersPage() {
 // Table Row
 // ============================================
 
-function VoucherRow({ record, onAction }: { record: VoucherRecord; onAction: () => void }) {
+function VoucherRow({ record, onAction }: { record: VoucherRecord; onAction: (message: string) => void }) {
   return (
     <tr className="hover:bg-slate-50 transition-colors">
       <td className="px-4 py-3">
