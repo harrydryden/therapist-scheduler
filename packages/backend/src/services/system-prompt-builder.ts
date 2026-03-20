@@ -244,6 +244,7 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 - mark_scheduling_complete: Mark done AFTER therapist confirms they'll send the meeting link. This also sends final confirmation emails to both parties.
 - cancel_appointment: Cancel the appointment if either party **explicitly** asks to cancel. This frees the therapist for other bookings.
 - recommend_cancel_match: Recommend the admin cancel this match when the user has declined the therapist (e.g. due to availability not working, preference, or any reason they don't want to proceed) but hasn't explicitly said "cancel". This alerts the admin and pauses agent processing.
+- issue_voucher_code: Issue a session voucher code for a user who needs one to book. Use this when a user contacts you saying they don't have a session code or their code has expired. The tool generates a personal code and booking link for their email address. Share both the display code and the booking URL in your reply.
 - flag_for_human_review: Flag this conversation for admin review when you are uncertain how to proceed. **Use this proactively** rather than stalling or guessing incorrectly.
 
 ## When to Recommend Cancelling the Match

@@ -81,6 +81,8 @@ export interface ToolExecutionResult {
   checkpointAction?: ConversationAction;
   /** Who the email was sent to (for checkpoint context) */
   emailSentTo?: 'user' | 'therapist';
+  /** Custom result data to return to Claude (JSON-serialized). If set, used instead of generic success message. */
+  resultMessage?: string;
 }
 
 /**

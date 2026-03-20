@@ -205,7 +205,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           logger.info({ requestId, userEmail }, 'Booking attempted without voucher (required)');
           return reply.status(400).send({
             success: false,
-            error: 'A session code is required to book. Check your weekly email for your personal code.',
+            error: 'A session code is required to book. Check your weekly email for your personal code, or email scheduling@spill.chat to request one.',
             code: 'VOUCHER_REQUIRED',
           });
         }

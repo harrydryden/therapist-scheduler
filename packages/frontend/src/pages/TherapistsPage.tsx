@@ -28,6 +28,7 @@ export default function TherapistsPage() {
   });
 
   const introText = frontendSettings?.['frontend.therapistPageIntro'] || '';
+  const voucherRequired = frontendSettings?.['voucher.required'] ?? false;
 
   // Filter to only show active therapists
   const activeTherapists = useMemo(() => {
@@ -163,7 +164,7 @@ export default function TherapistsPage() {
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-5 gap-y-8">
             {filteredTherapists.map((therapist) => (
-              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucher} />
+              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucherRequired ? voucher : undefined} />
             ))}
           </div>
         </>
