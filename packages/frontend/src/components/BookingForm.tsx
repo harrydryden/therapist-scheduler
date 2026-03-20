@@ -3,6 +3,7 @@ import { ApiError } from '../api/client';
 import type { TherapistDetail } from '../types';
 import { APP } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
+import type { VoucherState } from '../hooks/useVoucher';
 
 // Helper to check if error is the thread limit error
 function isThreadLimitError(error: unknown): error is ApiError {
@@ -13,15 +14,17 @@ function isThreadLimitError(error: unknown): error is ApiError {
 // shared via the useBookingForm hook, eliminating duplication with TherapistCard.tsx.
 interface BookingFormProps {
   therapist: TherapistDetail;
+  voucher?: VoucherState;
 }
 
-export default function BookingForm({ therapist }: BookingFormProps) {
+export default function BookingForm({ therapist, voucher }: BookingFormProps) {
   const [submitted, setSubmitted] = useState(false);
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
     onSuccess: () => setSubmitted(true),
+    voucherToken: voucher?.voucherToken,
   });
 
   // Show "therapist booked" message when not accepting bookings
@@ -50,6 +53,36 @@ export default function BookingForm({ therapist }: BookingFormProps) {
     );
   }
 
+  // Gate: expired voucher
+  if (voucher && voucher.isExpired) {
+    return (
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
+        <svg className="w-12 h-12 text-amber-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <h3 className="text-lg font-semibold text-amber-800 mb-2">Session Code Expired</h3>
+        <p className="text-amber-700">
+          Your session code has expired. Check your email for a new one.
+        </p>
+      </div>
+    );
+  }
+
+  // Gate: no voucher at all (voucher system active but user arrived without one)
+  if (voucher && !voucher.voucherToken) {
+    return (
+      <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
+        <svg className="w-12 h-12 text-slate-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+        </svg>
+        <h3 className="text-lg font-semibold text-slate-700 mb-2">Session Code Required</h3>
+        <p className="text-slate-600">
+          A session code is required to book. Check your weekly email from Spill for your personal code.
+        </p>
+      </div>
+    );
+  }
+
   if (submitted) {
     return (
       <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-center">
@@ -61,6 +94,14 @@ export default function BookingForm({ therapist }: BookingFormProps) {
           We've received your appointment request. Our scheduling coordinator {APP.COORDINATOR_NAME} will email you shortly to find a
           time that works for both you and {therapist.name}.
         </p>
+        {voucher?.displayCode && (
+          <p className="text-sm text-green-600 mt-3">
+            Your session code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
+            {voucher.expiresAt && (
+              <> It expires on {voucher.expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.</>
+            )}
+          </p>
+        )}
       </div>
     );
   }
@@ -101,6 +142,22 @@ export default function BookingForm({ therapist }: BookingFormProps) {
           <p className="mt-1 text-xs text-red-600">Please enter a valid email address</p>
         )}
       </div>
+
+      {voucher?.displayCode && (
+        <div className="mb-4 px-3 py-2 bg-green-50 border border-green-200 rounded-md">
+          <div className="flex items-center gap-2">
+            <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            <span className="text-sm text-green-800 font-medium">Session code: {voucher.displayCode}</span>
+          </div>
+          {voucher.expiresAt && (
+            <p className="text-xs text-green-600 mt-1 ml-6">
+              Expires {voucher.expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}
+            </p>
+          )}
+        </div>
+      )}
 
       {mutation.isError && isThreadLimitError(mutation.error) && (
         <div className="mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">

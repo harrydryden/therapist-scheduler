@@ -54,6 +54,8 @@ export interface AppointmentRequest {
   therapistNotionId: string;
   therapistName?: string;
   therapistAvailability?: TherapistAvailability | null;
+  /** HMAC-signed voucher token from weekly promotional email (auto-applied via URL or manually entered) */
+  voucherToken?: string;
 }
 
 // ============================================

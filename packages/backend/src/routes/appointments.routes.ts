@@ -18,6 +18,7 @@ import { getSettingValue, SettingKey } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateTrackingCode } from '../utils/tracking-code';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
+import { validateVoucherToken, getDisplayCodeFromToken } from '../utils/voucher-token';
 
 // Idempotency window: 5 minutes
 const IDEMPOTENCY_WINDOW_MS = 5 * 60 * 1000;
@@ -34,6 +35,8 @@ const appointmentRequestSchema = z.object({
   therapistEmail: z.string().email('Invalid therapist email').max(255).optional(),
   therapistName: z.string().min(1, 'Therapist name is required').max(200).optional(),
   therapistAvailability: z.any().optional(),
+  // Voucher token from weekly promotional email (HMAC-signed, auto-applied via URL)
+  voucherToken: z.string().max(500).optional(),
 });
 
 /**
@@ -143,6 +146,69 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           { requestId, userEmail, warnings: emailValidation.warnings, suggestions: emailValidation.suggestions },
           'Email validation warnings (potential typo)'
         );
+      }
+
+      // === Voucher validation ===
+      const voucherToken = validation.data.voucherToken;
+      const voucherRequired = await getSettingValue<boolean>('voucher.required');
+      const voucherEnabled = await getSettingValue<boolean>('voucher.enabled');
+      let voucherDisplayCode: string | null = null;
+
+      if (voucherEnabled) {
+        if (voucherToken) {
+          const voucherExpiryDays = await getSettingValue<number>('voucher.expiryDays');
+          const voucherValidation = validateVoucherToken(voucherToken, voucherExpiryDays);
+
+          if (!voucherValidation.valid) {
+            if (voucherValidation.expired) {
+              logger.info({ requestId, userEmail }, 'Expired voucher token submitted');
+              return reply.status(400).send({
+                success: false,
+                error: 'Your session code has expired. Check your email for a new one.',
+              });
+            }
+            logger.warn({ requestId, userEmail }, 'Invalid voucher token submitted');
+            return reply.status(400).send({
+              success: false,
+              error: 'Invalid session code.',
+            });
+          }
+
+          // Verify voucher email matches the booking email (prevents sharing vouchers)
+          if (voucherValidation.email?.toLowerCase() !== userEmail.toLowerCase()) {
+            logger.warn(
+              { requestId, userEmail, voucherEmail: voucherValidation.email },
+              'Voucher email mismatch'
+            );
+            return reply.status(400).send({
+              success: false,
+              error: 'This session code was issued to a different email address.',
+            });
+          }
+
+          // Check if voucher has been revoked by admin (token cleared from DB)
+          const voucherTracking = await prisma.voucherTracking.findUnique({
+            where: { id: userEmail.toLowerCase() },
+            select: { lastVoucherToken: true },
+          });
+          if (voucherTracking && voucherTracking.lastVoucherToken !== voucherToken) {
+            logger.info({ requestId, userEmail }, 'Revoked voucher token submitted');
+            return reply.status(400).send({
+              success: false,
+              error: 'This session code is no longer valid. Check your email for a new one.',
+            });
+          }
+
+          voucherDisplayCode = getDisplayCodeFromToken(voucherToken);
+          logger.info({ requestId, userEmail, voucherDisplayCode }, 'Valid voucher token accepted');
+        } else if (voucherRequired) {
+          logger.info({ requestId, userEmail }, 'Booking attempted without voucher (required)');
+          return reply.status(400).send({
+            success: false,
+            error: 'A session code is required to book. Check your weekly email for your personal code.',
+            code: 'VOUCHER_REQUIRED',
+          });
+        }
       }
 
       try {
@@ -331,6 +397,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                 idempotencyKey, // For preventing duplicate submissions
                 userId: userEntity.id,
                 therapistId: therapistEntity.id,
+                voucherCode: voucherDisplayCode, // Record voucher used (analytics)
               },
             });
 
@@ -376,6 +443,20 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         notionUsersService.ensureUserExists({ email: userEmail, name: userName }).catch((err) => {
           logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
         });
+
+        // Update voucher tracking: mark voucher as used and reset strike count (non-blocking)
+        if (voucherDisplayCode && voucherEnabled) {
+          prisma.voucherTracking.update({
+            where: { id: userEmail.toLowerCase() },
+            data: {
+              lastVoucherUsedAt: new Date(),
+              strikeCount: 0,
+            },
+          }).catch((err) => {
+            // Non-critical: tracking record may not exist if voucher was from before tracking was enabled
+            logger.warn({ err, requestId, userEmail }, 'Failed to update voucher tracking (non-critical)');
+          });
+        }
 
         // Send Slack notification for new appointment request (non-blocking, respects settings)
         getSettingValue<boolean>('notifications.slack.requested')

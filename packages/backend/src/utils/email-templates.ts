@@ -20,6 +20,9 @@ export interface TemplateVariables {
   recipientType?: 'user' | 'therapist';
   // Cancellation variables
   cancellationReason?: string;
+  // Voucher variables (weekly mailing with voucher codes)
+  voucherCode?: string;
+  voucherExpiry?: string;
   // Allow arbitrary template variables
   [key: string]: string | undefined;
 }

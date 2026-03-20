@@ -8,9 +8,11 @@ import {
 } from '../config/therapist-categories';
 import { UI } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
+import type { VoucherState } from '../hooks/useVoucher';
 
 interface TherapistCardProps {
   therapist: Therapist;
+  voucher?: VoucherState;
 }
 
 // Category badge with tooltip (uses portal to escape overflow:hidden)
@@ -248,13 +250,14 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
 
 // FIX #38: Booking form logic (firstName, email, mutation, handleSubmit) is now
 // shared via the useBookingForm hook, eliminating duplication with BookingForm.tsx.
-const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardProps) {
+const TherapistCard = memo(function TherapistCard({ therapist, voucher }: TherapistCardProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showBookingForm, setShowBookingForm] = useState(false);
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
+    voucherToken: voucher?.voucherToken,
   });
 
   const toggleSection = (section: string) => {
@@ -347,7 +350,20 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
 
       {/* Row 8: Bottom action bar */}
       <div className="px-6 pb-5">
-        {mutation.isSuccess ? (
+        {/* Voucher gate: no voucher or expired */}
+        {voucher && !voucher.voucherToken ? (
+          <div className="text-center py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl">
+            <p className="text-xs text-slate-500">
+              A session code is required to book. Check your weekly email from Spill.
+            </p>
+          </div>
+        ) : voucher && voucher.isExpired ? (
+          <div className="text-center py-3 px-4 bg-amber-50 border border-amber-200 rounded-xl">
+            <p className="text-xs text-amber-700">
+              Your session code has expired. Check your email for a new one.
+            </p>
+          </div>
+        ) : mutation.isSuccess ? (
           <div className="text-center py-3 bg-spill-teal-100 rounded-xl">
             <div className="flex items-center justify-center gap-2">
               <svg className="w-5 h-5 text-spill-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -395,6 +411,14 @@ const TherapistCard = memo(function TherapistCard({ therapist }: TherapistCardPr
             </div>
             {showEmailError && (
               <p className="text-xs text-spill-red-600">Please enter a valid email address</p>
+            )}
+            {voucher?.displayCode && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-green-50 border border-green-200 rounded-lg">
+                <svg className="w-3.5 h-3.5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                <span className="text-xs text-green-800 font-medium">{voucher.displayCode}</span>
+              </div>
             )}
             <div className="flex gap-2">
               <button

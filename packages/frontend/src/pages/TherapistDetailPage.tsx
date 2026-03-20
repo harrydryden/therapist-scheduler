@@ -8,8 +8,10 @@ import {
   STYLE_OPTIONS,
   AREAS_OF_FOCUS_OPTIONS,
 } from '../config/therapist-categories';
+import { useVoucher } from '../hooks/useVoucher';
 
 export default function TherapistDetailPage() {
+  const voucher = useVoucher();
   const { id } = useParams<{ id: string }>();
 
   const {
@@ -164,7 +166,7 @@ export default function TherapistDetailPage() {
         {/* Sidebar with booking form */}
         <div className="lg:col-span-1">
           <div className="sticky top-8">
-            <BookingForm therapist={therapist} />
+            <BookingForm therapist={therapist} voucher={voucher} />
           </div>
         </div>
       </div>
