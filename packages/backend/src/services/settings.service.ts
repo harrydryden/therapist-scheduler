@@ -661,7 +661,7 @@ Best wishes,
 Justin
 
 ---
-You're receiving this because you've indicated you are interested in free therapy. To unsubscribe from these reminders, simply reply to this email asking to be removed.`,
+You're receiving this because you've indicated you are interested in free therapy. [Unsubscribe from these reminders]({unsubscribeUrl}).`,
   },
 
   // === CHASE FOLLOW-UP EMAIL TEMPLATES ===
@@ -942,7 +942,7 @@ Best wishes,
 Justin
 
 ---
-You're receiving this because you've indicated you are interested in free therapy. To unsubscribe from these reminders, simply reply to this email asking to be removed.`,
+You're receiving this because you've indicated you are interested in free therapy. [Unsubscribe from these reminders]({unsubscribeUrl}).`,
   },
   'email.voucherFinalNoticeSubject': {
     category: 'emailTemplates',
