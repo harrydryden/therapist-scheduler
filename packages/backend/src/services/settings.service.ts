@@ -637,20 +637,24 @@ All you need to do is select a therapist below. Enter your first name and email 
   'email.weeklyMailingSubject': {
     category: 'emailTemplates',
     label: 'Weekly Mailing - Subject',
-    description: 'Subject line for weekly promotional email. Variables: {userName}',
+    description: 'Subject line for weekly promotional email. Variables: {userName}, {voucherCode}',
     valueType: 'string',
-    defaultValue: 'Book your therapy session with Spill',
+    defaultValue: 'Your free therapy session code — book before it expires',
   },
   'email.weeklyMailingBody': {
     category: 'emailTemplates',
     label: 'Weekly Mailing - Body',
-    description: 'Email body for weekly promotional email. Variables: {userName}, {webAppUrl}. Supports markdown links: [text](url)',
+    description: 'Email body for weekly promotional email. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}, {unsubscribeUrl}. Supports markdown links: [text](url)',
     valueType: 'string',
     defaultValue: `Hi {userName},
 
-The are new therapists available for free sessions. If you have an issue or goal you would like support with have a look at their profiles and request a session. Our only ask is that you complete a short feedback form after the session. You can have as many free sessions with different therapists as you like.
+Due to demand we've had to limit the number of free therapy sessions we can offer. You've been allocated a personal session code: {voucherCode}
 
-[Book your session]({webAppUrl})
+This code expires on {voucherExpiry}, so please book before then. Once it's gone, your spot will be offered to someone else.
+
+[Book your free session]({webAppUrl})
+
+Our only ask is that you complete a short feedback form after the session.
 
 Best wishes,
 
