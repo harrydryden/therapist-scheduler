@@ -132,6 +132,20 @@ export const schedulingTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'issue_voucher_code',
+    description: 'Issue a new session voucher code for a user who does not have one. Use this when a user contacts you saying they need a session code to book. The voucher code and booking link will be generated for the provided email address. Share the display code and booking URL with the user in your reply.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        email: {
+          type: 'string',
+          description: 'The email address of the user to issue the voucher to',
+        },
+      },
+      required: ['email'],
+    },
+  },
+  {
     name: 'flag_for_human_review',
     description: 'Flag this conversation for human review when you are uncertain how to proceed, the situation is unusual, or you need guidance. This enables human control mode so an admin can review and respond. Use this proactively when unsure rather than guessing or stalling.',
     input_schema: {
@@ -275,7 +289,7 @@ export async function runToolLoop(
         if (result.skipped) {
           toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
         } else {
-          toolResult = `Tool ${result.toolName} executed successfully.`;
+          toolResult = result.resultMessage || `Tool ${result.toolName} executed successfully.`;
 
           executedTools.push({
             toolName: result.toolName,

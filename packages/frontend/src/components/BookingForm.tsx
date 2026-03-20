@@ -62,7 +62,8 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
         </svg>
         <h3 className="text-lg font-semibold text-amber-800 mb-2">Session Code Expired</h3>
         <p className="text-amber-700">
-          Your session code has expired. Check your email for a new one.
+          Your session code has expired. Check your email for a new one, or contact{' '}
+          <a href="mailto:scheduling@spill.chat" className="underline font-medium">scheduling@spill.chat</a> to request a fresh code.
         </p>
       </div>
     );
@@ -77,7 +78,8 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
         </svg>
         <h3 className="text-lg font-semibold text-slate-700 mb-2">Session Code Required</h3>
         <p className="text-slate-600">
-          A session code is required to book. Check your weekly email from Spill for your personal code.
+          A session code is required to book. Check your weekly email from Spill for your personal code. If you don't have one, email{' '}
+          <a href="mailto:scheduling@spill.chat" className="text-spill-blue-800 underline font-medium">scheduling@spill.chat</a> to request a code.
         </p>
       </div>
     );

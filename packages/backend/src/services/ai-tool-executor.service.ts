@@ -32,6 +32,8 @@ import { redis } from '../utils/redis';
 import type { ConversationAction } from '../utils/conversation-checkpoint';
 import type { SchedulingContext, ToolExecutionResult } from './justin-time.service';
 import { availabilityResolver } from './availability-resolver.service';
+import { generateVoucherUrl } from '../utils/voucher-token';
+import { getSettingValue } from './settings.service';
 
 // ─── Tool Input Validation Schemas ────────────────────────────────────────────
 
@@ -57,6 +59,10 @@ const cancelAppointmentInputSchema = z.object({
 
 const recommendCancelMatchInputSchema = z.object({
   reason: z.string().min(1).max(500),
+});
+
+const issueVoucherCodeInputSchema = z.object({
+  email: z.string().email().max(255),
 });
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
@@ -300,6 +306,51 @@ export class AIToolExecutorService {
           await this.recommendCancelMatch(context, parsed.data.reason);
           checkpointAction = 'recommended_cancel_match';
           break;
+        }
+
+        case 'issue_voucher_code': {
+          const parsed = issueVoucherCodeInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return { success: false, toolName: name, error: `Invalid input: ${parsed.error.message}` };
+          }
+          const emailLower = parsed.data.email.toLowerCase();
+          const expiryDays = await getSettingValue<number>('voucher.expiryDays');
+          const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
+          const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);
+
+          // Upsert voucher tracking record
+          const now = new Date();
+          await prisma.voucherTracking.upsert({
+            where: { id: emailLower },
+            create: {
+              id: emailLower,
+              lastVoucherSentAt: now,
+              lastVoucherToken: voucherResult.token,
+              strikeCount: 0,
+            },
+            update: {
+              lastVoucherSentAt: now,
+              lastVoucherToken: voucherResult.token,
+              reminderSentAt: null,
+              unsubscribedAt: null,
+              strikeCount: 0,
+            },
+          });
+
+          logger.info(
+            { traceId: this.traceId, email: emailLower, displayCode: voucherResult.displayCode },
+            'Agent issued voucher code for user'
+          );
+
+          // Return voucher details to Claude so it can share with the user
+          const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
+            day: 'numeric', month: 'long', year: 'numeric',
+          });
+          return {
+            success: true,
+            toolName: name,
+            resultMessage: `Voucher issued successfully. Display code: ${voucherResult.displayCode}. Booking URL: ${voucherResult.url}. Expires: ${voucherExpiry}. Share the display code and booking URL with the user.`,
+          };
         }
 
         case 'flag_for_human_review': {
