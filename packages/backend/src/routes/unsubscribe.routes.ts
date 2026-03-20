@@ -8,6 +8,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { logger } from '../utils/logger';
 import { notionUsersService } from '../services/notion-users.service';
 import { extractEmailFromToken } from '../utils/unsubscribe-token';
+import { prisma } from '../utils/prisma';
 
 export async function unsubscribeRoutes(fastify: FastifyInstance) {
   /**
@@ -74,6 +75,15 @@ export async function unsubscribeRoutes(fastify: FastifyInstance) {
 
         // Update subscription status
         await notionUsersService.updateSubscription(user.pageId, false);
+
+        // Sync voucher tracking state (non-blocking)
+        prisma.voucherTracking.update({
+          where: { id: email.toLowerCase() },
+          data: { unsubscribedAt: new Date() },
+        }).catch((err) => {
+          // Record may not exist if user never received a voucher
+          logger.warn({ err, requestId, email }, 'Failed to update voucher tracking on unsubscribe (non-critical)');
+        });
 
         logger.info({ requestId, email }, 'User unsubscribed successfully');
 
