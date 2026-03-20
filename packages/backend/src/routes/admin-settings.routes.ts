@@ -706,6 +706,11 @@ export async function publicSettingsRoutes(fastify: FastifyInstance) {
         // Get only frontend category settings
         const frontendSettings = await getCategorySettings('frontend');
 
+        // Include voucher.required so the booking form knows whether to gate on vouchers
+        const voucherRequired = await getSettingValue<boolean>('voucher.required');
+        const voucherEnabled = await getSettingValue<boolean>('voucher.enabled');
+        frontendSettings['voucher.required'] = voucherEnabled && voucherRequired;
+
         return reply.send({
           success: true,
           data: frontendSettings,
