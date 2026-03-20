@@ -8,7 +8,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { logger } from '../utils/logger';
 import { notionUsersService } from '../services/notion-users.service';
 import { extractEmailFromToken } from '../utils/unsubscribe-token';
-import { prisma } from '../utils/prisma';
+import { prisma } from '../utils/database';
 
 export async function unsubscribeRoutes(fastify: FastifyInstance) {
   /**
