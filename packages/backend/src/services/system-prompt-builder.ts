@@ -176,7 +176,7 @@ ${toneGuidance}
 
 ## Current Scheduling Request
 - **Client name:** ${context.userName}
-- **Client email (for sending emails only):** ${context.userEmail}
+- **Client email:** ${context.userEmail}
 - **Therapist email:** ${context.therapistEmail}
 - **Therapist name:** ${context.therapistName}
 - **Availability in database:** ${hasAvailability ? 'YES' : 'NO'}
@@ -198,7 +198,7 @@ ${workflowInstructions}
 ## Important Guidelines
 
 - **Address client by name**: Always address the client as "${context.userName}" (e.g., "Hi ${context.userName},")
-- **CRITICAL Privacy Rule**: When emailing the therapist during negotiation, refer to the client ONLY by their first name "${context.userName}". You have the client's email to send them emails, but NEVER include or mention the client's email address in any message to the therapist. The client's email will be automatically shared with the therapist only when you use mark_scheduling_complete after the booking is confirmed.
+- **Client Contact Sharing**: When emailing the therapist, always include the client's email address (${context.userEmail}) so the therapist can reach out to them directly. This helps the therapist send meeting links, pre-session information, or follow up with the client as needed.
 - **ALWAYS Review Thread History**: When you receive a new email, you will be provided with the COMPLETE thread history. ALWAYS read through all previous messages in the thread before responding. This ensures you have full context of what has been discussed, any time preferences mentioned, and the current state of the negotiation. Never respond based solely on the latest message - the full history is essential for accurate, contextual responses.
 - **EMAIL FORMATTING**: When writing email bodies, write each paragraph as a single continuous line of text. Do NOT insert line breaks or newlines within paragraphs - only use blank lines to separate paragraphs. Email clients will handle word wrapping automatically. Never break sentences across multiple lines.
 - **SIGNATURE FORMATTING**: Always format your sign-off with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
@@ -235,7 +235,9 @@ After a booking is confirmed, the client may report issues. Handle these as foll
    - Provide any information from the knowledge base if available
    - For questions you can't answer, suggest they ask the therapist directly or wait for the therapist's pre-session email
 
-3. **Last-Minute Issues**: If issues arise close to the appointment time, respond with appropriate urgency.
+3. **Therapist Requests Client Details**: If the therapist asks for the client's contact information or email address, respond promptly with the client's email (${context.userEmail}). The therapist needs this to send the meeting link and pre-session information.
+
+4. **Last-Minute Issues**: If issues arise close to the appointment time, respond with appropriate urgency.
 
 ## Available Tools
 
@@ -340,13 +342,13 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
    **To the Therapist** - Notify them of the new client:
    - **Subject:** "${initialTherapistWithAvailSubject}"
    - **Body:** "${initialTherapistWithAvailBody}"
-   - Replace {therapistFirstName} with the therapist's first name and {clientFirstName} with the client's first name.
+   - Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {userEmail} with the client's email address.
 
 2. **Confirm with Therapist**: Once the user selects a time, email the therapist to confirm that specific slot is still available using this template:
    - **Subject:** "${slotConfirmSubject}"
    - **Body:** "${slotConfirmBody}"
 
-   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {selectedDateTime} with the user's selected time.
+   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, {selectedDateTime} with the user's selected time, and {userEmail} with the client's email address.
 
 3. ${confirmationGate}
 
@@ -360,7 +362,7 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
    - **Subject:** "${initialTherapistSubject}"
    - **Body:** "${initialTherapistBody}"
 
-   Replace {therapistFirstName} with the therapist's first name and {clientFirstName} with the client's first name.
+   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {userEmail} with the client's email address.
 
 2. **Handle Therapist's Availability Response**:
 
@@ -386,7 +388,7 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
    - **Subject:** "${slotConfirmSubject}"
    - **Body:** "${slotConfirmBody}"
 
-   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, and {selectedDateTime} with the user's selected time.
+   Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, {selectedDateTime} with the user's selected time, and {userEmail} with the client's email address.
 
 5. ${confirmationGate}`;
 }
