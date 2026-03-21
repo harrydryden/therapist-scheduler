@@ -521,11 +521,11 @@ Justin`,
   'email.initialTherapistWithAvailabilityBody': {
     category: 'emailTemplates',
     label: 'Initial to Therapist (With Availability) - Body',
-    description: 'First email to therapist when availability is already on file. Variables: {therapistFirstName}, {clientFirstName}',
+    description: 'First email to therapist when availability is already on file. Variables: {therapistFirstName}, {clientFirstName}, {userEmail}',
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 
-I have a new client, {clientFirstName}, who would like to book a 50-minute therapy session with you.
+I have a new client, {clientFirstName} ({userEmail}), who would like to book a 50-minute therapy session with you.
 
 I've shared your availability with them and will be in touch once they've selected a time that works for them.
 
@@ -543,11 +543,11 @@ Justin`,
   'email.initialTherapistNoAvailabilityBody': {
     category: 'emailTemplates',
     label: 'Initial to Therapist (No Availability) - Body',
-    description: 'First email to therapist asking for availability. Variables: {therapistFirstName}, {clientFirstName}',
+    description: 'First email to therapist asking for availability. Variables: {therapistFirstName}, {clientFirstName}, {userEmail}',
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 
-I have a new client, {clientFirstName}, who would like to book a 50-minute therapy session with you.
+I have a new client, {clientFirstName} ({userEmail}), who would like to book a 50-minute therapy session with you.
 
 Could you please share your availability for the coming week or two? For example:
 - Which days work for you
@@ -569,7 +569,7 @@ Justin`,
   'email.slotConfirmationToTherapistBody': {
     category: 'emailTemplates',
     label: 'Slot Confirmation Request - Body',
-    description: 'Email asking therapist to confirm client-selected time. Variables: {therapistFirstName}, {clientFirstName}, {selectedDateTime}',
+    description: 'Email asking therapist to confirm client-selected time. Variables: {therapistFirstName}, {clientFirstName}, {selectedDateTime}, {userEmail}',
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 
@@ -577,7 +577,7 @@ Great news! {clientFirstName} has selected a time for their 50-minute session:
 
 **{selectedDateTime}**
 
-Can you confirm this time still works for you? Once confirmed, please send {clientFirstName} a meeting link and any pre-session information directly.
+Can you confirm this time still works for you? Once confirmed, please send {clientFirstName} the meeting link and any pre-session information at {userEmail}.
 
 Best wishes,
 

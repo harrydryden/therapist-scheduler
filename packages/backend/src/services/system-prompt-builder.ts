@@ -176,7 +176,7 @@ ${toneGuidance}
 
 ## Current Scheduling Request
 - **Client name:** ${context.userName}
-- **Client email (for sending emails only):** ${context.userEmail}
+- **Client email:** ${context.userEmail}
 - **Therapist email:** ${context.therapistEmail}
 - **Therapist name:** ${context.therapistName}
 - **Availability in database:** ${hasAvailability ? 'YES' : 'NO'}
@@ -198,7 +198,7 @@ ${workflowInstructions}
 ## Important Guidelines
 
 - **Address client by name**: Always address the client as "${context.userName}" (e.g., "Hi ${context.userName},")
-- **CRITICAL Privacy Rule**: When emailing the therapist during negotiation, refer to the client ONLY by their first name "${context.userName}". You have the client's email to send them emails, but NEVER include or mention the client's email address in any message to the therapist. The client's email will be automatically shared with the therapist only when you use mark_scheduling_complete after the booking is confirmed.
+- **Client Contact Sharing**: When emailing the therapist, always include the client's email address (${context.userEmail}) so the therapist can reach out to them directly. This helps the therapist send meeting links, pre-session information, or follow up with the client as needed.
 - **ALWAYS Review Thread History**: When you receive a new email, you will be provided with the COMPLETE thread history. ALWAYS read through all previous messages in the thread before responding. This ensures you have full context of what has been discussed, any time preferences mentioned, and the current state of the negotiation. Never respond based solely on the latest message - the full history is essential for accurate, contextual responses.
 - **EMAIL FORMATTING**: When writing email bodies, write each paragraph as a single continuous line of text. Do NOT insert line breaks or newlines within paragraphs - only use blank lines to separate paragraphs. Email clients will handle word wrapping automatically. Never break sentences across multiple lines.
 - **SIGNATURE FORMATTING**: Always format your sign-off with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
