@@ -430,21 +430,32 @@ function detectIntent(text: string): { intent: EmailIntent; confidence: number }
 
 /**
  * Detect sentiment of an email
+ *
+ * For frustrated/urgent: requires 2+ pattern matches to reduce false positives
+ * from innocent emotional language common in therapy scheduling contexts
+ * (e.g. "I'm disappointed the slot is taken", "still waiting on insurance").
  */
 function detectSentiment(text: string): EmailSentiment {
   const textLower = text.toLowerCase();
 
-  // Check in order of specificity
-  const sentimentOrder: EmailSentiment[] = ['urgent', 'frustrated', 'confused', 'positive', 'neutral'];
+  // Score frustrated and urgent rather than first-match-wins —
+  // a single keyword is too unreliable in therapy scheduling context
+  const highThresholdSentiments: EmailSentiment[] = ['urgent', 'frustrated'];
+  for (const sentiment of highThresholdSentiments) {
+    let matches = 0;
+    for (const pattern of SENTIMENT_PATTERNS[sentiment]) {
+      if (pattern.test(textLower) && !isNegated(textLower, pattern)) {
+        matches++;
+      }
+    }
+    if (matches >= 2) return sentiment;
+  }
 
-  for (const sentiment of sentimentOrder) {
-    const patterns = SENTIMENT_PATTERNS[sentiment];
-    for (const pattern of patterns) {
+  // Single-match is fine for lower-stakes sentiments
+  const simpleSentiments: EmailSentiment[] = ['confused', 'positive'];
+  for (const sentiment of simpleSentiments) {
+    for (const pattern of SENTIMENT_PATTERNS[sentiment]) {
       if (pattern.test(textLower)) {
-        // For urgent/frustrated, check the match isn't negated (e.g. "not urgent")
-        if ((sentiment === 'urgent' || sentiment === 'frustrated') && isNegated(textLower, pattern)) {
-          continue;
-        }
         return sentiment;
       }
     }
