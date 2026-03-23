@@ -390,7 +390,7 @@ export class JustinTimeService {
         runBackgroundTask(
           () => slackNotificationService.sendAlert({
             title: alertTitle,
-            severity: specialHandling.reason === 'urgent' || specialHandling.reason === 'frustrated_user' ? 'high' : 'medium',
+            severity: specialHandling.reason === 'urgent' ? 'high' : 'medium',
             appointmentId: appointmentRequestId,
             therapistName: appointmentRequest.therapistName,
             details: `${sender === 'therapist' ? 'Therapist' : 'Client'} email flagged: ${specialHandling.reason}`,
