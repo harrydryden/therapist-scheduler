@@ -721,6 +721,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
               previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
               confirmedDateTime: null,
               confirmedDateTimeParsed: null,
+              checkpointStage: 'rescheduling',
               // Reset follow-up sentinels so they re-trigger for the new date
               meetingLinkCheckSentAt: null,
               reminderSentAt: null,
