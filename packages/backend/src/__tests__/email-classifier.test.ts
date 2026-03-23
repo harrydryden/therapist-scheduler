@@ -182,6 +182,57 @@ describe('classifyEmail', () => {
       );
       expect(result.sentiment).toBe('neutral');
     });
+
+    it('does NOT flag "not urgent" as urgent sentiment', () => {
+      const result = classifyEmail(
+        "It's not urgent but could we find a time this week?",
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.sentiment).not.toBe('urgent');
+      expect(result.urgencyLevel).not.toBe('high');
+    });
+
+    it('does NOT flag casual "thanks again" as frustrated', () => {
+      const result = classifyEmail(
+        'Thanks again for your help with scheduling!',
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.sentiment).not.toBe('frustrated');
+    });
+
+    it('does NOT flag "just following up" as frustrated', () => {
+      const result = classifyEmail(
+        'Hi, just following up on the appointment times. Let me know what works.',
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.sentiment).not.toBe('frustrated');
+    });
+
+    it('does NOT flag single emotional word as frustrated', () => {
+      const result = classifyEmail(
+        "I'm disappointed the Thursday slot is already taken. Could we try Friday?",
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.sentiment).not.toBe('frustrated');
+    });
+
+    it('requires multiple signals to detect frustrated', () => {
+      const result = classifyEmail(
+        "I'm frustrated. Still waiting for a response. This is unacceptable.",
+        USER_EMAIL,
+        THERAPIST_EMAIL,
+        USER_EMAIL
+      );
+      expect(result.sentiment).toBe('frustrated');
+    });
   });
 
   describe('slot extraction', () => {
@@ -326,14 +377,14 @@ describe('classifyEmail', () => {
       expect(result.urgencyLevel).toBe('high');
     });
 
-    it('returns high for frustrated sentiment', () => {
+    it('returns medium for frustrated sentiment', () => {
       const result = classifyEmail(
-        "I'm so frustrated! Still waiting for a response!! This is unacceptable.",
+        "I'm so frustrated! Still waiting for a response. This is unacceptable.",
         USER_EMAIL,
         THERAPIST_EMAIL,
         USER_EMAIL
       );
-      expect(result.urgencyLevel).toBe('high');
+      expect(result.urgencyLevel).toBe('medium');
     });
 
     it('returns medium for cancellation', () => {

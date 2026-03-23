@@ -137,10 +137,9 @@ const SENTIMENT_PATTERNS: Record<EmailSentiment, RegExp[]> = {
   frustrated: [
     /(?:frustrat|annoyed|upset|disappointed)/i,
     /(?:still waiting|no response|haven(?:'t|t) heard)/i,
-    /(?:again|another email|follow(?:ing)? up)/i,
     /(?:this is (?:the|my) (?:second|third|fourth))/i,
     /(?:unacceptable|ridiculous|terrible)/i,
-    /!{2,}/,
+    /!{3,}/,
   ],
   confused: [
     /(?:confused|unclear|don(?:'t|t) understand)/i,
@@ -367,6 +366,19 @@ function detectTherapistConfirmation(
 }
 
 /**
+ * Check if a keyword match is negated by a preceding "not", "no", "isn't", etc.
+ */
+const NEGATION_PREFIX = /(?:not|no|isn'?t|aren'?t|wasn'?t|don'?t|doesn'?t|never|neither)\s+/;
+
+function isNegated(text: string, pattern: RegExp): boolean {
+  const match = text.match(pattern);
+  if (!match || match.index === undefined) return false;
+  // Check the 20 characters before the match for negation words
+  const prefix = text.slice(Math.max(0, match.index - 20), match.index);
+  return NEGATION_PREFIX.test(prefix);
+}
+
+/**
  * Detect the primary intent of an email
  */
 function detectIntent(text: string): { intent: EmailIntent; confidence: number } {
@@ -388,6 +400,10 @@ function detectIntent(text: string): { intent: EmailIntent; confidence: number }
   for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
     for (const pattern of patterns) {
       if (pattern.test(textLower)) {
+        // Skip negated urgent matches (e.g. "not urgent", "isn't critical")
+        if (intent === 'urgent' && isNegated(textLower, pattern)) {
+          continue;
+        }
         scores[intent as EmailIntent] += 1;
       }
     }
@@ -414,16 +430,31 @@ function detectIntent(text: string): { intent: EmailIntent; confidence: number }
 
 /**
  * Detect sentiment of an email
+ *
+ * For frustrated/urgent: requires 2+ pattern matches to reduce false positives
+ * from innocent emotional language common in therapy scheduling contexts
+ * (e.g. "I'm disappointed the slot is taken", "still waiting on insurance").
  */
 function detectSentiment(text: string): EmailSentiment {
   const textLower = text.toLowerCase();
 
-  // Check in order of specificity
-  const sentimentOrder: EmailSentiment[] = ['urgent', 'frustrated', 'confused', 'positive', 'neutral'];
+  // Score frustrated and urgent rather than first-match-wins —
+  // a single keyword is too unreliable in therapy scheduling context
+  const highThresholdSentiments: EmailSentiment[] = ['urgent', 'frustrated'];
+  for (const sentiment of highThresholdSentiments) {
+    let matches = 0;
+    for (const pattern of SENTIMENT_PATTERNS[sentiment]) {
+      if (pattern.test(textLower) && !isNegated(textLower, pattern)) {
+        matches++;
+      }
+    }
+    if (matches >= 2) return sentiment;
+  }
 
-  for (const sentiment of sentimentOrder) {
-    const patterns = SENTIMENT_PATTERNS[sentiment];
-    for (const pattern of patterns) {
+  // Single-match is fine for lower-stakes sentiments
+  const simpleSentiments: EmailSentiment[] = ['confused', 'positive'];
+  for (const sentiment of simpleSentiments) {
+    for (const pattern of SENTIMENT_PATTERNS[sentiment]) {
       if (pattern.test(textLower)) {
         return sentiment;
       }
@@ -455,18 +486,18 @@ function calculateUrgency(
   sentiment: EmailSentiment,
   text: string
 ): 'low' | 'medium' | 'high' {
-  // High urgency indicators
+  // High urgency: only genuine urgent signals
   if (intent === 'urgent' || sentiment === 'urgent') return 'high';
-  if (sentiment === 'frustrated') return 'high';
 
-  // Medium urgency
+  // Medium urgency: actionable but not emergency
+  if (sentiment === 'frustrated') return 'medium';
   if (intent === 'cancellation') return 'medium';
   if (intent === 'reschedule_request') return 'medium';
   if (intent === 'meeting_link_issue') return 'medium';
 
   // Check for time-sensitive language (not "today" alone — too common in normal scheduling)
   const urgentPhrases = /(?:asap|urgent|immediately|within \d+ hour)/i;
-  if (urgentPhrases.test(text)) return 'high';
+  if (urgentPhrases.test(text) && !isNegated(text.toLowerCase(), urgentPhrases)) return 'high';
 
   return 'low';
 }
