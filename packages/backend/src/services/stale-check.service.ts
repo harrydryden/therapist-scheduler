@@ -414,13 +414,19 @@ class StaleCheckService {
 
       // Find conversations that should be marked stale:
       // - lastActivityAt > 48 hours ago
-      // - status is active (not confirmed/cancelled)
+      // - status is active (pre-booking OR confirmed-but-rescheduling)
       // - not already marked stale
       // Note: lastActivityAt is non-nullable with @default(now()), so null check is unnecessary
+      // Active conversations: pre-booking statuses OR confirmed-but-rescheduling
+      const activeStatusFilter = [
+        { status: { in: ['pending' as const, 'contacted' as const, 'negotiating' as const] } },
+        { status: 'confirmed' as const, reschedulingInProgress: true },
+      ];
+
       const result = await prisma.appointmentRequest.updateMany({
         where: {
           lastActivityAt: { lt: staleThreshold },
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          OR: activeStatusFilter,
           isStale: false,
         },
         data: {
@@ -435,7 +441,7 @@ class StaleCheckService {
         const newlyStale = await prisma.appointmentRequest.findMany({
           where: {
             lastActivityAt: { lt: staleThreshold },
-            status: { in: ['pending', 'contacted', 'negotiating'] },
+            OR: activeStatusFilter,
             isStale: true,
           },
           select: { id: true },
@@ -449,11 +455,11 @@ class StaleCheckService {
 
       // Also unmark stale if activity has resumed
       // (in case lastActivityAt was updated but isStale wasn't reset)
-      // Only for active appointments - don't touch cancelled/confirmed
+      // Only for active appointments - don't touch cancelled/settled confirmed
       const unmarkedResult = await prisma.appointmentRequest.updateMany({
         where: {
           lastActivityAt: { gte: staleThreshold },
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          OR: activeStatusFilter,
           isStale: true,
         },
         data: {
@@ -504,13 +510,17 @@ class StaleCheckService {
       // These are "spinning" - emails being processed but no forward progress
       const stalledResult = await prisma.appointmentRequest.updateMany({
         where: {
-          status: { in: ['pending', 'contacted', 'negotiating'] },
-          lastActivityAt: { gte: stallThreshold }, // Has recent activity
-          OR: [
-            { lastToolExecutedAt: null }, // Never executed a tool
-            { lastToolExecutedAt: { lt: stallThreshold } }, // Tool executed >24h ago
+          AND: [
+            { OR: activeStatusFilter },
+            {
+              lastActivityAt: { gte: stallThreshold }, // Has recent activity
+              OR: [
+                { lastToolExecutedAt: null }, // Never executed a tool
+                { lastToolExecutedAt: { lt: stallThreshold } }, // Tool executed >24h ago
+              ],
+              conversationStallAlertAt: null, // Not already alerted
+            },
           ],
-          conversationStallAlertAt: null, // Not already alerted
         },
         data: {
           conversationStallAlertAt: new Date(),
@@ -531,7 +541,7 @@ class StaleCheckService {
         const recentStallCutoff = new Date(Date.now() - 2 * 60 * 1000);
         const stalledAppointments = await prisma.appointmentRequest.findMany({
           where: {
-            status: { in: ['pending', 'contacted', 'negotiating'] },
+            OR: activeStatusFilter,
             conversationStallAlertAt: { gte: recentStallCutoff },
             conversationStallAcknowledged: false,
           },
@@ -569,7 +579,7 @@ class StaleCheckService {
       // Also clear stall alerts if tool was recently executed
       const clearedStallResult = await prisma.appointmentRequest.updateMany({
         where: {
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          OR: activeStatusFilter,
           lastToolExecutedAt: { gte: stallThreshold }, // Tool executed recently
           conversationStallAlertAt: { not: null }, // Has an alert
           conversationStallAcknowledged: false, // Not yet acknowledged
@@ -681,7 +691,10 @@ class StaleCheckService {
     // - Have not been auto-escalated before
     const candidates = await prisma.appointmentRequest.findMany({
       where: {
-        status: { in: ['pending', 'contacted', 'negotiating'] },
+        OR: [
+          { status: { in: ['pending' as const, 'contacted' as const, 'negotiating' as const] } },
+          { status: 'confirmed' as const, reschedulingInProgress: true },
+        ],
         conversationStallAlertAt: {
           not: null,
           lt: escalationThreshold, // Stall alert is older than threshold

@@ -44,9 +44,13 @@ class ChaseEmailService {
       }
 
       // Find stale conversations that haven't been chased yet
+      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          OR: [
+            { status: { in: ['pending', 'contacted', 'negotiating'] } },
+            { status: 'confirmed', reschedulingInProgress: true },
+          ],
           lastActivityAt: { lt: chaseThreshold },
           chaseSentAt: null, // Never chased (and not currently being sent)
           humanControlEnabled: false, // Don't chase while under human control
@@ -310,9 +314,13 @@ class ChaseEmailService {
       const closureThreshold = new Date(Date.now() - closureHours * 60 * 60 * 1000);
 
       // Find conversations where chase was sent but no response received
+      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          OR: [
+            { status: { in: ['pending', 'contacted', 'negotiating'] } },
+            { status: 'confirmed', reschedulingInProgress: true },
+          ],
           chaseSentAt: {
             gt: new Date(0), // Exclude null and sentinels (in-flight sends)
             lt: closureThreshold, // Chase sent > threshold ago

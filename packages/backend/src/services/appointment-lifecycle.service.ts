@@ -1484,6 +1484,7 @@ class AppointmentLifecycleService {
         updateData.reschedulingInProgress = true;
         updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
         updateData.reschedulingInitiatedBy = `admin:${adminId}`;
+        updateData.checkpointStage = 'rescheduling';
       }
 
       // When setting a new date, clear the rescheduling flag
