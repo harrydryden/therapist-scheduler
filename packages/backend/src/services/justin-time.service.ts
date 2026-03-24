@@ -53,13 +53,6 @@ import {
   type ConversationMessage,
 } from './scheduling-context.service';
 
-// ─── Backward-compatible re-exports ─────────────────────────────────────────
-// Other files (routes, agent-tool-loop, system-prompt-builder, ai-conversation,
-// ai-tool-executor) previously imported these types from this file.
-// They now import directly from scheduling-context.service.ts, but we keep
-// re-exports here so any remaining consumer code continues to work.
-export type { SchedulingContext, ToolExecutionResult, ConversationMessage };
-
 export class JustinTimeService {
   private traceId: string;
   private aiConversation: AIConversationService;
