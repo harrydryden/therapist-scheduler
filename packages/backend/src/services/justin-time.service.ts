@@ -702,13 +702,19 @@ ${formatClassificationForPrompt(emailClassification)}`;
           (t) => t.toolName === 'mark_scheduling_complete'
         );
 
-        // Tools that indicate the agent is actively working on a reschedule or cancellation
-        const schedulingToolNames = [
-          'send_email', 'update_therapist_availability', 'cancel_appointment',
-          'recommend_cancel_match', 'flag_for_human_review',
+        // Determine if the agent actually initiated rescheduling/cancellation.
+        // Signals: emailing the therapist (coordination), modifying availability,
+        // or cancellation tools. Emails sent only to the user (e.g. asking for
+        // preferred times, acknowledging a meeting link check) are NOT rescheduling
+        // signals — no therapist coordination has started yet.
+        const reschedulingToolNames = [
+          'update_therapist_availability', 'cancel_appointment', 'recommend_cancel_match',
         ];
-        const initiatedReschedule = executedTools.some(
-          (t) => schedulingToolNames.includes(t.toolName)
+        const emailedTherapist = executedTools.some(
+          (t) => t.toolName === 'send_email' && t.emailSentTo === 'therapist'
+        );
+        const initiatedReschedule = emailedTherapist || executedTools.some(
+          (t) => reschedulingToolNames.includes(t.toolName)
         );
 
         if (completedReschedule) {
