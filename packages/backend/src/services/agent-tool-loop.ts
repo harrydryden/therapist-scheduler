@@ -34,7 +34,7 @@ import {
   wouldRegress,
 } from '../utils/conversation-checkpoint';
 import { truncateMessageContent } from './ai-conversation.service';
-import type { ToolExecutionResult, SchedulingContext } from './justin-time.service';
+import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
 
 const MAX_TOOL_ITERATIONS = 5;

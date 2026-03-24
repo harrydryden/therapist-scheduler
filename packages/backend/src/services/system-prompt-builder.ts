@@ -31,7 +31,7 @@ import {
   type ConversationFacts,
   formatFactsForPrompt,
 } from '../utils/conversation-facts';
-import type { SchedulingContext } from './justin-time.service';
+import type { SchedulingContext } from './scheduling-context.service';
 
 /**
  * Wraps a promise with a timeout

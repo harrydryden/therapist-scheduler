@@ -257,6 +257,94 @@ export const WORK_REPORT = {
   LAST_REPORT_KEY: 'work-report:last-send-date',
 } as const;
 
+// Redis backpressure thresholds
+export const REDIS_BACKPRESSURE = {
+  /** After this many consecutive failures, enter light backpressure */
+  LIGHT_THRESHOLD: 3,
+  /** After this many consecutive failures, enter moderate backpressure */
+  MODERATE_THRESHOLD: 5,
+  /** After this many consecutive failures, enter severe backpressure */
+  SEVERE_THRESHOLD: 10,
+  /** Time in ms to wait before attempting recovery */
+  RECOVERY_WAIT_MS: 5000,
+  /** Multiplier for backoff during backpressure */
+  BACKOFF_MULTIPLIER: 2,
+  /** Default cache TTL in seconds */
+  DEFAULT_CACHE_TTL_SECONDS: 3600, // 1 hour
+} as const;
+
+// Email message processing
+export const EMAIL_PROCESSING = {
+  /** Redis ZSET key for processed messages */
+  PROCESSED_MESSAGES_KEY: 'gmail:processedMessages',
+  /** Redis key prefix for message locks */
+  MESSAGE_LOCK_PREFIX: 'gmail:lock:message:',
+  /** Redis key prefix for unmatched attempt tracking */
+  UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
+  /** Days to keep processed message IDs */
+  PROCESSED_MESSAGE_TTL_DAYS: 30,
+  /** Max attempts to match a message before giving up */
+  MAX_UNMATCHED_ATTEMPTS: 3,
+  /** TTL for unmatched attempt tracking (seconds) */
+  UNMATCHED_ATTEMPT_TTL_SECONDS: 3600,
+  /** Only run cleanup every N messages */
+  CLEANUP_INTERVAL_MESSAGES: 100,
+  /** Redis key for atomic cleanup counter */
+  CLEANUP_COUNTER_KEY: 'gmail:cleanupCounter',
+} as const;
+
+// Post-booking follow-up processing
+export const POST_BOOKING_PROCESSING = {
+  /** Batch size for processing to prevent memory issues */
+  BATCH_SIZE: 50,
+  /** Maximum parse attempts before giving up on a datetime string */
+  MAX_PARSE_ATTEMPTS: 3,
+  /** Reset parse failure tracking after this period (ms) */
+  PARSE_FAILURE_RESET_MS: 60 * 60 * 1000, // 1 hour
+  /** Force retry of all failures after this period (ms) */
+  DAILY_REPARSE_MS: 24 * 60 * 60 * 1000, // 24 hours
+  /** Max tracked parse failures to prevent unbounded memory growth */
+  MAX_PARSE_FAILURES: 500,
+} as const;
+
+// Stale check service intervals
+export const STALE_CHECK_INTERVALS = {
+  /** How often to run stale checks (ms) */
+  CHECK_INTERVAL_MS: 60 * 60 * 1000, // 1 hour
+  /** How often to run retention cleanup (ms) */
+  RETENTION_CHECK_INTERVAL_MS: 24 * 60 * 60 * 1000, // 24 hours
+} as const;
+
+// Slack notification operational constants
+export const SLACK_OPERATIONAL = {
+  /** Redis key for persisted notification queue */
+  QUEUE_KEY: 'slack:notification:queue',
+  /** TTL for queued notifications (seconds) */
+  QUEUE_TTL_SECONDS: 86400, // 24 hours
+  /** Suppress identical alerts within this window (seconds) */
+  NOTIFICATION_DEDUP_TTL_SECONDS: 120,
+  /** Suppress same notification type per appointment (seconds) */
+  APPOINTMENT_DEDUP_TTL_SECONDS: 86400, // 24 hours
+  /** Max queued notifications in memory */
+  MAX_QUEUE_SIZE: 100,
+  /** Circuit breaker config for Slack webhooks */
+  CIRCUIT_BREAKER: {
+    name: 'slack-webhook',
+    failureThreshold: 5,
+    resetTimeout: 30000, // 30 seconds
+    successThreshold: 2,
+    failureWindow: 60000, // 1 minute
+  },
+} as const;
+
+// Tool execution idempotency
+export const TOOL_EXECUTION = {
+  /** Redis key prefix for tool execution tracking */
+  PREFIX: 'tool:executed:',
+  /** TTL for idempotency keys (seconds) */
+  TTL_SECONDS: 3600, // 1 hour
+} as const;
+
 // Slack notification settings
 export const SLACK_NOTIFICATIONS = {
   // Weekly summary: Monday at 9am (Europe/London timezone)

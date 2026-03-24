@@ -3,7 +3,7 @@
  * Handles human-readable strings like "Monday 3rd February at 10:00am"
  */
 
-import * as chrono from 'chrono-node';
+import { parse as chronoParse } from 'chrono-node';
 import { config } from '../config';
 import { logger } from './logger';
 
@@ -78,7 +78,7 @@ export function parseConfirmedDateTime(
       chronoOptions.timezone = timezone;
     }
 
-    const results = chrono.parse(normalized, referenceDate, chronoOptions);
+    const results = chronoParse(normalized, referenceDate, chronoOptions);
 
     if (results.length > 0 && results[0].date()) {
       let parsedDate = results[0].date();

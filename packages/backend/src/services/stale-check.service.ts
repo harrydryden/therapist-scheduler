@@ -5,16 +5,12 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
-import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK } from '../constants';
+import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS } from '../constants';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
 import { auditEventService } from './audit-event.service';
 
-// Check interval: every hour
-const CHECK_INTERVAL_MS = 60 * 60 * 1000;
-
-// Data retention cleanup interval: every 24 hours
-const RETENTION_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const { CHECK_INTERVAL_MS, RETENTION_CHECK_INTERVAL_MS } = STALE_CHECK_INTERVALS;
 
 class StaleCheckService {
   private intervalId: NodeJS.Timeout | null = null;

@@ -25,7 +25,7 @@ import { resilientCall } from '../utils/resilient-call';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
 import type { ConversationState } from '../types';
 
-import type { ConversationMessage } from './justin-time.service';
+import type { ConversationMessage } from './scheduling-context.service';
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 

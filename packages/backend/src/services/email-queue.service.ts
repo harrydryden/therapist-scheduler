@@ -281,8 +281,7 @@ class EmailQueueService {
       // Worst case: a duplicate send, which is better than no send
     }
 
-    // Lazy import to avoid circular dependency
-    const { emailProcessingService } = await import('./email-processing.service');
+    // Use top-level import (circular dependency resolved via event bus architecture)
     await emailProcessingService.sendEmail({
       to,
       subject,
