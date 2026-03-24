@@ -212,9 +212,10 @@ Never write "Best wishes, ${agentName}" or "Best wishes ${agentName}" on a singl
 
 If either party (client or therapist) indicates they need to change the appointment time AFTER booking is confirmed:
 
-1. **When one party reports a time change**: Email the OTHER party to confirm the new proposed time.
-2. **Wait for confirmation**: Do not finalize until the other party agrees to the new time.
-3. **Finalize the reschedule**: Once both parties agree on a new time, use mark_scheduling_complete with the NEW datetime. This will:
+1. **Signal the reschedule**: FIRST call initiate_reschedule with the reason. This must be called BEFORE sending any emails so the system knows rescheduling is in progress.
+2. **When one party reports a time change**: Email the OTHER party to confirm the new proposed time.
+3. **Wait for confirmation**: Do not finalize until the other party agrees to the new time.
+4. **Finalize the reschedule**: Once both parties agree on a new time, use mark_scheduling_complete with the NEW datetime. This will:
    - Update the appointment to the new time
    - Store the previous time for reference
    - Reset follow-up email schedules for the new appointment time
@@ -244,6 +245,7 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 - send_email: Send emails to client or therapist
 - update_therapist_availability: Save therapist's availability to database (use when therapist first provides their times)
 - mark_scheduling_complete: Mark done AFTER therapist confirms they'll send the meeting link. This also sends final confirmation emails to both parties.
+- initiate_reschedule: Signal that a reschedule is needed. Call this FIRST when either party requests a time change on a confirmed appointment, BEFORE sending any coordination emails.
 - cancel_appointment: Cancel the appointment if either party **explicitly** asks to cancel. This frees the therapist for other bookings.
 - recommend_cancel_match: Recommend the admin cancel this match when the user has declined the therapist (e.g. due to availability not working, preference, or any reason they don't want to proceed) but hasn't explicitly said "cancel". This alerts the admin and pauses agent processing.
 - issue_voucher_code: Issue a session voucher code for a user who needs one to book. Use this when a user contacts you saying they don't have a session code or their code has expired. The tool generates a personal code and booking link for their email address. Share both the display code and the booking URL in your reply.

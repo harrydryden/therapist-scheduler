@@ -64,6 +64,10 @@ const recommendCancelMatchInputSchema = z.object({
   reason: z.string().min(1).max(500),
 });
 
+const initiateRescheduleInputSchema = z.object({
+  reason: z.string().min(1).max(500),
+});
+
 /**
  * FIX T1: Tool execution result type for explicit success/failure reporting
  * Instead of returning void, executeToolCall now returns this type so callers
@@ -696,25 +700,18 @@ ${formatClassificationForPrompt(emailClassification)}`;
         //
         // We check what the agent actually did during the tool loop to decide:
         // - mark_scheduling_complete called → reschedule already finalized, skip
-        // - Scheduling-related tools called → reschedule in progress, clear date & reset flags
-        // - No scheduling tools called → informational reply, leave appointment untouched
+        // - initiate_reschedule called → reschedule in progress, clear stale date
+        // - Neither called → informational reply, leave appointment untouched
         const completedReschedule = executedTools.some(
           (t) => t.toolName === 'mark_scheduling_complete'
         );
 
-        // Determine if the agent actually initiated rescheduling/cancellation.
-        // Signals: emailing the therapist (coordination), modifying availability,
-        // or cancellation tools. Emails sent only to the user (e.g. asking for
-        // preferred times, acknowledging a meeting link check) are NOT rescheduling
-        // signals — no therapist coordination has started yet.
-        const reschedulingToolNames = [
-          'update_therapist_availability', 'cancel_appointment', 'recommend_cancel_match',
-        ];
-        const emailedTherapist = executedTools.some(
-          (t) => t.toolName === 'send_email' && t.emailSentTo === 'therapist'
-        );
-        const initiatedReschedule = emailedTherapist || executedTools.some(
-          (t) => reschedulingToolNames.includes(t.toolName)
+        // Check if the agent explicitly signalled rescheduling via initiate_reschedule.
+        // This is the only reliable signal — we cannot infer intent from send_email
+        // because emailing the therapist happens for both rescheduling ("Can we move
+        // to Friday?") and non-rescheduling reasons ("Please resend the meeting link").
+        const initiatedReschedule = executedTools.some(
+          (t) => t.toolName === 'initiate_reschedule'
         );
 
         if (completedReschedule) {
@@ -723,13 +720,14 @@ ${formatClassificationForPrompt(emailClassification)}`;
             'Skipping rescheduling flag update - mark_scheduling_complete already finalized the reschedule'
           );
         } else if (initiatedReschedule) {
-          // Clear the confirmed date/time so that:
+          // Agent confirmed this is a reschedule. Clear the confirmed date/time so that:
           // 1. The old date doesn't mislead admins on the dashboard
-          // 2. Follow-up services (reminders, meeting link checks, feedback forms) don't
-          //    fire based on the stale date
-          // 3. The lifecycle tick doesn't auto-transition to session_held when the old
+          // 2. The lifecycle tick doesn't auto-transition to session_held when the old
           //    date passes while rescheduling is still in progress
-          // Also reset follow-up sentinel flags so they re-fire once the new date is set.
+          // NOTE: Follow-up sentinel flags are NOT reset here. They will be reset by
+          // mark_scheduling_complete (via resetFollowUpFlags) when the new date is
+          // confirmed. This prevents duplicate check-ins if the rescheduling process
+          // is abandoned and the original appointment stands.
           await prisma.appointmentRequest.update({
             where: { id: appointmentRequestId },
             data: {
@@ -739,25 +737,21 @@ ${formatClassificationForPrompt(emailClassification)}`;
               confirmedDateTime: null,
               confirmedDateTimeParsed: null,
               checkpointStage: 'rescheduling',
-              // Reset follow-up sentinels so they re-trigger for the new date
-              meetingLinkCheckSentAt: null,
-              reminderSentAt: null,
-              feedbackFormSentAt: null,
-              feedbackReminderSentAt: null,
             },
             select: { id: true },
           });
           logger.info(
             { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
-            'Email received for confirmed appointment - marked as rescheduling in progress, cleared stale date/time'
+            'Agent initiated reschedule for confirmed appointment - cleared stale date/time'
           );
         } else {
-          // No scheduling tools called — this was an informational reply
-          // (e.g. user acknowledging a meeting link check, asking a question).
+          // Agent did not signal rescheduling — this was an informational reply
+          // (e.g. user acknowledging a meeting link check, asking a question,
+          // or therapist providing session details).
           // Leave the appointment state and follow-up flags untouched.
           logger.info(
             { traceId: this.traceId, appointmentRequestId, executedToolNames: executedTools.map(t => t.toolName) },
-            'Email received for confirmed appointment but no scheduling actions taken - treating as informational reply'
+            'Email received for confirmed appointment - no reschedule initiated, treating as informational'
           );
         }
       } else if (appointmentRequest.status === 'cancelled') {
@@ -967,6 +961,23 @@ ${formatClassificationForPrompt(emailClassification)}`;
           }
           await this.recommendCancelMatch(context, parsed.data.reason);
           checkpointAction = 'recommended_cancel_match';
+          break;
+        }
+
+        case 'initiate_reschedule': {
+          const parsed = initiateRescheduleInputSchema.safeParse(input);
+          if (!parsed.success) {
+            const errorMsg = `Invalid initiate_reschedule input: ${parsed.error.message}`;
+            logger.error({ traceId: this.traceId, errors: parsed.error.errors }, 'Invalid initiate_reschedule input');
+            return { success: false, toolName: name, error: errorMsg };
+          }
+          // This tool is a signal only — the actual state update (clearing date,
+          // setting reschedulingInProgress) happens in the post-tool-loop logic
+          // when it sees initiate_reschedule in executedTools.
+          logger.info(
+            { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, reason: parsed.data.reason },
+            'Agent signalled reschedule intent'
+          );
           break;
         }
 
