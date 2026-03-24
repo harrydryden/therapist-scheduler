@@ -353,9 +353,24 @@ class TherapistBookingStatusService {
         return true;
       }
 
+      // Defense-in-depth: if a confirmed/session_held/feedback_requested appointment exists
+      // but hasConfirmedBooking was not set (e.g. markConfirmed failed), still freeze.
+      // This check is independent of frozenAt so it works even after auto-unfreeze.
+      const confirmedAppointment = await prisma.appointmentRequest.findFirst({
+        where: {
+          therapistNotionId,
+          status: { in: ['confirmed', 'session_held', 'feedback_requested'] },
+        },
+        select: { id: true },
+      });
+
+      if (confirmedAppointment) {
+        return true;
+      }
+
       // Check if frozen flag is set (set on new request, cleared by auto-unfreeze)
       if (status.frozenAt) {
-        // Verify there are still active conversations
+        // Verify there are still active pre-booking conversations
         const activeRequest = await prisma.appointmentRequest.findFirst({
           where: {
             therapistNotionId,
@@ -404,13 +419,33 @@ class TherapistBookingStatusService {
       // Build map of status by ID
       const statusMap = new Map(statuses.map(s => [s.id, s]));
 
+      // Find therapist IDs that need confirmed appointment check (hasConfirmedBooking not set)
+      const needsConfirmedCheck = statuses
+        .filter(s => !s.hasConfirmedBooking)
+        .map(s => s.id);
+
       // Find therapist IDs that have frozenAt but not hasConfirmedBooking
-      // These need the active appointment check
+      // These need the pre-booking active appointment check
       const needsActiveCheck = statuses
         .filter(s => s.frozenAt && !s.hasConfirmedBooking)
         .map(s => s.id);
 
-      // Query 2: Get therapists with active conversations (single query)
+      // Query 2: Defense-in-depth — find therapists with confirmed+ appointments
+      // even if hasConfirmedBooking flag wasn't set (e.g. markConfirmed failed)
+      const therapistsWithConfirmedAppointments = new Set<string>();
+      if (needsConfirmedCheck.length > 0) {
+        const confirmedAppointments = await prisma.appointmentRequest.findMany({
+          where: {
+            therapistNotionId: { in: needsConfirmedCheck },
+            status: { in: ['confirmed', 'session_held', 'feedback_requested'] },
+          },
+          select: { therapistNotionId: true },
+          distinct: ['therapistNotionId'],
+        });
+        confirmedAppointments.forEach(a => therapistsWithConfirmedAppointments.add(a.therapistNotionId));
+      }
+
+      // Query 3: Get therapists with active pre-booking conversations (single query)
       const therapistsWithActiveConversations = new Set<string>();
       if (needsActiveCheck.length > 0) {
         const activeAppointments = await prisma.appointmentRequest.findMany({
@@ -435,6 +470,12 @@ class TherapistBookingStatusService {
 
         if (status.hasConfirmedBooking) {
           result.set(therapistId, true); // Confirmed booking = always frozen
+          continue;
+        }
+
+        // Defense-in-depth: confirmed+ appointment exists but flag not set
+        if (therapistsWithConfirmedAppointments.has(therapistId)) {
+          result.set(therapistId, true);
           continue;
         }
 
@@ -689,6 +730,11 @@ class TherapistBookingStatusService {
           tbs.admin_alert_acknowledged,
           CASE
             WHEN tbs.has_confirmed_booking = true THEN true
+            WHEN EXISTS (
+              SELECT 1 FROM appointment_requests ar
+              WHERE ar.therapist_notion_id = tbs.id
+                AND ar.status IN ('confirmed', 'session_held', 'feedback_requested')
+            ) THEN true
             WHEN tbs.frozen_at IS NOT NULL AND EXISTS (
               SELECT 1 FROM appointment_requests ar
               WHERE ar.therapist_notion_id = tbs.id
