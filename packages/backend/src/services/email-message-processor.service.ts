@@ -8,18 +8,44 @@ import {
   stripHtml,
   encodeEmailHeader,
 } from '../utils/email-encoding';
-// FIX #5: Lazy import to break circular dependency:
-// justin-time.service -> appointment-lifecycle.service -> email-processing.service -> justin-time.service
-// Using dynamic import at call sites instead of top-level import.
-type JustinTimeServiceType = import('./justin-time.service').JustinTimeService;
-function getJustinTimeService(): typeof import('./justin-time.service').JustinTimeService {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('./justin-time.service').JustinTimeService;
+// FIX #5 (refactored): Dependency injection to break circular dependency.
+// Instead of require() at call sites, the AgentProcessor interface is registered
+// at startup by server.ts after all modules are loaded.
+export interface AgentProcessor {
+  processEmailReply(
+    appointmentId: string,
+    body: string,
+    from: string,
+    threadContext?: unknown,
+  ): Promise<void>;
+  processInquiryReply(
+    inquiryId: string,
+    body: string,
+    from: string,
+    threadContext?: unknown,
+  ): Promise<void>;
+}
+
+let agentProcessorFactory: ((traceId: string) => AgentProcessor) | null = null;
+
+/**
+ * Register the agent processor factory at startup to avoid circular imports.
+ * Called from server.ts after all services are initialized.
+ */
+export function registerAgentProcessor(factory: (traceId: string) => AgentProcessor): void {
+  agentProcessorFactory = factory;
+}
+
+function getAgentProcessor(traceId: string): AgentProcessor {
+  if (!agentProcessorFactory) {
+    throw new Error('AgentProcessor not registered — call registerAgentProcessor() at startup');
+  }
+  return agentProcessorFactory(traceId);
 }
 import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
-import { EMAIL, PENDING_EMAIL_QUEUE } from '../constants';
+import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
   detectThreadDivergence,
   shouldBlockProcessing,
@@ -29,74 +55,21 @@ import {
   type EmailContext,
   type AppointmentContext,
 } from '../utils/thread-divergence';
-import {
-  extractTrackingCode,
-} from '../utils/tracking-code';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
+import { CLEANUP_CHECK_AND_RESET_SCRIPT, ATOMIC_LOCK_CHECK_SCRIPT } from '../utils/redis-scripts';
+import { findMatchingAppointmentRequest } from '../utils/thread-matcher';
 
-// Redis keys
-const PROCESSED_MESSAGES_KEY = 'gmail:processedMessages'; // ZSET with timestamp scores
-const MESSAGE_LOCK_PREFIX = 'gmail:lock:message:';
-const UNMATCHED_ATTEMPT_PREFIX = 'gmail:unmatched:'; // Track failed match attempts
-const PROCESSED_MESSAGE_TTL_DAYS = 30;
-const MAX_UNMATCHED_ATTEMPTS = 3;
-const UNMATCHED_ATTEMPT_TTL_SECONDS = 3600; // 1 hour window for retry attempts
-
-// FIX M11: Only run cleanup every N messages to reduce database load
-const CLEANUP_INTERVAL_MESSAGES = 100;
-// FIX #13: Use Redis atomic counter instead of module-level variable
-// so cleanup is coordinated across multiple server instances
-const CLEANUP_COUNTER_KEY = 'gmail:cleanupCounter';
-
-/**
- * Lua script for atomic cleanup counter check-and-reset.
- * Prevents race condition where two instances both read >= threshold
- * and both run cleanup. Only the instance whose INCR crosses the
- * threshold resets the counter and gets permission to run cleanup.
- *
- * KEYS[1] = counter key
- * ARGV[1] = threshold
- * Returns: 1 if this instance should run cleanup, 0 otherwise
- */
-const CLEANUP_CHECK_AND_RESET_SCRIPT = `
-local key = KEYS[1]
-local threshold = tonumber(ARGV[1])
-local current = redis.call('INCR', key)
-if current >= threshold then
-  redis.call('SET', key, '0')
-  return 1
-end
-return 0
-`;
-
-/**
- * Lua script for atomic lock acquisition + processed check
- * Returns:
- * - 1: Lock acquired, not previously processed
- * - 0: Already being processed by another worker (lock exists)
- * - -1: Already processed (in ZSET)
- */
-const ATOMIC_LOCK_CHECK_SCRIPT = `
-local lockKey = KEYS[1]
-local processedKey = KEYS[2]
-local messageId = ARGV[1]
-local traceId = ARGV[2]
-local lockTtl = tonumber(ARGV[3])
-
--- Check if already processed first
-local score = redis.call('ZSCORE', processedKey, messageId)
-if score then
-  return -1
-end
-
--- Try to acquire lock
-local lockResult = redis.call('SET', lockKey, traceId, 'NX', 'EX', lockTtl)
-if lockResult then
-  return 1
-else
-  return 0
-end
-`;
+// Redis keys — imported from centralized constants
+const {
+  PROCESSED_MESSAGES_KEY,
+  MESSAGE_LOCK_PREFIX,
+  UNMATCHED_ATTEMPT_PREFIX,
+  PROCESSED_MESSAGE_TTL_DAYS,
+  MAX_UNMATCHED_ATTEMPTS,
+  UNMATCHED_ATTEMPT_TTL_SECONDS,
+  CLEANUP_INTERVAL_MESSAGES,
+  CLEANUP_COUNTER_KEY,
+} = EMAIL_PROCESSING;
 
 /**
  * Lock renewal configuration
@@ -429,7 +402,7 @@ export class EmailMessageProcessorService {
       }
 
       // Find matching appointment request
-      const appointmentRequest = await this.findMatchingAppointmentRequest(email);
+      const appointmentRequest = await findMatchingAppointmentRequest(email);
 
       if (!appointmentRequest) {
         // Track failed match attempts to prevent infinite reprocessing
@@ -633,10 +606,9 @@ export class EmailMessageProcessorService {
         }
       }
 
-      // Process with Justin Time, including full thread context
-      const JustinTimeServiceClass = getJustinTimeService();
-      const justinTime = new JustinTimeServiceClass(traceId);
-      await justinTime.processEmailReply(
+      // Process with AI agent, including full thread context
+      const agentProcessor = getAgentProcessor(traceId);
+      await agentProcessor.processEmailReply(
         appointmentRequest.id,
         email.body,
         email.from,
@@ -896,243 +868,6 @@ export class EmailMessageProcessorService {
     }
   }
 
-  // ─── Appointment matching ───────────────────────────────────────────
-
-  /**
-   * Find an appointment request that matches this email
-   * Priority order:
-   * 1. Gmail thread ID (deterministic - ensures correct routing for multi-therapist scenarios)
-   * 2. In-Reply-To/References headers (email chain tracking)
-   * 3. Sender email + therapist name in subject (legacy fallback)
-   *
-   * FIX EMAIL-CONTEXT: Include 'confirmed' status to handle post-booking emails
-   * (e.g., reschedule requests, questions about the session).
-   * Without this, emails about confirmed appointments were unmatched and the agent
-   * was never invoked with proper context (including therapistEmail), causing it
-   * to hallucinate email addresses.
-   */
-  private async findMatchingAppointmentRequest(
-    email: EmailMessage
-  ): Promise<{ id: string; userEmail: string; therapistEmail: string } | null> {
-    // All statuses are matchable so that final emails (e.g. thank-you notes,
-    // cancellation confirmations) are still threaded into the correct appointment.
-
-    // PRIORITIES 1-3: Combined into a single query to reduce sequential DB round-trips.
-    // The query fetches all potential matches and post-query logic applies priority ordering:
-    //   1. Gmail thread ID match (most deterministic)
-    //   2. In-Reply-To/References header match
-    //   3. Tracking code match (with sender verification)
-    const trackingCode = extractTrackingCode(email.subject);
-    const messageIds: string[] = [];
-    if (email.references?.length || email.inReplyTo) {
-      messageIds.push(...(email.references || []));
-      if (email.inReplyTo && !messageIds.includes(email.inReplyTo)) {
-        messageIds.push(email.inReplyTo);
-      }
-    }
-
-    // Build OR conditions for all deterministic match types
-    const deterministicConditions: Array<Record<string, unknown>> = [];
-    if (email.threadId) {
-      deterministicConditions.push({ gmailThreadId: email.threadId });
-      deterministicConditions.push({ therapistGmailThreadId: email.threadId });
-    }
-    if (messageIds.length > 0) {
-      deterministicConditions.push({ initialMessageId: { in: messageIds } });
-    }
-    if (trackingCode) {
-      deterministicConditions.push({ trackingCode });
-    }
-
-    if (deterministicConditions.length > 0) {
-      const candidates = await prisma.appointmentRequest.findMany({
-        where: {
-          OR: deterministicConditions,
-        },
-        select: {
-          id: true,
-          userEmail: true,
-          therapistEmail: true,
-          gmailThreadId: true,
-          therapistGmailThreadId: true,
-          initialMessageId: true,
-          trackingCode: true,
-        },
-      });
-
-      if (candidates.length > 0) {
-        // Priority 1: Thread ID match
-        if (email.threadId) {
-          const threadMatch = candidates.find(
-            (c) => c.gmailThreadId === email.threadId || c.therapistGmailThreadId === email.threadId
-          );
-          if (threadMatch) {
-            logger.info(
-              { appointmentId: threadMatch.id, threadId: email.threadId },
-              'Matched appointment by Gmail thread ID'
-            );
-            return { id: threadMatch.id, userEmail: threadMatch.userEmail, therapistEmail: threadMatch.therapistEmail };
-          }
-        }
-
-        // Priority 2: In-Reply-To/References match
-        if (messageIds.length > 0) {
-          const refMatch = candidates.find(
-            (c) => c.initialMessageId && messageIds.includes(c.initialMessageId)
-          );
-          if (refMatch) {
-            logger.info(
-              { appointmentId: refMatch.id, inReplyTo: email.inReplyTo },
-              'Matched appointment by In-Reply-To header'
-            );
-            return { id: refMatch.id, userEmail: refMatch.userEmail, therapistEmail: refMatch.therapistEmail };
-          }
-        }
-
-        // Priority 3: Tracking code match (with sender verification)
-        if (trackingCode) {
-          const trackingMatch = candidates.find((c) => c.trackingCode === trackingCode);
-          if (trackingMatch) {
-            const senderIsUser = email.from.toLowerCase() === trackingMatch.userEmail.toLowerCase();
-            const senderIsTherapist = email.from.toLowerCase() === trackingMatch.therapistEmail.toLowerCase();
-
-            if (senderIsUser || senderIsTherapist) {
-              logger.info(
-                { appointmentId: trackingMatch.id, trackingCode, senderType: senderIsUser ? 'user' : 'therapist' },
-                'Matched appointment by tracking code (deterministic match)'
-              );
-              return { id: trackingMatch.id, userEmail: trackingMatch.userEmail, therapistEmail: trackingMatch.therapistEmail };
-            } else {
-              logger.warn(
-                { trackingCode, from: email.from, expectedUser: trackingMatch.userEmail, expectedTherapist: trackingMatch.therapistEmail },
-                'Tracking code found but sender not recognized - possible forwarded email'
-              );
-              // Fall through to Priority 4
-            }
-          }
-        }
-      }
-    }
-
-    // PRIORITY 4: Fallback to sender + therapist name matching (for legacy appointments without tracking codes)
-    // Limited to 50 to prevent memory issues with high-volume users
-    /** Sort by most recently updated, with ID as deterministic tiebreaker */
-    const byMostRecent = (
-      a: { updatedAt: Date; id: string },
-      b: { updatedAt: Date; id: string },
-    ) => {
-      const timeDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-      if (timeDiff !== 0) return timeDiff;
-      return a.id.localeCompare(b.id);
-    };
-
-    const matchingRequests = await prisma.appointmentRequest.findMany({
-      where: {
-        OR: [
-          { userEmail: email.from },
-          { therapistEmail: email.from },
-        ],
-      },
-      orderBy: {
-        updatedAt: 'desc',
-      },
-      take: 50, // Limit to prevent unbounded queries
-      select: {
-        id: true,
-        userEmail: true,
-        therapistEmail: true,
-        therapistName: true,
-        updatedAt: true, // FIX E8: Needed for deterministic sorting after filtering
-      },
-    });
-
-    if (matchingRequests.length === 0) {
-      return null;
-    }
-
-    // If only one matching request, return it
-    if (matchingRequests.length === 1) {
-      return matchingRequests[0];
-    }
-
-    // Multiple matching requests - try to match by therapist name in subject
-    // FIX E8: Collect ALL matches, then select deterministically (most recently updated)
-    const subjectLower = email.subject.toLowerCase();
-    const nameMatches: typeof matchingRequests = [];
-
-    for (const request of matchingRequests) {
-      // Skip if therapistName is null/undefined to prevent crash
-      if (!request.therapistName) {
-        logger.warn(
-          { appointmentId: request.id },
-          'Appointment has null therapistName - skipping name-based matching'
-        );
-        continue;
-      }
-
-      const therapistNameLower = request.therapistName.toLowerCase();
-      const firstName = therapistNameLower.split(' ')[0];
-
-      if (subjectLower.includes(therapistNameLower) || subjectLower.includes(firstName)) {
-        nameMatches.push(request);
-      }
-    }
-
-    // FIX E8: If exactly one name match, use it
-    if (nameMatches.length === 1) {
-      logger.info(
-        { appointmentId: nameMatches[0].id, therapistName: nameMatches[0].therapistName },
-        'Matched appointment by therapist name in subject (unique match)'
-      );
-      return nameMatches[0];
-    }
-
-    // FIX E8 + H4: If multiple name matches, select deterministically
-    if (nameMatches.length > 1) {
-      nameMatches.sort(byMostRecent);
-      logger.warn(
-        {
-          matchCount: nameMatches.length,
-          selectedAppointmentId: nameMatches[0].id,
-          therapistName: nameMatches[0].therapistName,
-        },
-        'Multiple appointments matched therapist name - selecting most recently updated'
-      );
-      return nameMatches[0];
-    }
-
-    // Fallback: if sender is a therapist, match by their email
-    // If multiple appointments have the same therapist email, prefer most recently active
-    const therapistMatches = matchingRequests.filter(r => r.therapistEmail === email.from);
-    if (therapistMatches.length === 1) {
-      logger.info(
-        { appointmentId: therapistMatches[0].id, therapistEmail: email.from },
-        'Matched appointment by therapist email (unique match)'
-      );
-      return therapistMatches[0];
-    } else if (therapistMatches.length > 1) {
-      therapistMatches.sort(byMostRecent);
-      logger.warn(
-        {
-          therapistEmail: email.from,
-          matchCount: therapistMatches.length,
-          selectedAppointmentId: therapistMatches[0].id,
-        },
-        'Multiple appointments for same therapist - selecting most recently updated'
-      );
-      return therapistMatches[0];
-    }
-
-    // SAFETY: Reject ambiguous emails rather than guessing wrong
-    // This prevents sending responses to the wrong therapist/user
-    logger.error(
-      { from: email.from, subject: email.subject, matchingRequestCount: matchingRequests.length },
-      'AMBIGUOUS MATCH: Could not deterministically match email to appointment. ' +
-      'Email will be skipped to prevent misdirected responses. Manual intervention required.'
-    );
-    return null;
-  }
-
   // ─── Weekly mailing ─────────────────────────────────────────────────
 
   /**
@@ -1231,10 +966,9 @@ export class EmailMessageProcessorService {
         }
       }
 
-      // Process with Justin Time inquiry handler
-      const JustinTimeServiceClass2 = getJustinTimeService();
-      const justinTime = new JustinTimeServiceClass2(traceId);
-      await justinTime.processInquiryReply(
+      // Process with AI agent inquiry handler
+      const agentProcessor = getAgentProcessor(traceId);
+      await agentProcessor.processInquiryReply(
         inquiry.id,
         email.body,
         email.from,

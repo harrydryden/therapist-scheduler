@@ -29,17 +29,15 @@ import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { getSettingValue } from './settings.service';
 import { auditEventService } from './audit-event.service';
-import { POST_BOOKING, APPOINTMENT_STATUS } from '../constants';
+import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 
-// Batch size for processing to prevent memory issues
-const BATCH_SIZE = 50;
-
-// Maximum parse attempts before giving up on a datetime string
-const MAX_PARSE_ATTEMPTS = 3;
-// Reset parse failure tracking after 1 hour (allows retry if confirmedDateTime is updated)
-const PARSE_FAILURE_RESET_MS = 60 * 60 * 1000;
-// Force retry of all failures after 24 hours (daily reparse attempt)
-const DAILY_REPARSE_MS = 24 * 60 * 60 * 1000;
+// Processing constants — imported from centralized constants
+const {
+  BATCH_SIZE,
+  MAX_PARSE_ATTEMPTS,
+  PARSE_FAILURE_RESET_MS,
+  DAILY_REPARSE_MS,
+} = POST_BOOKING_PROCESSING;
 
 interface ParseFailureEntry {
   count: number;
@@ -50,7 +48,7 @@ interface ParseFailureEntry {
 class PostBookingFollowupService extends PeriodicService {
   // Track parse failures with timestamps to allow retry after reset period
   // Bounded to prevent unbounded memory growth
-  private static MAX_PARSE_FAILURES = 500;
+  private static MAX_PARSE_FAILURES = POST_BOOKING_PROCESSING.MAX_PARSE_FAILURES;
   private parseFailures: Map<string, ParseFailureEntry> = new Map();
 
   constructor() {

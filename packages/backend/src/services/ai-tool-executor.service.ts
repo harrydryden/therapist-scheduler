@@ -14,7 +14,6 @@
  *   - Audit logging for tool executions
  */
 
-import { z } from 'zod';
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
@@ -29,46 +28,25 @@ import type { AppointmentStatus } from '../constants';
 import { prependTrackingCodeToSubject } from '../utils/tracking-code';
 import { emailQueueService } from './email-queue.service';
 import { redis } from '../utils/redis';
+import { TOOL_EXECUTION } from '../constants';
 import type { ConversationAction } from '../utils/conversation-checkpoint';
-import type { SchedulingContext, ToolExecutionResult } from './justin-time.service';
+import type { SchedulingContext, ToolExecutionResult } from './scheduling-context.service';
 import { availabilityResolver } from './availability-resolver.service';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { getSettingValue } from './settings.service';
-
-// ─── Tool Input Validation Schemas ────────────────────────────────────────────
-
-const sendEmailInputSchema = z.object({
-  to: z.string().email(),
-  subject: z.string().min(1).max(1000),
-  body: z.string().min(1).max(50000),
-});
-
-const updateAvailabilityInputSchema = z.object({
-  availability: z.record(z.string(), z.string()),
-});
-
-const markCompleteInputSchema = z.object({
-  confirmed_datetime: z.string().min(1),
-  notes: z.string().optional(),
-});
-
-const cancelAppointmentInputSchema = z.object({
-  reason: z.string().min(1).max(500),
-  cancelled_by: z.enum(['client', 'therapist']),
-});
-
-const recommendCancelMatchInputSchema = z.object({
-  reason: z.string().min(1).max(500),
-});
-
-const issueVoucherCodeInputSchema = z.object({
-  email: z.string().email().max(255),
-});
+import {
+  sendEmailInputSchema,
+  updateAvailabilityInputSchema,
+  markCompleteInputSchema,
+  cancelAppointmentInputSchema,
+  recommendCancelMatchInputSchema,
+  issueVoucherCodeInputSchema,
+} from '../schemas/tool-inputs';
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
 
-const TOOL_EXECUTION_PREFIX = 'tool:executed:';
-const TOOL_EXECUTION_TTL_SECONDS = 3600; // 1 hour - enough to cover retries
+const TOOL_EXECUTION_PREFIX = TOOL_EXECUTION.PREFIX;
+const TOOL_EXECUTION_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
 
 /**
  * Generate a deterministic hash for a tool call to enable idempotency checking
@@ -525,22 +503,14 @@ export class AIToolExecutorService {
     // Normalize email body to remove mid-paragraph line breaks
     const normalizedBody = this.normalizeEmailBody(params.body);
 
-    // DEBUG: Log the raw and normalized body to trace line break issues
-    const originalLineBreaks = (params.body.match(/\n/g) || []).length;
-    const normalizedLineBreaks = (normalizedBody.match(/\n/g) || []).length;
-    logger.info(
+    logger.debug(
       {
         traceId: this.traceId,
         to: params.to,
-        subject: params.subject,
         originalBodyLength: params.body.length,
         normalizedBodyLength: normalizedBody.length,
-        originalLineBreaks,
-        normalizedLineBreaks,
-        lineBreaksRemoved: originalLineBreaks - normalizedLineBreaks,
-        normalizedBodyPreview: normalizedBody.substring(0, 500).replace(/\n/g, '\\n'),
       },
-      'Sending email - body normalization applied'
+      'Sending email — body normalization applied'
     );
 
     // Use normalized subject and body for the rest of the function

@@ -53,6 +53,8 @@ import { getAllTaskMetrics, getBackgroundTaskHealth } from './utils/background-t
 import { getTimeoutStats } from './utils/timeout';
 import { slackNotificationService } from './services/slack-notification.service';
 import { sseService } from './services/sse.service';
+import { registerAgentProcessor } from './services/email-message-processor.service';
+import { JustinTimeService } from './services/justin-time.service';
 import { adminAuthHook } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 
@@ -513,6 +515,10 @@ async function start() {
         logger.error({ err }, 'Error processing Slack notification queue');
       }
     }, 30000);
+
+    // Register agent processor to break circular dependency
+    // email-message-processor needs to call JustinTimeService but can't import it directly
+    registerAgentProcessor((traceId) => new JustinTimeService(traceId));
 
     // Start background services
     await emailQueueService.start(); // BullMQ email queue (retry with backoff)

@@ -9,8 +9,8 @@ import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
 } from '../utils/gmail-auth';
-import * as fs from 'fs';
-import * as path from 'path';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { withTimeout } from '../utils/timeout';
 
 /**
@@ -276,11 +276,11 @@ export class EmailOAuthService {
     emailAddress?: string;
   }> {
     const credentialsPath = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
-      path.join(process.cwd(), '../mcp-gmail/credentials.json');
+      join(process.cwd(), '../mcp-gmail/credentials.json');
     const tokenPath = process.env.MCP_GMAIL_TOKEN_PATH ||
-      path.join(process.cwd(), '../mcp-gmail/token.json');
-    const credentialsFound = fs.existsSync(credentialsPath);
-    const tokenFound = fs.existsSync(tokenPath);
+      join(process.cwd(), '../mcp-gmail/token.json');
+    const credentialsFound = existsSync(credentialsPath);
+    const tokenFound = existsSync(tokenPath);
 
     let canConnect = false;
     let emailAddress: string | undefined;

@@ -1,158 +1,18 @@
-import { useState, memo, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
-import type { Therapist, TherapistAvailability } from '../types';
+import { useState, memo } from 'react';
+import type { Therapist } from '../types';
 import {
-  getExplainer,
   CATEGORY_LABELS,
-  CATEGORY_COLORS,
 } from '../config/therapist-categories';
 import { UI } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
 import type { VoucherState } from '../hooks/useVoucher';
+import { CategorySection } from './badges/CategorySection';
+import { formatAvailability } from '../utils/availability';
+import type { TherapistAvailability } from '../types';
 
 interface TherapistCardProps {
   therapist: Therapist;
   voucher?: VoucherState;
-}
-
-// Category badge with tooltip (uses portal to escape overflow:hidden)
-interface CategoryBadgeProps {
-  type: string;
-  categoryType: 'approach' | 'style' | 'areasOfFocus';
-}
-
-function CategoryBadge({ type, categoryType }: CategoryBadgeProps) {
-  const [showTooltip, setShowTooltip] = useState(false);
-  const [tooltipPosition, setTooltipPosition] = useState<{ top: number; left: number } | null>(null);
-  const badgeRef = useRef<HTMLSpanElement>(null);
-  const explainer = getExplainer(categoryType, type);
-  const colorClass = CATEGORY_COLORS[categoryType];
-
-  useEffect(() => {
-    if (showTooltip && badgeRef.current) {
-      const rect = badgeRef.current.getBoundingClientRect();
-      setTooltipPosition({
-        top: rect.top - 8,
-        left: rect.left + rect.width / 2,
-      });
-    } else if (!showTooltip) {
-      setTooltipPosition(null);
-    }
-  }, [showTooltip]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      setShowTooltip((prev) => !prev);
-    }
-  };
-
-  return (
-    <div className="relative inline-block">
-      <span
-        ref={badgeRef}
-        className={`inline-block px-2.5 py-0.5 text-xs font-medium rounded-full border cursor-help ${colorClass}`}
-        onMouseEnter={() => setShowTooltip(true)}
-        onMouseLeave={() => setShowTooltip(false)}
-        onFocus={() => setShowTooltip(true)}
-        onBlur={() => setShowTooltip(false)}
-        onKeyDown={handleKeyDown}
-        tabIndex={0}
-        role="button"
-        aria-describedby={explainer ? `tooltip-${type.replace(/\s/g, '-')}` : undefined}
-      >
-        {type}
-      </span>
-      {showTooltip && explainer && createPortal(
-        <div
-          id={`tooltip-${type.replace(/\s/g, '-')}`}
-          role="tooltip"
-          className="fixed px-3 py-2 text-xs text-white bg-spill-grey-600 rounded-lg shadow-lg max-w-xs whitespace-normal pointer-events-none"
-          style={{
-            zIndex: UI.Z_INDEX.TOOLTIP,
-            top: tooltipPosition?.top ?? 0,
-            left: tooltipPosition?.left ?? 0,
-            transform: 'translate(-50%, -100%)',
-            visibility: tooltipPosition ? 'visible' : 'hidden',
-          }}
-        >
-          {explainer}
-          <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1">
-            <div className="border-4 border-transparent border-t-spill-grey-600"></div>
-          </div>
-        </div>,
-        document.body
-      )}
-    </div>
-  );
-}
-
-// Fallback badge for when no categories are selected
-function GeneralBadge({ categoryType }: { categoryType: 'approach' | 'style' | 'areasOfFocus' }) {
-  const colorClass = CATEGORY_COLORS[categoryType];
-
-  return (
-    <span
-      className={`inline-block px-2.5 py-0.5 text-xs font-medium rounded-full border ${colorClass}`}
-    >
-      General
-    </span>
-  );
-}
-
-// Reusable category section component
-interface CategorySectionProps {
-  label: string;
-  items: string[];
-  categoryType: 'approach' | 'style' | 'areasOfFocus';
-  isExpanded: boolean;
-  onToggle: () => void;
-}
-
-function CategorySection({ label, items, categoryType, isExpanded, onToggle }: CategorySectionProps) {
-  const hasItems = items && items.length > 0;
-  const visibleItems = isExpanded ? items : items.slice(0, UI.MAX_VISIBLE_BADGES);
-  const hiddenCount = items.length - UI.MAX_VISIBLE_BADGES;
-  const hasMore = hiddenCount > 0;
-
-  return (
-    <div>
-      <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
-        {label}
-      </span>
-      <div className="flex flex-wrap gap-1.5 items-start content-start">
-        {hasItems ? (
-          <>
-            {visibleItems.map((item) => (
-              <CategoryBadge key={item} type={item} categoryType={categoryType} />
-            ))}
-            {hasMore && !isExpanded && (
-              <button
-                onClick={onToggle}
-                aria-expanded={false}
-                aria-label={`Show ${hiddenCount} more ${label.toLowerCase()} options`}
-                className="inline-block px-2 py-0.5 text-xs font-medium bg-spill-grey-100 text-spill-grey-400 rounded-full hover:bg-spill-grey-200 transition-colors focus:outline-none focus:ring-2 focus:ring-spill-blue-400"
-              >
-                +{hiddenCount}
-              </button>
-            )}
-            {hasMore && isExpanded && (
-              <button
-                onClick={onToggle}
-                aria-expanded={true}
-                aria-label={`Show fewer ${label.toLowerCase()} options`}
-                className="inline-block px-2 py-0.5 text-xs font-medium text-spill-blue-800 hover:text-spill-blue-400 focus:outline-none focus:ring-2 focus:ring-spill-blue-400 rounded"
-              >
-                Less
-              </button>
-            )}
-          </>
-        ) : (
-          <GeneralBadge categoryType={categoryType} />
-        )}
-      </div>
-    </div>
-  );
 }
 
 // Icon components
@@ -169,41 +29,6 @@ interface AvailabilityDisplayProps {
   availability: TherapistAvailability | null;
   isExpanded: boolean;
   onToggle: () => void;
-}
-
-// Day order for sorting
-const DAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const DAY_ABBREVIATIONS: Record<string, string> = {
-  Monday: 'Mon',
-  Tuesday: 'Tue',
-  Wednesday: 'Wed',
-  Thursday: 'Thu',
-  Friday: 'Fri',
-  Saturday: 'Sat',
-  Sunday: 'Sun',
-};
-
-function formatAvailability(availability: TherapistAvailability): string[] {
-  const slotsByDay: Record<string, string[]> = {};
-
-  for (const slot of availability.slots) {
-    const day = slot.day;
-    const timeRange = `${slot.start}-${slot.end}`;
-    if (!slotsByDay[day]) {
-      slotsByDay[day] = [];
-    }
-    slotsByDay[day].push(timeRange);
-  }
-
-  const sortedDays = Object.keys(slotsByDay).sort(
-    (a, b) => DAY_ORDER.indexOf(a) - DAY_ORDER.indexOf(b)
-  );
-
-  return sortedDays.map((day) => {
-    const abbrev = DAY_ABBREVIATIONS[day] || day.slice(0, 3);
-    const times = slotsByDay[day].join(', ');
-    return `${abbrev}: ${times}`;
-  });
 }
 
 function AvailabilityDisplay({ availability, isExpanded, onToggle }: AvailabilityDisplayProps) {

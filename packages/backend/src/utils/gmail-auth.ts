@@ -11,14 +11,14 @@ import { OAuth2Client } from 'google-auth-library';
 import { redis } from './redis';
 import { logger } from './logger';
 import { RELEASE_LOCK_SCRIPT } from './redis-locks';
-import * as fs from 'fs';
-import * as path from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 
 // Gmail credentials paths
 const CREDENTIALS_PATH = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/credentials.json');
+  join(process.cwd(), '../mcp-gmail/credentials.json');
 const TOKEN_PATH = process.env.MCP_GMAIL_TOKEN_PATH ||
-  path.join(process.cwd(), '../mcp-gmail/token.json');
+  join(process.cwd(), '../mcp-gmail/token.json');
 
 /**
  * OAuth token refresh mutex constants.
@@ -65,17 +65,17 @@ export function loadGmailCredentials(serviceName: string): { credentials: any; t
   // Fall back to file-based credentials (for local development ONLY)
   const isProduction = process.env.NODE_ENV === 'production';
 
-  if (!fs.existsSync(CREDENTIALS_PATH)) {
+  if (!existsSync(CREDENTIALS_PATH)) {
     logger.warn({ path: CREDENTIALS_PATH }, `${serviceName}: Gmail credentials file not found`);
     return null;
   }
-  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8'));
+  const credentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
 
-  if (!fs.existsSync(TOKEN_PATH)) {
+  if (!existsSync(TOKEN_PATH)) {
     logger.warn({ path: TOKEN_PATH }, `${serviceName}: Gmail token file not found`);
     return null;
   }
-  const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf-8'));
+  const token = JSON.parse(readFileSync(TOKEN_PATH, 'utf-8'));
 
   if (isProduction) {
     logger.warn(

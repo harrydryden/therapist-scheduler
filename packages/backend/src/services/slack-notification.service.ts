@@ -22,34 +22,17 @@ import { logger } from '../utils/logger';
 import { circuitBreakerRegistry, CircuitBreakerError } from '../utils/circuit-breaker';
 import { DEFAULT_TIMEOUTS } from '../utils/timeout';
 import { cacheManager } from '../utils/redis';
+import { SLACK_OPERATIONAL } from '../constants';
 
-// Redis key for persisted notification queue
-const SLACK_QUEUE_KEY = 'slack:notification:queue';
-const SLACK_QUEUE_TTL = 86400; // 24 hours
-
-// Notification deduplication: suppress identical alerts within this window (seconds).
-// Covers race conditions from Pub/Sub re-delivery, push+poll overlap, and queue retry
-// after a Slack webhook timeout where the message was actually delivered.
-const NOTIFICATION_DEDUP_TTL_SECONDS = 120;
-
-// Appointment-scoped deduplication: suppress the same notification *type* for the
-// same appointment within a longer window (24 hours). This prevents duplicate
-// notifications when the same logical event re-triggers across periodic runs —
-// e.g. repeated OOO auto-replies from the same therapist, or the AI agent
-// re-flagging the same appointment for human review on each email processing cycle.
-const APPOINTMENT_DEDUP_TTL_SECONDS = 86400; // 24 hours
-
-// Slack circuit breaker configuration
-const SLACK_CIRCUIT_CONFIG = {
-  name: 'slack-webhook',
-  failureThreshold: 5,
-  resetTimeout: 30000, // 30 seconds
-  successThreshold: 2,
-  failureWindow: 60000, // 1 minute
-};
+// Operational constants — imported from centralized constants
+const SLACK_QUEUE_KEY = SLACK_OPERATIONAL.QUEUE_KEY;
+const SLACK_QUEUE_TTL = SLACK_OPERATIONAL.QUEUE_TTL_SECONDS;
+const NOTIFICATION_DEDUP_TTL_SECONDS = SLACK_OPERATIONAL.NOTIFICATION_DEDUP_TTL_SECONDS;
+const APPOINTMENT_DEDUP_TTL_SECONDS = SLACK_OPERATIONAL.APPOINTMENT_DEDUP_TTL_SECONDS;
+const MAX_QUEUE_SIZE = SLACK_OPERATIONAL.MAX_QUEUE_SIZE;
 
 // Get or create the Slack circuit breaker
-const slackCircuitBreaker = circuitBreakerRegistry.getOrCreate(SLACK_CIRCUIT_CONFIG);
+const slackCircuitBreaker = circuitBreakerRegistry.getOrCreate(SLACK_OPERATIONAL.CIRCUIT_BREAKER);
 
 // Notification queue for retry (in-memory for simplicity, could be Redis for persistence)
 interface QueuedNotification {
@@ -59,7 +42,6 @@ interface QueuedNotification {
   attempts: number;
 }
 const notificationQueue: QueuedNotification[] = [];
-const MAX_QUEUE_SIZE = 100;
 
 // Slack Block Kit types for rich message formatting
 interface SlackTextBlock {

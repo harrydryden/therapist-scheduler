@@ -13,13 +13,13 @@
  *
  *   Any active status → cancelled  (all except completed and cancelled)
  *
- * This service centralizes:
- * - Status transitions with atomic preconditions (prevents TOCTOU races)
- * - Email notifications (client + therapist)
- * - Slack notifications
+ * This service is focused on:
+ * - Status transition validation (state machine enforcement)
+ * - Atomic database updates with preconditions (prevents TOCTOU races)
  * - Audit trail (conversation state updates)
- * - Therapist status updates
- * - User sync to Notion
+ * - Orchestrating post-transition side effects via extracted services:
+ *   - transition-side-effects.service.ts: Notion sync, therapist booking status, SSE
+ *   - appointment-notifications.service.ts: Slack + email notifications
  *
  * All code paths that change appointment status MUST go through this service.
  * This ensures consistent behavior regardless of trigger source (AI agent, admin, system).
@@ -28,13 +28,9 @@
 import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
-import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { notionSyncManager } from './notion-sync-manager.service';
-import { notionService } from './notion.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
-import { runBackgroundTask } from '../utils/background-task';
-import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
+import { transitionSideEffectsService } from './transition-side-effects.service';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)
@@ -57,26 +53,12 @@ const FEEDBACK_IDX = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.FEEDBACK_
 // Custom Errors for Lifecycle Transitions
 // ============================================
 
-export class AppointmentNotFoundError extends Error {
-  constructor(appointmentId: string) {
-    super(`Appointment ${appointmentId} not found`);
-    this.name = 'AppointmentNotFoundError';
-  }
-}
-
-export class InvalidTransitionError extends Error {
-  constructor(fromStatus: string, toStatus: string) {
-    super(`Invalid status transition: ${fromStatus} → ${toStatus}`);
-    this.name = 'InvalidTransitionError';
-  }
-}
-
-export class ConcurrentModificationError extends Error {
-  constructor(appointmentId: string) {
-    super(`Appointment ${appointmentId} is being modified by another process`);
-    this.name = 'ConcurrentModificationError';
-  }
-}
+// Re-export domain errors from centralized error hierarchy for backward compatibility
+export {
+  AppointmentNotFoundError,
+  InvalidTransitionError,
+  ConcurrentModificationError,
+} from '../errors';
 
 // ============================================
 // Types
@@ -228,9 +210,7 @@ class AppointmentLifecycleService {
    * Called from each transition method so both updateStatus() and direct callers are covered.
    */
   private notifyTransition(result: TransitionResult, appointmentId: string, source: TransitionSource): void {
-    if (result.success && !result.skipped && !result.atomicSkipped) {
-      sseService.emitStatusChange(appointmentId, result.previousStatus, result.newStatus, source);
-    }
+    transitionSideEffectsService.notifyTransition(result, appointmentId, source);
   }
 
   // ============================================
@@ -568,32 +548,15 @@ class AppointmentLifecycleService {
       );
     }
 
-    // Mark therapist as confirmed (freezes for other bookings)
-    if (appointment.therapistNotionId) {
-      try {
-        await therapistBookingStatusService.markConfirmed(
-          appointment.therapistNotionId,
-          appointment.therapistName
-        );
-        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-      } catch (err) {
-        logger.error(
-          { ...logContext, err },
-          'Failed to mark therapist as confirmed (non-critical)'
-        );
-      }
-    }
-
-    // Sync user to Notion (non-blocking, tracked)
-    runBackgroundTask(
-      () => notionSyncManager.syncSingleUser(appointment.userEmail),
-      {
-        name: 'user-sync-notion',
-        context: { ...logContext, userEmail: appointment.userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    // Post-transition side effects (therapist booking status, Notion sync)
+    transitionSideEffectsService.onConfirmed({
+      appointmentId,
+      source,
+      adminId,
+      therapistNotionId: appointment.therapistNotionId,
+      therapistName: appointment.therapistName,
+      userEmail: appointment.userEmail,
+    });
 
     // Send Slack + email notifications (delegated to notifications service)
     appointmentNotificationsService.notifyConfirmed({
@@ -665,16 +628,13 @@ class AppointmentLifecycleService {
       throw new InvalidTransitionError(previousStatus, 'session_held');
     }
 
-    // Sync user to Notion - moves therapist from "Upcoming" to "Previous" (tracked)
-    runBackgroundTask(
-      () => notionSyncManager.syncSingleUser(appointment.userEmail),
-      {
-        name: 'user-sync-session-held',
-        context: { ...logContext, userEmail: appointment.userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    // Post-transition side effects (Notion user sync)
+    transitionSideEffectsService.onSessionHeld({
+      appointmentId,
+      source,
+      adminId,
+      userEmail: appointment.userEmail,
+    });
 
     // Add audit trail
     await this.addAuditMessage(
@@ -912,70 +872,17 @@ class AppointmentLifecycleService {
       'Appointment transitioned to completed'
     );
 
-    // Update therapist booking status and conditionally deactivate in Notion
-    if (appointment.therapistNotionId) {
-      try {
-        // Clear confirmed flag and recalculate request count in parallel (independent operations)
-        await Promise.all([
-          therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId),
-          therapistBookingStatusService.recalculateUniqueRequestCount(appointment.therapistNotionId),
-        ]);
-
-        // FIX #6: Only deactivate therapist if they have NO other active appointments.
-        // Previously, completing one appointment would hide the therapist even if they
-        // had other clients in negotiating/confirmed state.
-        const otherActiveAppointments = await prisma.appointmentRequest.count({
-          where: {
-            therapistNotionId: appointment.therapistNotionId,
-            id: { not: appointmentId },
-            status: {
-              in: [
-                APPOINTMENT_STATUS.PENDING,
-                APPOINTMENT_STATUS.CONTACTED,
-                APPOINTMENT_STATUS.NEGOTIATING,
-                APPOINTMENT_STATUS.CONFIRMED,
-                APPOINTMENT_STATUS.SESSION_HELD,
-                APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-              ],
-            },
-          },
-        });
-
-        if (otherActiveAppointments === 0) {
-          // No other active appointments - safe to deactivate
-          await notionService.updateTherapistActive(appointment.therapistNotionId, false);
-          logger.info(
-            { ...logContext, therapistNotionId: appointment.therapistNotionId },
-            'Marked therapist as inactive after last appointment completed'
-          );
-        } else {
-          logger.info(
-            { ...logContext, therapistNotionId: appointment.therapistNotionId, otherActiveAppointments },
-            'Therapist still has active appointments - keeping active'
-          );
-        }
-
-        // Sync frozen status to Notion (will unfreeze since no active requests)
-        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-      } catch (err) {
-        // Log but don't fail the completion - therapist status is secondary
-        logger.error(
-          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
-          'Failed to update therapist status after completion (non-fatal)'
-        );
-      }
-    }
-
-    // Sync user to Notion (non-blocking, tracked)
-    runBackgroundTask(
-      () => notionSyncManager.syncSingleUser(appointment.userEmail),
-      {
-        name: 'user-sync-completion',
-        context: { ...logContext, userEmail: appointment.userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    // Post-transition side effects (therapist booking status, Notion sync, deactivation)
+    transitionSideEffectsService.onCompleted({
+      appointmentId,
+      source,
+      adminId,
+      therapistNotionId: appointment.therapistNotionId,
+      therapistName: appointment.therapistName,
+      userEmail: appointment.userEmail,
+      userName: appointment.userName,
+      previousStatus,
+    });
 
     // Send Slack notification (delegated to notifications service)
     appointmentNotificationsService.notifyCompleted({
@@ -1205,61 +1112,15 @@ class AppointmentLifecycleService {
       'Appointment cancelled'
     );
 
-    // Update therapist status
-    if (appointment.therapistNotionId) {
-      try {
-        // If was confirmed, unmark therapist
-        if (wasConfirmed) {
-          await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);
-        }
-
-        // Recalculate unique request count
-        await therapistBookingStatusService.recalculateUniqueRequestCount(
-          appointment.therapistNotionId
-        );
-
-        // Deactivate therapist if they have NO other active appointments.
-        // Previously missing from cancellation path: if a therapist's last active
-        // appointment was cancelled (not completed), they were never deactivated.
-        const otherActiveAppointments = await prisma.appointmentRequest.count({
-          where: {
-            therapistNotionId: appointment.therapistNotionId,
-            id: { not: appointmentId },
-            status: {
-              in: [
-                APPOINTMENT_STATUS.PENDING,
-                APPOINTMENT_STATUS.CONTACTED,
-                APPOINTMENT_STATUS.NEGOTIATING,
-                APPOINTMENT_STATUS.CONFIRMED,
-                APPOINTMENT_STATUS.SESSION_HELD,
-                APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-              ],
-            },
-          },
-        });
-
-        if (otherActiveAppointments === 0) {
-          await notionService.updateTherapistActive(appointment.therapistNotionId, false);
-          logger.info(
-            { ...logContext, therapistNotionId: appointment.therapistNotionId },
-            'Marked therapist as inactive after last appointment cancelled'
-          );
-        } else {
-          logger.info(
-            { ...logContext, therapistNotionId: appointment.therapistNotionId, otherActiveAppointments },
-            'Therapist still has active appointments after cancellation - keeping active'
-          );
-        }
-
-        // Sync frozen status to Notion
-        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-      } catch (err) {
-        logger.error(
-          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
-          'Failed to update therapist status after cancellation (non-fatal)'
-        );
-      }
-    }
+    // Post-transition side effects (therapist booking status, Notion sync, deactivation)
+    transitionSideEffectsService.onCancelled({
+      appointmentId,
+      source,
+      adminId,
+      therapistNotionId: appointment.therapistNotionId,
+      wasConfirmed,
+      userEmail: appointment.userEmail,
+    });
 
     // Send Slack + email notifications (delegated to notifications service)
     appointmentNotificationsService.notifyCancelled({
@@ -1519,20 +1380,25 @@ class AppointmentLifecycleService {
 
     // SSE notification
     if (statusChanging) {
-      sseService.emitStatusChange(appointmentId, previousStatus, effectiveNewStatus, 'admin');
+      transitionSideEffectsService.notifyTransition(
+        { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus },
+        appointmentId,
+        'admin'
+      );
     }
 
     // --- Data-consistency side effects (always run when status changes) ---
-    if (statusChanging && appointment.therapistNotionId) {
-      await this.runAdminForceUpdateSideEffects(
+    if (statusChanging) {
+      transitionSideEffectsService.onAdminForceUpdate({
         appointmentId,
+        source: 'admin',
+        adminId,
         appointment,
         previousStatus,
-        effectiveNewStatus as AppointmentStatus,
-        logContext,
+        newStatus: effectiveNewStatus as AppointmentStatus,
         skipNotifications,
-        confirmedDateTime ?? appointment.confirmedDateTime,
-      );
+        confirmedDateTime: confirmedDateTime ?? appointment.confirmedDateTime,
+      });
     }
 
     logger.info(
@@ -1541,115 +1407,6 @@ class AppointmentLifecycleService {
     );
 
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
-  }
-
-  /**
-   * Run data-consistency side effects for admin force updates.
-   * Ensures therapist booking status and Notion stay in sync regardless of
-   * whether the status change went through the normal state machine.
-   */
-  private async runAdminForceUpdateSideEffects(
-    appointmentId: string,
-    appointment: {
-      therapistNotionId: string | null;
-      therapistName: string | null;
-      userName: string | null;
-      userEmail: string;
-      therapistEmail: string | null;
-    },
-    previousStatus: AppointmentStatus,
-    newStatus: AppointmentStatus,
-    logContext: Record<string, unknown>,
-    skipNotifications: boolean,
-    confirmedDateTime: string | null | undefined,
-  ): Promise<void> {
-    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED;
-    const nowConfirmed = newStatus === APPOINTMENT_STATUS.CONFIRMED;
-    const nowCompleted = newStatus === APPOINTMENT_STATUS.COMPLETED;
-    const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
-
-    // --- Therapist booking status ---
-    if (appointment.therapistNotionId) {
-      try {
-        if (nowConfirmed && !wasConfirmed) {
-          // Entering confirmed: freeze therapist for other bookings
-          await therapistBookingStatusService.markConfirmed(
-            appointment.therapistNotionId,
-            appointment.therapistName
-          );
-        } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
-          // Leaving confirmed via completion/cancellation: unfreeze therapist
-          await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);
-        }
-
-        if (nowCompleted || nowCancelled) {
-          await therapistBookingStatusService.recalculateUniqueRequestCount(
-            appointment.therapistNotionId
-          );
-        }
-
-        // Conditionally deactivate therapist if no other active appointments
-        // Applies to both completed AND cancelled - either terminal status should
-        // trigger deactivation when it's the therapist's last active appointment.
-        if (nowCompleted || nowCancelled) {
-          const otherActiveAppointments = await prisma.appointmentRequest.count({
-            where: {
-              therapistNotionId: appointment.therapistNotionId,
-              id: { not: appointmentId },
-              status: {
-                in: [
-                  APPOINTMENT_STATUS.PENDING,
-                  APPOINTMENT_STATUS.CONTACTED,
-                  APPOINTMENT_STATUS.NEGOTIATING,
-                  APPOINTMENT_STATUS.CONFIRMED,
-                  APPOINTMENT_STATUS.SESSION_HELD,
-                  APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-                ],
-              },
-            },
-          });
-
-          if (otherActiveAppointments === 0) {
-            await notionService.updateTherapistActive(appointment.therapistNotionId, false);
-            logger.info(
-              { ...logContext, therapistNotionId: appointment.therapistNotionId },
-              `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`
-            );
-          }
-        }
-
-        // Sync therapist to Notion
-        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-      } catch (err) {
-        logger.error(
-          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
-          'Failed to update therapist status after admin force update (non-fatal)'
-        );
-      }
-    }
-
-    // --- Notion user sync (non-blocking) ---
-    runBackgroundTask(
-      () => notionSyncManager.syncSingleUser(appointment.userEmail),
-      {
-        name: 'user-sync-admin-force-update',
-        context: { ...logContext, userEmail: appointment.userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
-
-    // --- Optional notifications (Slack only — delegated to notifications service) ---
-    if (!skipNotifications) {
-      appointmentNotificationsService.notifyAdminForceUpdate({
-        appointmentId,
-        adminId: logContext.adminId as string | undefined,
-        userName: appointment.userName,
-        therapistName: appointment.therapistName,
-        newStatus,
-        confirmedDateTime,
-      });
-    }
   }
 }
 
