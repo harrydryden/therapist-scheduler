@@ -16,6 +16,8 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { PeriodicService } from '../utils/periodic-service';
 import { slackNotificationService } from './slack-notification.service';
 import { WORK_REPORT } from '../constants';
+import { anthropicClient } from '../utils/anthropic-client';
+import { CLAUDE_MODELS } from '../config/models';
 
 class WorkReportService extends PeriodicService {
   private instanceId: string;
@@ -138,6 +140,101 @@ class WorkReportService extends PeriodicService {
   }
 
   /**
+   * Generate an AI synopsis of appointment activity during the report period.
+   * Fetches recent audit events grouped by appointment and asks Claude to summarise.
+   * Returns null on failure so the report still sends without a synopsis.
+   */
+  private async generateSynopsis(periodStart: Date, periodEnd: Date): Promise<string | null> {
+    try {
+      // Fetch appointments that had activity in the period, with their recent audit events
+      const activeAppointments = await prisma.appointmentRequest.findMany({
+        where: {
+          auditEvents: {
+            some: {
+              createdAt: { gte: periodStart, lte: periodEnd },
+              eventType: { in: ['email_sent', 'email_received', 'status_change', 'human_control'] },
+            },
+          },
+        },
+        select: {
+          id: true,
+          userName: true,
+          therapistName: true,
+          status: true,
+          checkpointStage: true,
+          humanControlEnabled: true,
+          isStale: true,
+          auditEvents: {
+            where: {
+              createdAt: { gte: periodStart, lte: periodEnd },
+              eventType: { in: ['email_sent', 'email_received', 'status_change', 'human_control'] },
+            },
+            select: {
+              eventType: true,
+              actor: true,
+              payload: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: 'asc' },
+            take: 10, // Cap events per appointment to control token usage
+          },
+        },
+        take: 20, // Cap total appointments to control prompt size
+      });
+
+      if (activeAppointments.length === 0) {
+        return null;
+      }
+
+      // Build a compact summary of activity per appointment for the prompt
+      const appointmentSummaries = activeAppointments.map(apt => {
+        const events = apt.auditEvents.map(e => {
+          const payload = e.payload as Record<string, unknown> | null;
+          const subject = payload?.subject ? ` — "${payload.subject}"` : '';
+          const bodyPreview = payload?.bodyPreview ? ` (${(payload.bodyPreview as string).slice(0, 80)})` : '';
+          return `  ${e.eventType} [${e.actor}]${subject}${bodyPreview}`;
+        });
+
+        const client = apt.userName || 'Unknown client';
+        const flags: string[] = [];
+        if (apt.humanControlEnabled) flags.push('HUMAN CONTROL');
+        if (apt.isStale) flags.push('STALE');
+        const flagStr = flags.length ? ` [${flags.join(', ')}]` : '';
+
+        return `• ${client} ↔ ${apt.therapistName} | Status: ${apt.status} | Stage: ${apt.checkpointStage || 'n/a'}${flagStr}\n${events.join('\n')}`;
+      });
+
+      const response = await anthropicClient.messages.create({
+        model: CLAUDE_MODELS.FAST,
+        max_tokens: 400,
+        messages: [
+          {
+            role: 'user',
+            content: `You are summarising a scheduling agent's daily activity for a Slack work report. Write a concise synopsis (max 600 chars) covering:
+1. Which appointments were worked on and with whom
+2. Key progress made (e.g. confirmations, new contacts, negotiations)
+3. Any issues needing attention (stale threads, human control, escalations)
+
+Use plain text, no markdown headers. Use short bullet points. Be factual and brief.
+
+Activity this period:
+${appointmentSummaries.join('\n\n')}`,
+          },
+        ],
+      });
+
+      const text = response.content[0]?.type === 'text' ? response.content[0].text : null;
+      if (!text) return null;
+
+      // Hard-cap at 800 chars to stay well within Slack limits when combined with report
+      return text.length > 800 ? text.slice(0, 797) + '...' : text;
+    } catch (error) {
+      logger.warn({ error }, 'Failed to generate work report synopsis — report will send without it');
+      return null;
+    }
+  }
+
+  /**
    * Generate the work report, save to DB, and send to Slack.
    */
   async generateAndSendReport(): Promise<void> {
@@ -174,6 +271,7 @@ class WorkReportService extends PeriodicService {
       pipelineNegotiating,
       pipelineConfirmed,
       feedbackSubmissions,
+      synopsis,
     ] = await Promise.all([
       // Emails sent by agent in period (audit events are reliably created for emails)
       prisma.appointmentAuditEvent.count({
@@ -254,6 +352,8 @@ class WorkReportService extends PeriodicService {
           createdAt: { gte: periodStart, lte: periodEnd },
         },
       }),
+      // AI synopsis of appointment activity
+      this.generateSynopsis(periodStart, periodEnd),
     ]);
 
     // Save report to database
@@ -276,6 +376,7 @@ class WorkReportService extends PeriodicService {
         pipelineNegotiating,
         pipelineConfirmed,
         feedbackSubmissions,
+        synopsis,
       },
     });
 
@@ -298,6 +399,7 @@ class WorkReportService extends PeriodicService {
       pipelineNegotiating,
       pipelineConfirmed,
       feedbackSubmissions,
+      synopsis,
     });
 
     // Update slack delivery time
@@ -317,6 +419,7 @@ class WorkReportService extends PeriodicService {
         emailsReceived,
         appointmentsCreated,
         appointmentsConfirmed,
+        hasSynopsis: !!synopsis,
         slackSent,
       },
       'Daily work report generated'

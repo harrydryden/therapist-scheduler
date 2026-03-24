@@ -499,6 +499,9 @@ model WorkReport {
   // Feedback received in period
   feedbackSubmissions Int @default(0) @map("feedback_submissions")
 
+  // AI-generated synopsis of work done in the period
+  synopsis String? @db.Text
+
   // Slack delivery tracking
   slackSentAt DateTime? @map("slack_sent_at")
 

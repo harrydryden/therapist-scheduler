@@ -982,6 +982,7 @@ class SlackNotificationService {
     pipelineNegotiating: number;
     pipelineConfirmed: number;
     feedbackSubmissions: number;
+    synopsis?: string | null;
   }): Promise<boolean> {
     const ukOptions: Intl.DateTimeFormatOptions = {
       timeZone: 'Europe/London',
@@ -1049,16 +1050,35 @@ class SlackNotificationService {
           text: reportText,
         },
       },
-      {
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: contextText.length > 3000 ? contextText.substring(0, 2997) + '...' : contextText,
-          },
-        ],
-      },
     ];
+
+    // Add AI synopsis as a separate section if available
+    if (stats.synopsis) {
+      let synopsisText = `\n🤖 *Synopsis*\n${stats.synopsis}`;
+      if (synopsisText.length > SLACK_SECTION_TEXT_LIMIT) {
+        synopsisText = synopsisText.substring(0, SLACK_SECTION_TEXT_LIMIT - 20) + '\n_…truncated_';
+      }
+      blocks.push(
+        { type: 'divider' },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: synopsisText,
+          },
+        },
+      );
+    }
+
+    blocks.push({
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: contextText.length > 3000 ? contextText.substring(0, 2997) + '...' : contextText,
+        },
+      ],
+    });
 
     const fallbackText = `📋 Daily Work Report: ${stats.emailsSent} emails sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`;
 

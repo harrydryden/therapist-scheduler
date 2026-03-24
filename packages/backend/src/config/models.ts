@@ -2,15 +2,21 @@
  * Centralized AI Model Configuration
  *
  * This file defines all AI models used throughout the application.
- * Using model aliases (without date suffix) ensures we use the latest version.
+ * Using model aliases (without date suffix) ensures we get the latest
+ * point releases within each generation automatically.
  *
  * Model naming convention: https://docs.anthropic.com/en/docs/about-claude/models
  *
- * Current aliases:
- * - claude-sonnet-4-5: Latest Sonnet 4.5.x (fast + intelligent)
- * - claude-haiku-4-5: Latest Haiku 4.5.x (fastest)
+ * Note: Anthropic does not offer cross-generation "latest" aliases
+ * (e.g., "claude-sonnet-latest"). Aliases like "claude-sonnet-4-6" resolve to
+ * the newest 4.6.x point release, but a new generation (e.g., 5.0) will
+ * require a manual update here.
  *
- * Last updated: 2025-02-09
+ * Current aliases:
+ * - claude-sonnet-4-6: Latest Sonnet 4.6.x (fast + intelligent)
+ * - claude-haiku-4-5: Latest Haiku 4.5.x (fastest, no 4.6 available yet)
+ *
+ * Last updated: 2026-03-24
  */
 
 export const CLAUDE_MODELS = {
@@ -19,7 +25,7 @@ export const CLAUDE_MODELS = {
    * Used by: Justin Time scheduling agent
    * Characteristics: Best reasoning, tool use, and multi-step tasks
    */
-  AGENT: 'claude-sonnet-4-5',
+  AGENT: 'claude-sonnet-4-6',
 
   /**
    * Model for data extraction and structured output tasks

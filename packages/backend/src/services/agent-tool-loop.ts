@@ -146,6 +146,20 @@ export const schedulingTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'initiate_reschedule',
+    description: 'Signal that a reschedule is needed for a confirmed appointment. Call this BEFORE sending any emails when either the client or therapist requests a time change. This clears the current confirmed date so the system knows rescheduling is in progress. Do NOT call this for non-rescheduling requests like missing meeting links, session questions, or general acknowledgments.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        reason: {
+          type: 'string',
+          description: 'Brief reason for the reschedule (e.g., "Client requested to move to a different day", "Therapist no longer available at confirmed time")',
+        },
+      },
+      required: ['reason'],
+    },
+  },
+  {
     name: 'flag_for_human_review',
     description: 'Flag this conversation for human review when you are uncertain how to proceed, the situation is unusual, or you need guidance. This enables human control mode so an admin can review and respond. Use this proactively when unsure rather than guessing or stalling.',
     input_schema: {
