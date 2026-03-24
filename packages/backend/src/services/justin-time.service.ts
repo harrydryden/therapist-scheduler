@@ -691,13 +691,24 @@ ${formatClassificationForPrompt(emailClassification)}`;
           'Status transitioned to negotiating via lifecycle service'
         );
       } else if (appointmentRequest.status === 'confirmed') {
-        // Confirmed appointment received an email - likely a rescheduling request.
-        // However, if the agent already called mark_scheduling_complete during the
-        // tool loop above (finalizing a reschedule), we must NOT overwrite the new
-        // confirmed datetime. The appointmentRequest variable was fetched before the
-        // tool loop and is stale — the DB already has the updated datetime.
+        // Confirmed appointment received an email - could be a rescheduling request
+        // or just an informational reply (e.g. acknowledging a meeting link check).
+        //
+        // We check what the agent actually did during the tool loop to decide:
+        // - mark_scheduling_complete called → reschedule already finalized, skip
+        // - Scheduling-related tools called → reschedule in progress, clear date & reset flags
+        // - No scheduling tools called → informational reply, leave appointment untouched
         const completedReschedule = executedTools.some(
           (t) => t.toolName === 'mark_scheduling_complete'
+        );
+
+        // Tools that indicate the agent is actively working on a reschedule or cancellation
+        const schedulingToolNames = [
+          'send_email', 'update_therapist_availability', 'cancel_appointment',
+          'recommend_cancel_match', 'flag_for_human_review',
+        ];
+        const initiatedReschedule = executedTools.some(
+          (t) => schedulingToolNames.includes(t.toolName)
         );
 
         if (completedReschedule) {
@@ -705,7 +716,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
             { traceId: this.traceId, appointmentRequestId },
             'Skipping rescheduling flag update - mark_scheduling_complete already finalized the reschedule'
           );
-        } else {
+        } else if (initiatedReschedule) {
           // Clear the confirmed date/time so that:
           // 1. The old date doesn't mislead admins on the dashboard
           // 2. Follow-up services (reminders, meeting link checks, feedback forms) don't
@@ -733,6 +744,14 @@ ${formatClassificationForPrompt(emailClassification)}`;
           logger.info(
             { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
             'Email received for confirmed appointment - marked as rescheduling in progress, cleared stale date/time'
+          );
+        } else {
+          // No scheduling tools called — this was an informational reply
+          // (e.g. user acknowledging a meeting link check, asking a question).
+          // Leave the appointment state and follow-up flags untouched.
+          logger.info(
+            { traceId: this.traceId, appointmentRequestId, executedToolNames: executedTools.map(t => t.toolName) },
+            'Email received for confirmed appointment but no scheduling actions taken - treating as informational reply'
           );
         }
       } else if (appointmentRequest.status === 'cancelled') {
