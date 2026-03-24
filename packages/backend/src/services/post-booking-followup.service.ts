@@ -1138,10 +1138,14 @@ class PostBookingFollowupService extends PeriodicService {
     recipient: 'user' | 'therapist'
   ): Promise<void> {
     const isUser = recipient === 'user';
-    const recipientName = isUser ? (appointment.userName || 'there') : appointment.therapistName;
+    const recipientName = isUser
+      ? (appointment.userName ? appointment.userName.split(' ')[0] : 'there')
+      : appointment.therapistName.split(' ')[0];
     const recipientEmail = isUser ? appointment.userEmail : appointment.therapistEmail;
     const threadId = isUser ? appointment.gmailThreadId : appointment.therapistGmailThreadId;
-    const otherPartyName = isUser ? appointment.therapistName : (appointment.userName || 'your client');
+    const otherPartyName = isUser
+      ? appointment.therapistName.split(' ')[0]
+      : (appointment.userName ? appointment.userName.split(' ')[0] : 'your client');
 
     // Format the date in human-friendly relative format
     const formattedDateTime = await formatEmailDateFromSettings(
