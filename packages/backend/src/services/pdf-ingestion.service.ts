@@ -247,23 +247,22 @@ class PDFIngestionService {
       updated.email = adminNotes.overrideEmail;
     }
 
-    // Helper to merge categories - admin overrides are just type strings (no evidence needed for manual selections)
-    const mergeCategories = (
+    // Replace categories with admin selections. The admin checkboxes represent
+    // the final desired set — unchecking an AI suggestion should remove it.
+    // Preserve AI evidence for categories the admin kept selected.
+    const replaceCategories = (
       existing: CategoryWithEvidence[],
       overrides: string[] | undefined
     ): CategoryWithEvidence[] => {
-      if (!overrides || overrides.length === 0) return existing;
-      const existingTypes = new Set(existing.map(c => c.type));
-      const newCategories = overrides
-        .filter(type => !existingTypes.has(type))
-        .map(type => ({ type, evidence: '', reasoning: 'Added by admin' }));
-      return [...existing, ...newCategories];
+      if (!overrides) return existing; // undefined = no override provided
+      const existingByType = new Map(existing.map(c => [c.type, c]));
+      return overrides.map(type => existingByType.get(type) || { type, evidence: '', reasoning: 'Added by admin' });
     };
 
-    // Apply category overrides
-    updated.approach = mergeCategories(profile.approach, adminNotes.overrideApproach);
-    updated.style = mergeCategories(profile.style, adminNotes.overrideStyle);
-    updated.areasOfFocus = mergeCategories(profile.areasOfFocus, adminNotes.overrideAreasOfFocus);
+    // Apply category overrides (replace, not merge)
+    updated.approach = replaceCategories(profile.approach, adminNotes.overrideApproach);
+    updated.style = replaceCategories(profile.style, adminNotes.overrideStyle);
+    updated.areasOfFocus = replaceCategories(profile.areasOfFocus, adminNotes.overrideAreasOfFocus);
 
     // Apply availability override
     if (adminNotes.overrideAvailability) {
@@ -448,7 +447,15 @@ class PDFIngestionService {
         profile = this.applyAdminOverrides(profile, adminNotes);
       }
 
-      // Step 4: Create therapist in Notion (with internal admin notes if provided)
+      // Step 4: Validate final profile before persisting
+      if (!profile.email || profile.email === 'unknown@placeholder.com') {
+        return {
+          success: false,
+          error: 'A valid email address is required. Please provide one via the email field or in the additional information.',
+        };
+      }
+
+      // Step 5: Create therapist in Notion (with internal admin notes if provided)
       logger.info({ traceId, name: profile.name }, 'Creating therapist in Notion');
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
 
