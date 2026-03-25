@@ -195,7 +195,7 @@ class WorkReportService extends PeriodicService {
           return `  ${e.eventType} [${e.actor}]${subject}${bodyPreview}`;
         });
 
-        const client = apt.userName || 'Unknown client';
+        const client = 'client';
         const flags: string[] = [];
         if (apt.humanControlEnabled) flags.push('HUMAN CONTROL');
         if (apt.isStale) flags.push('STALE');
