@@ -186,8 +186,9 @@ class WorkReportService extends PeriodicService {
         return null;
       }
 
-      // Build a compact summary of activity per appointment for the prompt
-      const appointmentSummaries = activeAppointments.map(apt => {
+      // Build a compact summary of activity per appointment for the prompt.
+      // Client names are anonymised to protect user privacy; therapist names are kept.
+      const appointmentSummaries = activeAppointments.map((apt, index) => {
         const events = apt.auditEvents.map(e => {
           const payload = e.payload as Record<string, unknown> | null;
           const subject = payload?.subject ? ` — "${payload.subject}"` : '';
@@ -195,7 +196,7 @@ class WorkReportService extends PeriodicService {
           return `  ${e.eventType} [${e.actor}]${subject}${bodyPreview}`;
         });
 
-        const client = apt.userName || 'Unknown client';
+        const client = `Client ${index + 1}`;
         const flags: string[] = [];
         if (apt.humanControlEnabled) flags.push('HUMAN CONTROL');
         if (apt.isStale) flags.push('STALE');
@@ -216,6 +217,7 @@ class WorkReportService extends PeriodicService {
 3. Any issues needing attention (stale threads, human control, escalations)
 
 Use plain text, no markdown headers. Use short bullet points. Be factual and brief.
+IMPORTANT: Refer to clients only as "Client 1", "Client 2", etc. as shown in the data. Never include real client names. Therapist names may be included.
 
 Activity this period:
 ${appointmentSummaries.join('\n\n')}`,
