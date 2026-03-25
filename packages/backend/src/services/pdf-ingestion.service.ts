@@ -106,7 +106,8 @@ STRICT RULES:
 - "Working at Depth" can ONLY appear in Style, NEVER in Approach
 - If the source text is generic or lacks specific clinical detail, assign FEWER categories
 - If availability information is not provided, set availability to null
-- The name and email fields are REQUIRED - extract them from the text
+- The name and email fields are REQUIRED - look for them in both the document text AND the additional information section below
+- If no email is found anywhere, use "unknown@placeholder.com" as a placeholder
 `;
 }
 
@@ -161,9 +162,26 @@ class PDFIngestionService {
 
       const extracted = JSON.parse(jsonStr.trim());
 
-      // Validate required fields
-      if (!extracted.name || !extracted.email) {
-        throw new Error('Missing required fields: name and email');
+      // Validate required fields - use fallbacks from additional info if possible
+      if (!extracted.name) {
+        // Try to extract name from additional info
+        const nameMatch = additionalInfo?.match(/Therapist Name:\s*(.+)/i);
+        if (nameMatch) {
+          extracted.name = nameMatch[1].trim();
+        } else {
+          throw new Error('Missing required field: name. Please provide the therapist name.');
+        }
+      }
+      if (!extracted.email) {
+        // Try to extract email from additional info
+        const emailMatch = additionalInfo?.match(/Therapist Email:\s*(\S+@\S+)/i);
+        if (emailMatch) {
+          extracted.email = emailMatch[1].trim();
+        }
+        // Email can be overridden by admin, so don't require it here
+        if (!extracted.email) {
+          extracted.email = 'unknown@placeholder.com';
+        }
       }
 
       // Helper to normalize categories - handle both old string[] and new object[] formats
@@ -216,7 +234,8 @@ class PDFIngestionService {
       };
     } catch (err) {
       logger.error({ err, responseContent: response.content }, 'Failed to parse AI extraction response');
-      throw new Error('Failed to extract therapist profile from document');
+      const message = err instanceof Error ? err.message : 'Failed to extract therapist profile';
+      throw new Error(message);
     }
   }
 
@@ -228,23 +247,22 @@ class PDFIngestionService {
       updated.email = adminNotes.overrideEmail;
     }
 
-    // Helper to merge categories - admin overrides are just type strings (no evidence needed for manual selections)
-    const mergeCategories = (
+    // Replace categories with admin selections. The admin checkboxes represent
+    // the final desired set — unchecking an AI suggestion should remove it.
+    // Preserve AI evidence for categories the admin kept selected.
+    const replaceCategories = (
       existing: CategoryWithEvidence[],
       overrides: string[] | undefined
     ): CategoryWithEvidence[] => {
-      if (!overrides || overrides.length === 0) return existing;
-      const existingTypes = new Set(existing.map(c => c.type));
-      const newCategories = overrides
-        .filter(type => !existingTypes.has(type))
-        .map(type => ({ type, evidence: '', reasoning: 'Added by admin' }));
-      return [...existing, ...newCategories];
+      if (!overrides) return existing; // undefined = no override provided
+      const existingByType = new Map(existing.map(c => [c.type, c]));
+      return overrides.map(type => existingByType.get(type) || { type, evidence: '', reasoning: 'Added by admin' });
     };
 
-    // Apply category overrides
-    updated.approach = mergeCategories(profile.approach, adminNotes.overrideApproach);
-    updated.style = mergeCategories(profile.style, adminNotes.overrideStyle);
-    updated.areasOfFocus = mergeCategories(profile.areasOfFocus, adminNotes.overrideAreasOfFocus);
+    // Apply category overrides (replace, not merge)
+    updated.approach = replaceCategories(profile.approach, adminNotes.overrideApproach);
+    updated.style = replaceCategories(profile.style, adminNotes.overrideStyle);
+    updated.areasOfFocus = replaceCategories(profile.areasOfFocus, adminNotes.overrideAreasOfFocus);
 
     // Apply availability override
     if (adminNotes.overrideAvailability) {
@@ -429,7 +447,15 @@ class PDFIngestionService {
         profile = this.applyAdminOverrides(profile, adminNotes);
       }
 
-      // Step 4: Create therapist in Notion (with internal admin notes if provided)
+      // Step 4: Validate final profile before persisting
+      if (!profile.email || profile.email === 'unknown@placeholder.com') {
+        return {
+          success: false,
+          error: 'A valid email address is required. Please provide one via the email field or in the additional information.',
+        };
+      }
+
+      // Step 5: Create therapist in Notion (with internal admin notes if provided)
       logger.info({ traceId, name: profile.name }, 'Creating therapist in Notion');
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
 
