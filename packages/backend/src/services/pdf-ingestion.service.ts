@@ -106,7 +106,8 @@ STRICT RULES:
 - "Working at Depth" can ONLY appear in Style, NEVER in Approach
 - If the source text is generic or lacks specific clinical detail, assign FEWER categories
 - If availability information is not provided, set availability to null
-- The name and email fields are REQUIRED - extract them from the text
+- The name and email fields are REQUIRED - look for them in both the document text AND the additional information section below
+- If no email is found anywhere, use "unknown@placeholder.com" as a placeholder
 `;
 }
 
@@ -161,9 +162,26 @@ class PDFIngestionService {
 
       const extracted = JSON.parse(jsonStr.trim());
 
-      // Validate required fields
-      if (!extracted.name || !extracted.email) {
-        throw new Error('Missing required fields: name and email');
+      // Validate required fields - use fallbacks from additional info if possible
+      if (!extracted.name) {
+        // Try to extract name from additional info
+        const nameMatch = additionalInfo?.match(/Therapist Name:\s*(.+)/i);
+        if (nameMatch) {
+          extracted.name = nameMatch[1].trim();
+        } else {
+          throw new Error('Missing required field: name. Please provide the therapist name.');
+        }
+      }
+      if (!extracted.email) {
+        // Try to extract email from additional info
+        const emailMatch = additionalInfo?.match(/Therapist Email:\s*(\S+@\S+)/i);
+        if (emailMatch) {
+          extracted.email = emailMatch[1].trim();
+        }
+        // Email can be overridden by admin, so don't require it here
+        if (!extracted.email) {
+          extracted.email = 'unknown@placeholder.com';
+        }
       }
 
       // Helper to normalize categories - handle both old string[] and new object[] formats
@@ -216,7 +234,8 @@ class PDFIngestionService {
       };
     } catch (err) {
       logger.error({ err, responseContent: response.content }, 'Failed to parse AI extraction response');
-      throw new Error('Failed to extract therapist profile from document');
+      const message = err instanceof Error ? err.message : 'Failed to extract therapist profile';
+      throw new Error(message);
     }
   }
 
