@@ -17,13 +17,13 @@ export interface AgentProcessor {
     body: string,
     from: string,
     threadContext?: unknown,
-  ): Promise<void>;
+  ): Promise<{ success: boolean; message: string } | void>;
   processInquiryReply(
     inquiryId: string,
     body: string,
     from: string,
     threadContext?: unknown,
-  ): Promise<void>;
+  ): Promise<{ success: boolean; message: string } | void>;
 }
 
 let agentProcessorFactory: ((traceId: string) => AgentProcessor) | null = null;

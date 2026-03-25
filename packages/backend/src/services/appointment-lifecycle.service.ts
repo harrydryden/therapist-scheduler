@@ -60,6 +60,13 @@ export {
   ConcurrentModificationError,
 } from '../errors';
 
+// Import for local use (re-export above does not create local bindings)
+import {
+  AppointmentNotFoundError,
+  InvalidTransitionError,
+  ConcurrentModificationError,
+} from '../errors';
+
 // ============================================
 // Types
 // ============================================
