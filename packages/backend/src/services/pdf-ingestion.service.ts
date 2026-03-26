@@ -147,20 +147,54 @@ class PDFIngestionService {
     );
 
     try {
-      // Try to extract JSON from the response
+      // Try to extract JSON from the response.
+      // AI models sometimes wrap JSON in markdown code fences or include stray
+      // backtick / prose characters. We progressively clean the response:
+      //  1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+      //  2. Extract the outermost { … } to discard surrounding text
+      //  3. Remove stray backticks that aren't inside quoted strings
       let jsonStr = response.content.trim();
 
-      // Handle markdown code blocks
-      if (jsonStr.startsWith('```json')) {
-        jsonStr = jsonStr.slice(7);
-      } else if (jsonStr.startsWith('```')) {
-        jsonStr = jsonStr.slice(3);
-      }
-      if (jsonStr.endsWith('```')) {
-        jsonStr = jsonStr.slice(0, -3);
+      // Strip markdown code fences
+      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
+
+      // Extract the JSON object by finding the outermost braces
+      const firstBrace = jsonStr.indexOf('{');
+      const lastBrace = jsonStr.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
       }
 
-      const extracted = JSON.parse(jsonStr.trim());
+      // Remove backticks that appear outside of JSON string values.
+      // Walk character-by-character to avoid corrupting quoted strings.
+      let cleaned = '';
+      let inString = false;
+      let escaped = false;
+      for (let i = 0; i < jsonStr.length; i++) {
+        const ch = jsonStr[i];
+        if (escaped) {
+          cleaned += ch;
+          escaped = false;
+          continue;
+        }
+        if (ch === '\\' && inString) {
+          cleaned += ch;
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = !inString;
+          cleaned += ch;
+          continue;
+        }
+        // Skip backticks outside of strings
+        if (ch === '`' && !inString) {
+          continue;
+        }
+        cleaned += ch;
+      }
+
+      const extracted = JSON.parse(cleaned.trim());
 
       // Validate required fields - use fallbacks from additional info if possible
       if (!extracted.name) {
@@ -234,7 +268,11 @@ class PDFIngestionService {
       };
     } catch (err) {
       logger.error({ err, responseContent: response.content }, 'Failed to parse AI extraction response');
-      const message = err instanceof Error ? err.message : 'Failed to extract therapist profile';
+      // Surface a user-friendly message instead of raw JSON.parse errors
+      const isParseError = err instanceof SyntaxError;
+      const message = isParseError
+        ? 'Failed to extract therapist profile — the AI returned malformed data. Please try again.'
+        : (err instanceof Error ? err.message : 'Failed to extract therapist profile');
       throw new Error(message);
     }
   }
