@@ -160,6 +160,14 @@ class PDFIngestionService {
         jsonStr = jsonStr.slice(0, -3);
       }
 
+      // Extract the JSON object by finding the outermost braces.
+      // AI responses sometimes include stray backticks or other text around the JSON.
+      const firstBrace = jsonStr.indexOf('{');
+      const lastBrace = jsonStr.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+      }
+
       const extracted = JSON.parse(jsonStr.trim());
 
       // Validate required fields - use fallbacks from additional info if possible
