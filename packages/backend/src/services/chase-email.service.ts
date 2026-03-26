@@ -5,6 +5,7 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {
   /**
@@ -48,7 +49,7 @@ class ChaseEmailService {
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           OR: [
-            { status: { in: ['pending', 'contacted', 'negotiating'] } },
+            { status: { in: [...PRE_BOOKING_STATUSES] } },
             { status: 'confirmed', reschedulingInProgress: true },
           ],
           lastActivityAt: { lt: chaseThreshold },
@@ -318,7 +319,7 @@ class ChaseEmailService {
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
           OR: [
-            { status: { in: ['pending', 'contacted', 'negotiating'] } },
+            { status: { in: [...PRE_BOOKING_STATUSES] } },
             { status: 'confirmed', reschedulingInProgress: true },
           ],
           chaseSentAt: {

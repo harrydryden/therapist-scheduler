@@ -12,7 +12,7 @@ import { appointmentLifecycleService } from '../services/appointment-lifecycle.s
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { parseConfirmedDateTime } from '../utils/date-parser';
-import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS } from '../constants';
+import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
@@ -100,7 +100,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
               where: {
                 userEmail,
                 therapistNotionId,
-                status: { in: ['pending', 'contacted', 'negotiating'] },
+                status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true, status: true },
             });

@@ -148,6 +148,20 @@ export async function adminDataRoutes(fastify: FastifyInstance) {
         // Step 2: Backfill therapists
         const therapistResult = await backfillTherapists();
 
+        // Step 2b: Sync newly created therapist odIds to Notion
+        let therapistIdsSynced = 0;
+        for (const { notionId, odId } of therapistResult.createdRecords) {
+          try {
+            await notionService.updateTherapistId(notionId, odId);
+            therapistIdsSynced++;
+          } catch (err) {
+            logger.warn({ err, notionId, odId }, 'Failed to sync backfilled therapist odId to Notion (non-critical)');
+          }
+        }
+        if (therapistIdsSynced > 0) {
+          logger.info({ therapistIdsSynced }, 'Synced backfilled therapist odIds to Notion');
+        }
+
         // Step 3: Link appointments to entities
         const linkResult = await linkAppointmentsToEntities();
 

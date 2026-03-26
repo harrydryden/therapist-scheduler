@@ -11,6 +11,7 @@ import {
 import { aiService } from './ai.service';
 import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
+import { parseJsonFromLLMResponse } from '../utils/json-parser';
 import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
 
 // Re-export for consumers
@@ -147,54 +148,7 @@ class PDFIngestionService {
     );
 
     try {
-      // Try to extract JSON from the response.
-      // AI models sometimes wrap JSON in markdown code fences or include stray
-      // backtick / prose characters. We progressively clean the response:
-      //  1. Strip markdown code fences (```json ... ``` or ``` ... ```)
-      //  2. Extract the outermost { … } to discard surrounding text
-      //  3. Remove stray backticks that aren't inside quoted strings
-      let jsonStr = response.content.trim();
-
-      // Strip markdown code fences
-      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
-
-      // Extract the JSON object by finding the outermost braces
-      const firstBrace = jsonStr.indexOf('{');
-      const lastBrace = jsonStr.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) {
-        jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
-      }
-
-      // Remove backticks that appear outside of JSON string values.
-      // Walk character-by-character to avoid corrupting quoted strings.
-      let cleaned = '';
-      let inString = false;
-      let escaped = false;
-      for (let i = 0; i < jsonStr.length; i++) {
-        const ch = jsonStr[i];
-        if (escaped) {
-          cleaned += ch;
-          escaped = false;
-          continue;
-        }
-        if (ch === '\\' && inString) {
-          cleaned += ch;
-          escaped = true;
-          continue;
-        }
-        if (ch === '"') {
-          inString = !inString;
-          cleaned += ch;
-          continue;
-        }
-        // Skip backticks outside of strings
-        if (ch === '`' && !inString) {
-          continue;
-        }
-        cleaned += ch;
-      }
-
-      const extracted = JSON.parse(cleaned.trim());
+      const extracted = parseJsonFromLLMResponse(response.content, 'therapist-extraction');
 
       // Validate required fields - use fallbacks from additional info if possible
       if (!extracted.name) {

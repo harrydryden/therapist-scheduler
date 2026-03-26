@@ -458,23 +458,26 @@ export class AIToolExecutorService {
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n');
 
-    // Replace full agent name with first name only in sign-offs.
-    // Handles "Justin Time" → "Justin" (or whatever the configured agent name is).
     if (agentFirstName) {
-      // Match the full name at the end of the body or on its own line, replace with first name
+      const escaped = agentFirstName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      // Replace full agent name with first name only in sign-offs.
+      // Handles "Justin Time" → "Justin" (or whatever the configured agent name is).
       const fullNamePattern = new RegExp(
-        `${agentFirstName}\\s+\\S+\\s*$`,
+        `${escaped}\\s+\\S+\\s*$`,
         'gim'
       );
       normalized = normalized.replace(fullNamePattern, agentFirstName);
+
+      // Fix signature on same line: "Best wishes Justin" → "Best wishes\nJustin"
+      const signaturePattern = new RegExp(
+        `\\b(Best wishes|Best|Thanks|Regards|Cheers|Sincerely|Kind regards|Warm regards|All the best)[,]?\\s+(${escaped})\\s*$`,
+        'gim'
+      );
+      normalized = normalized.replace(signaturePattern, '$1\n$2');
     }
 
     return normalized
-      // Fix signature on same line: "Best wishes Justin" → "Best wishes\nJustin"
-      .replace(
-        /\b(Best wishes|Best|Thanks|Regards|Cheers|Sincerely|Kind regards|Warm regards|All the best)[,]?\s+(Justin)\s*$/gim,
-        '$1\n$2'
-      )
       // Collapse excessive blank lines (3+ newlines → 2)
       .replace(/\n{3,}/g, '\n\n')
       // Clean up whitespace-only lines

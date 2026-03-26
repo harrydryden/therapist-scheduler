@@ -5,7 +5,7 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
-import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS } from '../constants';
+import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
 import { auditEventService } from './audit-event.service';
@@ -231,7 +231,7 @@ class StaleCheckService {
       const completedCount = await prisma.$transaction(async (tx) => {
         const toDelete = await tx.appointmentRequest.findMany({
           where: {
-            status: { in: ['confirmed', 'completed', 'session_held', 'feedback_requested'] },
+            status: { in: [...POST_BOOKING_STATUSES] },
             updatedAt: { lt: completedThreshold },
           },
           select: { id: true },
@@ -415,7 +415,7 @@ class StaleCheckService {
       // Note: lastActivityAt is non-nullable with @default(now()), so null check is unnecessary
       // Active conversations: pre-booking statuses OR confirmed-but-rescheduling
       const activeStatusFilter = [
-        { status: { in: ['pending' as const, 'contacted' as const, 'negotiating' as const] } },
+        { status: { in: [...PRE_BOOKING_STATUSES] as const } },
         { status: 'confirmed' as const, reschedulingInProgress: true },
       ];
 
@@ -688,7 +688,7 @@ class StaleCheckService {
     const candidates = await prisma.appointmentRequest.findMany({
       where: {
         OR: [
-          { status: { in: ['pending' as const, 'contacted' as const, 'negotiating' as const] } },
+          { status: { in: [...PRE_BOOKING_STATUSES] as const } },
           { status: 'confirmed' as const, reschedulingInProgress: true },
         ],
         conversationStallAlertAt: {

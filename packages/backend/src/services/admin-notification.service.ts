@@ -13,6 +13,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { PRE_BOOKING_STATUSES } from '../constants';
 import {
   calculateConversationHealth,
   calculateHealthStats,
@@ -280,7 +281,7 @@ class AdminNotificationService {
     // Fetch active appointments with fields needed for health calculation
     const appointments = await prisma.appointmentRequest.findMany({
       where: {
-        status: { in: ['pending', 'contacted', 'negotiating'] },
+        status: { in: [...PRE_BOOKING_STATUSES] },
       },
       select: {
         id: true,
