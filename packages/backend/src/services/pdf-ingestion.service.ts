@@ -498,9 +498,26 @@ class PDFIngestionService {
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
 
       // Step 5: Create Prisma Therapist record with ingestedAt timestamp
+      //         and sync the generated odId back to Notion
       try {
-        await getOrCreateTherapist(id, profile.email, profile.name);
-        logger.info({ traceId, notionId: id }, 'Created Prisma therapist record with ingestion date');
+        const therapist = await getOrCreateTherapist(id, profile.email, profile.name);
+        logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Created Prisma therapist record with ingestion date');
+
+        // Write the generated odId back to the Notion page so it appears in the ID column
+        try {
+          await notion.pages.update({
+            page_id: id,
+            properties: {
+              ID: {
+                rich_text: [{ type: 'text', text: { content: therapist.odId } }],
+              },
+            },
+          });
+          logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Synced therapist odId to Notion');
+        } catch (notionErr) {
+          // Non-critical - the ID can be synced later via the admin sync endpoint
+          logger.warn({ notionErr, traceId, notionId: id, odId: therapist.odId }, 'Failed to sync therapist odId to Notion');
+        }
       } catch (err) {
         // Non-critical - log but don't fail the ingestion
         logger.warn({ err, traceId, notionId: id }, 'Failed to create Prisma therapist record during ingestion');
