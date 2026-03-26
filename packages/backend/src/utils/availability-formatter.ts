@@ -451,7 +451,8 @@ function generateSummary(availability: FormattedAvailability): string {
   }
 
   if (availability.later.length > 0) {
-    const slotsToShow = availability.later.slice(0, Math.max(availability.later.length, 6));
+    const maxLaterSlots = 6;
+    const slotsToShow = availability.later.slice(0, maxLaterSlots);
     const formatted = formatSlotsByDate(slotsToShow);
     const remaining = availability.later.length - slotsToShow.length;
     const suffix = remaining > 0 ? `\n(+${remaining} more slots available)` : '';
