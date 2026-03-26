@@ -981,9 +981,7 @@ Justin`,
 
 Just a quick note to let you know we haven't forgotten about you! We're still actively looking for a client to match with you for a session.
 
-As soon as we have someone, we'll be in touch to get things booked in.
-
-In the meantime, if your availability has changed or you have any questions, feel free to reply to this email.
+We really appreciate your patience — as soon as we have someone, we'll be in touch to get things booked in.
 
 Best wishes
 
