@@ -33,14 +33,15 @@ model User {
 // Represents a therapist who provides sessions
 // Each therapist has a unique 10-digit ID (odId) for easy reference
 model Therapist {
-  id        String   @id @default(uuid())
-  odId      String   @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
-  notionId  String   @unique @map("notion_id") // Links to Notion database
-  email      String   @unique
+  id         String    @id @default(uuid())
+  odId       String    @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
+  notionId   String    @unique @map("notion_id") // Links to Notion database
+  email      String    @unique
   name       String
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  lastNudgeAt DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
 
   // Relations
   appointments AppointmentRequest[]
