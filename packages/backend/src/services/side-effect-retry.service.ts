@@ -227,14 +227,14 @@ class SideEffectRetryService {
       throw new Error(`Appointment ${effect.appointmentId} not found - cannot retry side effect`);
     }
 
-    const agentName = await getSettingValue<string>('agent.fromName');
+    const agentFirstName = (await getSettingValue<string>('agent.fromName')).split(' ')[0];
 
     switch (effect.effectType) {
       case 'email_client_confirmation':
         await emailQueueService.enqueue({
           to: appointment.userEmail,
           subject: `Your therapy session with ${appointment.therapistName} is confirmed`,
-          body: `Hi ${(appointment.userName || 'there').split(' ')[0]},\n\nYour session with ${appointment.therapistName} has been confirmed for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentName}`,
+          body: `Hi ${(appointment.userName || 'there').split(' ')[0]},\n\nYour session with ${appointment.therapistName} has been confirmed for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentFirstName}`,
           appointmentId: appointment.id,
         });
         break;
@@ -244,7 +244,7 @@ class SideEffectRetryService {
           await emailQueueService.enqueue({
             to: appointment.therapistEmail,
             subject: `Session confirmed: ${appointment.confirmedDateTime}`,
-            body: `Hi ${(appointment.therapistName || 'there').split(' ')[0]},\n\nA session has been confirmed with ${(appointment.userName || 'the client').split(' ')[0]} (${appointment.userEmail}) for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentName}`,
+            body: `Hi ${(appointment.therapistName || 'there').split(' ')[0]},\n\nA session has been confirmed with ${(appointment.userName || 'the client').split(' ')[0]} (${appointment.userEmail}) for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentFirstName}`,
             appointmentId: appointment.id,
           });
         }
