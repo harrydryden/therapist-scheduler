@@ -415,7 +415,7 @@ class StaleCheckService {
       // Note: lastActivityAt is non-nullable with @default(now()), so null check is unnecessary
       // Active conversations: pre-booking statuses OR confirmed-but-rescheduling
       const activeStatusFilter = [
-        { status: { in: [...PRE_BOOKING_STATUSES] as const } },
+        { status: { in: [...PRE_BOOKING_STATUSES] } },
         { status: 'confirmed' as const, reschedulingInProgress: true },
       ];
 
@@ -688,7 +688,7 @@ class StaleCheckService {
     const candidates = await prisma.appointmentRequest.findMany({
       where: {
         OR: [
-          { status: { in: [...PRE_BOOKING_STATUSES] as const } },
+          { status: { in: [...PRE_BOOKING_STATUSES] } },
           { status: 'confirmed' as const, reschedulingInProgress: true },
         ],
         conversationStallAlertAt: {

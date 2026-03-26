@@ -60,7 +60,7 @@ class TherapistNudgeService {
 
   private async runSafe(): Promise<void> {
     try {
-      await this.taskRunner.run((isLockValid) => this.sendNudges(isLockValid));
+      await this.taskRunner.run((ctx) => this.sendNudges(ctx.isLockValid));
     } catch (err) {
       logger.error({ err }, 'Therapist nudge check failed');
     }

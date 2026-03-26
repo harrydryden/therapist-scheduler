@@ -148,7 +148,7 @@ class PDFIngestionService {
     );
 
     try {
-      const extracted = parseJsonFromLLMResponse(response.content, 'therapist-extraction');
+      const extracted: any = parseJsonFromLLMResponse(response.content, 'therapist-extraction');
 
       // Validate required fields - use fallbacks from additional info if possible
       if (!extracted.name) {
