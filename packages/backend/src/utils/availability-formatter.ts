@@ -367,26 +367,67 @@ function normalizeAvailability(
 }
 
 /**
- * Group slots by date and format as "Monday 30th March: 10am, 11am, 12pm"
+ * Collapse consecutive hourly times into ranges.
+ * ["10am", "11am", "12pm", "1pm", "2pm", "3pm"] → ["10am – 3pm"]
+ * ["10am", "11am", "2pm", "3pm"]                → ["10am – 11am", "2pm – 3pm"]
+ * ["10am"]                                       → ["10am"]
+ */
+function collapseToRanges(datetimes: Date[]): string[] {
+  if (datetimes.length === 0) return [];
+  if (datetimes.length === 1) return [formatTime(datetimes[0])];
+
+  const ranges: string[] = [];
+  let rangeStart = datetimes[0];
+  let rangePrev = datetimes[0];
+
+  for (let i = 1; i <= datetimes.length; i++) {
+    const current = datetimes[i];
+    const gap = current ? (current.getTime() - rangePrev.getTime()) / (60 * 1000) : Infinity;
+
+    // Consecutive if within ~65 minutes (allows for 60-min intervals with small drift)
+    if (gap <= 65) {
+      rangePrev = current;
+    } else {
+      // Close the current range
+      if (rangeStart.getTime() === rangePrev.getTime()) {
+        ranges.push(formatTime(rangeStart));
+      } else {
+        ranges.push(`${formatTime(rangeStart)} – ${formatTime(rangePrev)}`);
+      }
+      if (current) {
+        rangeStart = current;
+        rangePrev = current;
+      }
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * Group slots by date and collapse consecutive times into ranges.
+ * e.g. "Monday 30th March: 10am – 3pm"
  */
 function formatSlotsByDate(slots: FormattedSlot[]): string {
-  // Group by calendar date
-  const byDate = new Map<string, { dateLong: string; times: string[] }>();
+  // Group by calendar date, preserving datetime objects for range detection
+  const byDate = new Map<string, { dateLong: string; datetimes: Date[] }>();
 
   for (const slot of slots) {
-    const dateKey = slot.datetime.toDateString(); // e.g. "Mon Mar 30 2026"
+    const dateKey = slot.datetime.toDateString();
     if (!byDate.has(dateKey)) {
       byDate.set(dateKey, {
         dateLong: formatDateLong(slot.datetime),
-        times: [],
+        datetimes: [],
       });
     }
-    byDate.get(dateKey)!.times.push(formatTime(slot.datetime));
+    byDate.get(dateKey)!.datetimes.push(slot.datetime);
   }
 
-  // Format each date group as a bullet line
   return Array.from(byDate.values())
-    .map(({ dateLong, times }) => `- ${dateLong}: ${times.join(', ')}`)
+    .map(({ dateLong, datetimes }) => {
+      const ranges = collapseToRanges(datetimes);
+      return `- ${dateLong}: ${ranges.join(', ')}`;
+    })
     .join('\n');
 }
 
