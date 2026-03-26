@@ -113,6 +113,7 @@ export async function buildSystemPrompt(
   const toneStyle = settingsMap.get('agent.toneStyle')!;
   const toneGuidance = getToneGuidance(toneStyle as string);
   const agentName = settingsMap.get('agent.fromName')! as string;
+  const agentFirstName = agentName.split(' ')[0];
   const sessionDuration = settingsMap.get('agent.sessionDurationMinutes')! as unknown as number;
   const maxSlotsPerGroup = settingsMap.get('agent.maxSlotsPerGroup')! as unknown as number;
   const maxTotalSlots = settingsMap.get('agent.maxTotalSlots')! as unknown as number;
@@ -201,12 +202,12 @@ ${workflowInstructions}
 - **Client Contact Sharing**: When emailing the therapist, always include the client's email address (${context.userEmail}) so the therapist can reach out to them directly. This helps the therapist send meeting links, pre-session information, or follow up with the client as needed.
 - **ALWAYS Review Thread History**: When you receive a new email, you will be provided with the COMPLETE thread history. ALWAYS read through all previous messages in the thread before responding. This ensures you have full context of what has been discussed, any time preferences mentioned, and the current state of the negotiation. Never respond based solely on the latest message - the full history is essential for accurate, contextual responses.
 - **EMAIL FORMATTING**: When writing email bodies, write each paragraph as a single continuous line of text. Do NOT insert line breaks or newlines within paragraphs - only use blank lines to separate paragraphs. Email clients will handle word wrapping automatically. Never break sentences across multiple lines.
-- **SIGNATURE FORMATTING**: Always format your sign-off with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
+- **SIGNATURE FORMATTING**: Always sign off with your FIRST NAME ONLY ("${agentFirstName}"), never your full name. Format with the closing phrase and name on SEPARATE lines, with a blank line before the closing:
 
 Best wishes
-${agentName}
+${agentFirstName}
 
-Never write "Best wishes, ${agentName}" or "Best wishes ${agentName}" on a single line. The closing phrase and your name must each be on their own line.
+Never write "Best wishes, ${agentFirstName}" or "Best wishes ${agentFirstName}" on a single line. The closing phrase and your name must each be on their own line.
 
 ## Privacy & Confidentiality
 

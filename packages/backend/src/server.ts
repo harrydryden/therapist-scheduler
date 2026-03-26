@@ -55,6 +55,7 @@ import { slackNotificationService } from './services/slack-notification.service'
 import { sseService } from './services/sse.service';
 import { registerAgentProcessor } from './services/email-message-processor.service';
 import { JustinTimeService } from './services/justin-time.service';
+import { therapistNudgeService } from './services/therapist-nudge.service';
 import { adminAuthHook } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 
@@ -419,6 +420,7 @@ async function start() {
       weeklyMailingListService.stop();
       slackWeeklySummaryService.stop();
       workReportService.stop();
+      therapistNudgeService.stop();
       notionSyncManager.stop();
 
       // Give services a moment to release locks
@@ -532,6 +534,7 @@ async function start() {
     notionSyncManager.start(); // Unified Notion sync (therapist freeze, users, feedback read/write)
     slackWeeklySummaryService.start(); // Weekly Slack summary (Monday 9am)
     workReportService.start(); // Daily work report (weekdays 9am)
+    therapistNudgeService.start(); // Periodic nudge emails to unmatched therapists
 
     // Recover any emails buffered in Redis WAL during database downtime
     emailQueueService.recoverFromWAL().catch((err) => {

@@ -111,7 +111,10 @@ export {
   ALL_STATUSES,
   ACTIVE_STATUSES,
   PRE_BOOKING_STATUSES,
+  POST_BOOKING_STATUSES,
   POST_SESSION_STATUSES,
+  TERMINAL_STATUSES,
+  CONFIRMED_ACTIVE_STATUSES,
 } from '@therapist-scheduler/shared';
 
 // Post-booking follow-up — DEFAULTS ONLY, runtime values come from postBooking.* settings

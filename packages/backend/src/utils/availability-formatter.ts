@@ -367,7 +367,73 @@ function normalizeAvailability(
 }
 
 /**
+ * Collapse consecutive hourly times into ranges.
+ * ["10am", "11am", "12pm", "1pm", "2pm", "3pm"] → ["10am – 3pm"]
+ * ["10am", "11am", "2pm", "3pm"]                → ["10am – 11am", "2pm – 3pm"]
+ * ["10am"]                                       → ["10am"]
+ */
+function collapseToRanges(datetimes: Date[]): string[] {
+  if (datetimes.length === 0) return [];
+  if (datetimes.length === 1) return [formatTime(datetimes[0])];
+
+  const ranges: string[] = [];
+  let rangeStart = datetimes[0];
+  let rangePrev = datetimes[0];
+
+  for (let i = 1; i <= datetimes.length; i++) {
+    const current = datetimes[i];
+    const gap = current ? (current.getTime() - rangePrev.getTime()) / (60 * 1000) : Infinity;
+
+    // Consecutive if within ~65 minutes (allows for 60-min intervals with small drift)
+    if (gap <= 65) {
+      rangePrev = current;
+    } else {
+      // Close the current range
+      if (rangeStart.getTime() === rangePrev.getTime()) {
+        ranges.push(formatTime(rangeStart));
+      } else {
+        ranges.push(`${formatTime(rangeStart)} – ${formatTime(rangePrev)}`);
+      }
+      if (current) {
+        rangeStart = current;
+        rangePrev = current;
+      }
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * Group slots by date and collapse consecutive times into ranges.
+ * e.g. "Monday 30th March: 10am – 3pm"
+ */
+function formatSlotsByDate(slots: FormattedSlot[]): string {
+  // Group by calendar date, preserving datetime objects for range detection
+  const byDate = new Map<string, { dateLong: string; datetimes: Date[] }>();
+
+  for (const slot of slots) {
+    const dateKey = slot.datetime.toDateString();
+    if (!byDate.has(dateKey)) {
+      byDate.set(dateKey, {
+        dateLong: formatDateLong(slot.datetime),
+        datetimes: [],
+      });
+    }
+    byDate.get(dateKey)!.datetimes.push(slot.datetime);
+  }
+
+  return Array.from(byDate.values())
+    .map(({ dateLong, datetimes }) => {
+      const ranges = collapseToRanges(datetimes);
+      return `- ${dateLong}: ${ranges.join(', ')}`;
+    })
+    .join('\n');
+}
+
+/**
  * Generate a human-readable summary of availability
+ * Groups times by date for clearer presentation
  */
 function generateSummary(availability: FormattedAvailability): string {
   const parts: string[] = [];
@@ -377,25 +443,26 @@ function generateSummary(availability: FormattedAvailability): string {
   }
 
   if (availability.thisWeek.length > 0) {
-    const slots = availability.thisWeek.map(s => s.shortDisplay).join(', ');
-    parts.push(`**This week:** ${slots}`);
+    parts.push(`**This week:**\n${formatSlotsByDate(availability.thisWeek)}`);
   }
 
   if (availability.nextWeek.length > 0) {
-    const slots = availability.nextWeek.map(s => s.shortDisplay).join(', ');
-    parts.push(`**Next week:** ${slots}`);
+    parts.push(`**Next week:**\n${formatSlotsByDate(availability.nextWeek)}`);
   }
 
   if (availability.later.length > 0) {
-    const slots = availability.later.slice(0, 3).map(s => s.shortDisplay).join(', ');
-    const suffix = availability.later.length > 3 ? ` (+${availability.later.length - 3} more)` : '';
-    parts.push(`**Later:** ${slots}${suffix}`);
+    const maxLaterSlots = 6;
+    const slotsToShow = availability.later.slice(0, maxLaterSlots);
+    const formatted = formatSlotsByDate(slotsToShow);
+    const remaining = availability.later.length - slotsToShow.length;
+    const suffix = remaining > 0 ? `\n(+${remaining} more slots available)` : '';
+    parts.push(`**Later:**\n${formatted}${suffix}`);
   }
 
   if (parts.length === 0) {
     return 'No available slots found in the next 3 weeks.';
   }
 
-  return parts.join('\n');
+  return parts.join('\n\n');
 }
 

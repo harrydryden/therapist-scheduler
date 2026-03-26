@@ -11,6 +11,7 @@ import {
 import { aiService } from './ai.service';
 import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
+import { parseJsonFromLLMResponse } from '../utils/json-parser';
 import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
 
 // Re-export for consumers
@@ -147,54 +148,7 @@ class PDFIngestionService {
     );
 
     try {
-      // Try to extract JSON from the response.
-      // AI models sometimes wrap JSON in markdown code fences or include stray
-      // backtick / prose characters. We progressively clean the response:
-      //  1. Strip markdown code fences (```json ... ``` or ``` ... ```)
-      //  2. Extract the outermost { … } to discard surrounding text
-      //  3. Remove stray backticks that aren't inside quoted strings
-      let jsonStr = response.content.trim();
-
-      // Strip markdown code fences
-      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
-
-      // Extract the JSON object by finding the outermost braces
-      const firstBrace = jsonStr.indexOf('{');
-      const lastBrace = jsonStr.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) {
-        jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
-      }
-
-      // Remove backticks that appear outside of JSON string values.
-      // Walk character-by-character to avoid corrupting quoted strings.
-      let cleaned = '';
-      let inString = false;
-      let escaped = false;
-      for (let i = 0; i < jsonStr.length; i++) {
-        const ch = jsonStr[i];
-        if (escaped) {
-          cleaned += ch;
-          escaped = false;
-          continue;
-        }
-        if (ch === '\\' && inString) {
-          cleaned += ch;
-          escaped = true;
-          continue;
-        }
-        if (ch === '"') {
-          inString = !inString;
-          cleaned += ch;
-          continue;
-        }
-        // Skip backticks outside of strings
-        if (ch === '`' && !inString) {
-          continue;
-        }
-        cleaned += ch;
-      }
-
-      const extracted = JSON.parse(cleaned.trim());
+      const extracted = parseJsonFromLLMResponse(response.content, 'therapist-extraction');
 
       // Validate required fields - use fallbacks from additional info if possible
       if (!extracted.name) {
@@ -498,9 +452,26 @@ class PDFIngestionService {
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
 
       // Step 5: Create Prisma Therapist record with ingestedAt timestamp
+      //         and sync the generated odId back to Notion
       try {
-        await getOrCreateTherapist(id, profile.email, profile.name);
-        logger.info({ traceId, notionId: id }, 'Created Prisma therapist record with ingestion date');
+        const therapist = await getOrCreateTherapist(id, profile.email, profile.name);
+        logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Created Prisma therapist record with ingestion date');
+
+        // Write the generated odId back to the Notion page so it appears in the ID column
+        try {
+          await notion.pages.update({
+            page_id: id,
+            properties: {
+              ID: {
+                rich_text: [{ type: 'text', text: { content: therapist.odId } }],
+              },
+            },
+          });
+          logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Synced therapist odId to Notion');
+        } catch (notionErr) {
+          // Non-critical - the ID can be synced later via the admin sync endpoint
+          logger.warn({ notionErr, traceId, notionId: id, odId: therapist.odId }, 'Failed to sync therapist odId to Notion');
+        }
       } catch (err) {
         // Non-critical - log but don't fail the ingestion
         logger.warn({ err, traceId, notionId: id }, 'Failed to create Prisma therapist record during ingestion');

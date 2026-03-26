@@ -19,7 +19,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
-import { RATE_LIMITS, PAGINATION } from '../constants';
+import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
@@ -491,7 +491,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
               where: {
                 userEmail,
                 therapistNotionId,
-                status: { in: ['pending', 'contacted', 'negotiating'] },
+                status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true },
             });

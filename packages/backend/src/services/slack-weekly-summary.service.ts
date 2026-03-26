@@ -12,7 +12,7 @@ import { redis } from '../utils/redis';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { PeriodicService } from '../utils/periodic-service';
 import { slackNotificationService } from './slack-notification.service';
-import { SLACK_NOTIFICATIONS } from '../constants';
+import { SLACK_NOTIFICATIONS, PRE_BOOKING_STATUSES } from '../constants';
 
 const LAST_SUMMARY_KEY = SLACK_NOTIFICATIONS.LAST_SUMMARY_KEY;
 
@@ -117,7 +117,7 @@ class SlackWeeklySummaryService extends PeriodicService {
         where: {
           conversationStallAlertAt: { not: null },
           conversationStallAcknowledged: false,
-          status: { in: ['pending', 'contacted', 'negotiating'] },
+          status: { in: [...PRE_BOOKING_STATUSES] },
         },
       }),
       prisma.appointmentRequest.count({

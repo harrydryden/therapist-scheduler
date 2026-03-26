@@ -251,6 +251,8 @@ export async function backfillTherapists(): Promise<{
   created: number;
   skipped: number;
   errors: string[];
+  /** Newly created records (notionId → odId) for Notion sync */
+  createdRecords: Array<{ notionId: string; odId: string }>;
 }> {
   // Get all unique therapists from appointments
   const uniqueTherapists = await prisma.appointmentRequest.findMany({
@@ -267,6 +269,7 @@ export async function backfillTherapists(): Promise<{
   let created = 0;
   let skipped = 0;
   const errors: string[] = [];
+  const createdRecords: Array<{ notionId: string; odId: string }> = [];
 
   for (const { therapistNotionId, therapistEmail, therapistName } of uniqueTherapists) {
     try {
@@ -279,8 +282,9 @@ export async function backfillTherapists(): Promise<{
         continue;
       }
 
-      await getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName);
+      const record = await getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName);
       created++;
+      createdRecords.push({ notionId: therapistNotionId, odId: record.odId });
     } catch (error) {
       const errorMsg = `Failed to create therapist for ${therapistNotionId}: ${error instanceof Error ? error.message : 'Unknown error'}`;
       errors.push(errorMsg);
@@ -289,7 +293,7 @@ export async function backfillTherapists(): Promise<{
   }
 
   logger.info({ created, skipped, errors: errors.length }, 'Therapist backfill complete');
-  return { created, skipped, errors };
+  return { created, skipped, errors, createdRecords };
 }
 
 /**

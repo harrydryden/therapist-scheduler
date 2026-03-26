@@ -66,6 +66,13 @@ export const POST_SESSION_STATUSES: readonly AppointmentStatus[] = [
   'completed',
 ] as const;
 
+/** Confirmed-and-active statuses (confirmed but not yet completed/cancelled — used for freeze logic) */
+export const CONFIRMED_ACTIVE_STATUSES: readonly AppointmentStatus[] = [
+  'confirmed',
+  'session_held',
+  'feedback_requested',
+] as const;
+
 /** Post-booking statuses (confirmed and beyond, excluding cancelled) */
 export const POST_BOOKING_STATUSES: readonly AppointmentStatus[] = [
   'confirmed',

@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
-import { THERAPIST_BOOKING } from '../constants';
+import { THERAPIST_BOOKING, PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
 import { notionService } from './notion.service';
 
@@ -299,30 +299,42 @@ class TherapistBookingStatusService {
   /**
    * Get all therapists that should be hidden from the frontend
    *
-   * Uses the "Frozen" checkbox in Notion as the source of truth.
-   * The backend syncs freeze status to Notion, but admin can override by unchecking.
+   * Uses BOTH Postgres (therapistBookingStatus) and Notion (Frozen checkbox).
+   * Postgres is the authoritative source — it's updated atomically with appointment
+   * creation. Notion is updated asynchronously and may lag behind.
+   *
+   * A therapist is hidden if EITHER source says it should be frozen. This means:
+   * - Postgres freeze (from recordNewRequest) takes effect immediately, even if
+   *   the async Notion sync hasn't completed yet.
+   * - Admin can still override by unchecking Frozen in Notion AND clearing the
+   *   booking status via the admin dashboard (both must agree to unfreeze).
    *
    * Visibility logic (Active takes precedence over Frozen):
    * - Active + Not Frozen = VISIBLE
    * - Active + Frozen = HIDDEN (frozen)
    * - Inactive + Not Frozen = HIDDEN (inactive)
    * - Inactive + Frozen = HIDDEN (inactive)
-   *
-   * This method returns therapist IDs that are frozen (for active therapists).
-   * Inactive therapists are already filtered out by the fetchTherapists query.
    */
   async getUnavailableTherapistIds(): Promise<string[]> {
     try {
-      // Get frozen therapist IDs directly from Notion
-      // This respects any admin overrides (if admin unchecks Frozen, therapist becomes available)
-      const frozenIds = await notionService.getFrozenTherapistIds();
+      // Fetch from both sources in parallel
+      const [notionFrozenIds, postgresFreeze] = await Promise.all([
+        notionService.getFrozenTherapistIds().catch((err) => {
+          logger.error({ err, operation: 'getUnavailableTherapistIds' }, 'Failed to get frozen IDs from Notion - using Postgres only');
+          return [] as string[];
+        }),
+        this.getFrozenTherapistIdsFromPostgres(),
+      ]);
+
+      // Union both sets — frozen in either source means hidden
+      const allFrozenIds = new Set([...notionFrozenIds, ...postgresFreeze]);
 
       logger.debug(
-        { frozenCount: frozenIds.length },
-        'Retrieved frozen therapist IDs from Notion'
+        { notionCount: notionFrozenIds.length, postgresCount: postgresFreeze.length, totalCount: allFrozenIds.size },
+        'Retrieved frozen therapist IDs from Notion + Postgres'
       );
 
-      return frozenIds;
+      return Array.from(allFrozenIds);
     } catch (error) {
       logger.error({ error, operation: 'getUnavailableTherapistIds' }, 'Failed to get unavailable therapist IDs');
       return [];
@@ -330,61 +342,43 @@ class TherapistBookingStatusService {
   }
 
   /**
-   * Determine if a therapist should be frozen based on booking status
-   * Called by the sync service to update Notion
-   *
-   * Simplified logic:
-   * - Confirmed booking = frozen
-   * - Active conversations with frozenAt set = frozen
-   * - frozenAt cleared by auto-unfreeze = not frozen
+   * Get therapist IDs that should be frozen based on Postgres booking status.
+   * This is the authoritative source — updated inside the appointment creation transaction.
+   * Delegates to batchComputeFreezeStatus to avoid duplicating freeze logic.
    */
-  async shouldTherapistBeFrozen(therapistNotionId: string): Promise<boolean> {
+  private async getFrozenTherapistIdsFromPostgres(): Promise<string[]> {
     try {
-      const status = await prisma.therapistBookingStatus.findUnique({
-        where: { id: therapistNotionId },
-      });
-
-      if (!status) {
-        return false; // No booking activity = not frozen
-      }
-
-      // Confirmed booking = always frozen
-      if (status.hasConfirmedBooking) {
-        return true;
-      }
-
-      // Defense-in-depth: if a confirmed/session_held/feedback_requested appointment exists
-      // but hasConfirmedBooking was not set (e.g. markConfirmed failed), still freeze.
-      // This check is independent of frozenAt so it works even after auto-unfreeze.
-      const confirmedAppointment = await prisma.appointmentRequest.findFirst({
-        where: {
-          therapistNotionId,
-          status: { in: ['confirmed', 'session_held', 'feedback_requested'] },
-        },
+      const statuses = await prisma.therapistBookingStatus.findMany({
         select: { id: true },
       });
 
-      if (confirmedAppointment) {
-        return true;
-      }
+      if (statuses.length === 0) return [];
 
-      // Check if frozen flag is set (set on new request, cleared by auto-unfreeze)
-      if (status.frozenAt) {
-        // Verify there are still active pre-booking conversations
-        const activeRequest = await prisma.appointmentRequest.findFirst({
-          where: {
-            therapistNotionId,
-            status: { in: ['pending', 'contacted', 'negotiating'] },
-          },
-          select: { id: true },
-        });
+      const therapistIds = statuses.map(s => s.id);
+      const freezeMap = await this.batchComputeFreezeStatus(therapistIds);
 
-        if (activeRequest) {
-          return true; // Frozen with active conversation
-        }
-      }
+      return therapistIds.filter(id => freezeMap.get(id) === true);
+    } catch (error) {
+      logger.error({ error, operation: 'getFrozenTherapistIdsFromPostgres' }, 'Failed to get frozen IDs from Postgres');
+      return [];
+    }
+  }
 
-      return false;
+  /**
+   * Determine if a therapist should be frozen based on booking status.
+   * Called by the sync service to update Notion.
+   * Delegates to batchComputeFreezeStatus to avoid duplicating freeze logic.
+   *
+   * Freeze rules (single source of truth in batchComputeFreezeStatus):
+   * - Confirmed booking = frozen
+   * - Confirmed+ appointment exists (defense-in-depth) = frozen
+   * - frozenAt set AND active pre-booking conversation = frozen
+   * - Otherwise = not frozen
+   */
+  async shouldTherapistBeFrozen(therapistNotionId: string): Promise<boolean> {
+    try {
+      const freezeMap = await this.batchComputeFreezeStatus([therapistNotionId]);
+      return freezeMap.get(therapistNotionId) ?? false;
     } catch (error) {
       logger.error({ error, therapistNotionId }, 'Failed to check if therapist should be frozen');
       return false;
@@ -437,7 +431,7 @@ class TherapistBookingStatusService {
         const confirmedAppointments = await prisma.appointmentRequest.findMany({
           where: {
             therapistNotionId: { in: needsConfirmedCheck },
-            status: { in: ['confirmed', 'session_held', 'feedback_requested'] },
+            status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
           },
           select: { therapistNotionId: true },
           distinct: ['therapistNotionId'],
@@ -451,7 +445,7 @@ class TherapistBookingStatusService {
         const activeAppointments = await prisma.appointmentRequest.findMany({
           where: {
             therapistNotionId: { in: needsActiveCheck },
-            status: { in: ['pending', 'contacted', 'negotiating'] },
+            status: { in: [...PRE_BOOKING_STATUSES] },
           },
           select: { therapistNotionId: true },
           distinct: ['therapistNotionId'],
@@ -490,9 +484,9 @@ class TherapistBookingStatusService {
       return result;
     } catch (error) {
       logger.error({ error, count: therapistIds.length }, 'Failed to batch compute freeze status');
-      // Fall back to individual queries on error
+      // Fail-open: on error, assume not frozen rather than blocking all therapists
       for (const id of therapistIds) {
-        result.set(id, await this.shouldTherapistBeFrozen(id));
+        result.set(id, false);
       }
       return result;
     }
@@ -562,7 +556,7 @@ class TherapistBookingStatusService {
         const allActiveConversations = await prisma.appointmentRequest.findMany({
           where: {
             therapistNotionId: { in: therapistIds },
-            status: { in: ['pending', 'contacted', 'negotiating'] },
+            status: { in: [...PRE_BOOKING_STATUSES] },
           },
           select: { therapistNotionId: true, lastActivityAt: true },
         });

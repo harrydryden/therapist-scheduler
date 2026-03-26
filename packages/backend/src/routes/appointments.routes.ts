@@ -10,7 +10,7 @@ import { therapistBookingStatusService } from '../services/therapist-booking-sta
 import { notionUsersService } from '../services/notion-users.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
-import { RATE_LIMITS } from '../constants';
+import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
 import { emailQueueService } from '../services/email-queue.service';
 import { validateEmail, checkForTypos } from '../utils/email-validator';
@@ -287,7 +287,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           where: {
             userEmail,
             therapistNotionId,
-            status: { in: ['pending', 'contacted', 'negotiating'] },
+            status: { in: [...PRE_BOOKING_STATUSES] },
           },
           select: { id: true },
         });
@@ -334,7 +334,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
               where: {
                 userEmail,
                 therapistNotionId,
-                status: { in: ['pending', 'contacted', 'negotiating'] },
+                status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true, status: true },
             });
@@ -350,7 +350,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
               const userActiveThreads = await tx.appointmentRequest.findMany({
                 where: {
                   userEmail,
-                  status: { in: ['pending', 'contacted', 'negotiating'] },
+                  status: { in: [...PRE_BOOKING_STATUSES] },
                 },
                 select: {
                   id: true,

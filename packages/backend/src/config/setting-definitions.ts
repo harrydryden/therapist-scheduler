@@ -947,6 +947,46 @@ Best wishes,
 
 Justin`,
   },
+
+  // === THERAPIST NUDGE SETTINGS ===
+  'therapistNudge.enabled': {
+    category: 'therapistNudge',
+    label: 'Enable Therapist Nudge Emails',
+    description: 'When enabled, sends periodic emails to active therapists who have not yet been matched with a client, to let them know we are still looking.',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
+  'therapistNudge.intervalWeeks': {
+    category: 'therapistNudge',
+    label: 'Nudge Interval (weeks)',
+    description: 'How often (in weeks) to send a nudge email to unmatched therapists. Measured from the later of their ingestion date or last nudge.',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 12,
+    defaultValue: 2,
+  },
+  'email.therapistNudgeSubject': {
+    category: 'emailTemplates',
+    label: 'Therapist Nudge - Subject',
+    description: 'Subject line for the periodic nudge email sent to unmatched therapists. Variables: {therapistFirstName}',
+    valueType: 'string',
+    defaultValue: 'Spill update - still finding you a client',
+  },
+  'email.therapistNudgeBody': {
+    category: 'emailTemplates',
+    label: 'Therapist Nudge - Body',
+    description: 'Email body for the periodic nudge email sent to unmatched therapists. Variables: {therapistFirstName}, {agentFirstName}',
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Just a quick note to let you know we haven't forgotten about you! We're still actively looking for a client to match with you for a session.
+
+We really appreciate your patience — as soon as we have someone, we'll be in touch to get things booked in.
+
+Best wishes
+
+{agentFirstName}`,
+  },
 };
 
 export type SettingKey = keyof typeof SETTING_DEFINITIONS;

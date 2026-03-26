@@ -264,6 +264,71 @@ export function parseTherapistAvailability(
 }
 
 /**
+ * Extract and parse a JSON object from an LLM response.
+ *
+ * AI models often wrap JSON in markdown code fences, include prose around the
+ * object, or emit stray backtick characters. This function progressively cleans
+ * the response before parsing:
+ *  1. Strip markdown code fences (```json … ``` or ``` … ```)
+ *  2. Extract the outermost { … } to discard surrounding text
+ *  3. Remove backtick characters that appear outside quoted strings
+ *
+ * @param text      Raw LLM response text
+ * @param context   Label for log messages (e.g. "therapist-extraction")
+ * @returns         The parsed object, or throws on failure
+ */
+export function parseJsonFromLLMResponse<T = unknown>(text: string, context?: string): T {
+  let jsonStr = text.trim();
+
+  // 1. Strip markdown code fences
+  jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?\s*```$/, '');
+
+  // 2. Extract the outermost JSON object
+  const firstBrace = jsonStr.indexOf('{');
+  const lastBrace = jsonStr.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    jsonStr = jsonStr.slice(firstBrace, lastBrace + 1);
+  }
+
+  // 3. Remove backticks outside of quoted strings (string-aware walk)
+  let cleaned = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < jsonStr.length; i++) {
+    const ch = jsonStr[i];
+    if (escaped) {
+      cleaned += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      cleaned += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      cleaned += ch;
+      continue;
+    }
+    if (ch === '`' && !inString) {
+      continue;
+    }
+    cleaned += ch;
+  }
+
+  try {
+    return JSON.parse(cleaned.trim()) as T;
+  } catch (err) {
+    logger.warn(
+      { err, context, preview: text.substring(0, 200) },
+      'Failed to parse JSON from LLM response'
+    );
+    throw err;
+  }
+}
+
+/**
  * Safely stringify JSON for database storage
  */
 export function safeJsonStringify(data: unknown): string {
