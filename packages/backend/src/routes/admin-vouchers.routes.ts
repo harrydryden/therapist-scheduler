@@ -88,6 +88,43 @@ function formatSummary(raw: { total: bigint; active: bigint; used: bigint; at_ri
   };
 }
 
+/**
+ * Send a voucher email to the user using the weekly mailing template.
+ * Returns true if the email was sent successfully, false otherwise.
+ */
+async function sendVoucherEmail(
+  email: string,
+  voucherResult: { displayCode: string; expiresAt: Date; url: string },
+): Promise<boolean> {
+  try {
+    const subjectTemplate = await getSettingValue<string>('email.weeklyMailingSubject');
+    const bodyTemplate = await getSettingValue<string>('email.weeklyMailingBody');
+    const unsubscribeUrl = generateUnsubscribeUrl(email, config.backendUrl);
+
+    const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
+      day: 'numeric', month: 'long', year: 'numeric',
+    });
+
+    const subject = renderTemplate(subjectTemplate, {
+      userName: email.split('@')[0],
+      voucherCode: voucherResult.displayCode,
+    });
+    const body = renderTemplate(bodyTemplate, {
+      userName: email.split('@')[0],
+      voucherCode: voucherResult.displayCode,
+      voucherExpiry,
+      webAppUrl: voucherResult.url,
+      unsubscribeUrl,
+    });
+
+    await emailProcessingService.sendEmail({ to: email, subject, body });
+    return true;
+  } catch (error) {
+    logger.error({ error, email }, 'Failed to send voucher email (voucher still created)');
+    return false;
+  }
+}
+
 export async function adminVoucherRoutes(fastify: FastifyInstance) {
   // Auth middleware - require webhook secret for admin access
   fastify.addHook('preHandler', verifyWebhookSecret);
@@ -295,37 +332,8 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
       }
     }
 
-    // Optionally send email - track success/failure accurately
-    let emailSent = false;
-    if (body.sendEmail) {
-      try {
-        const subjectTemplate = await getSettingValue<string>('email.weeklyMailingSubject');
-        const bodyTemplate = await getSettingValue<string>('email.weeklyMailingBody');
-        const unsubscribeUrl = generateUnsubscribeUrl(emailLower, config.backendUrl);
-
-        const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
-          day: 'numeric', month: 'long', year: 'numeric',
-        });
-
-        const subject = renderTemplate(subjectTemplate, {
-          userName: emailLower.split('@')[0],
-          voucherCode: voucherResult.displayCode,
-        });
-        const emailBody = renderTemplate(bodyTemplate, {
-          userName: emailLower.split('@')[0],
-          voucherCode: voucherResult.displayCode,
-          voucherExpiry,
-          webAppUrl: voucherResult.url,
-          unsubscribeUrl,
-        });
-
-        await emailProcessingService.sendEmail({ to: emailLower, subject, body: emailBody });
-        emailSent = true;
-        logger.info({ email: emailLower, displayCode: voucherResult.displayCode }, 'Admin manually issued voucher with email');
-      } catch (error) {
-        logger.error({ error, email: emailLower }, 'Failed to send voucher email (voucher still created)');
-      }
-    }
+    // Optionally send email
+    const emailSent = body.sendEmail ? await sendVoucherEmail(emailLower, voucherResult) : false;
 
     logger.info({ email: emailLower, displayCode: voucherResult.displayCode }, 'Admin manually issued voucher');
 
@@ -417,7 +425,10 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         logger.error({ error, email: emailLower }, 'Failed to update Notion subscription (voucher tracking updated)');
       }
 
-      logger.info({ email: emailLower, notionUpdated }, 'Admin resubscribed user');
+      // Send welcome-back email with fresh voucher code
+      const emailSent = await sendVoucherEmail(emailLower, voucherResult);
+
+      logger.info({ email: emailLower, notionUpdated, emailSent }, 'Admin resubscribed user');
 
       return reply.send({
         success: true,
@@ -425,7 +436,9 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
           email: emailLower,
           displayCode: voucherResult.displayCode,
           expiresAt: voucherResult.expiresAt.toISOString(),
+          voucherUrl: voucherResult.url,
           notionUpdated,
+          emailSent,
         },
       });
     }
