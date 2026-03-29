@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
-import { THERAPIST_BOOKING, PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES } from '../constants';
+import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
 import { notionService } from './notion.service';
 

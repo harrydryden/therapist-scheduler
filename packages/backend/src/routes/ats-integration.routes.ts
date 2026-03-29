@@ -30,7 +30,6 @@ import { slackNotificationService } from '../services/slack-notification.service
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
-import { STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import { parseFormQuestions } from '@therapist-scheduler/shared/utils/form-utils';
 import type {
@@ -40,7 +39,7 @@ import type {
   ATSDashboardStats,
   ATSFeedbackFormConfig,
 } from '@therapist-scheduler/shared';
-import type { HealthStatus, ConversationStage } from '@therapist-scheduler/shared';
+import type { ConversationStage } from '@therapist-scheduler/shared';
 
 // ============================================
 // Validation Schemas

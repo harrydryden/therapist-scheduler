@@ -13,7 +13,6 @@ import {
   getSettingValue,
   getCategorySettings,
   memoryCacheInvalidate,
-  memoryCacheInvalidateAll,
 } from '../services/settings.service';
 
 // Re-export for existing consumers that import from this file
