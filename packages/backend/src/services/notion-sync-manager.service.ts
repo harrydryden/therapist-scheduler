@@ -12,15 +12,20 @@
  * 1. Therapist Freeze Sync (TO Notion) - Every 5 min
  *    - Syncs freeze status from PostgreSQL to Notion therapist database
  *
- * 2. User Sync (TO Notion) - Every 6 hours
+ * 2. Therapist ID Sync (Notion ↔ Postgres) - Every 10 min
+ *    - Detects active therapists in Notion without an ID
+ *    - Creates them in PostgreSQL with a generated odId
+ *    - Writes the odId back to the Notion page
+ *
+ * 3. User Sync (TO Notion) - Every 6 hours
  *    - Syncs user data to Notion users database
  *
- * 3. Notion→Postgres User Sync (FROM Notion) - Every 10 min
+ * 4. Notion→Postgres User Sync (FROM Notion) - Every 10 min
  *    - Detects users added in Notion without an ID
  *    - Creates them in PostgreSQL with a generated odId
  *    - Writes the odId back to the Notion page
  *
- * 4. Appointment Lifecycle Tick - Every 30 min
+ * 5. Appointment Lifecycle Tick - Every 30 min
  *    - Transitions confirmed appointments to session_held after session time
  */
 
@@ -35,6 +40,7 @@ import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { notionService } from './notion.service';
 import { notionUsersService } from './notion-users.service';
+import { getOrCreateTherapist } from '../utils/unique-id';
 
 
 // ============================================
@@ -43,6 +49,7 @@ import { notionUsersService } from './notion-users.service';
 
 const SYNC_INTERVALS = {
   therapistFreeze: 5 * 60 * 1000,      // 5 minutes
+  therapistIdSync: 10 * 60 * 1000,     // 10 minutes (Notion → Postgres therapist ID sync)
   appointmentLifecycle: 30 * 60 * 1000, // 30 minutes (transitions confirmed → session_held)
   userSync: 6 * 60 * 60 * 1000,        // 6 hours
   notionToPostgresUserSync: 10 * 60 * 1000, // 10 minutes (Notion → Postgres user sync)
@@ -50,6 +57,7 @@ const SYNC_INTERVALS = {
 
 const STARTUP_DELAYS = {
   therapistFreeze: 0,                   // Immediately
+  therapistIdSync: 15 * 1000,          // 15 seconds (after freeze sync has started)
   appointmentLifecycle: 2 * 60 * 1000,  // 2 minutes
   userSync: 30 * 1000,                 // 30 seconds
   notionToPostgresUserSync: 60 * 1000, // 1 minute (after initial user sync has had time to run)
@@ -80,7 +88,7 @@ interface SyncStatus {
   lastResult: SyncResult | null;
 }
 
-type SyncType = 'therapistFreeze' | 'appointmentLifecycle' | 'userSync' | 'notionToPostgresUserSync';
+type SyncType = 'therapistFreeze' | 'therapistIdSync' | 'appointmentLifecycle' | 'userSync' | 'notionToPostgresUserSync';
 
 // ============================================
 // Notion Sync Manager
@@ -108,12 +116,14 @@ class NotionSyncManager {
 
     // Start each sync type with its configured delay and interval
     this.startSyncType('therapistFreeze', () => this.syncTherapistFreeze());
+    this.startSyncType('therapistIdSync', () => this.syncTherapistIds());
     this.startSyncType('userSync', () => this.syncUsers());
     this.startSyncType('notionToPostgresUserSync', () => this.syncNotionUsersToPostgres());
     this.startSyncType('appointmentLifecycle', () => this.runAppointmentLifecycleTick());
 
     logger.info({
       therapistFreeze: `${SYNC_INTERVALS.therapistFreeze / 1000}s`,
+      therapistIdSync: `${SYNC_INTERVALS.therapistIdSync / 1000}s`,
       appointmentLifecycle: `${SYNC_INTERVALS.appointmentLifecycle / 1000}s`,
       userSync: `${SYNC_INTERVALS.userSync / 1000}s`,
       notionToPostgresUserSync: `${SYNC_INTERVALS.notionToPostgresUserSync / 1000}s`,
@@ -147,6 +157,7 @@ class NotionSyncManager {
   getStatus(): SyncStatus[] {
     return [
       this.getSyncStatus('therapistFreeze', 'Therapist Freeze Sync'),
+      this.getSyncStatus('therapistIdSync', 'Therapist ID Sync'),
       this.getSyncStatus('userSync', 'User Sync'),
       this.getSyncStatus('notionToPostgresUserSync', 'Notion→Postgres User Sync'),
       this.getSyncStatus('appointmentLifecycle', 'Appointment Lifecycle Tick'),
@@ -163,6 +174,10 @@ class NotionSyncManager {
 
   async triggerUserSync(): Promise<SyncResult> {
     return this.runWithLock('userSync', () => this.syncUsers());
+  }
+
+  async triggerTherapistIdSync(): Promise<SyncResult> {
+    return this.runWithLock('therapistIdSync', () => this.syncTherapistIds());
   }
 
   async triggerNotionToPostgresUserSync(): Promise<SyncResult> {
@@ -235,6 +250,7 @@ class NotionSyncManager {
   private isSyncEnabled(type: SyncType): boolean {
     switch (type) {
       case 'therapistFreeze':
+      case 'therapistIdSync':
         return notionClientManager.isConfigured();
       case 'userSync':
         return notionUsersService.isConfigured();
@@ -356,6 +372,62 @@ class NotionSyncManager {
       logger.info({ syncId, synced, errors }, 'Therapist freeze sync completed');
     } catch (error) {
       logger.error({ syncId, error }, 'Therapist freeze sync failed');
+      errors++;
+    }
+
+    return { synced, errors };
+  }
+
+  /**
+   * Sync therapist IDs FROM Notion TO PostgreSQL and back.
+   * Detects active therapists in Notion without an odId, creates them in Postgres,
+   * and writes the generated odId back to the Notion page.
+   */
+  private async syncTherapistIds(): Promise<SyncResult> {
+    const syncId = Date.now().toString(36);
+    logger.info({ syncId }, 'Running therapist ID sync');
+
+    let synced = 0;
+    let errors = 0;
+
+    try {
+      // fetchTherapists returns active therapists with their odId (or null if missing)
+      const therapists = await notionService.fetchTherapists();
+      const needingSync = therapists.filter(t => !t.odId);
+
+      if (needingSync.length === 0) {
+        logger.debug({ syncId }, 'All active therapists already have IDs');
+        return { synced: 0, errors: 0 };
+      }
+
+      logger.info({ syncId, count: needingSync.length }, 'Therapists needing ID sync');
+
+      for (const therapist of needingSync) {
+        try {
+          // Create or retrieve the therapist record in Postgres
+          const dbTherapist = await getOrCreateTherapist(
+            therapist.id,
+            therapist.email,
+            therapist.name
+          );
+
+          // Write the odId back to Notion
+          await notionService.updateTherapistId(therapist.id, dbTherapist.odId);
+          synced++;
+
+          logger.info(
+            { syncId, notionId: therapist.id, odId: dbTherapist.odId, name: therapist.name },
+            'Synced therapist ID to Notion'
+          );
+        } catch (err) {
+          errors++;
+          logger.error({ err, syncId, notionId: therapist.id, name: therapist.name }, 'Failed to sync therapist ID');
+        }
+      }
+
+      logger.info({ syncId, synced, errors }, 'Therapist ID sync completed');
+    } catch (error) {
+      logger.error({ syncId, error }, 'Therapist ID sync failed');
       errors++;
     }
 
