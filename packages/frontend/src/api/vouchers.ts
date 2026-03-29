@@ -20,6 +20,7 @@ export interface VoucherSummary {
   used: number;
   atRisk: number;
   unsubscribed: number;
+  maxStrikes: number;
 }
 
 export interface VoucherListResponse {
@@ -55,27 +56,35 @@ export async function getVouchers(filters: VoucherFilters = {}): Promise<Voucher
   const response = await fetchAdminApi<VoucherListResponse>(
     `/admin/vouchers${queryString ? `?${queryString}` : ''}`
   );
-
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to fetch vouchers');
+  }
+  return response.data;
 }
 
 export async function getVoucher(email: string): Promise<VoucherRecord> {
   const response = await fetchAdminApi<VoucherRecord>(
     `/admin/vouchers/${encodeURIComponent(email)}`
   );
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to fetch voucher');
+  }
+  return response.data;
 }
 
 export async function issueVoucher(data: {
   email: string;
   expiryDays?: number;
   sendEmail?: boolean;
-}): Promise<{ email: string; displayCode: string; expiresAt: string; emailSent: boolean }> {
-  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; emailSent: boolean }>(
+}): Promise<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }> {
+  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }>(
     '/admin/vouchers/issue',
     { method: 'POST', body: JSON.stringify(data) }
   );
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to issue voucher');
+  }
+  return response.data;
 }
 
 export async function resetStrikes(email: string): Promise<{ email: string; strikeCount: number; previousStrikes: number }> {
@@ -83,7 +92,10 @@ export async function resetStrikes(email: string): Promise<{ email: string; stri
     `/admin/vouchers/${encodeURIComponent(email)}/reset-strikes`,
     { method: 'POST', body: JSON.stringify({}) }
   );
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to reset strikes');
+  }
+  return response.data;
 }
 
 export async function resubscribeUser(email: string): Promise<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }> {
@@ -91,7 +103,10 @@ export async function resubscribeUser(email: string): Promise<{ email: string; d
     `/admin/vouchers/${encodeURIComponent(email)}/resubscribe`,
     { method: 'POST', body: JSON.stringify({}) }
   );
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to resubscribe user');
+  }
+  return response.data;
 }
 
 export async function revokeVoucher(email: string): Promise<{ email: string; revoked: boolean }> {
@@ -99,5 +114,8 @@ export async function revokeVoucher(email: string): Promise<{ email: string; rev
     `/admin/vouchers/${encodeURIComponent(email)}/revoke`,
     { method: 'POST', body: JSON.stringify({}) }
   );
-  return response.data!;
+  if (!response.data) {
+    throw new Error('Failed to revoke voucher');
+  }
+  return response.data;
 }

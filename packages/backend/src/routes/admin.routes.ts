@@ -5,13 +5,13 @@ import { emailProcessingService } from '../services/email-processing.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { redis } from '../utils/redis';
 import { logger } from '../utils/logger';
-import { RATE_LIMITS, HEADERS } from '../constants';
+import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
 import { getSettingValues } from '../services/settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { verifyWebhookSecret } from '../middleware/auth';
-import { getBackgroundTaskHealth, getTaskMetrics } from '../utils/background-task';
+import { getTaskMetrics } from '../utils/background-task';
 
 const setupPushSchema = z.object({
   topicName: z.string().min(1, 'Pub/Sub topic name is required'),

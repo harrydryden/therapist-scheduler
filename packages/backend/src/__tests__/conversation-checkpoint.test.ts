@@ -577,15 +577,15 @@ describe('STAGE_COMPLETION_PERCENTAGE', () => {
 // ============================================
 // End-to-end lifecycle coherence
 // ============================================
+// NOTE: Full lifecycle path simulations (happy path, stale→chase→closure,
+// reactivation, rescheduling, cancellation reachability) are tested in
+// thread-lifecycle-chase.test.ts alongside the chase/closure-specific logic
+// they exercise. This avoids duplication between the two test files.
 
-describe('Lifecycle coherence', () => {
+describe('Lifecycle coherence - graph properties', () => {
   describe('every non-terminal stage has a path to a terminal state', () => {
     const terminalStages: ConversationStage[] = ['confirmed', 'cancelled'];
 
-    /**
-     * BFS to find if there's a path from a given stage to any terminal stage
-     * via VALID_TRANSITIONS
-     */
     function canReachTerminal(startStage: ConversationStage): boolean {
       const visited = new Set<ConversationStage>();
       const queue: ConversationStage[] = [startStage];
@@ -596,7 +596,6 @@ describe('Lifecycle coherence', () => {
         if (visited.has(current)) continue;
         visited.add(current);
 
-        // Get all valid next stages
         for (const nextStage of ALL_STAGES) {
           if (isValidTransition(current, nextStage) && !visited.has(nextStage)) {
             queue.push(nextStage);
@@ -611,106 +610,6 @@ describe('Lifecycle coherence', () => {
       if (terminalStages.includes(stage)) continue;
       it(`${stage} can reach a terminal state`, () => {
         expect(canReachTerminal(stage)).toBe(true);
-      });
-    }
-  });
-
-  describe('happy path: initial_contact → confirmed', () => {
-    it('walks through the full happy path via actions', () => {
-      let cp = updateCheckpoint(null, 'sent_initial_email_to_therapist');
-      expect(cp.stage).toBe('awaiting_therapist_availability');
-
-      cp = updateCheckpoint(cp, 'received_therapist_availability');
-      expect(cp.stage).toBe('awaiting_user_slot_selection');
-
-      cp = updateCheckpoint(cp, 'received_user_slot_selection');
-      expect(cp.stage).toBe('awaiting_therapist_confirmation');
-
-      cp = updateCheckpoint(cp, 'received_therapist_confirmation');
-      expect(cp.stage).toBe('awaiting_meeting_link');
-
-      cp = updateCheckpoint(cp, 'sent_final_confirmations');
-      expect(cp.stage).toBe('confirmed');
-    });
-  });
-
-  describe('stale → chase → closure_recommended → cancelled path', () => {
-    it('walks through the full escalation path', () => {
-      // Start at a waiting stage
-      let cp = createCheckpoint('awaiting_therapist_availability', 'sent_initial_email_to_therapist');
-
-      // Stall detection marks it as stalled
-      cp = markAsStalled(cp);
-      expect(cp.stage).toBe('stalled');
-      expect(isValidTransition('awaiting_therapist_availability', 'stalled')).toBe(true);
-
-      // Chase follow-up sent
-      cp = updateCheckpoint(cp, 'sent_chase_followup');
-      expect(cp.stage).toBe('chased');
-      expect(isValidTransition('stalled', 'chased')).toBe(true);
-
-      // No response - closure recommended
-      cp = updateCheckpoint(cp, 'closure_recommended_to_admin');
-      expect(cp.stage).toBe('closure_recommended');
-      expect(isValidTransition('chased', 'closure_recommended')).toBe(true);
-
-      // Admin cancels
-      expect(isValidTransition('closure_recommended', 'cancelled')).toBe(true);
-    });
-  });
-
-  describe('chased → reactivation on response', () => {
-    it('allows reactivation to all appropriate active stages', () => {
-      expect(isValidTransition('chased', 'awaiting_therapist_availability')).toBe(true);
-      expect(isValidTransition('chased', 'awaiting_user_slot_selection')).toBe(true);
-      expect(isValidTransition('chased', 'awaiting_therapist_confirmation')).toBe(true);
-      expect(isValidTransition('chased', 'confirmed')).toBe(true);
-    });
-  });
-
-  describe('closure_recommended → dismiss → new chase cycle', () => {
-    it('allows transition back to chased after admin dismiss', () => {
-      expect(isValidTransition('closure_recommended', 'chased')).toBe(true);
-    });
-
-    it('allows transition to reactivation stages after dismiss', () => {
-      expect(isValidTransition('closure_recommended', 'awaiting_therapist_availability')).toBe(true);
-      expect(isValidTransition('closure_recommended', 'awaiting_user_slot_selection')).toBe(true);
-      expect(isValidTransition('closure_recommended', 'awaiting_therapist_confirmation')).toBe(true);
-    });
-  });
-
-  describe('rescheduling includes chase path', () => {
-    it('allows rescheduling -> stalled -> chased -> closure_recommended', () => {
-      expect(isValidTransition('rescheduling', 'stalled')).toBe(true);
-      expect(isValidTransition('rescheduling', 'chased')).toBe(true);
-      expect(isValidTransition('stalled', 'chased')).toBe(true);
-      expect(isValidTransition('chased', 'closure_recommended')).toBe(true);
-    });
-  });
-
-  describe('cancellation is reachable from every non-terminal stage', () => {
-    const nonTerminal: ConversationStage[] = ALL_STAGES.filter(
-      s => s !== 'confirmed' && s !== 'cancelled'
-    );
-
-    for (const stage of nonTerminal) {
-      it(`${stage} can reach cancelled (directly or via chain)`, () => {
-        // Direct cancellation or via valid transition chain
-        const canCancel = isValidTransition(stage, 'cancelled');
-        if (!canCancel) {
-          // For stages that can't directly cancel, verify they can reach a stage that can
-          let reachable = false;
-          for (const intermediate of ALL_STAGES) {
-            if (isValidTransition(stage, intermediate) && isValidTransition(intermediate, 'cancelled')) {
-              reachable = true;
-              break;
-            }
-          }
-          expect(reachable).toBe(true);
-        } else {
-          expect(canCancel).toBe(true);
-        }
       });
     }
   });

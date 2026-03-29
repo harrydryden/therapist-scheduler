@@ -13,6 +13,8 @@ import type { TherapistAvailability } from '../types';
 interface TherapistCardProps {
   therapist: Therapist;
   voucher?: VoucherState;
+  /** When true, users without a valid voucher are blocked from booking */
+  voucherRequired?: boolean;
 }
 
 // Icon components
@@ -75,7 +77,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
 
 // FIX #38: Booking form logic (firstName, email, mutation, handleSubmit) is now
 // shared via the useBookingForm hook, eliminating duplication with BookingForm.tsx.
-const TherapistCard = memo(function TherapistCard({ therapist, voucher }: TherapistCardProps) {
+const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherRequired = false }: TherapistCardProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showBookingForm, setShowBookingForm] = useState(false);
 
@@ -175,14 +177,14 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher }: Therap
 
       {/* Row 8: Bottom action bar */}
       <div className="px-6 pb-5">
-        {/* Voucher gate: no voucher or expired */}
-        {voucher && !voucher.voucherToken ? (
+        {/* Voucher gate: only block when voucher is required */}
+        {voucherRequired && voucher && !voucher.voucherToken ? (
           <div className="text-center py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl">
             <p className="text-xs text-slate-500">
               A session code is required to book. Check your weekly email from Spill.
             </p>
           </div>
-        ) : voucher && voucher.isExpired ? (
+        ) : voucherRequired && voucher && voucher.isExpired ? (
           <div className="text-center py-3 px-4 bg-amber-50 border border-amber-200 rounded-xl">
             <p className="text-xs text-amber-700">
               Your session code has expired. Check your email for a new one.

@@ -193,6 +193,7 @@ describe('Admin Voucher Routes', () => {
       expect(body.data.items[0].email).toBe('user@example.com');
       expect(body.data.summary.total).toBe(10);
       expect(body.data.summary.active).toBe(3);
+      expect(body.data.summary.maxStrikes).toBe(3);
       expect(body.data.pagination.page).toBe(1);
     });
 
@@ -366,7 +367,7 @@ describe('Admin Voucher Routes', () => {
   // ---- POST /api/admin/vouchers/issue ----
 
   describe('POST /api/admin/vouchers/issue', () => {
-    it('creates voucher and returns display code', async () => {
+    it('creates voucher and returns display code and voucherUrl', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
       (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
       (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
@@ -385,6 +386,7 @@ describe('Admin Voucher Routes', () => {
       const data = res.json().data;
       expect(data.email).toBe('new@example.com');
       expect(data.displayCode).toMatch(/^\w+-\w+-\w+$/); // word-word-word format
+      expect(data.voucherUrl).toMatch(/^https:\/\/app\.test\?voucher=/);
       expect(data.emailSent).toBe(true);
       expect(prisma.voucherTracking.upsert).toHaveBeenCalled();
     });
@@ -592,6 +594,46 @@ describe('Admin Voucher Routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.json().data.notionUpdated).toBe(false);
+    });
+
+    it('sends welcome-back email with voucher code', async () => {
+      (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
+        makeRecord({ unsubscribedAt: new Date(), strikeCount: 3 })
+      );
+      (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
+      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue(null);
+      (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/vouchers/user@example.com/resubscribe',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data.emailSent).toBe(true);
+      expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+      const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+      expect(emailCall.to).toBe('user@example.com');
+    });
+
+    it('returns voucherUrl for admin sharing', async () => {
+      (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
+        makeRecord({ unsubscribedAt: new Date() })
+      );
+      (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
+      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue(null);
+      (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/vouchers/user@example.com/resubscribe',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const data = res.json().data;
+      expect(data.voucherUrl).toMatch(/^https:\/\/app\.test\?voucher=/);
     });
   });
 

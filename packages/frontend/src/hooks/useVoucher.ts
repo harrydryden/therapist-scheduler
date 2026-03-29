@@ -113,7 +113,7 @@ export interface VoucherState {
  *
  * Returns the token, display code, and expiry status.
  */
-export function useVoucher(): VoucherState {
+export function useVoucher(expiryDays: number = 14): VoucherState {
   const [voucherToken, setVoucherToken] = useState<string | null>(() => {
     // Initialize from sessionStorage
     try {
@@ -146,8 +146,8 @@ export function useVoucher(): VoucherState {
   }, []);
 
   const displayCode = voucherToken ? getDisplayCodeFromToken(voucherToken) : null;
-  const expired = voucherToken ? isTokenExpired(voucherToken) : null;
-  const expiresAt = voucherToken ? getExpiresAt(voucherToken) : null;
+  const expired = voucherToken ? isTokenExpired(voucherToken, expiryDays) : null;
+  const expiresAt = voucherToken ? getExpiresAt(voucherToken, expiryDays) : null;
 
   const clearVoucher = () => {
     try {

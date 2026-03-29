@@ -7,7 +7,6 @@ import FilterBar from '../components/FilterBar';
 import { useVoucher } from '../hooks/useVoucher';
 
 export default function TherapistsPage() {
-  const voucher = useVoucher();
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [isIntroExpanded, setIsIntroExpanded] = useState(false);
 
@@ -28,7 +27,11 @@ export default function TherapistsPage() {
   });
 
   const introText = frontendSettings?.['frontend.therapistPageIntro'] || '';
+  const voucherEnabled = frontendSettings?.['voucher.enabled'] ?? false;
   const voucherRequired = frontendSettings?.['voucher.required'] ?? false;
+  const voucherExpiryDays = frontendSettings?.['voucher.expiryDays'] ?? 14;
+
+  const voucher = useVoucher(voucherExpiryDays);
 
   // Filter to only show active therapists
   const activeTherapists = useMemo(() => {
@@ -164,7 +167,7 @@ export default function TherapistsPage() {
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-5 gap-y-8">
             {filteredTherapists.map((therapist) => (
-              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucherRequired ? voucher : undefined} />
+              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucherEnabled ? voucher : undefined} voucherRequired={voucherRequired} />
             ))}
           </div>
         </>

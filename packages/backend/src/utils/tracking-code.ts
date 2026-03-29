@@ -156,55 +156,6 @@ export function prependTrackingCodeToSubject(subject: string, code: string): str
 }
 
 /**
- * Find appointment by tracking code
- * Used as fallback when thread ID matching fails
- *
- * Each appointment has a unique tracking code, so this returns at most one appointment.
- */
-export async function findAppointmentByTrackingCode(
-  trackingCode: string,
-  matchableStatuses: string[]
-): Promise<{ id: string; userEmail: string; therapistEmail: string } | null> {
-  const appointment = await prisma.appointmentRequest.findFirst({
-    where: {
-      trackingCode: trackingCode,
-      status: { in: matchableStatuses as any },
-    },
-    select: { id: true, userEmail: true, therapistEmail: true },
-  });
-
-  if (appointment) {
-    logger.info(
-      { trackingCode, appointmentId: appointment.id },
-      'Matched appointment by tracking code'
-    );
-  }
-
-  return appointment;
-}
-
-/**
- * Find all appointments for a tracking code
- * Should typically return 0-1 appointments since codes are unique,
- * but kept for backwards compatibility with any legacy shared codes.
- */
-export async function findAllAppointmentsByTrackingCode(
-  trackingCode: string,
-  matchableStatuses: string[]
-): Promise<Array<{ id: string; userEmail: string; therapistEmail: string; updatedAt: Date }>> {
-  const appointments = await prisma.appointmentRequest.findMany({
-    where: {
-      trackingCode: trackingCode,
-      status: { in: matchableStatuses as any },
-    },
-    select: { id: true, userEmail: true, therapistEmail: true, updatedAt: true },
-    orderBy: { updatedAt: 'desc' },
-  });
-
-  return appointments;
-}
-
-/**
  * Backfill tracking codes for appointments that don't have one
  * Returns the number of appointments updated
  */

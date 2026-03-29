@@ -15,9 +15,11 @@ function isThreadLimitError(error: unknown): error is ApiError {
 interface BookingFormProps {
   therapist: TherapistDetail;
   voucher?: VoucherState;
+  /** When true, users without a valid voucher are blocked from booking */
+  voucherRequired?: boolean;
 }
 
-export default function BookingForm({ therapist, voucher }: BookingFormProps) {
+export default function BookingForm({ therapist, voucher, voucherRequired = false }: BookingFormProps) {
   const [submitted, setSubmitted] = useState(false);
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
@@ -53,8 +55,8 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
     );
   }
 
-  // Gate: expired voucher
-  if (voucher && voucher.isExpired) {
+  // Gate: expired voucher (only block when voucher is required)
+  if (voucherRequired && voucher && voucher.isExpired) {
     return (
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
         <svg className="w-12 h-12 text-amber-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -69,8 +71,8 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
     );
   }
 
-  // Gate: no voucher at all (voucher system active but user arrived without one)
-  if (voucher && !voucher.voucherToken) {
+  // Gate: no voucher at all (only block when voucher is required)
+  if (voucherRequired && voucher && !voucher.voucherToken) {
     return (
       <div className="bg-slate-50 border border-slate-200 rounded-lg p-6 text-center">
         <svg className="w-12 h-12 text-slate-400 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -99,9 +101,6 @@ export default function BookingForm({ therapist, voucher }: BookingFormProps) {
         {voucher?.displayCode && (
           <p className="text-sm text-green-600 mt-3">
             Your session code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
-            {voucher.expiresAt && (
-              <> It expires on {voucher.expiresAt.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.</>
-            )}
           </p>
         )}
       </div>

@@ -27,15 +27,8 @@ const traceStorage = new AsyncLocalStorage<TraceContext>();
  * Get the current trace context from the async call stack.
  * Returns undefined if called outside a traced request.
  */
-export function getTraceContext(): TraceContext | undefined {
+function getTraceContext(): TraceContext | undefined {
   return traceStorage.getStore();
-}
-
-/**
- * Get just the trace ID, or a fallback for untraced contexts (background jobs).
- */
-export function getTraceId(): string {
-  return traceStorage.getStore()?.traceId ?? 'no-trace';
 }
 
 /**
@@ -54,16 +47,6 @@ export function generateTraceId(requestId?: string): string {
   if (requestId) return `req-${requestId}`;
   const hex = Math.random().toString(16).substring(2, 10);
   return `bg-${hex}`;
-}
-
-/**
- * Create a child logger with trace context automatically attached.
- * Useful for services that want structured logging with trace info.
- */
-export function getTracedLogger() {
-  const ctx = getTraceContext();
-  if (!ctx) return logger;
-  return logger.child({ traceId: ctx.traceId });
 }
 
 /**

@@ -22,7 +22,6 @@ import { prisma } from '../utils/database';
 import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
-import { APPOINTMENT_STATUS } from '../constants';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
 import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt } from '../utils/email-classifier';
