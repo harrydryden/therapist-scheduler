@@ -71,8 +71,8 @@ export async function issueVoucher(data: {
   email: string;
   expiryDays?: number;
   sendEmail?: boolean;
-}): Promise<{ email: string; displayCode: string; expiresAt: string; emailSent: boolean }> {
-  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; emailSent: boolean }>(
+}): Promise<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }> {
+  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }>(
     '/admin/vouchers/issue',
     { method: 'POST', body: JSON.stringify(data) }
   );

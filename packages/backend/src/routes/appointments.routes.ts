@@ -186,16 +186,18 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             });
           }
 
-          // Check if voucher has been revoked by admin (token cleared from DB)
+          // Check if voucher has been explicitly revoked by admin (token set to null).
+          // Only reject when the token is null (revoked), not when a newer token exists —
+          // users may legitimately use an older but still time-valid voucher from a previous email.
           const voucherTracking = await prisma.voucherTracking.findUnique({
             where: { id: userEmail.toLowerCase() },
             select: { lastVoucherToken: true },
           });
-          if (voucherTracking && voucherTracking.lastVoucherToken !== voucherToken) {
+          if (voucherTracking && voucherTracking.lastVoucherToken === null) {
             logger.info({ requestId, userEmail }, 'Revoked voucher token submitted');
             return reply.status(400).send({
               success: false,
-              error: 'This session code is no longer valid. Check your email for a new one.',
+              error: 'This session code has been revoked. Check your email for a new one.',
             });
           }
 
@@ -444,16 +446,23 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
         });
 
-        // Update voucher tracking: mark voucher as used and reset strike count (non-blocking)
+        // Update voucher tracking: mark voucher as used and reset strike count (non-blocking).
+        // Uses upsert to handle edge cases where no tracking record exists yet
+        // (e.g., admin-issued voucher to a brand-new user).
         if (voucherDisplayCode && voucherEnabled) {
-          prisma.voucherTracking.update({
+          const usedAt = new Date();
+          prisma.voucherTracking.upsert({
             where: { id: userEmail.toLowerCase() },
-            data: {
-              lastVoucherUsedAt: new Date(),
+            create: {
+              id: userEmail.toLowerCase(),
+              lastVoucherUsedAt: usedAt,
+              strikeCount: 0,
+            },
+            update: {
+              lastVoucherUsedAt: usedAt,
               strikeCount: 0,
             },
           }).catch((err) => {
-            // Non-critical: tracking record may not exist if voucher was from before tracking was enabled
             logger.warn({ err, requestId, userEmail }, 'Failed to update voucher tracking (non-critical)');
           });
         }

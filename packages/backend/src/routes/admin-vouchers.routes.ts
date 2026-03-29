@@ -335,6 +335,7 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         email: emailLower,
         displayCode: voucherResult.displayCode,
         expiresAt: voucherResult.expiresAt.toISOString(),
+        voucherUrl: voucherResult.url,
         emailSent,
       },
     });

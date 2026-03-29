@@ -118,6 +118,7 @@ interface IssueResult {
   displayCode: string;
   email: string;
   expiresAt: string;
+  voucherUrl: string;
   emailSent: boolean;
 }
 
@@ -155,9 +156,29 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
               </p>
             </div>
 
+            <div className="mb-4">
+              <p className="text-xs text-slate-500 mb-1">Booking Link</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={result.voucherUrl}
+                  className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-600 truncate"
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
+                />
+                <button
+                  type="button"
+                  onClick={() => { navigator.clipboard.writeText(result.voucherUrl); }}
+                  className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors flex-shrink-0"
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
             {!result.emailSent && sendEmail && (
               <p className="text-sm text-amber-600 mb-3">
-                Email sending failed — voucher was still created. Share the code manually.
+                Email sending failed — voucher was still created. Share the link above manually.
               </p>
             )}
             {result.emailSent && (
