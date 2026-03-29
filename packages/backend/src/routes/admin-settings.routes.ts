@@ -706,10 +706,16 @@ export async function publicSettingsRoutes(fastify: FastifyInstance) {
         // Get only frontend category settings
         const frontendSettings = await getCategorySettings('frontend');
 
-        // Include voucher.required so the booking form knows whether to gate on vouchers
+        // Include voucher settings so the frontend can:
+        // - pass voucher tokens when voucher system is enabled (for tracking)
+        // - gate booking access when voucher is required
+        // - check client-side expiry with the correct configured value
         const voucherRequired = await getSettingValue<boolean>('voucher.required');
         const voucherEnabled = await getSettingValue<boolean>('voucher.enabled');
+        const voucherExpiryDays = await getSettingValue<number>('voucher.expiryDays');
+        frontendSettings['voucher.enabled'] = voucherEnabled;
         frontendSettings['voucher.required'] = voucherEnabled && voucherRequired;
+        frontendSettings['voucher.expiryDays'] = voucherExpiryDays;
 
         return reply.send({
           success: true,

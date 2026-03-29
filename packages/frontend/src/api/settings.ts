@@ -72,7 +72,9 @@ export async function resetSetting(
 // Public Frontend Settings (no auth required)
 export interface FrontendSettings {
   'frontend.therapistPageIntro': string;
+  'voucher.enabled': boolean;
   'voucher.required': boolean;
+  'voucher.expiryDays': number;
 }
 
 export async function getFrontendSettings(): Promise<FrontendSettings> {

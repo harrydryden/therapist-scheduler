@@ -12,7 +12,6 @@ import { useVoucher } from '../hooks/useVoucher';
 import { getFrontendSettings } from '../api/client';
 
 export default function TherapistDetailPage() {
-  const voucher = useVoucher();
   const { id } = useParams<{ id: string }>();
 
   const { data: frontendSettings } = useQuery({
@@ -20,7 +19,11 @@ export default function TherapistDetailPage() {
     queryFn: getFrontendSettings,
     staleTime: 5 * 60 * 1000,
   });
+  const voucherEnabled = frontendSettings?.['voucher.enabled'] ?? false;
   const voucherRequired = frontendSettings?.['voucher.required'] ?? false;
+  const voucherExpiryDays = frontendSettings?.['voucher.expiryDays'] ?? 14;
+
+  const voucher = useVoucher(voucherExpiryDays);
 
   const {
     data: therapist,
@@ -174,7 +177,7 @@ export default function TherapistDetailPage() {
         {/* Sidebar with booking form */}
         <div className="lg:col-span-1">
           <div className="sticky top-8">
-            <BookingForm therapist={therapist} voucher={voucherRequired ? voucher : undefined} />
+            <BookingForm therapist={therapist} voucher={voucherEnabled ? voucher : undefined} voucherRequired={voucherRequired} />
           </div>
         </div>
       </div>

@@ -20,6 +20,7 @@ export interface VoucherSummary {
   used: number;
   atRisk: number;
   unsubscribed: number;
+  maxStrikes: number;
 }
 
 export interface VoucherListResponse {

@@ -31,24 +31,40 @@ const listVouchersSchema = z.object({
 
 const issueVoucherSchema = z.object({
   email: z.string().email().max(255),
-  expiryDays: z.number().int().min(1).max(90).optional(),
+  expiryDays: z.number().int().min(7).max(30).optional(),
   sendEmail: z.boolean().default(true),
 });
 
+// Shared type for voucher tracking records from Prisma
+type VoucherRecord = {
+  id: string;
+  lastVoucherToken: string | null;
+  strikeCount: number;
+  lastVoucherSentAt: Date | null;
+  lastVoucherUsedAt: Date | null;
+  reminderSentAt: Date | null;
+  unsubscribedAt: Date | null;
+  createdAt: Date;
+};
+
+// Single source of truth for computing voucher status from a DB record
+function computeVoucherStatus(r: VoucherRecord, expiryThreshold: Date): string {
+  if (r.unsubscribedAt) return 'unsubscribed';
+  if (r.lastVoucherUsedAt && r.lastVoucherSentAt && r.lastVoucherUsedAt > r.lastVoucherSentAt) return 'used';
+  if (r.lastVoucherSentAt && r.lastVoucherSentAt >= expiryThreshold && r.lastVoucherToken) return 'active';
+  return 'expired';
+}
+
 // Helper to format a DB record into the API response shape
-function formatRecord(
-  r: { id: string; lastVoucherToken: string | null; strikeCount: number; lastVoucherSentAt: Date | null; lastVoucherUsedAt: Date | null; reminderSentAt: Date | null; unsubscribedAt: Date | null; createdAt: Date },
-  status: string,
-  expiryDays: number,
-  maxStrikes: number,
-) {
+function formatRecord(r: VoucherRecord, expiryDays: number, maxStrikes: number) {
+  const expiryThreshold = new Date(Date.now() - expiryDays * 24 * 60 * 60 * 1000);
   const expiresAt = r.lastVoucherSentAt
     ? new Date(r.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000)
     : null;
   return {
     email: r.id,
     displayCode: r.lastVoucherToken ? getDisplayCodeFromToken(r.lastVoucherToken) : null,
-    status,
+    status: computeVoucherStatus(r, expiryThreshold),
     strikeCount: r.strikeCount,
     maxStrikes,
     lastVoucherSentAt: r.lastVoucherSentAt?.toISOString() || null,
@@ -61,13 +77,14 @@ function formatRecord(
 }
 
 // Format raw SQL bigint summary into numbers
-function formatSummary(raw: { total: bigint; active: bigint; used: bigint; at_risk: bigint; unsubscribed: bigint }) {
+function formatSummary(raw: { total: bigint; active: bigint; used: bigint; at_risk: bigint; unsubscribed: bigint }, maxStrikes: number) {
   return {
     total: Number(raw.total),
     active: Number(raw.active),
     used: Number(raw.used),
     atRisk: Number(raw.at_risk),
     unsubscribed: Number(raw.unsubscribed),
+    maxStrikes,
   };
 }
 
@@ -87,15 +104,7 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
     const maxStrikes = await getSettingValue<number>('voucher.maxStrikes');
     const expiryThreshold = new Date(Date.now() - expiryDays * 24 * 60 * 60 * 1000);
 
-    // Compute derived status from a record - single source of truth
-    const computeStatus = (r: { lastVoucherSentAt: Date | null; lastVoucherUsedAt: Date | null; lastVoucherToken: string | null; unsubscribedAt: Date | null }) => {
-      if (r.unsubscribedAt) return 'unsubscribed';
-      const isUsed = r.lastVoucherUsedAt && r.lastVoucherSentAt && r.lastVoucherUsedAt > r.lastVoucherSentAt;
-      if (isUsed) return 'used';
-      const isExpired = r.lastVoucherSentAt ? r.lastVoucherSentAt < expiryThreshold : true;
-      if (r.lastVoucherSentAt && !isExpired && r.lastVoucherToken) return 'active';
-      return 'expired';
-    };
+    const computeStatus = (r: VoucherRecord) => computeVoucherStatus(r, expiryThreshold);
 
     // Summary stats via single raw SQL query with CASE expressions
     // This avoids loading any records into memory just for counts
@@ -158,13 +167,13 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         prisma.voucherTracking.count({ where: baseWhere }),
       ]);
 
-      const items = records.map((r) => formatRecord(r, computeStatus(r), expiryDays, maxStrikes));
+      const items = records.map((r) => formatRecord(r, expiryDays, maxStrikes));
 
       return reply.send({
         success: true,
         data: {
           items,
-          summary: formatSummary(summary),
+          summary: formatSummary(summary, maxStrikes),
           pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
         },
       });
@@ -196,13 +205,13 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
     const filtered = records.filter((r) => computeStatus(r) === status);
     const total = filtered.length;
     const paged = filtered.slice((page - 1) * limit, page * limit);
-    const items = paged.map((r) => formatRecord(r, status, expiryDays, maxStrikes));
+    const items = paged.map((r) => formatRecord(r, expiryDays, maxStrikes));
 
     return reply.send({
       success: true,
       data: {
         items,
-        summary: formatSummary(summary),
+        summary: formatSummary(summary, maxStrikes),
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       },
     });
@@ -225,31 +234,10 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
 
       const expiryDays = await getSettingValue<number>('voucher.expiryDays');
       const maxStrikes = await getSettingValue<number>('voucher.maxStrikes');
-      const now = new Date();
-      const expiryThreshold = new Date(now.getTime() - expiryDays * 24 * 60 * 60 * 1000);
-
-      const isExpired = record.lastVoucherSentAt ? record.lastVoucherSentAt < expiryThreshold : true;
-      const isUsed = record.lastVoucherUsedAt && record.lastVoucherSentAt
-        ? record.lastVoucherUsedAt > record.lastVoucherSentAt
-        : false;
 
       return reply.send({
         success: true,
-        data: {
-          email: record.id,
-          displayCode: record.lastVoucherToken ? getDisplayCodeFromToken(record.lastVoucherToken) : null,
-          status: record.unsubscribedAt ? 'unsubscribed' : isUsed ? 'used' : !isExpired && record.lastVoucherToken ? 'active' : 'expired',
-          strikeCount: record.strikeCount,
-          maxStrikes,
-          lastVoucherSentAt: record.lastVoucherSentAt?.toISOString() || null,
-          lastVoucherUsedAt: record.lastVoucherUsedAt?.toISOString() || null,
-          expiresAt: record.lastVoucherSentAt
-            ? new Date(record.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000).toISOString()
-            : null,
-          reminderSentAt: record.reminderSentAt?.toISOString() || null,
-          unsubscribedAt: record.unsubscribedAt?.toISOString() || null,
-          createdAt: record.createdAt.toISOString(),
-        },
+        data: formatRecord(record, expiryDays, maxStrikes),
       });
     }
   );

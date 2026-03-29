@@ -204,8 +204,8 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
             <input
               id="issue-expiry"
               type="number"
-              min={1}
-              max={90}
+              min={7}
+              max={30}
               value={expiryDays}
               onChange={(e) => setExpiryDays(Number(e.target.value))}
               className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
@@ -425,7 +425,7 @@ export default function AdminVouchersPage() {
     setFilters((prev) => ({ ...prev, page }));
   }, []);
 
-  const summary = data?.summary || { total: 0, active: 0, used: 0, atRisk: 0, unsubscribed: 0 };
+  const summary = data?.summary || { total: 0, active: 0, used: 0, atRisk: 0, unsubscribed: 0, maxStrikes: 3 };
   const items = data?.items || [];
   const pagination = data?.pagination || { page: 1, limit: 50, total: 0, totalPages: 0 };
 
@@ -477,7 +477,9 @@ export default function AdminVouchersPage() {
           value={summary.atRisk}
           color="bg-amber-50 text-amber-700"
           active={false}
-          onClick={() => setFilters((prev) => ({ ...prev, minStrikes: 2, status: 'all', page: 1 }))}
+          onClick={() => {
+            setFilters((prev) => ({ ...prev, minStrikes: Math.max(1, summary.maxStrikes - 1), status: 'all', page: 1 }));
+          }}
         />
         <SummaryTile
           label="Unsubscribed"
