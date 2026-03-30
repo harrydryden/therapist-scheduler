@@ -565,6 +565,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           therapistEmail,
           therapistName,
           therapistAvailability,
+          bookingMethod: 'agent_negotiated',
         }).catch((err) => {
           logger.error({ err, requestId, appointmentId: appointmentRequest.id }, 'ATS: Failed to start scheduling agent');
         });

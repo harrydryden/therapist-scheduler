@@ -26,21 +26,43 @@ function CalendarIcon() {
   );
 }
 
+// External link icon for Book Now button
+function ExternalLinkIcon() {
+  return (
+    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+    </svg>
+  );
+}
+
 // Availability display component
 interface AvailabilityDisplayProps {
   availability: TherapistAvailability | null;
+  bookingLink: string | null;
   isExpanded: boolean;
   onToggle: () => void;
 }
 
-function AvailabilityDisplay({ availability, isExpanded, onToggle }: AvailabilityDisplayProps) {
+function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle }: AvailabilityDisplayProps) {
   const hasAvailability = availability && availability.slots && availability.slots.length > 0;
 
   if (!hasAvailability) {
     return (
-      <div className="flex items-center gap-2.5 text-spill-grey-400">
-        <CalendarIcon />
-        <span className="text-sm">Available on request</span>
+      <div className="text-spill-grey-400">
+        <div className="flex items-center gap-2.5">
+          <CalendarIcon />
+          <span className="text-sm">Available on request</span>
+        </div>
+        {bookingLink && (
+          <a
+            href={bookingLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 ml-[26px] mt-2 text-xs font-semibold text-spill-teal-600 hover:text-spill-teal-400 transition-colors"
+          >
+            Book now <ExternalLinkIcon />
+          </a>
+        )}
       </div>
     );
   }
@@ -70,6 +92,16 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
           </button>
         )}
         <p className="text-xs text-spill-grey-400 mt-1.5 ml-[26px]">More times available upon request</p>
+        {bookingLink && (
+          <a
+            href={bookingLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 ml-[26px] mt-1.5 text-xs font-semibold text-spill-teal-600 hover:text-spill-teal-400 transition-colors"
+          >
+            Book now <ExternalLinkIcon />
+          </a>
+        )}
       </div>
     </div>
   );
@@ -81,7 +113,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showBookingForm, setShowBookingForm] = useState(false);
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
+  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
     voucherToken: voucher?.voucherToken,
@@ -170,6 +202,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
       <div className="px-6">
         <AvailabilityDisplay
           availability={therapist.availability}
+          bookingLink={therapist.bookingLink}
           isExpanded={isExpanded('availability')}
           onToggle={() => toggleSection('availability')}
         />
@@ -255,23 +288,56 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               >
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={!canSubmit}
-                className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {mutation.isPending ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Sending...
-                  </span>
-                ) : (
-                  'Book session'
-                )}
-              </button>
+              {therapist.bookingLink ? (
+                <>
+                  <button
+                    type="submit"
+                    disabled={!canSubmit}
+                    className="flex-1 py-2.5 px-4 text-sm font-medium text-spill-teal-600 bg-spill-teal-100 rounded-full hover:bg-spill-teal-200 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    Request booking
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canSubmit}
+                    onClick={() => {
+                      handleDirectBooking();
+                      window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
+                    }}
+                    className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-1.5"
+                  >
+                    {mutation.isPending ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Sending...
+                      </span>
+                    ) : (
+                      <>Book now <ExternalLinkIcon /></>
+                    )}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!canSubmit}
+                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {mutation.isPending ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Sending...
+                    </span>
+                  ) : (
+                    'Book session'
+                  )}
+                </button>
+              )}
             </div>
             {mutation.isError && (
               <p className="text-xs text-spill-red-600 text-center">

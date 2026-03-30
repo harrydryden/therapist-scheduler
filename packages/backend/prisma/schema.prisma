@@ -96,6 +96,10 @@ model AppointmentRequest {
   // Voucher code used at booking time (what3words-style display code for analytics)
   voucherCode String? @map("voucher_code")
 
+  // How the booking was initiated: 'agent_negotiated' (default) or 'direct_link'
+  // direct_link means the user booked via the therapist's external booking page
+  bookingMethod String @default("agent_negotiated") @map("booking_method")
+
   // Tracking code for deterministic email matching (embedded in subjects)
   // Format: SPL<number> (e.g., SPL1, SPL42) - UNIQUE per appointment
   // Each appointment gets its own tracking code for feedback forms and email matching

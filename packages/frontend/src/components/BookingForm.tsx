@@ -22,7 +22,9 @@ interface BookingFormProps {
 export default function BookingForm({ therapist, voucher, voucherRequired = false }: BookingFormProps) {
   const [submitted, setSubmitted] = useState(false);
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
+  const [bookingMethodUsed, setBookingMethodUsed] = useState<'agent_negotiated' | 'direct_link'>('agent_negotiated');
+
+  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
     onSuccess: () => setSubmitted(true),
@@ -93,10 +95,14 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         <svg className="w-12 h-12 text-green-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
         </svg>
-        <h3 className="text-lg font-semibold text-green-800 mb-2">Request Submitted!</h3>
+        <h3 className="text-lg font-semibold text-green-800 mb-2">
+          {bookingMethodUsed === 'direct_link' ? 'Details Received!' : 'Request Submitted!'}
+        </h3>
         <p className="text-green-700">
-          We've received your appointment request. Our scheduling coordinator {APP.COORDINATOR_NAME} will email you shortly to find a
-          time that works for both you and {therapist.name}.
+          {bookingMethodUsed === 'direct_link'
+            ? `Once you've booked with ${therapist.name}, our coordinator ${APP.COORDINATOR_NAME} will follow up to confirm your session time.`
+            : `We've received your appointment request. Our scheduling coordinator ${APP.COORDINATOR_NAME} will email you shortly to find a time that works for both you and ${therapist.name}.`
+          }
         </p>
         {voucher?.displayCode && (
           <p className="text-sm text-green-600 mt-3">
@@ -189,17 +195,55 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         </div>
       )}
 
-      <button
-        type="submit"
-        disabled={!canSubmit}
-        className="w-full px-4 py-3 text-white font-medium bg-primary-600 rounded-md hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
-      >
-        {mutation.isPending ? 'Submitting...' : 'Request Appointment'}
-      </button>
+      {therapist.bookingLink ? (
+        <div className="space-y-2">
+          <div className="flex gap-3">
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className="flex-1 px-4 py-3 text-primary-600 font-medium bg-primary-50 border border-primary-200 rounded-md hover:bg-primary-100 disabled:bg-gray-100 disabled:text-gray-400 disabled:border-gray-200 disabled:cursor-not-allowed transition-colors"
+            >
+              {mutation.isPending ? 'Submitting...' : 'Request Booking'}
+            </button>
+            <button
+              type="button"
+              disabled={!canSubmit}
+              onClick={() => {
+                setBookingMethodUsed('direct_link');
+                handleDirectBooking();
+                window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
+              }}
+              className="flex-1 px-4 py-3 text-white font-medium bg-primary-600 rounded-md hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors inline-flex items-center justify-center gap-1.5"
+            >
+              {mutation.isPending ? 'Submitting...' : (
+                <>
+                  Book Now
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                  </svg>
+                </>
+              )}
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 text-center">
+            <strong>Book Now</strong> opens {therapist.name}'s booking page. We'll follow up to confirm your session time.
+          </p>
+        </div>
+      ) : (
+        <>
+          <button
+            type="submit"
+            disabled={!canSubmit}
+            className="w-full px-4 py-3 text-white font-medium bg-primary-600 rounded-md hover:bg-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          >
+            {mutation.isPending ? 'Submitting...' : 'Request Appointment'}
+          </button>
 
-      <p className="mt-3 text-xs text-gray-500 text-center">
-        Our coordinator will contact you to schedule a time that works for both of you.
-      </p>
+          <p className="mt-3 text-xs text-gray-500 text-center">
+            Our coordinator will contact you to schedule a time that works for both of you.
+          </p>
+        </>
+      )}
 
       <p className="mt-2 text-xs text-gray-400 text-center">
         You can have up to 2 active appointment requests at a time.

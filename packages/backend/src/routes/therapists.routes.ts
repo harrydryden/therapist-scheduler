@@ -85,6 +85,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
           active: t.active,
           availabilitySummary: formatAvailabilitySummary(t.availability),
           profileImage: t.profileImage,
+          bookingLink: t.bookingLink,
           acceptingBookings: true, // Only available therapists are in this list
         }))
         // Sort by ingestion date: longest on platform first (oldest date first)
@@ -147,6 +148,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
           availabilitySummary: formatAvailabilitySummary(therapist.availability),
           acceptingBookings,
           profileImage: therapist.profileImage,
+          bookingLink: therapist.bookingLink,
         };
 
         return sendSuccess(reply, response);

@@ -180,10 +180,20 @@ ${toneGuidance}
 - **Client email:** ${context.userEmail}
 - **Therapist email:** ${context.therapistEmail}
 - **Therapist name:** ${context.therapistName}
+- **Booking method:** ${context.bookingMethod === 'direct_link' ? 'DIRECT BOOKING LINK (client booked via therapist\'s external booking page)' : 'Agent-negotiated (standard email coordination)'}
 - **Availability in database:** ${hasAvailability ? 'YES' : 'NO'}
 ${hasAvailability ? `- **Available slots:**\n${availabilityText}` : ''}
 
-${workflowInstructions}
+${context.bookingMethod === 'direct_link' ? buildDirectBookingInstructions(context) : workflowInstructions}
+
+## Detecting Booking Links in Emails
+
+If at any point during the conversation the therapist shares a direct booking link (e.g. Calendly, Acuity, YouCanBook.me, or any URL that appears to be a scheduling/booking page), you should:
+
+1. **Forward the link to the client**: Email the client with the booking link, letting them know they can book directly through the therapist's page.
+2. **Ask both parties for confirmation**: After a reasonable time (or in the same message to the client), ask them to reply with the date and time they've booked so you can confirm it in the system.
+3. **Follow up with the therapist**: Email the therapist asking them to confirm the date and time once the client has booked.
+4. **Either party confirming is sufficient**: If either the client or the therapist confirms the date and time, you can proceed to mark the booking as complete using mark_scheduling_complete.
 
 ## Availability Context
 
@@ -328,6 +338,26 @@ const TONE_GUIDANCE: Record<string, string> = {
 
 function getToneGuidance(toneStyle: string): string {
   return TONE_GUIDANCE[toneStyle] || TONE_GUIDANCE['warm-casual'];
+}
+
+function buildDirectBookingInstructions(context: SchedulingContext): string {
+  return `## Your Workflow (DIRECT BOOKING — Client Used External Booking Link)
+
+The client booked directly through the therapist's external booking page. Your job is to **confirm the session date and time** with both parties so the system can track it.
+
+1. **Email the Client**: Send an email to ${context.userName} acknowledging their booking and asking them to confirm the date and time of the session they booked with ${context.therapistName}.
+   - Keep it brief and friendly: "I see you've booked a session with ${context.therapistName}. Could you let me know the date and time you selected so I can confirm everything on our end?"
+
+2. **Email the Therapist**: Send an email to ${context.therapistName} letting them know ${context.userName} (${context.userEmail}) has booked a session via their booking page, and ask them to confirm the date and time.
+   - Include the client's email (${context.userEmail}) so they can send meeting details directly.
+
+3. **Confirm the Booking**: Once EITHER the client or the therapist replies with the date and time:
+   - Call mark_scheduling_complete with the confirmed date and time. You do NOT need to wait for both parties — confirmation from either one is sufficient.
+   - If the responses conflict (different times), follow up to clarify.
+
+4. **Follow Up if No Response**: If neither party responds within a reasonable time, send a follow-up email to both asking for the session details.
+
+**Important**: Do NOT try to negotiate or suggest times — the booking has already been made externally. You are only confirming what was booked.`;
 }
 
 interface WorkflowParams {
