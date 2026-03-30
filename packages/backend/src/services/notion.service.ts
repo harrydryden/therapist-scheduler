@@ -49,6 +49,8 @@ export interface InternalTherapist {
   active: boolean;
   profileImage: string | null;
   frozen: boolean;
+  /** External booking page URL (e.g. Calendly link) from Notion "Booking Link" property */
+  bookingLink: string | null;
 }
 
 const CACHE_TTL = 300; // 5 minutes for general data
@@ -167,6 +169,10 @@ class NotionService {
     const idProperty = properties.ID;
     const odId = idProperty?.rich_text?.[0]?.plain_text || null;
 
+    // Extract booking link (URL property for external booking pages like Calendly)
+    const bookingLinkProperty = properties['Booking Link'];
+    const bookingLink = bookingLinkProperty?.url || null;
+
     return {
       id: page.id,
       odId,
@@ -180,6 +186,7 @@ class NotionService {
       active,
       profileImage,
       frozen,
+      bookingLink,
     };
   }
 

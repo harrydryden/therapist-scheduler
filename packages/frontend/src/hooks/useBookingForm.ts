@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { submitAppointmentRequest } from '../api/client';
-import type { AppointmentRequest } from '../types';
+import type { AppointmentRequest, BookingMethod } from '../types';
 
 // FIX #38: Shared booking form hook extracted from BookingForm.tsx and TherapistCard.tsx
 // to eliminate duplicated firstName, email, mutation, and handleSubmit logic.
@@ -32,8 +32,7 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess, vo
 
   const emailValid = isValidEmail(email.trim());
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitWithMethod = (bookingMethod: BookingMethod = 'agent_negotiated') => {
     if (!firstName.trim() || !emailValid) return;
 
     mutation.mutate({
@@ -42,7 +41,17 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess, vo
       therapistNotionId,
       therapistName,
       ...(voucherToken ? { voucherToken } : {}),
+      bookingMethod,
     });
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    submitWithMethod('agent_negotiated');
+  };
+
+  const handleDirectBooking = () => {
+    submitWithMethod('direct_link');
   };
 
   const canSubmit = firstName.trim().length > 0 && emailValid && !mutation.isPending;
@@ -57,6 +66,7 @@ export function useBookingForm({ therapistNotionId, therapistName, onSuccess, vo
     setEmail,
     mutation,
     handleSubmit,
+    handleDirectBooking,
     canSubmit,
     showEmailError,
   };

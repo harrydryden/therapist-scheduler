@@ -38,6 +38,8 @@ export interface ToolExecutionResult {
   resultMessage?: string;
 }
 
+export type BookingMethod = 'agent_negotiated' | 'direct_link';
+
 export interface SchedulingContext {
   appointmentRequestId: string;
   userName: string;
@@ -45,6 +47,8 @@ export interface SchedulingContext {
   therapistEmail: string;
   therapistName: string;
   therapistAvailability: Record<string, unknown> | null;
+  /** How the booking was initiated: agent negotiation (default) or direct booking link */
+  bookingMethod: BookingMethod;
 }
 
 export interface ConversationMessage {
@@ -67,6 +71,7 @@ export function buildSchedulingContext(
     therapistEmail: string;
     therapistName: string;
     therapistAvailability: unknown;
+    bookingMethod?: string;
   },
 ): SchedulingContext {
   return {
@@ -76,6 +81,7 @@ export function buildSchedulingContext(
     therapistEmail: appointmentRequest.therapistEmail,
     therapistName: appointmentRequest.therapistName,
     therapistAvailability: appointmentRequest.therapistAvailability as Record<string, unknown> | null,
+    bookingMethod: (appointmentRequest.bookingMethod as BookingMethod) || 'agent_negotiated',
   };
 }
 

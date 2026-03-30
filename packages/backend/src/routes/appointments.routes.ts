@@ -37,6 +37,8 @@ const appointmentRequestSchema = z.object({
   therapistAvailability: z.any().optional(),
   // Voucher token from weekly promotional email (HMAC-signed, auto-applied via URL)
   voucherToken: z.string().max(500).optional(),
+  // How the user intends to book: via agent negotiation (default) or direct booking link
+  bookingMethod: z.enum(['agent_negotiated', 'direct_link']).default('agent_negotiated').optional(),
 });
 
 /**
@@ -86,7 +88,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const { userName, userEmail, therapistNotionId, idempotencyKey: providedKey } = validation.data;
+      const { userName, userEmail, therapistNotionId, idempotencyKey: providedKey, bookingMethod } = validation.data;
 
       // Generate or use provided idempotency key
       const idempotencyKey = providedKey || generateIdempotencyKey(userEmail, therapistNotionId);
@@ -400,6 +402,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                 userId: userEntity.id,
                 therapistId: therapistEntity.id,
                 voucherCode: voucherDisplayCode, // Record voucher used (analytics)
+                bookingMethod: bookingMethod || 'agent_negotiated',
               },
             });
 
@@ -502,6 +505,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             therapistEmail,
             therapistName,
             therapistAvailability: therapistAvailability,
+            bookingMethod: bookingMethod || 'agent_negotiated',
           })
           .then(() => {
             logger.info(

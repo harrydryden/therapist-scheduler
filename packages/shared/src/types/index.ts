@@ -38,6 +38,8 @@ export interface Therapist {
   // Note: email is NOT returned from public API for privacy reasons
   availability: TherapistAvailability | null;
   active: boolean;
+  /** External booking page URL (e.g. Calendly). When set, users can book directly. */
+  bookingLink: string | null;
 }
 
 export interface TherapistDetail extends Therapist {
@@ -48,6 +50,8 @@ export interface TherapistDetail extends Therapist {
 // Appointment Request
 // ============================================
 
+export type BookingMethod = 'agent_negotiated' | 'direct_link';
+
 export interface AppointmentRequest {
   userName: string;
   userEmail: string;
@@ -56,6 +60,8 @@ export interface AppointmentRequest {
   therapistAvailability?: TherapistAvailability | null;
   /** HMAC-signed voucher token from weekly promotional email (auto-applied via URL or manually entered) */
   voucherToken?: string;
+  /** How the user intends to book: via agent negotiation (default) or direct booking link */
+  bookingMethod?: BookingMethod;
 }
 
 // ============================================

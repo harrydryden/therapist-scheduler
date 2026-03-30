@@ -26,21 +26,49 @@ function CalendarIcon() {
   );
 }
 
+// External link icon for Book Now button
+function ExternalLinkIcon() {
+  return (
+    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+    </svg>
+  );
+}
+
 // Availability display component
 interface AvailabilityDisplayProps {
   availability: TherapistAvailability | null;
+  bookingLink: string | null;
   isExpanded: boolean;
   onToggle: () => void;
+  /** Called when user clicks "Book now" — parent should show the booking form */
+  onBookNowClick?: () => void;
 }
 
-function AvailabilityDisplay({ availability, isExpanded, onToggle }: AvailabilityDisplayProps) {
+function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, onBookNowClick }: AvailabilityDisplayProps) {
   const hasAvailability = availability && availability.slots && availability.slots.length > 0;
+
+  const bookNowButton = bookingLink && (
+    <button
+      type="button"
+      onClick={() => {
+        window.open(bookingLink, '_blank', 'noopener,noreferrer');
+        onBookNowClick?.();
+      }}
+      className="inline-flex items-center gap-1.5 text-xs font-semibold text-spill-teal-600 hover:text-spill-teal-400 transition-colors focus:outline-none focus:ring-2 focus:ring-spill-teal-400 rounded"
+    >
+      Book now <ExternalLinkIcon />
+    </button>
+  );
 
   if (!hasAvailability) {
     return (
-      <div className="flex items-center gap-2.5 text-spill-grey-400">
-        <CalendarIcon />
-        <span className="text-sm">Available on request</span>
+      <div className="text-spill-grey-400">
+        <div className="flex items-center gap-2.5">
+          <CalendarIcon />
+          <span className="text-sm">Available on request</span>
+        </div>
+        {bookNowButton && <div className="ml-[26px] mt-2">{bookNowButton}</div>}
       </div>
     );
   }
@@ -70,6 +98,7 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
           </button>
         )}
         <p className="text-xs text-spill-grey-400 mt-1.5 ml-[26px]">More times available upon request</p>
+        {bookNowButton && <div className="ml-[26px] mt-1.5">{bookNowButton}</div>}
       </div>
     </div>
   );
@@ -80,8 +109,10 @@ function AvailabilityDisplay({ availability, isExpanded, onToggle }: Availabilit
 const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherRequired = false }: TherapistCardProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showBookingForm, setShowBookingForm] = useState(false);
+  // Tracks whether user entered the form via "Book now" (direct link) vs "Get started"
+  const [enteredViaDirectLink, setEnteredViaDirectLink] = useState(false);
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, canSubmit, showEmailError } = useBookingForm({
+  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
     therapistNotionId: therapist.id,
     therapistName: therapist.name,
     voucherToken: voucher?.voucherToken,
@@ -170,8 +201,13 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
       <div className="px-6">
         <AvailabilityDisplay
           availability={therapist.availability}
+          bookingLink={therapist.bookingLink}
           isExpanded={isExpanded('availability')}
           onToggle={() => toggleSection('availability')}
+          onBookNowClick={() => {
+            setEnteredViaDirectLink(true);
+            setShowBookingForm(true);
+          }}
         />
       </div>
 
@@ -181,7 +217,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         {voucherRequired && voucher && !voucher.voucherToken ? (
           <div className="text-center py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl">
             <p className="text-xs text-slate-500">
-              A session code is required to book. Check your weekly email from Spill.
+              A session code is required to book. Check your email from Spill.
             </p>
           </div>
         ) : voucherRequired && voucher && voucher.isExpired ? (
@@ -196,14 +232,24 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               <svg className="w-5 h-5 text-spill-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
-              <span className="text-sm font-semibold text-spill-teal-600">Request sent!</span>
+              <span className="text-sm font-semibold text-spill-teal-600">
+                {enteredViaDirectLink ? 'Details received!' : 'Request sent!'}
+              </span>
             </div>
             <p className="text-xs text-spill-grey-400 mt-1">
-              We'll email you to schedule your session.
+              {enteredViaDirectLink
+                ? "We'll follow up to confirm your booking time."
+                : "We'll email you to schedule your session."
+              }
             </p>
           </div>
         ) : showBookingForm ? (
-          <form onSubmit={handleSubmit} className="space-y-2.5">
+          <form onSubmit={enteredViaDirectLink ? (e) => { e.preventDefault(); handleDirectBooking(); } : handleSubmit} className="space-y-2.5">
+            {enteredViaDirectLink && (
+              <p className="text-xs text-spill-grey-400 text-center">
+                Share your details so we can confirm your booking time.
+              </p>
+            )}
             <div className="flex gap-2">
               <div className="flex-1">
                 <label htmlFor={`firstName-${therapist.id}`} className="sr-only">
@@ -250,28 +296,85 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={() => setShowBookingForm(false)}
+                onClick={() => {
+                  setShowBookingForm(false);
+                  setEnteredViaDirectLink(false);
+                }}
                 className="px-4 py-2.5 text-sm font-medium text-spill-grey-400 bg-spill-grey-100 rounded-full hover:bg-spill-grey-200 transition-colors"
               >
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={!canSubmit}
-                className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-              >
-                {mutation.isPending ? (
-                  <span className="flex items-center justify-center gap-2">
-                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Sending...
-                  </span>
-                ) : (
-                  'Book session'
-                )}
-              </button>
+              {enteredViaDirectLink ? (
+                /* User already opened the booking page — just capture their details */
+                <button
+                  type="submit"
+                  disabled={!canSubmit}
+                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {mutation.isPending ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Sending...
+                    </span>
+                  ) : (
+                    'Confirm details'
+                  )}
+                </button>
+              ) : therapist.bookingLink ? (
+                /* User entered via "Get started" but therapist has a booking link — offer both paths */
+                <>
+                  <button
+                    type="submit"
+                    disabled={!canSubmit}
+                    className="flex-1 py-2.5 px-4 text-sm font-medium text-spill-teal-600 bg-spill-teal-100 rounded-full hover:bg-spill-teal-200 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    Request booking
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canSubmit}
+                    onClick={() => {
+                      handleDirectBooking();
+                      window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
+                    }}
+                    className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-1.5"
+                  >
+                    {mutation.isPending ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Sending...
+                      </span>
+                    ) : (
+                      <>Book now <ExternalLinkIcon /></>
+                    )}
+                  </button>
+                </>
+              ) : (
+                /* No booking link — standard flow */
+                <button
+                  type="submit"
+                  disabled={!canSubmit}
+                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                >
+                  {mutation.isPending ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      Sending...
+                    </span>
+                  ) : (
+                    'Book session'
+                  )}
+                </button>
+              )}
             </div>
             {mutation.isError && (
               <p className="text-xs text-spill-red-600 text-center">
