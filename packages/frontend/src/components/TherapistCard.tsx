@@ -181,7 +181,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         {voucherRequired && voucher && !voucher.voucherToken ? (
           <div className="text-center py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl">
             <p className="text-xs text-slate-500">
-              A session code is required to book. Check your weekly email from Spill.
+              A session code is required to book. Check your email from Spill.
             </p>
           </div>
         ) : voucherRequired && voucher && voucher.isExpired ? (

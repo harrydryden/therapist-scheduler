@@ -80,7 +80,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         </svg>
         <h3 className="text-lg font-semibold text-slate-700 mb-2">Session Code Required</h3>
         <p className="text-slate-600">
-          A session code is required to book. Check your weekly email from Spill for your personal code. If you don't have one, email{' '}
+          A session code is required to book. Check your email from Spill for your personal code. If you don't have one, email{' '}
           <a href="mailto:scheduling@spill.chat" className="text-spill-blue-800 underline font-medium">scheduling@spill.chat</a> to request a code.
         </p>
       </div>
