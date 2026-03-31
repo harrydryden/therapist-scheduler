@@ -36,6 +36,8 @@ export interface ToolExecutionResult {
   emailSentTo?: 'user' | 'therapist';
   /** Custom result data to return to Claude (JSON-serialized). If set, used instead of generic success message. */
   resultMessage?: string;
+  /** Response tracking data to merge into conversation state (avoids mid-loop state save conflicts) */
+  responseTracking?: { lastEmailSentToTherapist: string; pendingSince: string };
 }
 
 export type BookingMethod = 'agent_negotiated' | 'direct_link';

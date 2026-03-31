@@ -39,6 +39,7 @@ import {
   updateAvailabilityInputSchema,
   markCompleteInputSchema,
   cancelAppointmentInputSchema,
+  initiateRescheduleInputSchema,
   recommendCancelMatchInputSchema,
   issueVoucherCodeInputSchema,
 } from '../schemas/tool-inputs';
@@ -271,6 +272,63 @@ export class AIToolExecutorService {
             cancelled_by: cancelData.cancelled_by,
           });
           checkpointAction = 'processed_cancellation';
+          break;
+        }
+
+        case 'initiate_reschedule': {
+          const parsed = initiateRescheduleInputSchema.safeParse(input);
+          if (!parsed.success) {
+            const errorMsg = `Invalid initiate_reschedule input: ${parsed.error.message}`;
+            logger.error({ traceId: this.traceId, errors: parsed.error.errors }, 'Invalid initiate_reschedule input');
+            return { success: false, toolName: name, error: errorMsg };
+          }
+
+          // Fetch current appointment to get confirmedDateTime before clearing it
+          const rescheduleAppointment = await prisma.appointmentRequest.findUnique({
+            where: { id: context.appointmentRequestId },
+            select: { confirmedDateTime: true },
+          });
+
+          if (!rescheduleAppointment) {
+            return { success: false, toolName: name, error: 'Appointment not found' };
+          }
+
+          const rescheduleResult = await prisma.appointmentRequest.updateMany({
+            where: {
+              id: context.appointmentRequestId,
+              status: 'confirmed',
+              humanControlEnabled: false,
+            },
+            data: {
+              reschedulingInProgress: true,
+              reschedulingInitiatedBy: 'agent',
+              previousConfirmedDateTime: rescheduleAppointment.confirmedDateTime,
+              confirmedDateTime: null,
+              checkpointStage: 'rescheduling',
+              meetingLinkCheckSentAt: null,
+              reminderSentAt: null,
+              lastActivityAt: new Date(),
+              updatedAt: new Date(),
+            },
+          });
+
+          if (rescheduleResult.count === 0) {
+            return {
+              success: false,
+              toolName: name,
+              error: 'Cannot initiate reschedule - appointment is not in confirmed status or human control is enabled',
+            };
+          }
+
+          checkpointAction = 'initiated_reschedule';
+          logger.info(
+            {
+              traceId: this.traceId,
+              appointmentRequestId: context.appointmentRequestId,
+              reason: parsed.data.reason,
+            },
+            'Initiated reschedule for confirmed appointment'
+          );
           break;
         }
 
@@ -727,35 +785,11 @@ export class AIToolExecutorService {
       // below. No separate call needed - this prevents inconsistency if one succeeds
       // and the other fails.
 
-      // Track when we send emails to therapist for response time metrics
-      if (appointmentRequestId && isTherapistEmail) {
-        try {
-          // Lazy import to avoid circular dependency
-          const { AIConversationService } = await import('./ai-conversation.service');
-          const conversationService = new AIConversationService(this.traceId);
-
-          const currentState = await conversationService.getConversationState(appointmentRequestId);
-          if (currentState) {
-            const { _version, ...stateWithoutVersion } = currentState;
-            // Store response tracking data in conversation state
-            const responseTracking = stateWithoutVersion.responseTracking || {};
-            responseTracking.lastEmailSentToTherapist = new Date().toISOString();
-            responseTracking.pendingSince = responseTracking.lastEmailSentToTherapist;
-            stateWithoutVersion.responseTracking = responseTracking;
-            await conversationService.storeConversationState(appointmentRequestId, stateWithoutVersion, _version);
-            logger.debug(
-              { traceId: this.traceId, appointmentRequestId },
-              'Recorded therapist email send time for response tracking'
-            );
-          }
-        } catch (trackingError) {
-          // Non-critical - don't fail email send if tracking fails
-          logger.warn(
-            { traceId: this.traceId, error: trackingError },
-            'Failed to record response tracking data'
-          );
-        }
-      }
+      // FIX: Response tracking for therapist emails is now returned to the caller
+      // via ToolExecutionResult.responseTracking, and merged into conversation state
+      // by the tool loop before the final state save. Previously this method loaded
+      // and saved conversation state separately, which bumped updatedAt and caused
+      // the parent's optimistic lock to fail, losing the agent's work.
     } catch (sendError) {
       logger.warn(
         { traceId: this.traceId, error: sendError },

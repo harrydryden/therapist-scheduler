@@ -290,7 +290,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                 <svg className="w-3.5 h-3.5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                <span className="text-xs text-green-800 font-medium">{voucher.displayCode}</span>
+                <span className="text-xs text-green-800 font-medium">Voucher code: {voucher.displayCode}</span>
               </div>
             )}
             <div className="flex gap-2">

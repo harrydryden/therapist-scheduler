@@ -449,25 +449,31 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
         });
 
-        // Update voucher tracking: mark voucher as used and reset strike count (non-blocking).
+        // Update voucher tracking: mark voucher as used and reset strike count.
         // Uses upsert to handle edge cases where no tracking record exists yet
         // (e.g., admin-issued voucher to a brand-new user).
+        // FIX: Awaited instead of fire-and-forget to ensure tracking state is consistent.
+        // If this fails, the voucher appears "unused" in admin, a spurious reminder is sent
+        // next week, and strikes may be miscounted.
         if (voucherDisplayCode && voucherEnabled) {
           const usedAt = new Date();
-          prisma.voucherTracking.upsert({
-            where: { id: userEmail.toLowerCase() },
-            create: {
-              id: userEmail.toLowerCase(),
-              lastVoucherUsedAt: usedAt,
-              strikeCount: 0,
-            },
-            update: {
-              lastVoucherUsedAt: usedAt,
-              strikeCount: 0,
-            },
-          }).catch((err) => {
-            logger.warn({ err, requestId, userEmail }, 'Failed to update voucher tracking (non-critical)');
-          });
+          try {
+            await prisma.voucherTracking.upsert({
+              where: { id: userEmail.toLowerCase() },
+              create: {
+                id: userEmail.toLowerCase(),
+                lastVoucherUsedAt: usedAt,
+                strikeCount: 0,
+              },
+              update: {
+                lastVoucherUsedAt: usedAt,
+                strikeCount: 0,
+              },
+            });
+          } catch (err) {
+            // Log but don't fail the booking — the appointment was already created
+            logger.warn({ err, requestId, userEmail }, 'Failed to update voucher tracking after booking');
+          }
         }
 
         // Send Slack notification for new appointment request (non-blocking, respects settings)

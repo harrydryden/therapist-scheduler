@@ -63,6 +63,8 @@ const ALL_ACTIONS: ConversationAction[] = [
   'processed_reschedule',
   'sent_chase_followup',
   'closure_recommended_to_admin',
+  'recommended_cancel_match',
+  'initiated_reschedule',
 ];
 
 // ============================================

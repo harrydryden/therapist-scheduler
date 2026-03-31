@@ -163,14 +163,18 @@ export class JustinTimeService {
         }
       }
 
-      // Update appointment request status
-      await prisma.appointmentRequest.update({
-        where: { id: context.appointmentRequestId },
+      // Update appointment request status atomically — only advance to 'contacted'
+      // if still in 'pending'. An early email reply could have already advanced the
+      // status to 'negotiating', and we must not regress it.
+      await prisma.appointmentRequest.updateMany({
+        where: {
+          id: context.appointmentRequestId,
+          status: 'pending',
+        },
         data: {
           status: 'contacted',
           updatedAt: new Date(),
         },
-        select: { id: true },
       });
 
       return {

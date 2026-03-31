@@ -854,11 +854,12 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         },
       },
     },
-    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    async (request: FastifyRequest<{ Params: { id: string }; Querystring: { force?: string } }>, reply: FastifyReply) => {
       const requestId = request.id;
       const { id } = request.params;
+      const force = (request.query as { force?: string }).force === 'true';
 
-      logger.info({ requestId, appointmentId: id }, 'Manually triggering feedback email');
+      logger.info({ requestId, appointmentId: id, force }, 'Manually triggering feedback email');
 
       try {
         // Fetch the appointment
@@ -878,6 +879,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
 
         if (!appointment) {
           return Errors.notFound(reply, 'Appointment');
+        }
+
+        // FIX #12: Duplicate guard — prevent resending feedback email unless force=true
+        if (appointment.feedbackFormSentAt && !force) {
+          return Errors.badRequest(
+            reply,
+            `Feedback form already sent on ${appointment.feedbackFormSentAt.toISOString()}. Use force=true query parameter to resend.`
+          );
         }
 
         // Build feedback form URL

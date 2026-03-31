@@ -292,6 +292,21 @@ class TransitionSideEffectsService {
         );
       }
     }
+
+    // Sync user to Notion (non-blocking, tracked).
+    // Previously missing from the cancellation path — every other transition
+    // (confirmed, session_held, completed) synced the user.
+    if (userEmail) {
+      runBackgroundTask(
+        () => notionSyncManager.syncSingleUser(userEmail),
+        {
+          name: 'user-sync-cancellation',
+          context: { ...logContext, userEmail },
+          retry: true,
+          maxRetries: 2,
+        }
+      );
+    }
   }
 
   /**

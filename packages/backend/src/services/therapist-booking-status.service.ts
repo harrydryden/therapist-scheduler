@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
-import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES } from '../constants';
+import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES, ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
 import { notionService } from './notion.service';
 
@@ -86,7 +86,7 @@ class TherapistBookingStatusService {
         where: {
           therapistNotionId,
           userEmail,
-          status: { notIn: ['cancelled'] },
+          status: { in: [...ACTIVE_STATUSES] },
         },
         select: { id: true },
       });
@@ -111,7 +111,7 @@ class TherapistBookingStatusService {
         const activeRequest = await client.appointmentRequest.findFirst({
           where: {
             therapistNotionId,
-            status: { notIn: ['cancelled'] },
+            status: { in: [...ACTIVE_STATUSES] },
           },
           select: { id: true },
         });
@@ -517,6 +517,7 @@ class TherapistBookingStatusService {
     try {
       // 1. Flag therapists with max+ threads where ALL are inactive
       // These need admin attention (might want to cancel stale conversations)
+      const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
       const flaggedResult = await prisma.$executeRaw`
         UPDATE therapist_booking_status tbs
         SET admin_alert_at = ${now}, updated_at = ${now}
@@ -526,12 +527,12 @@ class TherapistBookingStatusService {
           AND EXISTS (
             SELECT 1 FROM appointment_requests ar
             WHERE ar.therapist_notion_id = tbs.id
-              AND ar.status IN ('pending', 'contacted', 'negotiating')
+              AND ar.status IN (${Prisma.join(preBookingStatuses)})
           )
           AND NOT EXISTS (
             SELECT 1 FROM appointment_requests ar
             WHERE ar.therapist_notion_id = tbs.id
-              AND ar.status IN ('pending', 'contacted', 'negotiating')
+              AND ar.status IN (${Prisma.join(preBookingStatuses)})
               AND ar.last_activity_at IS NOT NULL
               AND ar.last_activity_at >= ${inactivityThreshold}
           )
@@ -876,7 +877,7 @@ class TherapistBookingStatusService {
             const otherConfirmed = await tx.appointmentRequest.findFirst({
               where: {
                 therapistNotionId,
-                status: 'confirmed',
+                status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
               },
               select: { id: true },
             });

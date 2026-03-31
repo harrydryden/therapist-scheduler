@@ -13,7 +13,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { PRE_BOOKING_STATUSES } from '../constants';
+import { PRE_BOOKING_STATUSES, ACTIVE_STATUSES } from '../constants';
 import {
   calculateConversationHealth,
   calculateHealthStats,
@@ -50,6 +50,7 @@ class AdminNotificationService {
         where: {
           threadDivergedAt: { not: null },
           threadDivergenceAcknowledged: false,
+          status: { in: [...ACTIVE_STATUSES] },
         },
         select: {
           id: true,
@@ -65,6 +66,7 @@ class AdminNotificationService {
         where: {
           conversationStallAlertAt: { not: null },
           conversationStallAcknowledged: false,
+          status: { in: [...ACTIVE_STATUSES] },
         },
         select: {
           id: true,
@@ -208,10 +210,10 @@ class AdminNotificationService {
   async getAlertCount(): Promise<number> {
     const [divergence, stall, therapist] = await Promise.all([
       prisma.appointmentRequest.count({
-        where: { threadDivergedAt: { not: null }, threadDivergenceAcknowledged: false },
+        where: { threadDivergedAt: { not: null }, threadDivergenceAcknowledged: false, status: { in: [...ACTIVE_STATUSES] } },
       }),
       prisma.appointmentRequest.count({
-        where: { conversationStallAlertAt: { not: null }, conversationStallAcknowledged: false },
+        where: { conversationStallAlertAt: { not: null }, conversationStallAcknowledged: false, status: { in: [...ACTIVE_STATUSES] } },
       }),
       prisma.therapistBookingStatus.count({
         where: { adminAlertAt: { not: null }, adminAlertAcknowledged: false },
@@ -244,12 +246,18 @@ class AdminNotificationService {
         count = divergenceResult.count;
         break;
       case 'conversation_stall':
-      case 'tool_failure':
         const stallResult = await prisma.appointmentRequest.updateMany({
           where: { conversationStallAlertAt: { not: null }, conversationStallAcknowledged: false },
           data: { conversationStallAcknowledged: true },
         });
         count = stallResult.count;
+        break;
+      case 'tool_failure':
+        const toolFailureResult = await prisma.appointmentRequest.updateMany({
+          where: { lastToolExecutionFailed: true },
+          data: { lastToolExecutionFailed: false },
+        });
+        count = toolFailureResult.count;
         break;
       case 'therapist_alert':
         const therapistResult = await prisma.therapistBookingStatus.updateMany({
@@ -288,6 +296,7 @@ class AdminNotificationService {
         userName: true,
         therapistName: true,
         status: true,
+        reschedulingInProgress: true,
         lastActivityAt: true,
         lastToolExecutedAt: true,
         lastToolExecutionFailed: true,
@@ -309,6 +318,7 @@ class AdminNotificationService {
       const healthInput: AppointmentForHealth = {
         id: apt.id,
         status: apt.status,
+        reschedulingInProgress: apt.reschedulingInProgress,
         lastActivityAt: apt.lastActivityAt,
         lastToolExecutedAt: apt.lastToolExecutedAt,
         lastToolExecutionFailed: apt.lastToolExecutionFailed,
@@ -359,6 +369,7 @@ class AdminNotificationService {
       select: {
         id: true,
         status: true,
+        reschedulingInProgress: true,
         lastActivityAt: true,
         lastToolExecutedAt: true,
         lastToolExecutionFailed: true,
@@ -380,6 +391,7 @@ class AdminNotificationService {
     const healthInput: AppointmentForHealth = {
       id: apt.id,
       status: apt.status,
+      reschedulingInProgress: apt.reschedulingInProgress,
       lastActivityAt: apt.lastActivityAt,
       lastToolExecutedAt: apt.lastToolExecutedAt,
       lastToolExecutionFailed: apt.lastToolExecutionFailed,

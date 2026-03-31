@@ -1,4 +1,5 @@
 import { ConversationStage, STAGE_DESCRIPTIONS } from './conversation-checkpoint';
+import { PRE_BOOKING_STATUSES } from '../constants';
 
 interface SummaryAppointment {
   status: string;
@@ -141,7 +142,8 @@ export function buildAppointmentSummary(
 
   // Flags
   const flags: string[] = [];
-  if (appointment.isStale) flags.push('stale');
+  const preBookingStatuses: readonly string[] = PRE_BOOKING_STATUSES;
+  if (appointment.isStale && preBookingStatuses.includes(appointment.status)) flags.push('stale');
   if (appointment.humanControlEnabled) flags.push('human_control');
   if (appointment.chaseSentAt) flags.push('chased');
   if (appointment.closureRecommendedAt && !appointment.closureRecommendationActioned) {

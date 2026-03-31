@@ -179,8 +179,19 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
 ];
 
-/** Tools whose execution produces external side effects */
-const SIDE_EFFECT_TOOLS = new Set(['send_email', 'mark_scheduling_complete', 'flag_for_human_review', 'recommend_cancel_match']);
+/** Tools whose execution produces external side effects (DB mutations, emails, Notion updates).
+ *  checkpointBeforeSideEffects() is called before these to ensure conversation state
+ *  is persisted, so a crash mid-execution doesn't lose prior agent work. */
+const SIDE_EFFECT_TOOLS = new Set([
+  'send_email',
+  'mark_scheduling_complete',
+  'flag_for_human_review',
+  'recommend_cancel_match',
+  'cancel_appointment',
+  'initiate_reschedule',
+  'update_therapist_availability',
+  'issue_voucher_code',
+]);
 
 export interface ExecutedTool {
   toolName: string;
@@ -310,6 +321,16 @@ export async function runToolLoop(
             emailSentTo: result.emailSentTo,
             timestamp: new Date().toISOString(),
           });
+
+          // Merge response tracking into conversation state (therapist email timing).
+          // This is done here instead of inside sendEmail to avoid a mid-loop state
+          // save that would invalidate the optimistic lock version.
+          if (result.responseTracking) {
+            conversationState.responseTracking = {
+              ...conversationState.responseTracking,
+              ...result.responseTracking,
+            };
+          }
 
           // Update checkpoint after successful tool execution
           if (result.checkpointAction) {

@@ -106,7 +106,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         </p>
         {voucher?.displayCode && (
           <p className="text-sm text-green-600 mt-3">
-            Your session code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
+            Your voucher code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
           </p>
         )}
       </div>
@@ -156,7 +156,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
             <svg className="w-4 h-4 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
-            <span className="text-sm text-green-800 font-medium">Session code: {voucher.displayCode}</span>
+            <span className="text-sm text-green-800 font-medium">Voucher code: {voucher.displayCode}</span>
           </div>
           {voucher.expiresAt && (
             <p className="text-xs text-green-600 mt-1 ml-6">
