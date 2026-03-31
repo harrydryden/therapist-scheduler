@@ -86,3 +86,6 @@ export const TERMINAL_STATUSES: readonly AppointmentStatus[] = [
   'completed',
   'cancelled',
 ] as const;
+
+// Voucher display code word list (shared between frontend and backend)
+export { VOUCHER_WORD_LIST } from './voucher-words';

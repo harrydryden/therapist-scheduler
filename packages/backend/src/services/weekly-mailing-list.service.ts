@@ -527,12 +527,10 @@ class WeeklyMailingListService {
         return;
       }
 
-      // Update strike count
-      await prisma.voucherTracking.update({
-        where: { id: emailLower },
-        data: { strikeCount: newStrikeCount },
-      });
-
+      // FIX: Atomically increment strike AND persist new voucher token in one transaction.
+      // Previously these were two separate DB writes — if the process crashed between them,
+      // the strike was incremented but no new voucher was sent, causing double-counting
+      // on the next weekly run.
       tracking = { ...tracking, strikeCount: newStrikeCount };
       logger.info(
         { email: emailLower, strikeCount: newStrikeCount, maxStrikes },
@@ -540,22 +538,26 @@ class WeeklyMailingListService {
       );
     }
 
-    // If voucher was used → reset strikes (reward)
+    // If voucher was used → reset strikes (reward); folded into the atomic upsert below
     if (voucherUsed && tracking) {
-      await prisma.voucherTracking.update({
-        where: { id: emailLower },
-        data: { strikeCount: 0 },
-      });
       tracking = { ...tracking, strikeCount: 0 };
       logger.info({ email: emailLower }, 'Voucher was used, strike count reset');
     }
 
-    // Issue new voucher
+    // Issue new voucher — strike/reset update is included atomically in the DB write
     await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
   }
 
   /**
-   * Generate and send a new voucher code email
+   * Generate and send a new voucher code email.
+   *
+   * FIX: DB write happens BEFORE email send so that if the process crashes
+   * after persisting but before sending, the next weekly run sees an active
+   * unused voucher and sends a reminder — rather than the old behaviour where
+   * a sent email could be lost from tracking, causing incorrect strike counts.
+   *
+   * The upsert also includes the caller's strike count, making the strike
+   * increment (or reset) and new-voucher persist atomic in a single DB write.
    */
   private async sendNewVoucherEmail(
     user: NotionUser,
@@ -571,6 +573,28 @@ class WeeklyMailingListService {
     const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);
     const voucherExpiry = formatExpiryDate(voucherResult.expiresAt);
 
+    // Upsert tracking record BEFORE sending email.
+    // Includes the caller's computed strikeCount so that strike increment/reset
+    // and new-voucher token are persisted in a single atomic DB write.
+    const now = new Date();
+    const strikeCount = tracking?.strikeCount ?? 0;
+    await prisma.voucherTracking.upsert({
+      where: { id: emailLower },
+      create: {
+        id: emailLower,
+        lastVoucherSentAt: now,
+        lastVoucherToken: voucherResult.token,
+        strikeCount,
+        reminderSentAt: null,
+      },
+      update: {
+        lastVoucherSentAt: now,
+        lastVoucherToken: voucherResult.token,
+        strikeCount,
+        reminderSentAt: null,
+      },
+    });
+
     const subject = renderTemplate(emailSettings.subjectTemplate, {
       userName: user.name,
       voucherCode: voucherResult.displayCode,
@@ -584,24 +608,6 @@ class WeeklyMailingListService {
     });
 
     await emailProcessingService.sendEmail({ to: user.email, subject, body });
-
-    // Upsert tracking record
-    const now = new Date();
-    await prisma.voucherTracking.upsert({
-      where: { id: emailLower },
-      create: {
-        id: emailLower,
-        lastVoucherSentAt: now,
-        lastVoucherToken: voucherResult.token,
-        strikeCount: 0,
-        reminderSentAt: null,
-      },
-      update: {
-        lastVoucherSentAt: now,
-        lastVoucherToken: voucherResult.token,
-        reminderSentAt: null,
-      },
-    });
 
     logger.info(
       { email: emailLower, displayCode: voucherResult.displayCode, expiresAt: voucherResult.expiresAt.toISOString() },

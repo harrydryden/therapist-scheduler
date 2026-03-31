@@ -248,15 +248,13 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     await weeklyMailingListService.forceSend(true);
 
-    // Strike should be reset to 0 (reward for using voucher)
-    const updateCalls = (prisma.voucherTracking.update as jest.Mock).mock.calls;
-    const strikeResetCall = updateCalls.find((c: unknown[]) =>
-      (c[0] as { data: { strikeCount?: number } }).data.strikeCount === 0
-    );
-    expect(strikeResetCall).toBeTruthy();
+    // Strike reset and new voucher are now atomic in a single upsert
+    expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
+    const upsertCall = (prisma.voucherTracking.upsert as jest.Mock).mock.calls[0][0];
+    expect(upsertCall.create.strikeCount).toBe(0);
+    expect(upsertCall.update.strikeCount).toBe(0);
 
     // New voucher should be issued
-    expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
     expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
   });
 
@@ -274,15 +272,11 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     await weeklyMailingListService.forceSend(true);
 
-    // Strike should be incremented from 1 to 2
-    const updateCalls = (prisma.voucherTracking.update as jest.Mock).mock.calls;
-    const strikeCall = updateCalls.find((c: unknown[]) =>
-      (c[0] as { data: { strikeCount?: number } }).data.strikeCount === 2
-    );
-    expect(strikeCall).toBeTruthy();
-
-    // New voucher should still be issued (under max strikes)
+    // Strike increment and new voucher are now atomic in a single upsert
     expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
+    const upsertCall = (prisma.voucherTracking.upsert as jest.Mock).mock.calls[0][0];
+    expect(upsertCall.create.strikeCount).toBe(2);
+    expect(upsertCall.update.strikeCount).toBe(2);
   });
 
   // ---- Max strikes: auto-unsubscribe ----
