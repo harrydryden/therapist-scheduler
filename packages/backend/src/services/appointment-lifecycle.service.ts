@@ -443,6 +443,8 @@ class AppointmentLifecycleService {
       // Always clear rescheduling flags when confirming
       reschedulingInProgress: false,
       reschedulingInitiatedBy: null,
+      // Clear stale flag — stale only applies to pre-confirmation statuses
+      isStale: false,
     };
 
     // Handle reschedule-specific fields
@@ -1338,6 +1340,14 @@ class AppointmentLifecycleService {
       if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
         updateData.reschedulingInProgress = false;
         updateData.reschedulingInitiatedBy = null;
+      }
+
+      // Clear stale flag on any transition to confirmed or beyond —
+      // stale only applies to pre-confirmation statuses
+      const confirmedIdx = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.CONFIRMED);
+      const targetIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
+      if (targetIdx >= confirmedIdx || newStatus === APPOINTMENT_STATUS.CANCELLED) {
+        updateData.isStale = false;
       }
     }
 

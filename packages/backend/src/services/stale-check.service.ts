@@ -470,6 +470,26 @@ class StaleCheckService {
         );
       }
 
+      // Clear stale flag on any post-confirmation appointments.
+      // Stale only applies to pre-confirmation statuses; appointments that were
+      // marked stale before being confirmed should not retain the flag.
+      const clearedPostConfirmResult = await prisma.appointmentRequest.updateMany({
+        where: {
+          status: { in: [...POST_BOOKING_STATUSES, 'cancelled'] },
+          isStale: true,
+        },
+        data: {
+          isStale: false,
+        },
+      });
+
+      if (clearedPostConfirmResult.count > 0) {
+        logger.info(
+          { checkId, cleared: clearedPostConfirmResult.count },
+          'Cleared stale flag from post-confirmation appointments'
+        );
+      }
+
       // Get configurable inactivity threshold (unified for admin alert + auto-unfreeze)
       const inactivityHours = await getSettingValue<number>('notifications.inactivityAlertHours');
       const inactivityThreshold = new Date(Date.now() - inactivityHours * 60 * 60 * 1000);

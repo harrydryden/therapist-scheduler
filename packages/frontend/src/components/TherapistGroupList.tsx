@@ -1,6 +1,7 @@
 import { memo, useMemo, useCallback } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import type { AppointmentListItem, AppointmentFilters, PaginationInfo } from '../types';
+import { PRE_BOOKING_STATUSES } from '../types';
 import { getStatusColor, getStageLabel } from '../config/color-mappings';
 import HealthStatusBadge from './HealthStatusBadge';
 import TherapistGroupSkeleton from './skeletons/TherapistGroupSkeleton';
@@ -107,7 +108,8 @@ function AppointmentRowContent({
 }) {
   // Collect attention flags
   const flags: { label: string; color: string }[] = [];
-  if (apt.isStale) flags.push({ label: 'Stale', color: 'text-spill-red-600' });
+  const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
+  if (apt.isStale && preBookingStatuses.includes(apt.status)) flags.push({ label: 'Stale', color: 'text-spill-red-600' });
   if (apt.isStalled) flags.push({ label: 'Stalled', color: 'text-orange-600' });
   if (apt.hasToolFailure) flags.push({ label: 'Error', color: 'text-spill-red-600' });
   if (apt.closureRecommendedAt && !apt.closureRecommendationActioned) {
