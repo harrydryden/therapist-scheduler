@@ -419,30 +419,32 @@ class StaleCheckService {
         { status: 'confirmed' as const, reschedulingInProgress: true },
       ];
 
-      const result = await prisma.appointmentRequest.updateMany({
+      // First find candidates that will be marked stale (so we know exactly which IDs are affected)
+      const staleCandidates = await prisma.appointmentRequest.findMany({
         where: {
           lastActivityAt: { lt: staleThreshold },
           OR: activeStatusFilter,
           isStale: false,
         },
-        data: {
-          isStale: true,
-        },
+        select: { id: true },
       });
 
-      if (result.count > 0) {
-        logger.info({ checkId, markedStale: result.count }, 'Marked conversations as stale');
+      if (staleCandidates.length > 0) {
+        const staleCandidateIds = staleCandidates.map(a => a.id);
 
-        // Log stale_flagged audit events for each newly stale appointment
-        const newlyStale = await prisma.appointmentRequest.findMany({
+        await prisma.appointmentRequest.updateMany({
           where: {
-            lastActivityAt: { lt: staleThreshold },
-            OR: activeStatusFilter,
+            id: { in: staleCandidateIds },
+          },
+          data: {
             isStale: true,
           },
-          select: { id: true },
         });
-        for (const apt of newlyStale) {
+
+        logger.info({ checkId, markedStale: staleCandidateIds.length }, 'Marked conversations as stale');
+
+        // Log stale_flagged audit events only for newly stale appointments
+        for (const apt of staleCandidates) {
           auditEventService.log(apt.id, 'stale_flagged', 'system', {
             reason: 'No activity for configured threshold',
           });
@@ -487,6 +489,25 @@ class StaleCheckService {
         logger.info(
           { checkId, cleared: clearedPostConfirmResult.count },
           'Cleared stale flag from post-confirmation appointments'
+        );
+      }
+
+      // Clear stall alerts on terminal-status appointments (completed/cancelled)
+      // These appointments are no longer active and should not show alerts
+      const clearedTerminalStallResult = await prisma.appointmentRequest.updateMany({
+        where: {
+          status: { in: ['completed', 'cancelled'] },
+          conversationStallAlertAt: { not: null },
+        },
+        data: {
+          conversationStallAlertAt: null,
+        },
+      });
+
+      if (clearedTerminalStallResult.count > 0) {
+        logger.info(
+          { checkId, cleared: clearedTerminalStallResult.count },
+          'Cleared stall alerts from terminal-status appointments'
         );
       }
 

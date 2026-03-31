@@ -33,7 +33,8 @@ export type ConversationAction =
   | 'processed_reschedule'
   | 'sent_chase_followup'
   | 'closure_recommended_to_admin'
-  | 'recommended_cancel_match';
+  | 'recommended_cancel_match'
+  | 'initiated_reschedule';
 
 /**
  * Checkpoint data structure
@@ -156,6 +157,7 @@ export function stageFromAction(action: ConversationAction): ConversationStage {
     sent_chase_followup: 'chased',
     closure_recommended_to_admin: 'closure_recommended',
     recommended_cancel_match: 'closure_recommended',
+    initiated_reschedule: 'rescheduling',
   };
 
   return actionToStage[action] || 'initial_contact';

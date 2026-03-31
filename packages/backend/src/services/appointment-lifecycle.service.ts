@@ -435,8 +435,10 @@ class AppointmentLifecycleService {
       status: APPOINTMENT_STATUS.CONFIRMED,
       confirmedDateTime,
       confirmedDateTimeParsed: confirmedDateTimeParsed || null,
-      // For reschedules, reset confirmedAt so timing calculations use new time
-      confirmedAt: isReschedule ? new Date() : (wasConfirmed ? undefined : new Date()),
+      // Set confirmedAt: new Date() for first confirmation, reset for reschedules.
+      // (The wasConfirmed && !isReschedule case is unreachable — caught by the
+      // idempotent same-datetime check above.)
+      confirmedAt: new Date(),
       notes: notes || undefined,
       lastActivityAt: new Date(),
       updatedAt: new Date(),
@@ -676,6 +678,7 @@ class AppointmentLifecycleService {
       select: {
         id: true,
         status: true,
+        userEmail: true,
       },
     });
 
@@ -712,6 +715,17 @@ class AppointmentLifecycleService {
         `Invalid transition: ${previousStatus} → feedback_requested (only session_held or confirmed allowed)`
       );
       throw new InvalidTransitionError(previousStatus, 'feedback_requested');
+    }
+
+    // If transitioning from confirmed (skipping session_held), fire the
+    // onSessionHeld side effects so the user's Notion record is synced
+    if (previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
+      await transitionSideEffectsService.onSessionHeld({
+        appointmentId,
+        source,
+        adminId,
+        userEmail: appointment.userEmail,
+      });
     }
 
     // Add audit trail
@@ -880,6 +894,17 @@ class AppointmentLifecycleService {
       { ...logContext, previousStatus },
       'Appointment transitioned to completed'
     );
+
+    // If completing from confirmed (skipping session_held), fire the
+    // onSessionHeld side effects so the user's Notion record is synced
+    if (previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
+      await transitionSideEffectsService.onSessionHeld({
+        appointmentId,
+        source,
+        adminId,
+        userEmail: appointment.userEmail,
+      });
+    }
 
     // Post-transition side effects (therapist booking status, Notion sync, deactivation)
     transitionSideEffectsService.onCompleted({
@@ -1274,19 +1299,157 @@ class AppointmentLifecycleService {
     const skipNotifications = options.skipNotifications ?? true;
     const logContext = { appointmentId, adminId };
 
-    const appointment = await prisma.appointmentRequest.findUnique({
-      where: { id: appointmentId },
-      select: {
-        id: true,
-        status: true,
-        confirmedDateTime: true,
-        confirmedAt: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        therapistEmail: true,
-        therapistNotionId: true,
-      },
+    // Use transaction with FOR UPDATE NOWAIT row lock to prevent TOCTOU races.
+    // Without this, another process could change the status between our read and write,
+    // causing side effects to fire based on a stale previousStatus.
+    type AdminForceUpdateRow = {
+      id: string;
+      status: string;
+      confirmed_date_time: string | null;
+      confirmed_at: Date | null;
+      user_name: string | null;
+      user_email: string;
+      therapist_name: string;
+      therapist_email: string | null;
+      therapist_notion_id: string;
+    };
+
+    let appointment!: {
+      id: string;
+      status: string;
+      confirmedDateTime: string | null;
+      confirmedAt: Date | null;
+      userName: string | null;
+      userEmail: string;
+      therapistName: string;
+      therapistEmail: string | null;
+      therapistNotionId: string;
+    };
+    // Track whether sentinel fields were reset inside the transaction for audit trail
+    let sentinelFieldsReset = false;
+
+    await prisma.$transaction(async (tx) => {
+      // Lock the row with FOR UPDATE NOWAIT to prevent concurrent modifications
+      let row: AdminForceUpdateRow | null;
+      try {
+        const rows = await tx.$queryRaw<AdminForceUpdateRow[]>`
+          SELECT id, status, confirmed_date_time, confirmed_at, user_name, user_email,
+                 therapist_name, therapist_email, therapist_notion_id
+          FROM "appointment_requests"
+          WHERE id = ${appointmentId}
+          FOR UPDATE NOWAIT
+        `;
+        row = rows[0] || null;
+      } catch (lockError) {
+        throw new ConcurrentModificationError(appointmentId);
+      }
+
+      if (!row) {
+        throw new AppointmentNotFoundError(appointmentId);
+      }
+
+      // Map snake_case DB columns to camelCase
+      appointment = {
+        id: row.id,
+        status: row.status,
+        confirmedDateTime: row.confirmed_date_time,
+        confirmedAt: row.confirmed_at,
+        userName: row.user_name,
+        userEmail: row.user_email,
+        therapistName: row.therapist_name,
+        therapistEmail: row.therapist_email,
+        therapistNotionId: row.therapist_notion_id,
+      };
+
+      const previousStatus = appointment.status as AppointmentStatus;
+      const statusChanging = newStatus && newStatus !== previousStatus;
+      const dateChanging = confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime;
+
+      if (!statusChanging && !dateChanging) {
+        return; // Will handle the early return after the transaction
+      }
+
+      // Build typed update data
+      const updateData: Parameters<typeof prisma.appointmentRequest.update>[0]['data'] = {
+        updatedAt: new Date(),
+        lastActivityAt: new Date(),
+      };
+
+      if (statusChanging) {
+        updateData.status = newStatus;
+        if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
+          updateData.confirmedAt = new Date();
+        }
+
+        // Reset follow-up sentinel fields when moving backwards past the stage they guard.
+        // Without this, automated services (post-booking follow-up) would skip re-sending
+        // emails because the sentinel is already set from the first pass through the lifecycle.
+        const prevIdx = LIFECYCLE_STATUS_ORDER.indexOf(previousStatus);
+        const newIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
+        const movingBackwards = newIdx >= 0 && prevIdx >= 0 && newIdx < prevIdx;
+
+        if (movingBackwards) {
+          // Moving back to confirmed or earlier, from past confirmed → reset post-confirmation emails
+          if (newIdx <= CONFIRMED_IDX && prevIdx > CONFIRMED_IDX) {
+            updateData.meetingLinkCheckSentAt = null;
+            updateData.reminderSentAt = null;
+            sentinelFieldsReset = true;
+          }
+
+          // Moving back before feedback_requested, from at-or-past it → reset feedback emails
+          if (newIdx < FEEDBACK_IDX && prevIdx >= FEEDBACK_IDX) {
+            updateData.feedbackFormSentAt = null;
+            updateData.feedbackReminderSentAt = null;
+            sentinelFieldsReset = true;
+          }
+        }
+
+        // Terminal statuses (completed/cancelled) supersede any in-progress reschedule.
+        // Clear rescheduling state so the record is clean. Note: cancelled is not in
+        // LIFECYCLE_STATUS_ORDER so the movingBackwards logic above doesn't cover it.
+        if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
+          updateData.reschedulingInProgress = false;
+          updateData.reschedulingInitiatedBy = null;
+        }
+
+        // Clear stale flag on any transition to confirmed or beyond —
+        // stale only applies to pre-confirmation statuses
+        const confirmedIdx = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.CONFIRMED);
+        const targetIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
+        if (targetIdx >= confirmedIdx || newStatus === APPOINTMENT_STATUS.CANCELLED) {
+          updateData.isStale = false;
+        }
+      }
+
+      if (dateChanging) {
+        updateData.confirmedDateTime = confirmedDateTime;
+        updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
+
+        // When clearing the date on an active appointment, mark as rescheduling
+        const effectiveStatus = newStatus || previousStatus;
+        const isActiveStatus = effectiveStatus !== APPOINTMENT_STATUS.COMPLETED && effectiveStatus !== APPOINTMENT_STATUS.CANCELLED;
+        if (!confirmedDateTime && isActiveStatus && appointment.confirmedDateTime) {
+          updateData.reschedulingInProgress = true;
+          updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
+          updateData.reschedulingInitiatedBy = `admin:${adminId}`;
+          updateData.checkpointStage = 'rescheduling';
+        }
+
+        // When setting a new date, clear the rescheduling flag
+        if (confirmedDateTime) {
+          updateData.reschedulingInProgress = false;
+          updateData.reschedulingInitiatedBy = null;
+        }
+      }
+
+      await tx.appointmentRequest.update({
+        where: { id: appointmentId },
+        data: updateData,
+        select: { id: true }, // Minimal select to avoid RETURNING columns that may not exist in DB yet
+      });
+    }, {
+      maxWait: 5000,
+      timeout: 10000,
     });
 
     if (!appointment) {
@@ -1301,89 +1464,12 @@ class AppointmentLifecycleService {
       return { success: true, previousStatus, newStatus: previousStatus, skipped: true };
     }
 
-    // Build typed update data
-    const updateData: Parameters<typeof prisma.appointmentRequest.update>[0]['data'] = {
-      updatedAt: new Date(),
-      lastActivityAt: new Date(),
-    };
-
-    if (statusChanging) {
-      updateData.status = newStatus;
-      if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
-        updateData.confirmedAt = new Date();
-      }
-
-      // Reset follow-up sentinel fields when moving backwards past the stage they guard.
-      // Without this, automated services (post-booking follow-up) would skip re-sending
-      // emails because the sentinel is already set from the first pass through the lifecycle.
-      const prevIdx = LIFECYCLE_STATUS_ORDER.indexOf(previousStatus);
-      const newIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
-      const movingBackwards = newIdx >= 0 && prevIdx >= 0 && newIdx < prevIdx;
-
-      if (movingBackwards) {
-        // Moving back to confirmed or earlier, from past confirmed → reset post-confirmation emails
-        if (newIdx <= CONFIRMED_IDX && prevIdx > CONFIRMED_IDX) {
-          updateData.meetingLinkCheckSentAt = null;
-          updateData.reminderSentAt = null;
-        }
-
-        // Moving back before feedback_requested, from at-or-past it → reset feedback emails
-        if (newIdx < FEEDBACK_IDX && prevIdx >= FEEDBACK_IDX) {
-          updateData.feedbackFormSentAt = null;
-          updateData.feedbackReminderSentAt = null;
-        }
-      }
-
-      // Terminal statuses (completed/cancelled) supersede any in-progress reschedule.
-      // Clear rescheduling state so the record is clean. Note: cancelled is not in
-      // LIFECYCLE_STATUS_ORDER so the movingBackwards logic above doesn't cover it.
-      if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
-        updateData.reschedulingInProgress = false;
-        updateData.reschedulingInitiatedBy = null;
-      }
-
-      // Clear stale flag on any transition to confirmed or beyond —
-      // stale only applies to pre-confirmation statuses
-      const confirmedIdx = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.CONFIRMED);
-      const targetIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
-      if (targetIdx >= confirmedIdx || newStatus === APPOINTMENT_STATUS.CANCELLED) {
-        updateData.isStale = false;
-      }
-    }
-
-    if (dateChanging) {
-      updateData.confirmedDateTime = confirmedDateTime;
-      updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
-
-      // When clearing the date on an active appointment, mark as rescheduling
-      const effectiveStatus = newStatus || previousStatus;
-      const isActiveStatus = effectiveStatus !== APPOINTMENT_STATUS.COMPLETED && effectiveStatus !== APPOINTMENT_STATUS.CANCELLED;
-      if (!confirmedDateTime && isActiveStatus && appointment.confirmedDateTime) {
-        updateData.reschedulingInProgress = true;
-        updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
-        updateData.reschedulingInitiatedBy = `admin:${adminId}`;
-        updateData.checkpointStage = 'rescheduling';
-      }
-
-      // When setting a new date, clear the rescheduling flag
-      if (confirmedDateTime) {
-        updateData.reschedulingInProgress = false;
-        updateData.reschedulingInitiatedBy = null;
-      }
-    }
-
-    await prisma.appointmentRequest.update({
-      where: { id: appointmentId },
-      data: updateData,
-      select: { id: true }, // Minimal select to avoid RETURNING columns that may not exist in DB yet
-    });
-
     // Audit trail
     const effectiveNewStatus = newStatus || previousStatus;
     const auditParts: string[] = [];
     if (statusChanging) {
       auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
-      if (updateData.feedbackFormSentAt === null || updateData.meetingLinkCheckSentAt === null) {
+      if (sentinelFieldsReset) {
         auditParts.push('Follow-up email flags reset (moved backwards in lifecycle)');
       }
     }

@@ -390,10 +390,9 @@ class PostBookingFollowupService extends PeriodicService {
           );
         }
 
-        // Handle partial failure: if only one succeeded, log but mark as sent
-        // to prevent duplicate sends to the successful recipient
-        if (userSent || therapistSent) {
-          // At least one email sent - mark as complete to prevent duplicates
+        // FIX #16: Handle partial vs full success differently
+        if (userSent && therapistSent) {
+          // Full success - mark as complete
           const updateResult = await prisma.appointmentRequest.updateMany({
             where: {
               id: appointment.id,
@@ -420,26 +419,34 @@ class PostBookingFollowupService extends PeriodicService {
             }
           }
 
-          // Log partial vs full success
-          if (userSent && therapistSent) {
-            sent++;
-            logger.info(
-              { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail, therapistEmail: appointment.therapistEmail },
-              'Sent session reminder emails to user and therapist'
-            );
-          } else {
-            // Partial success - log which failed for manual follow-up
-            logger.warn(
-              { checkId, appointmentId: appointment.id, userSent, therapistSent },
-              'Partial session reminder send - some emails failed, marking as sent to prevent duplicates'
-            );
-            // Add note about partial failure for admin visibility
+          sent++;
+          logger.info(
+            { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail, therapistEmail: appointment.therapistEmail },
+            'Sent session reminder emails to user and therapist'
+          );
+        } else if (userSent || therapistSent) {
+          // Partial success - set sentinel to prevent re-sending to successful recipient,
+          // but flag as stale for admin attention
+          const failedRecipient = !userSent ? 'user' : 'therapist';
+          const succeededRecipient = userSent ? 'user' : 'therapist';
+
+          const updateResult = await prisma.appointmentRequest.updateMany({
+            where: {
+              id: appointment.id,
+              reminderSentAt: new Date(0), // Must still be our sentinel
+            },
+            data: {
+              reminderSentAt: now,
+              isStale: true, // Flag for admin attention
+            },
+          });
+
+          if (updateResult.count > 0) {
             try {
-              const failedRecipient = !userSent ? 'user' : 'therapist';
               await prisma.appointmentRequest.update({
                 where: { id: appointment.id },
                 data: {
-                  notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: Session reminder failed for ${failedRecipient} - manual follow-up may be needed`,
+                  notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: Session reminder sent to ${succeededRecipient} but FAILED for ${failedRecipient} - manual follow-up required`,
                 },
                 select: { id: true },
               });
@@ -447,6 +454,11 @@ class PostBookingFollowupService extends PeriodicService {
               // Ignore - already logged main issue
             }
           }
+
+          logger.warn(
+            { checkId, appointmentId: appointment.id, userSent, therapistSent, failedRecipient },
+            'Partial session reminder send - flagged as stale for admin follow-up'
+          );
         } else {
           // Both failed - reset to retry
           await prisma.appointmentRequest.update({
@@ -651,8 +663,7 @@ class PostBookingFollowupService extends PeriodicService {
    * - Send to USER only (not therapist)
    * - Skip if already sent or sending
    * - Skip if appointment is cancelled
-   * - Look for session_held status (sessions that have taken place)
-   * - Also check confirmed status for backwards compatibility
+   * - Look for session_held status only (FIX #11: confirmed removed to prevent skipping session_held)
    * - Transition to feedback_requested after sending
    *
    * Uses optimistic locking pattern to prevent duplicates
@@ -663,13 +674,10 @@ class PostBookingFollowupService extends PeriodicService {
     // Find appointments that:
     // - Have a parsed datetime
     // - Haven't had feedback form sent
-    // - Status is session_held OR confirmed (for backwards compatibility)
+    // - Status is session_held (FIX #11: require session_held only to prevent skipping this status)
     const candidates = await prisma.appointmentRequest.findMany({
       where: {
-        OR: [
-          { status: APPOINTMENT_STATUS.SESSION_HELD },
-          { status: APPOINTMENT_STATUS.CONFIRMED },
-        ],
+        status: APPOINTMENT_STATUS.SESSION_HELD,
         confirmedDateTimeParsed: { not: null },
         feedbackFormSentAt: null,
       },
@@ -699,9 +707,8 @@ class PostBookingFollowupService extends PeriodicService {
     for (const appointment of candidates) {
       if (!appointment.confirmedDateTimeParsed) continue;
 
-      // Double-check status is valid (session_held or confirmed)
-      if (appointment.status !== APPOINTMENT_STATUS.SESSION_HELD &&
-          appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
+      // Double-check status is session_held (FIX #11)
+      if (appointment.status !== APPOINTMENT_STATUS.SESSION_HELD) {
         skipped++;
         continue;
       }
@@ -718,7 +725,7 @@ class PostBookingFollowupService extends PeriodicService {
         where: {
           id: appointment.id,
           feedbackFormSentAt: null, // Only if still null
-          status: { in: [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED] },
+          status: APPOINTMENT_STATUS.SESSION_HELD, // FIX #11: require session_held only
         },
         data: {
           feedbackFormSentAt: new Date(0), // Sentinel value: epoch = "sending"
@@ -735,6 +742,36 @@ class PostBookingFollowupService extends PeriodicService {
       }
 
       try {
+        // FIX #23: If trackingCode is null, skip the email send to avoid infinite retry loop.
+        // Set sentinel to prevent retry and add a note for admin visibility.
+        if (!appointment.trackingCode) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
+            'Appointment missing tracking code - skipping feedback form email to prevent infinite retry'
+          );
+          await prisma.appointmentRequest.updateMany({
+            where: {
+              id: appointment.id,
+              feedbackFormSentAt: new Date(0), // Must still be our sentinel
+            },
+            data: { feedbackFormSentAt: now },
+          });
+          try {
+            await prisma.appointmentRequest.update({
+              where: { id: appointment.id },
+              data: {
+                notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: Feedback form email skipped - missing tracking code. Admin must send manually after assigning a tracking code.`,
+                isStale: true,
+              },
+              select: { id: true },
+            });
+          } catch {
+            // Ignore - already logged main issue
+          }
+          skipped++;
+          continue;
+        }
+
         await this.sendFeedbackFormEmail(appointment);
 
         // Send therapist feedback notification (same trigger as user feedback form)
@@ -782,11 +819,24 @@ class PostBookingFollowupService extends PeriodicService {
               source: 'system',
             });
           } catch (transitionError) {
-            // Log but don't fail - email was sent, just status update might be delayed
+            // FIX #10: Transition failed — reset sentinel so next cycle retries both email + transition
             logger.error(
               { checkId, appointmentId: appointment.id, error: transitionError },
-              'Feedback form email sent but lifecycle transition failed - status may be stale'
+              'Feedback form lifecycle transition failed - resetting sentinel to retry next cycle'
             );
+            try {
+              await prisma.appointmentRequest.update({
+                where: { id: appointment.id },
+                data: { feedbackFormSentAt: null },
+                select: { id: true },
+              });
+            } catch (resetError) {
+              logger.error(
+                { checkId, appointmentId: appointment.id, error: resetError },
+                'Failed to reset feedbackFormSentAt sentinel after transition failure'
+              );
+            }
+            continue;
           }
           sent++;
           logger.info(

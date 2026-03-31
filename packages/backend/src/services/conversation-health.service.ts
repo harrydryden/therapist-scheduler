@@ -118,6 +118,7 @@ export async function getHealthThresholds(): Promise<HealthThresholds> {
 export interface AppointmentForHealth {
   id: string;
   status: string;
+  reschedulingInProgress: boolean;
   lastActivityAt: Date;
   lastToolExecutedAt: Date | null;
   lastToolExecutionFailed: boolean;
@@ -157,7 +158,11 @@ export function calculateConversationHealth(
 
   // Skip health check for terminal/post-session statuses
   // These don't require active conversation - no messages expected
-  if (STATUSES_NOT_REQUIRING_MONITORING.includes(appointment.status)) {
+  // Exception: confirmed appointments with rescheduling in progress still need monitoring
+  if (
+    STATUSES_NOT_REQUIRING_MONITORING.includes(appointment.status) &&
+    !(appointment.status === APPOINTMENT_STATUS.CONFIRMED && appointment.reschedulingInProgress)
+  ) {
     return {
       status: 'green',
       score: 100,
@@ -508,6 +513,7 @@ export function calculateHealthStats(healthResults: ConversationHealth[]): Healt
 export function toAppointmentForHealth(apt: {
   id: string;
   status: string;
+  reschedulingInProgress?: boolean;
   lastActivityAt: Date | null;
   updatedAt: Date;
   lastToolExecutedAt: Date | null;
@@ -524,6 +530,7 @@ export function toAppointmentForHealth(apt: {
   return {
     id: apt.id,
     status: apt.status,
+    reschedulingInProgress: apt.reschedulingInProgress ?? false,
     lastActivityAt: apt.lastActivityAt || apt.updatedAt,
     lastToolExecutedAt: apt.lastToolExecutedAt,
     lastToolExecutionFailed: apt.lastToolExecutionFailed,
