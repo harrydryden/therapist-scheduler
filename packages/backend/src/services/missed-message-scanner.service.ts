@@ -20,9 +20,15 @@ const {
  * - Emails read in Gmail (admin, mobile notification) before polling detected them
  * - Replies arriving during deployment windows or outages
  *
- * Unlike the stale check's recoverMissedReplies (which only checks 10 appointments
- * inactive for 1h+), this scanner is comprehensive — it checks every active thread
- * in batches, running every 4 hours.
+ * Complements the stale check's recoverMissedReplies (which covers contacted/negotiating
+ * with take:10, hourly, 1h+ inactive only). This scanner is comprehensive:
+ * - Covers ALL active statuses including post-booking (confirmed, session_held, feedback_requested)
+ * - No limit on number of appointments scanned (processes all in batches)
+ * - Runs every 4 hours as a thorough sweep
+ * - Respects humanControlEnabled flag (skips admin-controlled appointments)
+ *
+ * The overlap on contacted/negotiating is intentional — stale check provides fast
+ * recovery (hourly, 10 at a time), this scanner provides comprehensive backup.
  *
  * Uses LockedTaskRunner for distributed locking so only one instance runs at a time
  * in multi-replica deployments.
@@ -129,6 +135,16 @@ class MissedMessageScannerService {
   ): Promise<{ scanned: number; recovered: number }> {
     const startTime = Date.now();
 
+    // Pre-validate OAuth token before making Gmail API calls (matches email-polling pattern)
+    const tokenStatus = await emailProcessingService.ensureValidToken(10);
+    if (!tokenStatus.valid) {
+      logger.warn(
+        { scanId, trigger, error: tokenStatus.error },
+        'OAuth token invalid before scan — skipping this cycle'
+      );
+      return { scanned: 0, recovered: 0 };
+    }
+
     // Find all appointments with active threads (pre-booking + confirmed active)
     // These are the statuses where email conversations are ongoing
     const activeAppointments = await prisma.appointmentRequest.findMany({
@@ -136,6 +152,7 @@ class MissedMessageScannerService {
         status: {
           in: ['contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'],
         },
+        humanControlEnabled: false, // Don't interfere with admin-controlled appointments
         OR: [
           { gmailThreadId: { not: null } },
           { therapistGmailThreadId: { not: null } },

@@ -12,6 +12,7 @@ import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getTaskMetrics } from '../utils/background-task';
+import { missedMessageScannerService } from '../services/missed-message-scanner.service';
 
 const setupPushSchema = z.object({
   topicName: z.string().min(1, 'Pub/Sub topic name is required'),
@@ -215,6 +216,41 @@ export async function adminRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to trigger weekly mailing');
         return Errors.internal(reply, 'Failed to trigger weekly mailing');
+      }
+    }
+  );
+
+  // ============================================
+  // Missed Message Scanner
+  // ============================================
+
+  /**
+   * POST /api/admin/email/trigger-missed-message-scan
+   * Manually trigger a full missed message scan across all active threads
+   */
+  fastify.post(
+    '/api/admin/email/trigger-missed-message-scan',
+    {
+      config: {
+        rateLimit: {
+          max: 1,
+          timeWindow: 10 * 60 * 1000, // 1 per 10 minutes
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      logger.info({ requestId }, 'Manual missed message scan requested');
+
+      try {
+        const result = await missedMessageScannerService.triggerManualScan();
+        return sendSuccess(reply, {
+          ...result,
+          message: `Scan complete — recovered ${result.recovered} messages from ${result.scanned} threads`,
+        });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to trigger missed message scan');
+        return Errors.internal(reply, 'Failed to trigger missed message scan');
       }
     }
   );
