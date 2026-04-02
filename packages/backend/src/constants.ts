@@ -220,6 +220,25 @@ export const STALE_CHECK_LOCK = {
   RENEWAL_INTERVAL_MS: 60 * 1000, // Renew every 60 seconds
 } as const;
 
+// Missed message scanner distributed lock
+export const MISSED_MESSAGE_SCANNER_LOCK = {
+  KEY: 'missed-message-scanner:processing-lock',
+  TTL_SECONDS: 600, // 10 minutes - scanning many threads can be slow
+  RENEWAL_INTERVAL_MS: 120 * 1000, // Renew every 2 minutes
+} as const;
+
+// Missed message scanner intervals
+export const MISSED_MESSAGE_SCANNER_INTERVALS = {
+  /** How often to run the full scan (ms) — default 4 hours */
+  SCAN_INTERVAL_MS: 4 * 60 * 60 * 1000,
+  /** Delay before first scan after startup (ms) — 2 minutes to let services initialize */
+  STARTUP_DELAY_MS: 2 * 60 * 1000,
+  /** Max appointments to scan per batch (to respect Gmail API rate limits) */
+  BATCH_SIZE: 25,
+  /** Delay between batches (ms) to avoid Gmail rate limiting */
+  BATCH_DELAY_MS: 2000,
+} as const;
+
 // Data retention cleanup distributed lock
 export const RETENTION_CLEANUP_LOCK = {
   KEY: 'retention-cleanup:processing-lock',
