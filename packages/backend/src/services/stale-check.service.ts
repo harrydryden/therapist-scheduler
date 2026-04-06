@@ -3,7 +3,6 @@ import { logger } from '../utils/logger';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
-import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
 import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
@@ -633,17 +632,10 @@ class StaleCheckService {
         );
       }
 
-      // Stale thread recovery: check for missed therapist replies
-      // When a conversation is stale and in 'contacted' status with a therapist thread ID,
-      // the therapist may have replied but the reply was missed (push notification lost,
-      // poll window expired). Check these threads directly for unread messages.
-      const recoveredCount = await this.recoverMissedReplies(checkId);
-      if (recoveredCount > 0) {
-        logger.info(
-          { checkId, recoveredCount },
-          'Recovered missed replies from stale threads'
-        );
-      }
+      // NOTE: Missed reply recovery is handled by missedMessageScannerService (hourly,
+      // all active statuses, no batch limit). The previous recoverMissedReplies() here
+      // was redundant — same function, same cadence, but limited to contacted/negotiating
+      // with take:10. Removed to avoid duplicate Gmail API calls.
 
       // Periodic WAL recovery: sync any emails buffered in Redis during DB downtime.
       // WAL entries expire after 24h, so hourly recovery prevents silent email loss
@@ -838,103 +830,8 @@ class StaleCheckService {
    * - Tier 1: Appointments inactive for 1+ hour (quick recovery for missed push notifications)
    * - Tier 2: Stale appointments (48h+ inactive, already flagged by the isStale check)
    */
-  private async recoverMissedReplies(checkId: string): Promise<number> {
-    try {
-      // Recovery threshold: check appointments with no activity for 1+ hour.
-      // This catches missed push notifications much faster than the 48h stale flag.
-      // The processedGmailMessage DB check in checkThreadForUnprocessedReplies
-      // ensures we don't reprocess already-handled messages, so running this
-      // more frequently is safe (at worst it makes a few extra Gmail API calls).
-      const replyRecoveryThreshold = new Date(Date.now() - 1 * 60 * 60 * 1000); // 1 hour
-
-      // Find appointments awaiting replies that have a thread ID to check.
-      // Includes both stale (48h+) and recently-inactive (1h+) appointments.
-      const awaitingReply = await prisma.appointmentRequest.findMany({
-        where: {
-          status: { in: ['contacted', 'negotiating'] },
-          therapistGmailThreadId: { not: null },
-          humanControlEnabled: false, // Don't interfere with human-controlled appointments
-          lastActivityAt: { lt: replyRecoveryThreshold }, // No activity for 1+ hour
-        },
-        select: {
-          id: true,
-          therapistGmailThreadId: true,
-          gmailThreadId: true,
-          therapistName: true,
-          userName: true,
-        },
-        take: 10, // Limit batch size to avoid Gmail rate limits
-      });
-
-      if (awaitingReply.length === 0) {
-        return 0;
-      }
-
-      logger.info(
-        { checkId, count: awaitingReply.length },
-        'Checking threads for missed replies (1h+ inactive appointments)'
-      );
-
-      let totalRecovered = 0;
-
-      for (const appointment of awaitingReply) {
-        try {
-          // Check the therapist thread for unprocessed messages
-          if (appointment.therapistGmailThreadId) {
-            const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
-              appointment.therapistGmailThreadId,
-              `${checkId}:stale-recovery:${appointment.id}`
-            );
-            if (recovered > 0) {
-              logger.info(
-                {
-                  checkId,
-                  appointmentId: appointment.id,
-                  threadId: appointment.therapistGmailThreadId,
-                  recoveredCount: recovered,
-                  therapistName: appointment.therapistName,
-                  userName: appointment.userName,
-                },
-                'Recovered missed therapist reply from stale thread'
-              );
-              totalRecovered += recovered;
-            }
-          }
-
-          // Also check the client thread in case a client reply was missed
-          if (appointment.gmailThreadId) {
-            const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
-              appointment.gmailThreadId,
-              `${checkId}:stale-recovery:${appointment.id}`
-            );
-            if (recovered > 0) {
-              logger.info(
-                {
-                  checkId,
-                  appointmentId: appointment.id,
-                  threadId: appointment.gmailThreadId,
-                  recoveredCount: recovered,
-                  userName: appointment.userName,
-                },
-                'Recovered missed client reply from stale thread'
-              );
-              totalRecovered += recovered;
-            }
-          }
-        } catch (error) {
-          logger.warn(
-            { checkId, appointmentId: appointment.id, error },
-            'Failed to check stale thread for missed replies - will retry next cycle'
-          );
-        }
-      }
-
-      return totalRecovered;
-    } catch (error) {
-      logger.error({ checkId, error }, 'Failed to run stale thread recovery');
-      return 0;
-    }
-  }
+  // recoverMissedReplies removed — now handled by missedMessageScannerService
+  // (hourly, all active statuses, no batch limit, with Slack alerting)
 
   /**
    * Update lastActivityAt for an appointment (call when email sent/received)
