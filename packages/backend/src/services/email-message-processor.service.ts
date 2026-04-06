@@ -576,8 +576,12 @@ export class EmailMessageProcessorService {
           WHERE "id" = ${appointmentRequest.id}
         `;
 
-        // Mark as needing manual review but don't process automatically
-        // Don't mark as processed - leave for admin to handle
+        // Mark as processed to prevent infinite re-detection by the scanner.
+        // Without this, every hourly scan cycle would re-find the same message,
+        // re-record a divergence alert, and append another note — forever.
+        // The admin has been notified via the alert dashboard and can use
+        // the "Scan Messages" button to force-reprocess if needed.
+        await markMessageProcessed(messageId, traceId, 'divergence-blocked');
         return false;
       }
 

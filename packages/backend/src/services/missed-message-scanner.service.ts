@@ -2,13 +2,15 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { emailProcessingService } from './email-processing.service';
-import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS } from '../constants';
+import { slackNotificationService } from './slack-notification.service';
+import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
 
 const {
   SCAN_INTERVAL_MS,
   STARTUP_DELAY_MS,
   BATCH_SIZE,
   BATCH_DELAY_MS,
+  CONSECUTIVE_SKIP_ALERT_THRESHOLD,
 } = MISSED_MESSAGE_SCANNER_INTERVALS;
 
 /**
@@ -20,15 +22,12 @@ const {
  * - Emails read in Gmail (admin, mobile notification) before polling detected them
  * - Replies arriving during deployment windows or outages
  *
- * Complements the stale check's recoverMissedReplies (which covers contacted/negotiating
- * with take:10, hourly, 1h+ inactive only). This scanner is comprehensive:
- * - Covers ALL active statuses including post-booking (confirmed, session_held, feedback_requested)
+ * This is the single authoritative missed-message recovery path. It covers:
+ * - ALL active statuses (contacted, negotiating, confirmed, session_held, feedback_requested)
  * - No limit on number of appointments scanned (processes all in batches)
- * - Runs every 4 hours as a thorough sweep
+ * - Runs every hour
  * - Respects humanControlEnabled flag (skips admin-controlled appointments)
- *
- * The overlap on contacted/negotiating is intentional — stale check provides fast
- * recovery (hourly, 10 at a time), this scanner provides comprehensive backup.
+ * - Sends Slack alerts when messages are recovered or when the scanner is unhealthy
  *
  * Uses LockedTaskRunner for distributed locking so only one instance runs at a time
  * in multi-replica deployments.
@@ -38,6 +37,7 @@ class MissedMessageScannerService {
   private startupTimeoutId: NodeJS.Timeout | null = null;
   private instanceId: string;
   private taskRunner: LockedTaskRunner;
+  private consecutiveSkips = 0;
 
   constructor() {
     this.instanceId = `${process.pid}-${Date.now().toString(36)}-missed-scanner`;
@@ -60,10 +60,10 @@ class MissedMessageScannerService {
       return;
     }
 
-    const intervalHours = Math.round(SCAN_INTERVAL_MS / (60 * 60 * 1000));
+    const intervalMinutes = Math.round(SCAN_INTERVAL_MS / (60 * 1000));
     logger.info(
-      { intervalMs: SCAN_INTERVAL_MS, intervalHours },
-      `Starting missed message scanner (runs every ${intervalHours} hours)`
+      { intervalMs: SCAN_INTERVAL_MS, intervalMinutes },
+      `Starting missed message scanner (runs every ${intervalMinutes} minutes)`
     );
 
     // Delay first scan to allow Gmail client and other services to initialize
@@ -94,12 +94,12 @@ class MissedMessageScannerService {
   }
 
   /**
-   * Run a scan with distributed locking and error handling
+   * Run a scan with distributed locking and error handling.
+   *
+   * Skip tracking lives here (not inside scanActiveThreads) so that
+   * the reset-on-success at the end only fires when we truly completed a scan.
    */
-  private async runSafeScan(trigger: 'startup' | 'scheduled' | 'manual'): Promise<{
-    scanned: number;
-    recovered: number;
-  }> {
+  private async runSafeScan(trigger: 'startup' | 'scheduled' | 'manual'): Promise<ScanResult> {
     const scanId = `scan-${Date.now().toString(36)}`;
 
     const result = await this.taskRunner.run(async (ctx) => {
@@ -108,7 +108,8 @@ class MissedMessageScannerService {
 
     if (!result.acquired) {
       logger.debug({ scanId, trigger }, 'Missed message scan skipped — another instance holds the lock');
-      return { scanned: 0, recovered: 0 };
+      this.trackSkip(scanId, trigger, 'lock_contention');
+      return EMPTY_RESULT;
     }
 
     if (result.error) {
@@ -116,10 +117,37 @@ class MissedMessageScannerService {
         { scanId, trigger, error: result.error },
         'Missed message scan failed'
       );
-      return { scanned: 0, recovered: 0 };
+      this.trackSkip(scanId, trigger, 'error');
+      return EMPTY_RESULT;
     }
 
-    return result.result || { scanned: 0, recovered: 0 };
+    // Successful scan — reset skip counter
+    this.consecutiveSkips = 0;
+    return result.result || EMPTY_RESULT;
+  }
+
+  /**
+   * Track consecutive skips and alert if threshold is exceeded.
+   * Consecutive skips suggest the scanner is unhealthy (OAuth issues, stuck lock, etc.).
+   */
+  private trackSkip(scanId: string, trigger: string, reason: string): void {
+    this.consecutiveSkips++;
+
+    if (this.consecutiveSkips >= CONSECUTIVE_SKIP_ALERT_THRESHOLD) {
+      logger.error(
+        { scanId, trigger, reason, consecutiveSkips: this.consecutiveSkips },
+        'Missed message scanner has been skipped multiple times consecutively — messages may be going undetected'
+      );
+
+      slackNotificationService.sendAlert({
+        title: 'Missed Message Scanner Unhealthy',
+        severity: 'high',
+        details: `Scanner has been skipped *${this.consecutiveSkips}* consecutive times (reason: ${reason}). ` +
+          'Incoming messages may not be detected. Check OAuth token status and server health.',
+      }).catch(() => {
+        // Best-effort alerting
+      });
+    }
   }
 
   /**
@@ -127,32 +155,30 @@ class MissedMessageScannerService {
    *
    * Queries appointments in active statuses that have Gmail thread IDs,
    * then checks each thread against the processedGmailMessage table.
+   *
+   * Throws on infrastructure failures (OAuth, DB) so the caller can
+   * track skips correctly. Per-thread errors are caught and logged
+   * without aborting the full scan.
    */
   private async scanActiveThreads(
     scanId: string,
     trigger: string,
     isLockValid: () => boolean
-  ): Promise<{ scanned: number; recovered: number }> {
+  ): Promise<ScanResult> {
     const startTime = Date.now();
 
-    // Pre-validate OAuth token before making Gmail API calls (matches email-polling pattern)
+    // Pre-validate OAuth token — throw so caller tracks this as a skip
     const tokenStatus = await emailProcessingService.ensureValidToken(10);
     if (!tokenStatus.valid) {
-      logger.warn(
-        { scanId, trigger, error: tokenStatus.error },
-        'OAuth token invalid before scan — skipping this cycle'
-      );
-      return { scanned: 0, recovered: 0 };
+      throw new Error(`OAuth token invalid: ${tokenStatus.error || 'unknown'}`);
     }
 
-    // Find all appointments with active threads (pre-booking + confirmed active)
-    // These are the statuses where email conversations are ongoing
+    // Use the shared ACTIVE_STATUSES constant (pending is included but harmless —
+    // pending appointments never have thread IDs, so the OR clause filters them out)
     const activeAppointments = await prisma.appointmentRequest.findMany({
       where: {
-        status: {
-          in: ['contacted', 'negotiating', 'confirmed', 'session_held', 'feedback_requested'],
-        },
-        humanControlEnabled: false, // Don't interfere with admin-controlled appointments
+        status: { in: [...ACTIVE_STATUSES] },
+        humanControlEnabled: false,
         OR: [
           { gmailThreadId: { not: null } },
           { therapistGmailThreadId: { not: null } },
@@ -166,12 +192,12 @@ class MissedMessageScannerService {
         userName: true,
         status: true,
       },
-      orderBy: { lastActivityAt: 'asc' }, // Check least-recently-active first
+      orderBy: { lastActivityAt: 'asc' },
     });
 
     if (activeAppointments.length === 0) {
       logger.info({ scanId, trigger }, 'Missed message scan: no active appointments with threads');
-      return { scanned: 0, recovered: 0 };
+      return EMPTY_RESULT;
     }
 
     logger.info(
@@ -181,10 +207,10 @@ class MissedMessageScannerService {
 
     let totalScanned = 0;
     let totalRecovered = 0;
+    let totalFailed = 0;
+    const recoveredAppointments: Array<{ id: string; therapistName: string; userName: string; count: number }> = [];
 
-    // Process in batches to respect Gmail API rate limits
     for (let i = 0; i < activeAppointments.length; i += BATCH_SIZE) {
-      // Check lock is still valid before each batch
       if (!isLockValid()) {
         logger.warn(
           { scanId, scannedSoFar: totalScanned, recoveredSoFar: totalRecovered },
@@ -197,55 +223,40 @@ class MissedMessageScannerService {
 
       for (const appointment of batch) {
         const traceId = `${scanId}:${appointment.id}`;
+        let appointmentRecovered = 0;
 
         try {
           // Check therapist thread
           if (appointment.therapistGmailThreadId) {
             totalScanned++;
-            const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
+            const result = await emailProcessingService.checkThreadForUnprocessedReplies(
               appointment.therapistGmailThreadId,
               traceId
             );
-            if (recovered > 0) {
-              logger.info(
-                {
-                  scanId,
-                  appointmentId: appointment.id,
-                  threadId: appointment.therapistGmailThreadId,
-                  threadType: 'therapist',
-                  recoveredCount: recovered,
-                  therapistName: appointment.therapistName,
-                  userName: appointment.userName,
-                },
-                'Missed message scanner recovered messages from therapist thread'
-              );
-              totalRecovered += recovered;
-            }
+            appointmentRecovered += result;
           }
 
           // Check client thread
           if (appointment.gmailThreadId) {
             totalScanned++;
-            const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
+            const result = await emailProcessingService.checkThreadForUnprocessedReplies(
               appointment.gmailThreadId,
               traceId
             );
-            if (recovered > 0) {
-              logger.info(
-                {
-                  scanId,
-                  appointmentId: appointment.id,
-                  threadId: appointment.gmailThreadId,
-                  threadType: 'client',
-                  recoveredCount: recovered,
-                  userName: appointment.userName,
-                },
-                'Missed message scanner recovered messages from client thread'
-              );
-              totalRecovered += recovered;
-            }
+            appointmentRecovered += result;
+          }
+
+          if (appointmentRecovered > 0) {
+            totalRecovered += appointmentRecovered;
+            recoveredAppointments.push({
+              id: appointment.id,
+              therapistName: appointment.therapistName || 'Unknown',
+              userName: appointment.userName || 'Unknown',
+              count: appointmentRecovered,
+            });
           }
         } catch (error) {
+          totalFailed++;
           logger.warn(
             { scanId, appointmentId: appointment.id, error },
             'Failed to scan appointment threads — continuing with next'
@@ -267,19 +278,34 @@ class MissedMessageScannerService {
         totalAppointments: activeAppointments.length,
         threadsScanned: totalScanned,
         messagesRecovered: totalRecovered,
+        threadsFailed: totalFailed,
         durationMs,
-        durationMinutes: Math.round(durationMs / 60000),
       },
       `Missed message scan complete — recovered ${totalRecovered} messages from ${totalScanned} threads`
     );
 
-    return { scanned: totalScanned, recovered: totalRecovered };
+    // Alert via Slack when messages are recovered
+    if (totalRecovered > 0) {
+      const appointmentSummary = recoveredAppointments
+        .map(a => `• ${a.userName} / ${a.therapistName}: ${a.count} message(s)`)
+        .join('\n');
+
+      slackNotificationService.sendAlert({
+        title: 'Missed Messages Recovered',
+        severity: totalRecovered >= 3 ? 'high' : 'medium',
+        details: `Scanner recovered *${totalRecovered}* missed message(s) across *${recoveredAppointments.length}* appointment(s). ` +
+          'These were not delivered via push notifications.\n\n' +
+          appointmentSummary,
+      }).catch(() => {});
+    }
+
+    return { scanned: totalScanned, recovered: totalRecovered, failed: totalFailed };
   }
 
   /**
    * Manually trigger a scan (for admin/debugging)
    */
-  async triggerManualScan(): Promise<{ scanned: number; recovered: number }> {
+  async triggerManualScan(): Promise<ScanResult> {
     logger.info('Manual missed message scan triggered');
     return this.runSafeScan('manual');
   }
@@ -290,14 +316,24 @@ class MissedMessageScannerService {
   getStatus(): {
     running: boolean;
     intervalMs: number;
-    intervalHours: number;
+    intervalMinutes: number;
+    consecutiveSkips: number;
   } {
     return {
       running: this.intervalId !== null,
       intervalMs: SCAN_INTERVAL_MS,
-      intervalHours: Math.round(SCAN_INTERVAL_MS / (60 * 60 * 1000)),
+      intervalMinutes: Math.round(SCAN_INTERVAL_MS / (60 * 1000)),
+      consecutiveSkips: this.consecutiveSkips,
     };
   }
 }
+
+interface ScanResult {
+  scanned: number;
+  recovered: number;
+  failed?: number;
+}
+
+const EMPTY_RESULT: ScanResult = { scanned: 0, recovered: 0, failed: 0 };
 
 export const missedMessageScannerService = new MissedMessageScannerService();

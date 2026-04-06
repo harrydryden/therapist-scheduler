@@ -618,20 +618,20 @@ All you need to do is select a therapist below. Enter your first name and email 
   'email.weeklyMailingSubject': {
     category: 'emailTemplates',
     label: 'Weekly Mailing - Subject',
-    description: 'Subject line for weekly promotional email. Variables: {userName}, {voucherCode}',
+    description: 'Subject line for weekly promotional email. Variables: {userName}',
     valueType: 'string',
-    defaultValue: 'Your free therapy session code — book before it expires',
+    defaultValue: 'Your weekly therapy update',
   },
   'email.weeklyMailingBody': {
     category: 'emailTemplates',
     label: 'Weekly Mailing - Body',
-    description: 'Email body for weekly promotional email. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}, {unsubscribeUrl}. Supports markdown links: [text](url)',
+    description: 'Email body for weekly promotional email. Variables: {userName}, {newTherapistsSection}, {voucherSection}, {webAppUrl}, {unsubscribeUrl}. Supports markdown links: [text](url)',
     valueType: 'string',
     defaultValue: `Hi {userName},
 
-Due to demand we've had to limit the number of free therapy sessions we can offer. You've been allocated a personal session code: {voucherCode}
-
-This code expires on {voucherExpiry}, so please book before then. Once it's gone, your spot will be offered to someone else.
+Here's your weekly update from Spill.
+{newTherapistsSection}
+{voucherSection}
 
 [Book your free session]({webAppUrl})
 
@@ -900,30 +900,17 @@ Justin`,
   // === VOUCHER EMAIL TEMPLATES ===
   'email.voucherReminderSubject': {
     category: 'emailTemplates',
-    label: 'Voucher Reminder - Subject',
-    description: 'Subject line for voucher reminder email (sent when code is unused after 1 week). Variables: {userName}, {voucherCode}',
+    label: 'Voucher Reminder - Subject (unused, kept for compatibility)',
+    description: 'No longer used — reminders are now part of the unified weekly email.',
     valueType: 'string',
-    defaultValue: 'Your session code expires soon — book now',
+    defaultValue: 'Your weekly therapy update',
   },
   'email.voucherReminderBody': {
     category: 'emailTemplates',
-    label: 'Voucher Reminder - Body',
-    description: 'Email body for voucher reminder. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}, {unsubscribeUrl}',
+    label: 'Voucher Reminder - Body (unused, kept for compatibility)',
+    description: 'No longer used — reminders are now part of the unified weekly email.',
     valueType: 'string',
-    defaultValue: `Hi {userName},
-
-Just a reminder — your personal session code {voucherCode} expires on {voucherExpiry}.
-
-Don't miss out on your free therapy session. Book before your code expires:
-
-[Book your session]({webAppUrl})
-
-Best wishes,
-
-Justin
-
----
-You're receiving this because you've indicated you are interested in free therapy. [Unsubscribe from these reminders]({unsubscribeUrl}).`,
+    defaultValue: 'Reminder: your booking link expires on {voucherExpiry}. Don\'t miss out on your free therapy session — book before it expires.',
   },
   'email.voucherFinalNoticeSubject': {
     category: 'emailTemplates',

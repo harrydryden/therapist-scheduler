@@ -229,14 +229,16 @@ export const MISSED_MESSAGE_SCANNER_LOCK = {
 
 // Missed message scanner intervals
 export const MISSED_MESSAGE_SCANNER_INTERVALS = {
-  /** How often to run the full scan (ms) — default 4 hours */
-  SCAN_INTERVAL_MS: 4 * 60 * 60 * 1000,
+  /** How often to run the full scan (ms) — reduced from 4h to 1h to catch missed messages sooner */
+  SCAN_INTERVAL_MS: 1 * 60 * 60 * 1000,
   /** Delay before first scan after startup (ms) — 2 minutes to let services initialize */
   STARTUP_DELAY_MS: 2 * 60 * 1000,
   /** Max appointments to scan per batch (to respect Gmail API rate limits) */
   BATCH_SIZE: 25,
   /** Delay between batches (ms) to avoid Gmail rate limiting */
   BATCH_DELAY_MS: 2000,
+  /** Alert after this many consecutive skipped cycles (OAuth failures, lock contention, etc.) */
+  CONSECUTIVE_SKIP_ALERT_THRESHOLD: 3,
 } as const;
 
 // Data retention cleanup distributed lock
@@ -264,6 +266,8 @@ export const WEEKLY_MAILING = {
   RENEWAL_INTERVAL_MS: 120 * 1000,
   // Key to track last send date
   LAST_SEND_KEY: 'weekly-mailing:last-send-date',
+  // Key to track known therapist IDs (for detecting new therapists)
+  KNOWN_THERAPISTS_KEY: 'weekly-mailing:known-therapist-ids',
 } as const;
 
 // Daily work report settings

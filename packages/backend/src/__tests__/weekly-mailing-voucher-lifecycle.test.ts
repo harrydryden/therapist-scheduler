@@ -12,6 +12,9 @@
  * - Expired unused voucher: increments strike, issues new code
  * - Max strikes reached: sends final notice and auto-unsubscribes
  * - Non-voucher mode: sends plain email
+ * - New therapists section: detected via Redis-tracked known IDs
+ * - Unified email: both new-voucher and reminder use the same template
+ * - Voucher code not shown as literal text (only in booking link)
  */
 
 // ============================================
@@ -103,6 +106,8 @@ import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
 import { getSettingValue, getSettingValues } from '../services/settings.service';
 import { notionUsersService } from '../services/notion-users.service';
+import { notionService } from '../services/notion.service';
+import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { emailProcessingService } from '../services/email-processing.service';
 
 // Import after mocks — the singleton is created at import time
@@ -116,15 +121,18 @@ const testRedis = redis as unknown as { __store: Map<string, string> };
 
 const testUser = { email: 'alice@example.com', name: 'Alice', pageId: 'notion-page-1' };
 
+const testTherapists = [
+  { id: 'therapist-1', name: 'Dr Smith', areasOfFocus: ['anxiety', 'stress'], active: true, frozen: false, email: 'smith@test.com', bio: '', approach: [], style: [], odId: null, availability: null, profileImage: null, bookingLink: null },
+  { id: 'therapist-2', name: 'Dr Jones', areasOfFocus: ['relationships'], active: true, frozen: false, email: 'jones@test.com', bio: '', approach: [], style: [], odId: null, availability: null, profileImage: null, bookingLink: null },
+];
+
 function setupSettings(overrides: Record<string, unknown> = {}) {
   const defaults: Record<string, unknown> = {
     'weeklyMailing.enabled': true,
-    'email.weeklyMailingSubject': 'Your code: {{voucherCode}}',
-    'email.weeklyMailingBody': 'Hi {{userName}}, use {{voucherCode}} before {{voucherExpiry}}. {{webAppUrl}} {{unsubscribeUrl}}',
-    'email.voucherReminderSubject': 'Reminder: {{voucherCode}}',
-    'email.voucherReminderBody': 'Reminder: {{voucherCode}} expires {{voucherExpiry}}. {{webAppUrl}} {{unsubscribeUrl}}',
-    'email.voucherFinalNoticeSubject': 'Goodbye {{userName}}',
-    'email.voucherFinalNoticeBody': 'You have been unsubscribed. {{unsubscribeUrl}}',
+    'email.weeklyMailingSubject': 'Your weekly therapy update',
+    'email.weeklyMailingBody': 'Hi {userName},\n\nHere\'s your weekly update.\n{newTherapistsSection}\n{voucherSection}\n\n[Book your free session]({webAppUrl})\n\nBest wishes,\n\nJustin\n\n---\n[Unsubscribe]({unsubscribeUrl})',
+    'email.voucherFinalNoticeSubject': 'Goodbye {userName}',
+    'email.voucherFinalNoticeBody': 'You have been unsubscribed. {unsubscribeUrl}',
     'weeklyMailing.webAppUrl': 'https://app.test',
     'voucher.enabled': true,
     'voucher.expiryDays': 14,
@@ -179,8 +187,10 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     testRedis.__store.clear();
     setupSettings();
 
-    // Default: one eligible user, service enabled
+    // Default: one eligible user, service enabled, therapists available
     (notionUsersService.getEligibleMailingListUsers as jest.Mock).mockResolvedValue([testUser]);
+    (notionService.fetchTherapists as jest.Mock).mockResolvedValue(testTherapists);
+    (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
     (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
     (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
     (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
@@ -196,10 +206,22 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     expect(result.sent).toBe(1);
     expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
 
-    // Verify email contains a voucher code (word-word-word pattern)
+    // Verify email uses the unified subject (no voucher code in subject)
     const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
     expect(emailCall.to).toBe('alice@example.com');
-    expect(emailCall.subject).toMatch(/\w+-\w+-\w+/);
+    expect(emailCall.subject).toBe('Your weekly therapy update');
+
+    // Verify body contains voucher section about new booking link
+    expect(emailCall.body).toContain('new personal booking link');
+    expect(emailCall.body).toContain('expires on');
+
+    // Verify voucher code is NOT shown as literal text in body
+    // (the word-word-word pattern should not appear in the body text)
+    const bodyWithoutUrls = emailCall.body.replace(/https?:\/\/[^\s)]+/g, '');
+    expect(bodyWithoutUrls).not.toMatch(/\b\w+-\w+-\w+\b/);
+
+    // Verify booking link contains the voucher token
+    expect(emailCall.body).toMatch(/\[Book your free session\]\(https:\/\/app\.test\?voucher=/);
 
     // Verify tracking upsert was called with new token
     expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
@@ -208,9 +230,9 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     expect(upsertCall.create.lastVoucherToken).toBeTruthy();
   });
 
-  // ---- Active unused voucher: send reminder ----
+  // ---- Active unused voucher: send reminder in unified email ----
 
-  it('sends reminder when active voucher is unused', async () => {
+  it('sends unified email with reminder section when active voucher is unused', async () => {
     const token = 'v1:abc:def:c2lnbmF0dXJl'; // fake but structurally valid
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
       makeTracking({
@@ -221,9 +243,17 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     await weeklyMailingListService.forceSend(true);
 
-    // Should send reminder, not new voucher
+    // Should send unified email (same subject), not separate reminder
     const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
-    expect(emailCall.subject).toMatch(/Reminder/i);
+    expect(emailCall.subject).toBe('Your weekly therapy update');
+
+    // Body should contain reminder text
+    expect(emailCall.body).toContain('reminder');
+    expect(emailCall.body).toContain('booking link expires');
+
+    // Voucher code should NOT appear as text
+    const bodyWithoutUrls = emailCall.body.replace(/https?:\/\/[^\s)]+/g, '');
+    expect(bodyWithoutUrls).not.toMatch(/\b\w+-\w+-\w+\b/);
 
     // Should update reminderSentAt, NOT upsert new token
     expect(prisma.voucherTracking.update).toHaveBeenCalledTimes(1);
@@ -383,7 +413,52 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     // Should issue new voucher, not send reminder
     expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
     const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
-    // Should be the regular email, not reminder
-    expect(emailCall.subject).not.toMatch(/Reminder/i);
+    // Should contain new booking link text, not reminder text
+    expect(emailCall.body).toContain('new personal booking link');
+  });
+
+  // ---- New therapists section ----
+
+  it('includes new therapists section when new therapists are available', async () => {
+    // No known therapists in Redis → all therapists are "new"
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
+
+    await weeklyMailingListService.forceSend(true);
+
+    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    expect(emailCall.body).toContain('new therapists available');
+    expect(emailCall.body).toContain('Dr');
+    expect(emailCall.body).toContain('anxiety');
+  });
+
+  it('omits new therapists section when all therapists are known', async () => {
+    // Pre-populate Redis with known therapist IDs
+    testRedis.__store.set(
+      'weekly-mailing:known-therapist-ids',
+      JSON.stringify(['therapist-1', 'therapist-2']),
+    );
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
+
+    await weeklyMailingListService.forceSend(true);
+
+    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    expect(emailCall.body).not.toContain('new therapists available');
+  });
+
+  it('only includes genuinely new therapists in the section', async () => {
+    // therapist-1 is known, therapist-2 is new
+    testRedis.__store.set(
+      'weekly-mailing:known-therapist-ids',
+      JSON.stringify(['therapist-1']),
+    );
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
+
+    await weeklyMailingListService.forceSend(true);
+
+    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    expect(emailCall.body).toContain('new therapists available');
+    // Should contain Dr Jones (new) but not Dr Smith (known)
+    expect(emailCall.body).toContain('Jones');
+    expect(emailCall.body).not.toContain('Smith');
   });
 });

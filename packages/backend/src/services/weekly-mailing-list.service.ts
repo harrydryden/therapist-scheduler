@@ -22,13 +22,13 @@ import { redis } from '../utils/redis';
 import { prisma } from '../utils/database';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { notionUsersService, NotionUser } from './notion-users.service';
-import { notionService } from './notion.service';
+import { notionService, InternalTherapist } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
-import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
+import { generateVoucherUrl } from '../utils/voucher-token';
 import { WEEKLY_MAILING } from '../constants';
 
 // Check interval: every hour
@@ -163,6 +163,10 @@ class WeeklyMailingListService {
       throw new Error('Weekly email already sent this week. Wait until next week or use skipAlreadySentCheck.');
     }
 
+    // Get available therapists and determine new ones
+    const availableTherapists = await this.getAvailableTherapists();
+    const newTherapists = await this.getNewTherapists(availableTherapists);
+
     // Get eligible users
     const users = await this.getEligibleUsers();
     if (users.length === 0) {
@@ -170,10 +174,11 @@ class WeeklyMailingListService {
       return { sent: 0, failed: 0, total: 0 };
     }
 
-    logger.info({ checkId, userCount: users.length }, 'Force sending weekly emails');
+    logger.info({ checkId, userCount: users.length, newTherapists: newTherapists.length }, 'Force sending weekly emails');
 
     // Fetch email template settings once for the entire batch
     const emailSettings = await this.fetchEmailSettings();
+    const newTherapistsSection = this.buildNewTherapistsSection(newTherapists);
 
     // Send emails
     let sent = 0;
@@ -181,7 +186,7 @@ class WeeklyMailingListService {
 
     for (const user of users) {
       try {
-        await this.sendWeeklyEmail(user, emailSettings);
+        await this.sendWeeklyEmail(user, emailSettings, newTherapistsSection);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -223,11 +228,15 @@ class WeeklyMailingListService {
       return;
     }
 
-    // Check if any therapist is available
-    if (!(await this.isAnyTherapistAvailable())) {
+    // Get available therapists (also checks if any exist)
+    const availableTherapists = await this.getAvailableTherapists();
+    if (availableTherapists.length === 0) {
       logger.info({ checkId }, 'No therapists available - skipping weekly mailing');
       return;
     }
+
+    // Determine which therapists are new since last email
+    const newTherapists = await this.getNewTherapists(availableTherapists);
 
     // Get eligible users
     const users = await this.getEligibleUsers();
@@ -238,10 +247,11 @@ class WeeklyMailingListService {
       return;
     }
 
-    logger.info({ checkId, userCount: users.length }, 'Sending weekly emails');
+    logger.info({ checkId, userCount: users.length, newTherapists: newTherapists.length }, 'Sending weekly emails');
 
     // Fetch email template settings once for the entire batch
     const emailSettings = await this.fetchEmailSettings();
+    const newTherapistsSection = this.buildNewTherapistsSection(newTherapists);
 
     // Send emails
     let sent = 0;
@@ -254,7 +264,7 @@ class WeeklyMailingListService {
         break;
       }
       try {
-        await this.sendWeeklyEmail(user, emailSettings);
+        await this.sendWeeklyEmail(user, emailSettings, newTherapistsSection);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -370,20 +380,86 @@ class WeeklyMailingListService {
    */
   private async isAnyTherapistAvailable(): Promise<boolean> {
     try {
-      // Get all active therapists
-      const therapists = await notionService.fetchTherapists();
-      if (therapists.length === 0) return false;
-
-      // Get unavailable therapist IDs (frozen/booked)
-      const unavailableIds = await therapistBookingStatusService.getUnavailableTherapistIds();
-      const unavailableSet = new Set(unavailableIds);
-
-      // Check if any therapist is available
-      return therapists.some(t => !unavailableSet.has(t.id));
+      const available = await this.getAvailableTherapists();
+      return available.length > 0;
     } catch (error) {
       logger.error({ error }, 'Failed to check therapist availability');
       return false;
     }
+  }
+
+  /**
+   * Get all currently available therapists (active and not frozen/booked)
+   */
+  private async getAvailableTherapists(): Promise<InternalTherapist[]> {
+    const therapists = await notionService.fetchTherapists();
+    if (therapists.length === 0) return [];
+
+    const unavailableIds = await therapistBookingStatusService.getUnavailableTherapistIds();
+    const unavailableSet = new Set(unavailableIds);
+
+    return therapists.filter(t => !unavailableSet.has(t.id));
+  }
+
+  /**
+   * Determine which therapists are new since the last weekly email.
+   * Compares currently available therapist IDs against a stored set in Redis.
+   * Updates the stored set after comparison.
+   */
+  private async getNewTherapists(availableTherapists: InternalTherapist[]): Promise<InternalTherapist[]> {
+    try {
+      const storedJson = await redis.get(WEEKLY_MAILING.KNOWN_THERAPISTS_KEY);
+      const knownIds: Set<string> = storedJson ? new Set(JSON.parse(storedJson)) : new Set();
+
+      const newTherapists = availableTherapists.filter(t => !knownIds.has(t.id));
+
+      // Store current available IDs for next comparison (keep for 30 days)
+      const currentIds = availableTherapists.map(t => t.id);
+      await redis.set(
+        WEEKLY_MAILING.KNOWN_THERAPISTS_KEY,
+        JSON.stringify(currentIds),
+        'EX',
+        30 * 24 * 60 * 60,
+      );
+
+      return newTherapists;
+    } catch (error) {
+      logger.warn({ error }, 'Failed to determine new therapists, treating all as known');
+      return [];
+    }
+  }
+
+  /**
+   * Build the "new therapists" section for the weekly email.
+   * Returns empty string if no new therapists.
+   */
+  private buildNewTherapistsSection(newTherapists: InternalTherapist[]): string {
+    if (newTherapists.length === 0) return '';
+
+    const therapistLines = newTherapists.map(t => {
+      if (t.areasOfFocus.length > 0) {
+        return `• ${t.name} — specialises in ${t.areasOfFocus.slice(0, 3).join(', ').toLowerCase()}`;
+      }
+      return `• ${t.name}`;
+    });
+
+    return `\nWe have new therapists available:\n${therapistLines.join('\n')}\n`;
+  }
+
+  /**
+   * Build the voucher section for the weekly email.
+   * For new vouchers: tells user they have a new booking link that expires.
+   * For reminders: tells user their existing link expires in X days.
+   * Never exposes the voucher code as text — it's only embedded in the booking URL.
+   */
+  private buildVoucherSection(isReminder: boolean, voucherExpiry: string, daysRemaining?: number): string {
+    if (isReminder) {
+      const daysText = daysRemaining !== undefined && daysRemaining >= 0
+        ? `in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`
+        : `on ${voucherExpiry}`;
+      return `Just a reminder — your personal booking link expires ${daysText}. Don't miss out on your free therapy session.`;
+    }
+    return `You've been allocated a new personal booking link. It expires on ${voucherExpiry}, so please book before then. Once it's gone, your spot will be offered to someone else.`;
   }
 
   /**
@@ -405,8 +481,6 @@ class WeeklyMailingListService {
     const settingsMap = await getSettingValues([
       'email.weeklyMailingSubject',
       'email.weeklyMailingBody',
-      'email.voucherReminderSubject',
-      'email.voucherReminderBody',
       'email.voucherFinalNoticeSubject',
       'email.voucherFinalNoticeBody',
       'weeklyMailing.webAppUrl',
@@ -417,8 +491,6 @@ class WeeklyMailingListService {
     return {
       subjectTemplate: settingsMap.get('email.weeklyMailingSubject') as string,
       bodyTemplate: settingsMap.get('email.weeklyMailingBody') as string,
-      reminderSubjectTemplate: settingsMap.get('email.voucherReminderSubject') as string,
-      reminderBodyTemplate: settingsMap.get('email.voucherReminderBody') as string,
       finalNoticeSubjectTemplate: settingsMap.get('email.voucherFinalNoticeSubject') as string,
       finalNoticeBodyTemplate: settingsMap.get('email.voucherFinalNoticeBody') as string,
       webAppUrl: settingsMap.get('weeklyMailing.webAppUrl') as string,
@@ -430,6 +502,13 @@ class WeeklyMailingListService {
 
   /**
    * Send weekly email to a single user.
+   *
+   * Produces a single unified email containing:
+   * 1. New therapists section (if any new therapists since last email)
+   * 2. Voucher section — either a new code or a reminder about an existing one
+   *
+   * The voucher code is never shown as text; it is only embedded in the booking URL.
+   *
    * When vouchers are enabled, implements the use-it-or-lose-it lifecycle:
    * - If no active voucher (or used/expired): issue a new code
    * - If active voucher still valid and unused: send reminder
@@ -439,6 +518,7 @@ class WeeklyMailingListService {
   private async sendWeeklyEmail(
     user: NotionUser,
     emailSettings: EmailSettings,
+    newTherapistsSection: string,
   ): Promise<void> {
     const { webAppUrl } = emailSettings;
 
@@ -446,13 +526,13 @@ class WeeklyMailingListService {
     const unsubscribeUrl = generateUnsubscribeUrl(user.email, config.backendUrl);
 
     if (!emailSettings.voucherEnabled) {
-      // Original non-voucher flow
+      // Non-voucher flow — unified template with new therapists only
       const subject = renderTemplate(emailSettings.subjectTemplate, { userName: user.name });
-      const body = renderTemplate(emailSettings.bodyTemplate, {
+      const body = renderUnifiedBody(emailSettings.bodyTemplate, {
         userName: user.name,
         webAppUrl,
         unsubscribeUrl,
-      });
+      }, newTherapistsSection, '');
 
       await emailProcessingService.sendEmail({ to: user.email, subject, body });
       logger.info({ email: user.email }, 'Sent weekly mailing email (no voucher)');
@@ -475,33 +555,30 @@ class WeeklyMailingListService {
       tracking.lastVoucherUsedAt > tracking.lastVoucherSentAt;
 
     if (hasActiveVoucher && !voucherUsed) {
-      // Active voucher, not yet used → send REMINDER email
+      // Active voucher, not yet used → send unified email with REMINDER voucher section
       const existingToken = tracking!.lastVoucherToken;
       if (!existingToken) {
         logger.warn({ email: emailLower }, 'Voucher tracking has no stored token, issuing new one');
-        await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
+        await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, newTherapistsSection, tracking);
         return;
       }
 
-      const displayCode = getDisplayCodeFromToken(existingToken) || 'your code';
       const expiresAt = new Date(tracking!.lastVoucherSentAt!.getTime() + expiryDays * 24 * 60 * 60 * 1000);
       const voucherExpiry = formatExpiryDate(expiresAt);
+      const daysRemaining = Math.ceil((expiresAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
 
-      // Build reminder URL with existing token
+      // Build booking URL with existing voucher token embedded
       const separator = webAppUrl.includes('?') ? '&' : '?';
       const voucherWebAppUrl = `${webAppUrl}${separator}voucher=${encodeURIComponent(existingToken)}`;
 
-      const subject = renderTemplate(emailSettings.reminderSubjectTemplate, {
+      const voucherSection = this.buildVoucherSection(true, voucherExpiry, daysRemaining);
+
+      const subject = renderTemplate(emailSettings.subjectTemplate, { userName: user.name });
+      const body = renderUnifiedBody(emailSettings.bodyTemplate, {
         userName: user.name,
-        voucherCode: displayCode,
-      });
-      const body = renderTemplate(emailSettings.reminderBodyTemplate, {
-        userName: user.name,
-        voucherCode: displayCode,
-        voucherExpiry,
         webAppUrl: voucherWebAppUrl,
         unsubscribeUrl,
-      });
+      }, newTherapistsSection, voucherSection);
 
       await emailProcessingService.sendEmail({ to: user.email, subject, body });
 
@@ -511,7 +588,7 @@ class WeeklyMailingListService {
         data: { reminderSentAt: now },
       });
 
-      logger.info({ email: emailLower, displayCode }, 'Sent voucher reminder email');
+      logger.info({ email: emailLower }, 'Sent weekly email with voucher reminder');
       return;
     }
 
@@ -528,9 +605,6 @@ class WeeklyMailingListService {
       }
 
       // FIX: Atomically increment strike AND persist new voucher token in one transaction.
-      // Previously these were two separate DB writes — if the process crashed between them,
-      // the strike was incremented but no new voucher was sent, causing double-counting
-      // on the next weekly run.
       tracking = { ...tracking, strikeCount: newStrikeCount };
       logger.info(
         { email: emailLower, strikeCount: newStrikeCount, maxStrikes },
@@ -545,11 +619,11 @@ class WeeklyMailingListService {
     }
 
     // Issue new voucher — strike/reset update is included atomically in the DB write
-    await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
+    await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, newTherapistsSection, tracking);
   }
 
   /**
-   * Generate and send a new voucher code email.
+   * Generate and send a new voucher code via the unified weekly email template.
    *
    * FIX: DB write happens BEFORE email send so that if the process crashes
    * after persisting but before sending, the next weekly run sees an active
@@ -563,6 +637,7 @@ class WeeklyMailingListService {
     user: NotionUser,
     emailSettings: EmailSettings,
     unsubscribeUrl: string,
+    newTherapistsSection: string,
     tracking: { id: string; strikeCount: number } | null,
   ): Promise<void> {
     const emailLower = user.email.toLowerCase();
@@ -574,8 +649,6 @@ class WeeklyMailingListService {
     const voucherExpiry = formatExpiryDate(voucherResult.expiresAt);
 
     // Upsert tracking record BEFORE sending email.
-    // Includes the caller's computed strikeCount so that strike increment/reset
-    // and new-voucher token are persisted in a single atomic DB write.
     const now = new Date();
     const strikeCount = tracking?.strikeCount ?? 0;
     await prisma.voucherTracking.upsert({
@@ -595,23 +668,20 @@ class WeeklyMailingListService {
       },
     });
 
-    const subject = renderTemplate(emailSettings.subjectTemplate, {
+    const voucherSection = this.buildVoucherSection(false, voucherExpiry);
+
+    const subject = renderTemplate(emailSettings.subjectTemplate, { userName: user.name });
+    const body = renderUnifiedBody(emailSettings.bodyTemplate, {
       userName: user.name,
-      voucherCode: voucherResult.displayCode,
-    });
-    const body = renderTemplate(emailSettings.bodyTemplate, {
-      userName: user.name,
-      voucherCode: voucherResult.displayCode,
-      voucherExpiry,
       webAppUrl: voucherResult.url,
       unsubscribeUrl,
-    });
+    }, newTherapistsSection, voucherSection);
 
     await emailProcessingService.sendEmail({ to: user.email, subject, body });
 
     logger.info(
-      { email: emailLower, displayCode: voucherResult.displayCode, expiresAt: voucherResult.expiresAt.toISOString() },
-      'Sent new voucher email'
+      { email: emailLower, expiresAt: voucherResult.expiresAt.toISOString() },
+      'Sent weekly email with new voucher'
     );
   }
 
@@ -672,8 +742,6 @@ class WeeklyMailingListService {
 interface EmailSettings {
   subjectTemplate: string;
   bodyTemplate: string;
-  reminderSubjectTemplate: string;
-  reminderBodyTemplate: string;
   finalNoticeSubjectTemplate: string;
   finalNoticeBodyTemplate: string;
   webAppUrl: string;
@@ -691,6 +759,28 @@ function formatExpiryDate(date: Date): string {
     month: 'long',
     year: 'numeric',
   });
+}
+
+/**
+ * Render the unified weekly email body.
+ *
+ * Uses renderTemplate for user-supplied variables (which are HTML-escaped for safety),
+ * then does a plain string replacement for the system-generated section content
+ * ({newTherapistsSection} and {voucherSection}). This avoids double-escaping since
+ * the email body is later converted to HTML by convertToHtml.
+ */
+function renderUnifiedBody(
+  template: string,
+  variables: import('../utils/email-templates').TemplateVariables,
+  newTherapistsSection: string,
+  voucherSection: string,
+): string {
+  // First pass: render user-supplied variables with HTML escaping
+  const rendered = renderTemplate(template, variables);
+  // Second pass: inject system-generated sections without escaping
+  return rendered
+    .replace(/\{newTherapistsSection\}/g, newTherapistsSection)
+    .replace(/\{voucherSection\}/g, voucherSection);
 }
 
 export const weeklyMailingListService = new WeeklyMailingListService();
