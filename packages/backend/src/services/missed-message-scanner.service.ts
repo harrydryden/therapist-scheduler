@@ -2,6 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { emailProcessingService } from './email-processing.service';
+import { slackNotificationService } from './slack-notification.service';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS } from '../constants';
 
 const {
@@ -9,6 +10,7 @@ const {
   STARTUP_DELAY_MS,
   BATCH_SIZE,
   BATCH_DELAY_MS,
+  CONSECUTIVE_SKIP_ALERT_THRESHOLD,
 } = MISSED_MESSAGE_SCANNER_INTERVALS;
 
 /**
@@ -24,8 +26,9 @@ const {
  * with take:10, hourly, 1h+ inactive only). This scanner is comprehensive:
  * - Covers ALL active statuses including post-booking (confirmed, session_held, feedback_requested)
  * - No limit on number of appointments scanned (processes all in batches)
- * - Runs every 4 hours as a thorough sweep
+ * - Runs every hour as a thorough sweep
  * - Respects humanControlEnabled flag (skips admin-controlled appointments)
+ * - Sends Slack alerts when messages are recovered or when the scanner is unhealthy
  *
  * The overlap on contacted/negotiating is intentional — stale check provides fast
  * recovery (hourly, 10 at a time), this scanner provides comprehensive backup.
@@ -38,6 +41,7 @@ class MissedMessageScannerService {
   private startupTimeoutId: NodeJS.Timeout | null = null;
   private instanceId: string;
   private taskRunner: LockedTaskRunner;
+  private consecutiveSkips = 0;
 
   constructor() {
     this.instanceId = `${process.pid}-${Date.now().toString(36)}-missed-scanner`;
@@ -60,10 +64,10 @@ class MissedMessageScannerService {
       return;
     }
 
-    const intervalHours = Math.round(SCAN_INTERVAL_MS / (60 * 60 * 1000));
+    const intervalMinutes = Math.round(SCAN_INTERVAL_MS / (60 * 1000));
     logger.info(
-      { intervalMs: SCAN_INTERVAL_MS, intervalHours },
-      `Starting missed message scanner (runs every ${intervalHours} hours)`
+      { intervalMs: SCAN_INTERVAL_MS, intervalMinutes },
+      `Starting missed message scanner (runs every ${intervalMinutes} minutes)`
     );
 
     // Delay first scan to allow Gmail client and other services to initialize
@@ -108,6 +112,7 @@ class MissedMessageScannerService {
 
     if (!result.acquired) {
       logger.debug({ scanId, trigger }, 'Missed message scan skipped — another instance holds the lock');
+      this.trackSkip(scanId, trigger, 'lock_contention');
       return { scanned: 0, recovered: 0 };
     }
 
@@ -116,10 +121,37 @@ class MissedMessageScannerService {
         { scanId, trigger, error: result.error },
         'Missed message scan failed'
       );
+      this.trackSkip(scanId, trigger, 'error');
       return { scanned: 0, recovered: 0 };
     }
 
+    // Successful scan — reset skip counter
+    this.consecutiveSkips = 0;
     return result.result || { scanned: 0, recovered: 0 };
+  }
+
+  /**
+   * Track consecutive skips and alert if threshold is exceeded.
+   * Consecutive skips suggest the scanner is unhealthy (OAuth issues, stuck lock, etc.).
+   */
+  private trackSkip(scanId: string, trigger: string, reason: string): void {
+    this.consecutiveSkips++;
+
+    if (this.consecutiveSkips >= CONSECUTIVE_SKIP_ALERT_THRESHOLD) {
+      logger.error(
+        { scanId, trigger, reason, consecutiveSkips: this.consecutiveSkips },
+        'Missed message scanner has been skipped multiple times consecutively — messages may be going undetected'
+      );
+
+      slackNotificationService.sendAlert({
+        title: 'Missed Message Scanner Unhealthy',
+        severity: 'high',
+        details: `Scanner has been skipped *${this.consecutiveSkips}* consecutive times (reason: ${reason}). ` +
+          'Incoming messages may not be detected. Check OAuth token status and server health.',
+      }).catch(() => {
+        // Best-effort alerting
+      });
+    }
   }
 
   /**
@@ -142,6 +174,7 @@ class MissedMessageScannerService {
         { scanId, trigger, error: tokenStatus.error },
         'OAuth token invalid before scan — skipping this cycle'
       );
+      this.trackSkip(scanId, trigger, 'oauth_invalid');
       return { scanned: 0, recovered: 0 };
     }
 
@@ -181,6 +214,7 @@ class MissedMessageScannerService {
 
     let totalScanned = 0;
     let totalRecovered = 0;
+    const recoveredAppointments: Array<{ id: string; therapistName: string; userName: string; count: number }> = [];
 
     // Process in batches to respect Gmail API rate limits
     for (let i = 0; i < activeAppointments.length; i += BATCH_SIZE) {
@@ -197,6 +231,7 @@ class MissedMessageScannerService {
 
       for (const appointment of batch) {
         const traceId = `${scanId}:${appointment.id}`;
+        let appointmentRecovered = 0;
 
         try {
           // Check therapist thread
@@ -220,6 +255,7 @@ class MissedMessageScannerService {
                 'Missed message scanner recovered messages from therapist thread'
               );
               totalRecovered += recovered;
+              appointmentRecovered += recovered;
             }
           }
 
@@ -243,7 +279,17 @@ class MissedMessageScannerService {
                 'Missed message scanner recovered messages from client thread'
               );
               totalRecovered += recovered;
+              appointmentRecovered += recovered;
             }
+          }
+
+          if (appointmentRecovered > 0) {
+            recoveredAppointments.push({
+              id: appointment.id,
+              therapistName: appointment.therapistName || 'Unknown',
+              userName: appointment.userName || 'Unknown',
+              count: appointmentRecovered,
+            });
           }
         } catch (error) {
           logger.warn(
@@ -273,6 +319,23 @@ class MissedMessageScannerService {
       `Missed message scan complete — recovered ${totalRecovered} messages from ${totalScanned} threads`
     );
 
+    // Alert via Slack when messages are recovered — this indicates a delivery problem
+    if (totalRecovered > 0) {
+      const appointmentSummary = recoveredAppointments
+        .map(a => `• ${a.userName} / ${a.therapistName}: ${a.count} message(s)`)
+        .join('\n');
+
+      slackNotificationService.sendAlert({
+        title: 'Missed Messages Recovered',
+        severity: totalRecovered >= 3 ? 'high' : 'medium',
+        details: `Scanner recovered *${totalRecovered}* missed message(s) across *${recoveredAppointments.length}* appointment(s). ` +
+          'These messages were not delivered via push notifications and were caught by the periodic scan.\n\n' +
+          appointmentSummary,
+      }).catch(() => {
+        // Best-effort alerting
+      });
+    }
+
     return { scanned: totalScanned, recovered: totalRecovered };
   }
 
@@ -290,12 +353,14 @@ class MissedMessageScannerService {
   getStatus(): {
     running: boolean;
     intervalMs: number;
-    intervalHours: number;
+    intervalMinutes: number;
+    consecutiveSkips: number;
   } {
     return {
       running: this.intervalId !== null,
       intervalMs: SCAN_INTERVAL_MS,
-      intervalHours: Math.round(SCAN_INTERVAL_MS / (60 * 60 * 1000)),
+      intervalMinutes: Math.round(SCAN_INTERVAL_MS / (60 * 1000)),
+      consecutiveSkips: this.consecutiveSkips,
     };
   }
 }

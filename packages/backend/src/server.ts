@@ -538,7 +538,7 @@ async function start() {
     slackWeeklySummaryService.start(); // Weekly Slack summary (Monday 9am)
     workReportService.start(); // Daily work report (weekdays 9am)
     therapistNudgeService.start(); // Periodic nudge emails to unmatched therapists
-    missedMessageScannerService.start(); // Scan active threads for missed messages every 4 hours
+    missedMessageScannerService.start(); // Scan active threads for missed messages every hour
 
     // Recover any emails buffered in Redis WAL during database downtime
     emailQueueService.recoverFromWAL().catch((err) => {
