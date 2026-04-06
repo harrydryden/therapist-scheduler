@@ -264,6 +264,8 @@ export const WEEKLY_MAILING = {
   RENEWAL_INTERVAL_MS: 120 * 1000,
   // Key to track last send date
   LAST_SEND_KEY: 'weekly-mailing:last-send-date',
+  // Key to track known therapist IDs (for detecting new therapists)
+  KNOWN_THERAPISTS_KEY: 'weekly-mailing:known-therapist-ids',
 } as const;
 
 // Daily work report settings
