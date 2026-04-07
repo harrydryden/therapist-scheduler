@@ -141,8 +141,14 @@ export const CONVERSATION_LIMITS = {
   MAX_MESSAGES: 100,
   // Max total state size in bytes (prevents DB issues)
   MAX_STATE_BYTES: 500 * 1024, // 500KB
-  // Number of messages to keep when trimming (keeps recent context)
+  // Total messages to keep after trimming
   TRIM_TO_MESSAGES: 50,
+  // When trimming, keep the first N messages (initial booking context)
+  // so the agent always sees how the conversation started, not just the
+  // most recent reschedule chatter. The middle is dropped with a summary
+  // placeholder. The remaining slots are filled from the tail (recent
+  // context). This preserves coherence on long-running threads.
+  TRIM_KEEP_FIRST: 4,
   // Max individual message length (truncate longer messages)
   // Prevents single large email from causing memory issues
   MAX_MESSAGE_LENGTH: 50 * 1024, // 50KB per message

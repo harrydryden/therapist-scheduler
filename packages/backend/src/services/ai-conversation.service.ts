@@ -360,42 +360,63 @@ export class AIConversationService {
   }
 
   /**
-   * Trim conversation state to prevent unbounded growth
-   * Keeps the most recent messages while preserving conversation coherence
+   * Trim conversation state to prevent unbounded growth.
+   *
+   * Strategy (Phase 6): keep BOTH ends of the conversation, drop the middle.
+   *   - First TRIM_KEEP_FIRST messages: initial booking context (who, what, when).
+   *     The agent always needs these to understand what the conversation is about,
+   *     even after a long reschedule chain.
+   *   - Last (TRIM_TO_MESSAGES - TRIM_KEEP_FIRST - 1) messages: recent context.
+   *   - One placeholder message in between explaining how many messages were dropped.
+   *
+   * The previous strategy kept only the tail, which meant a long reschedule
+   * conversation could lose all the original booking context (who's involved,
+   * what slots were considered, what the original ask was). At ~100 appts/day
+   * this didn't bite often but it produced confusing agent behaviour on the
+   * rare long thread.
    */
   trimConversationState(
     state: { systemPrompt?: string; messages: ConversationMessage[] }
   ): { systemPrompt?: string; messages: ConversationMessage[] } {
-    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES } = CONVERSATION_LIMITS;
+    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
 
-    // Check if trimming is needed
+    // Fast path: nothing to trim
     if (state.messages.length <= MAX_MESSAGES) {
-      // Also check byte size
       const stateSize = JSON.stringify(state).length;
       if (stateSize <= MAX_STATE_BYTES) {
         return state;
       }
     }
 
-    // Trim to TRIM_TO_MESSAGES, keeping most recent
-    const trimmedMessages = state.messages.slice(-TRIM_TO_MESSAGES);
+    // Reserve one slot for the placeholder summary message; split the rest
+    // between head (initial context) and tail (recent context).
+    const keepFirst = Math.min(TRIM_KEEP_FIRST, state.messages.length);
+    const keepLast = Math.max(0, TRIM_TO_MESSAGES - keepFirst - 1);
+    const droppedCount = state.messages.length - keepFirst - keepLast;
 
-    // Add a summary message at the beginning to indicate context was trimmed
-    const droppedCount = state.messages.length - TRIM_TO_MESSAGES;
-    if (droppedCount > 0) {
-      trimmedMessages.unshift({
-        role: 'user' as const,
-        content: `[System Note: ${droppedCount} older messages were trimmed to maintain performance. Recent context preserved.]`,
-      });
+    // If nothing would actually be dropped (very short conversation), return as-is
+    if (droppedCount <= 0) {
+      return state;
     }
+
+    const head = state.messages.slice(0, keepFirst);
+    const tail = state.messages.slice(-keepLast);
+    const placeholder: ConversationMessage = {
+      role: 'user',
+      content: `[System Note: ${droppedCount} middle messages were trimmed to maintain performance. The first ${keepFirst} messages (initial booking context) and the last ${keepLast} messages (recent activity) are preserved.]`,
+    };
+
+    const trimmedMessages = [...head, placeholder, ...tail];
 
     logger.info(
       {
         originalCount: state.messages.length,
         trimmedCount: trimmedMessages.length,
+        keepFirst,
+        keepLast,
         droppedCount,
       },
-      'Trimmed conversation state to prevent unbounded growth'
+      'Trimmed conversation state (head+tail strategy)'
     );
 
     return {
