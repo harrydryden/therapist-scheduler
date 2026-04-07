@@ -31,7 +31,6 @@ import { logger } from '../utils/logger';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
-import { auditEventService } from './audit-event.service';
 import { aiConversationService } from './ai-conversation.service';
 import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
 
@@ -1550,7 +1549,9 @@ class AppointmentLifecycleService {
    *
    * Idempotent: returns { dismissed: false } when there's nothing to dismiss.
    */
-  async dismissClosureRecommendation(params: BaseTransitionParams): Promise<{ dismissed: boolean }> {
+  async dismissClosureRecommendation(
+    params: BaseTransitionParams
+  ): Promise<{ dismissed: boolean; previousStage?: string; restoredStage?: string | null }> {
     const { appointmentId, source, adminId, reason } = params;
 
     const appointment = await prisma.appointmentRequest.findUnique({
@@ -1622,20 +1623,16 @@ class AppointmentLifecycleService {
       return { dismissed: false };
     }
 
-    await auditEventService.log(appointmentId, 'checkpoint_update', actorForSource(source), {
-      previousStage,
-      newStage: result.stage || 'none',
-      action: 'closure_dismissed',
-      reason,
-      ...(adminId && { adminId }),
-    } as never);
-
     logger.info(
       { appointmentId, source, reason, restoredStage: result.stage },
       'Closure recommendation dismissed'
     );
 
-    return { dismissed: true };
+    // Audit event + Slack notification are emitted by the caller via
+    // recordAppointmentEvent (the auto-dismiss path uses
+    // 'closure_dismissed_auto', the admin manual path uses 'closure_dismissed').
+    // Returning previousStage so the caller has it for the audit payload.
+    return { dismissed: true, previousStage, restoredStage: result.stage };
   }
 }
 
@@ -1658,15 +1655,6 @@ function inferRestoredStage(
   }
   if (chaseSentTo === 'user') return 'awaiting_user_slot_selection';
   return 'awaiting_therapist_availability';
-}
-
-/**
- * Map a TransitionSource to the AuditActor enum used by audit events.
- */
-function actorForSource(source: TransitionSource): 'agent' | 'admin' | 'system' {
-  if (source === 'admin') return 'admin';
-  if (source === 'agent') return 'agent';
-  return 'system';
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();

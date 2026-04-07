@@ -6,6 +6,7 @@ import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { aiConversationService } from './ai-conversation.service';
+import { recordAppointmentEvent } from './appointment-event.service';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {
@@ -182,14 +183,34 @@ class ChaseEmailService {
                 'ALERT: Chase email sent but sentinel update failed - possible duplicate'
               );
             } else {
-              // Send Slack notification
-              await slackNotificationService.notifyChaseFollowUp(
-                appointment.id,
-                appointment.userName,
-                appointment.therapistName,
-                target,
-                Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
+              const inactiveHours = Math.round(
+                (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
               );
+              await recordAppointmentEvent({
+                appointmentId: appointment.id,
+                type: 'chase_sent',
+                actor: 'system',
+                reason: `Inactive ${inactiveHours}h, chasing ${target}`,
+                payload: {
+                  target,
+                  chasedEmail: email,
+                  inactiveHours,
+                  userName: appointment.userName,
+                  therapistName: appointment.therapistName,
+                },
+                slack: {
+                  title: 'Chase follow-up sent',
+                  severity: 'medium',
+                  details:
+                    `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
+                    `*${inactiveHours}h*. Sent a follow-up nudge.`,
+                  additionalFields: {
+                    'To': email,
+                    'User': appointment.userName || '(unknown)',
+                    'Therapist': appointment.therapistName || '(unknown)',
+                  },
+                },
+              });
 
               logger.info(
                 {
@@ -412,15 +433,31 @@ class ChaseEmailService {
             continue;
           }
 
-          // Send Slack notification recommending closure
-          await slackNotificationService.notifyClosureRecommendation(
-            appointment.id,
-            appointment.userName,
-            appointment.therapistName,
-            appointment.chaseSentTo || 'unknown',
-            inactiveHours,
-            reason
-          );
+          await recordAppointmentEvent({
+            appointmentId: appointment.id,
+            type: 'closure_recommended',
+            actor: 'system',
+            reason,
+            payload: {
+              chasedParty: appointment.chaseSentTo || 'unknown',
+              inactiveHours,
+              hoursSinceChase,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+            },
+            slack: {
+              title: 'Closure recommended',
+              severity: 'high',
+              details:
+                `No response from *${appointment.chaseSentTo}* (${chasedParty}) ` +
+                `after chase follow-up *${hoursSinceChase}h* ago. ` +
+                `Total inactivity: *${inactiveHours}h*. Admin review needed.`,
+              additionalFields: {
+                'User': appointment.userName || '(unknown)',
+                'Therapist': appointment.therapistName || '(unknown)',
+              },
+            },
+          });
 
           logger.info(
             {

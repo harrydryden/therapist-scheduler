@@ -9,6 +9,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { emailProcessingService } from '../services/email-processing.service';
 import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../services/appointment-lifecycle.service';
+import { recordAppointmentEvent } from '../services/appointment-event.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
@@ -1526,12 +1527,26 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             'Admin accepted closure recommendation - appointment cancelled'
           );
         } else {
-          await appointmentLifecycleService.dismissClosureRecommendation({
+          const result = await appointmentLifecycleService.dismissClosureRecommendation({
             appointmentId: id,
             source: 'admin',
             adminId,
             reason: 'Admin dismissed closure recommendation',
           });
+
+          if (result.dismissed) {
+            await recordAppointmentEvent({
+              appointmentId: id,
+              type: 'closure_dismissed',
+              actor: 'admin',
+              reason: 'Admin dismissed closure recommendation',
+              payload: {
+                adminId,
+                previousStage: result.previousStage,
+                restoredStage: result.restoredStage,
+              },
+            });
+          }
 
           logger.info(
             { requestId, appointmentId: id, adminId },

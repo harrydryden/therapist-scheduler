@@ -47,6 +47,7 @@ import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { recordAppointmentEvent } from './appointment-event.service';
 import { classifyEmail } from '../utils/email-classifier';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
@@ -660,20 +661,29 @@ export class EmailMessageProcessorService {
             reason: `Incoming reply from ${email.from}`,
           });
           if (result.dismissed) {
-            slackNotificationService.sendAlert({
-              title: 'Closure Recommendation Auto-Dismissed',
-              severity: 'medium',
+            await recordAppointmentEvent({
               appointmentId: appointmentRequest.id,
-              details:
-                `An incoming reply arrived on a closure-recommended thread. The closure ` +
-                `recommendation was auto-dismissed and the chase cycle reset so the agent ` +
-                `can resume processing.`,
-              additionalFields: {
-                'From': email.from,
-                'Subject': email.subject.slice(0, 100),
+              type: 'closure_dismissed_auto',
+              actor: 'system',
+              reason: `Incoming reply from ${email.from}`,
+              payload: {
+                previousStage: result.previousStage,
+                restoredStage: result.restoredStage,
+                from: email.from,
+                subject: email.subject.slice(0, 100),
               },
-            }).catch((err) => {
-              logger.warn({ traceId, err }, 'Failed to send Slack alert for closure auto-dismissal');
+              slack: {
+                title: 'Closure Recommendation Auto-Dismissed',
+                severity: 'medium',
+                details:
+                  'An incoming reply arrived on a closure-recommended thread. The closure ' +
+                  'recommendation was auto-dismissed and the chase cycle reset so the agent ' +
+                  'can resume processing.',
+                additionalFields: {
+                  'From': email.from,
+                  'Subject': email.subject.slice(0, 100),
+                },
+              },
             });
           }
         } catch (err) {

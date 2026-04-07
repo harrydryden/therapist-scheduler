@@ -61,7 +61,6 @@ jest.mock('../services/ai-conversation.service', () => ({
 
 import { prisma } from '../utils/database';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
-import { auditEventService } from '../services/audit-event.service';
 
 // ============================================
 // dismissClosureRecommendation
@@ -243,7 +242,10 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     expect(options.extraUpdates).not.toHaveProperty('humanControlEnabled');
   });
 
-  it('logs an audit event with the correct actor for the source', async () => {
+  it('returns previousStage and restoredStage so callers can record audit events', async () => {
+    // Phase 4 moved audit logging to recordAppointmentEvent at the call site,
+    // so dismissClosureRecommendation now returns the stage info the caller
+    // needs for the audit payload rather than emitting it directly.
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: new Date(),
       closureRecommendationActioned: false,
@@ -251,24 +253,21 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       chaseSentTo: null,
       humanControlTakenBy: null,
     });
+    mockApplyCheckpointUpdate.mockResolvedValue({
+      applied: true,
+      stage: 'awaiting_user_slot_selection',
+    });
 
-    await appointmentLifecycleService.dismissClosureRecommendation({
+    const result = await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
       source: 'admin',
       adminId: 'admin-42',
       reason: 'manual dismiss',
     });
 
-    expect(auditEventService.log).toHaveBeenCalledWith(
-      'apt-1',
-      'checkpoint_update',
-      'admin',
-      expect.objectContaining({
-        action: 'closure_dismissed',
-        reason: 'manual dismiss',
-        adminId: 'admin-42',
-      }),
-    );
+    expect(result.dismissed).toBe(true);
+    expect(result.previousStage).toBe('closure_recommended');
+    expect(result.restoredStage).toBe('awaiting_user_slot_selection');
   });
 
   it('returns dismissed=false when helper loses optimistic lock', async () => {
@@ -287,6 +286,5 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     });
 
     expect(result.dismissed).toBe(false);
-    expect(auditEventService.log).not.toHaveBeenCalled();
   });
 });
