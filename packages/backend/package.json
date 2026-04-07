@@ -14,7 +14,10 @@
     "migrate:conversation-state": "tsx src/scripts/migrate-conversation-state.ts",
     "typecheck": "prisma generate && tsc --noEmit",
     "lint": "eslint src/**/*.ts",
-    "test": "jest"
+    "test": "jest --testPathIgnorePatterns=/integration/",
+    "test:integration": "jest --testPathPattern=/integration/",
+    "test:all": "jest",
+    "check:schema-migration": "node scripts/check-schema-migration.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
