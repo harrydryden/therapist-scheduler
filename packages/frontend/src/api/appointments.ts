@@ -162,6 +162,8 @@ export interface ThreadMessagePreview {
   date: string;
   status: 'processed' | 'unprocessed';
   snippet: string;
+  /** Last processing error recorded by the scanner, if any. Only set for unprocessed messages. */
+  lastError?: string;
 }
 
 export interface ReprocessPreviewResult {

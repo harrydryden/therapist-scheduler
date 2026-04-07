@@ -75,6 +75,14 @@ export default function ScanResultsPanel({
                       {msg.snippet && (
                         <p className="text-slate-500 mt-0.5 truncate">{msg.snippet}</p>
                       )}
+                      {msg.lastError && (
+                        <p
+                          className="text-red-700 mt-1 font-mono text-[10px] break-words whitespace-pre-wrap bg-red-50 border border-red-200 rounded p-1"
+                          title="Last processing error — the scanner tried to recover this message and failed"
+                        >
+                          {msg.lastError}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>

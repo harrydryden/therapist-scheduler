@@ -66,11 +66,14 @@ const {
   MESSAGE_LOCK_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
   PROCESSING_FAILURE_PREFIX,
+  PROCESSING_ERROR_PREFIX,
+  PROCESSING_ALERT_DEDUP_PREFIX,
   PROCESSED_MESSAGE_TTL_DAYS,
   MAX_UNMATCHED_ATTEMPTS,
   MAX_PROCESSING_FAILURES,
   UNMATCHED_ATTEMPT_TTL_SECONDS,
   PROCESSING_FAILURE_TTL_SECONDS,
+  PROCESSING_ALERT_DEDUP_TTL_SECONDS,
   CLEANUP_INTERVAL_MESSAGES,
   CLEANUP_COUNTER_KEY,
 } = EMAIL_PROCESSING;
@@ -163,6 +166,44 @@ async function trackProcessingFailure(messageId: string, traceId: string): Promi
     traceId,
   );
   return result ?? 1;
+}
+
+/**
+ * Record the last error message for a processing failure, so it can be
+ * surfaced in the admin scan preview UI next to the MISSED label.
+ */
+async function recordProcessingError(messageId: string, errorMessage: string, traceId: string): Promise<void> {
+  const key = `${PROCESSING_ERROR_PREFIX}${messageId}`;
+  await safeRedisOp(
+    () => redis.set(key, errorMessage.slice(0, 500), 'EX', PROCESSING_FAILURE_TTL_SECONDS),
+    'record processing error message',
+    traceId,
+  );
+}
+
+/**
+ * Look up the last recorded error for a message (or null if none). Used by
+ * previewThreadMessages to annotate MISSED messages with their failure reason.
+ */
+export async function getLastProcessingError(messageId: string): Promise<string | null> {
+  const key = `${PROCESSING_ERROR_PREFIX}${messageId}`;
+  return safeRedisOp(() => redis.get(key), 'read processing error message');
+}
+
+/**
+ * Try to acquire a short-lived alert dedup lock. Returns true if this caller
+ * owns the alert slot (and should send), false if another recent alert beat them.
+ * Prevents the first-failure Slack alert from spamming when the scanner hits
+ * the same broken message many times within the dedup window.
+ */
+async function acquireAlertDedupLock(messageId: string, traceId: string): Promise<boolean> {
+  const key = `${PROCESSING_ALERT_DEDUP_PREFIX}${messageId}`;
+  const result = await safeRedisOp(
+    () => redis.set(key, '1', 'EX', PROCESSING_ALERT_DEDUP_TTL_SECONDS, 'NX'),
+    'acquire processing alert dedup',
+    traceId,
+  );
+  return result === 'OK';
 }
 
 /**
@@ -690,7 +731,13 @@ export class EmailMessageProcessorService {
       // We deliberately do NOT clear the failure counter here — if a message
       // succeeds once but then fails MAX times within the 7-day TTL, that's
       // legitimate flakiness and should still trip the abandonment threshold.
+      // We DO clear the stored error string so it doesn't linger in the UI.
       await markMessageProcessed(messageId, traceId, 'successfully-processed');
+      await safeRedisOp(
+        () => redis.del(`${PROCESSING_ERROR_PREFIX}${messageId}`),
+        'clear processing error on success',
+        traceId,
+      );
 
       // Mark as read in Gmail
       const gmailClient = await emailOAuthService.ensureGmailClient();
@@ -704,40 +751,57 @@ export class EmailMessageProcessorService {
 
       return true;
     } catch (error) {
-      // Track the failure across attempts so we don't retry forever.
-      // The missed-message scanner re-discovers failed messages every hour;
-      // without this counter, a persistently broken message would loop forever
-      // and block the scanner from progressing past it.
+      // The missed-message scanner re-discovers failed messages every hour.
+      // Without retry budget + visibility, a persistently broken message loops
+      // forever and we can't see why. We track attempts, store the last error
+      // for UI surfacing, and alert on both the first failure and abandonment.
       const attempts = await trackProcessingFailure(messageId, traceId);
       const errorMessage = error instanceof Error ? error.message : String(error);
 
+      await recordProcessingError(messageId, errorMessage, traceId);
+
       logger.error(
-        { error, traceId, messageId, attempts, maxAttempts: MAX_PROCESSING_FAILURES },
+        { error, traceId, messageId, attempts, maxAttempts: MAX_PROCESSING_FAILURES, errorMessage },
         `Failed to process message (attempt ${attempts}/${MAX_PROCESSING_FAILURES})`
       );
 
-      // FIX E4: If using database fallback, delete the lock record to allow retry
       if (usingDatabaseFallback) {
         try {
           await prisma.processedGmailMessage.delete({
             where: { id: messageId },
           });
-          logger.debug({ traceId, messageId }, 'Deleted database lock record to allow retry');
         } catch (deleteErr: any) {
-          // Record might already be deleted or not exist - that's fine
-          if (deleteErr?.code !== 'P2025') { // P2025 = Record not found
+          if (deleteErr?.code !== 'P2025') {
             logger.warn({ traceId, messageId, deleteErr }, 'Failed to delete database lock record');
           }
         }
       }
 
-      // After max attempts, abandon the message and alert admin.
-      // The message is marked as processed (with a failure context) so the scanner
-      // stops re-discovering it. The admin must intervene manually.
+      // First-failure visibility: send one Slack alert per (messageId, dedup window)
+      // with the actual error text so admins see the real cause immediately instead
+      // of waiting for 3 silent hours.
+      if (await acquireAlertDedupLock(messageId, traceId)) {
+        slackNotificationService.sendAlert({
+          title: 'Message Processing Failed',
+          severity: 'medium',
+          details:
+            `A Gmail message failed to process. It will retry up to ${MAX_PROCESSING_FAILURES} times ` +
+            'before being abandoned. Error details below.\n\n' +
+            `\`\`\`${errorMessage.slice(0, 1500)}\`\`\``,
+          additionalFields: {
+            'Message ID': messageId,
+            'Attempt': `${attempts}/${MAX_PROCESSING_FAILURES}`,
+          },
+        }).catch((slackErr) => {
+          logger.warn({ traceId, slackErr }, 'Failed to send first-failure Slack alert');
+        });
+      }
+
+      // After max attempts, abandon the message to break the scanner loop.
       if (attempts >= MAX_PROCESSING_FAILURES) {
         logger.error(
           { traceId, messageId, attempts, errorMessage },
-          'Message processing failed after max attempts — marking as abandoned to prevent infinite scanner loop'
+          'Message processing abandoned after max attempts'
         );
 
         try {
@@ -746,24 +810,22 @@ export class EmailMessageProcessorService {
           logger.error({ traceId, messageId, markErr }, 'Failed to mark abandoned message as processed');
         }
 
-        // Best-effort Slack alert so admin knows manual intervention is needed
         slackNotificationService.sendAlert({
           title: 'Message Processing Abandoned',
           severity: 'high',
           details:
             `A Gmail message failed to process after *${attempts}* attempts and has been abandoned ` +
             'to prevent the scanner from looping. Manual review required.\n\n' +
-            `Last error: ${errorMessage.slice(0, 500)}`,
+            `\`\`\`${errorMessage.slice(0, 1500)}\`\`\``,
           additionalFields: {
             'Message ID': messageId,
             'Attempts': String(attempts),
           },
         }).catch((slackErr) => {
-          logger.warn({ traceId, slackErr }, 'Failed to send Slack alert for abandoned message');
+          logger.warn({ traceId, slackErr }, 'Failed to send abandonment Slack alert');
         });
       }
 
-      // Don't mark as processed on error (unless abandoned above) - will retry
       return false;
     } finally {
       // Only manage Redis lock if not using database fallback

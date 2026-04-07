@@ -1010,6 +1010,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               date: string;
               status: 'processed' | 'unprocessed';
               snippet: string;
+              lastError?: string;
             }>;
           }> = [];
 
