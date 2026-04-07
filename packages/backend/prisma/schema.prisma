@@ -271,13 +271,27 @@ model TherapistBookingStatus {
   @@map("therapist_booking_status")
 }
 
-// Track processed Gmail messages for deduplication
-// Fallback when Redis is unavailable
+// Track processed Gmail messages for deduplication.
+//
+// The `context` column records WHY the message was marked processed.
+// Without this, debugging "why is this message marked processed?" required
+// grepping logs for the Gmail message ID. Common values:
+//   'successfully-processed'         — agent processed it normally
+//   'unparseable'                    — MIME parse failed
+//   'bounce'                         — bounce notification, handled
+//   'own-email'                      — our own outgoing email
+//   'weekly-mailing-reply'           — routed to weekly mailing handler
+//   'unmatched-abandoned'            — couldn't match to an appointment
+//   'divergence-blocked-abandoned'   — thread divergence retry budget exhausted
+//   'processing-failed-abandoned'    — agent errored out 3 times
+//   'legacy'                         — pre-existing row from before the column was added
 model ProcessedGmailMessage {
   id          String   @id // Gmail message ID
   processedAt DateTime @default(now()) @map("processed_at")
+  context     String   @default("legacy") // See model doc for values
 
   @@index([processedAt])
+  @@index([context])
   @@map("processed_gmail_messages")
 }
 

@@ -598,6 +598,7 @@ export class EmailIngestService {
       status: 'processed' | 'unprocessed';
       snippet: string;
       lastError?: string;
+      processedContext?: string;
     }>;
   }> {
     const gmail = await emailOAuthService.ensureGmailClient();
@@ -638,21 +639,23 @@ export class EmailIngestService {
       return { messages: [] };
     }
 
-    // Check which are already processed
+    // Check which are already processed, and fetch the context tag so the UI
+    // can show WHY (successfully processed vs divergence-blocked-abandoned etc).
     const alreadyProcessed = await prisma.processedGmailMessage.findMany({
       where: { id: { in: inboundMessages.map((m) => m.id) } },
-      select: { id: true },
+      select: { id: true, context: true },
     });
-    const processedIds = new Set(alreadyProcessed.map((p) => p.id));
+    const processedMap = new Map(alreadyProcessed.map((p) => [p.id, p.context]));
 
     // Fetch last-known processing errors for unprocessed messages so the UI
     // can show the admin exactly why each message is stuck. Single batched
     // DB query rather than N+1.
-    const unprocessedIds = inboundMessages.filter(m => !processedIds.has(m.id)).map(m => m.id);
+    const unprocessedIds = inboundMessages.filter(m => !processedMap.has(m.id)).map(m => m.id);
     const errorMap = await getLastProcessingErrors(unprocessedIds);
 
     const messages = inboundMessages.map((m) => {
-      const status = processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const;
+      const processedContext = processedMap.get(m.id);
+      const status = processedContext !== undefined ? 'processed' as const : 'unprocessed' as const;
       const lastError = status === 'unprocessed' ? errorMap.get(m.id) || undefined : undefined;
       return {
         messageId: m.id,
@@ -662,6 +665,7 @@ export class EmailIngestService {
         status,
         snippet: m.snippet.substring(0, 120),
         ...(lastError ? { lastError } : {}),
+        ...(processedContext ? { processedContext } : {}),
       };
     });
 

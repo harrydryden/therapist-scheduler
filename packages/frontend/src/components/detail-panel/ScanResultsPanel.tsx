@@ -66,10 +66,17 @@ export default function ScanResultsPanel({
                           className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
                             msg.status === 'unprocessed'
                               ? 'bg-yellow-200 text-yellow-800'
-                              : 'bg-slate-200 text-slate-600'
+                              : msg.processedContext && msg.processedContext.endsWith('-abandoned')
+                                ? 'bg-orange-200 text-orange-800'
+                                : 'bg-slate-200 text-slate-600'
                           }`}
+                          title={msg.processedContext || undefined}
                         >
-                          {msg.status === 'unprocessed' ? 'MISSED' : 'OK'}
+                          {msg.status === 'unprocessed'
+                            ? 'MISSED'
+                            : msg.processedContext && msg.processedContext.endsWith('-abandoned')
+                              ? 'ABANDONED'
+                              : 'OK'}
                         </span>
                       </div>
                       {msg.snippet && (

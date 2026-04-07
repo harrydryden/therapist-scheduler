@@ -257,10 +257,31 @@ async function acquireAlertDedupLock(messageId: string, traceId: string): Promis
 }
 
 /**
+ * Valid context tags for the ProcessedGmailMessage.context column. Kept in
+ * sync with the schema doc-comment. Narrowing the parameter to this union
+ * makes it impossible to pass an arbitrary string and drift the vocabulary.
+ */
+export type ProcessedMessageContext =
+  | 'successfully-processed'
+  | 'unparseable'
+  | 'bounce'
+  | 'own-email'
+  | 'weekly-mailing-reply'
+  | 'unmatched-abandoned'
+  | 'divergence-blocked-abandoned'
+  | 'processing-failed-abandoned';
+
+/**
  * Mark a Gmail message as processed in both Redis (fast) and database (durable).
  * Extracted to eliminate 7x duplication of this pattern across processMessage().
+ * The `context` is persisted so the admin UI can distinguish successful
+ * processing from various forms of abandonment without grepping logs.
  */
-async function markMessageProcessed(messageId: string, traceId: string, context: string): Promise<void> {
+async function markMessageProcessed(
+  messageId: string,
+  traceId: string,
+  context: ProcessedMessageContext,
+): Promise<void> {
   await Promise.all([
     safeRedisOp(
       () => redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId),
@@ -269,8 +290,8 @@ async function markMessageProcessed(messageId: string, traceId: string, context:
     ),
     prisma.processedGmailMessage.upsert({
       where: { id: messageId },
-      create: { id: messageId },
-      update: {},
+      create: { id: messageId, context },
+      update: { context },
     }),
   ]);
 }
