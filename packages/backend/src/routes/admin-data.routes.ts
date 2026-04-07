@@ -9,7 +9,7 @@ import { logger } from '../utils/logger';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { notionService } from '../services/notion.service';
 import { notionUsersService } from '../services/notion-users.service';
-import { backfillMissingTrackingCodes, fixDuplicateTrackingCodes, migrateLegacyTrackingCodes } from '../utils/tracking-code';
+import { backfillMissingTrackingCodes, fixDuplicateTrackingCodes, migrateLegacyTrackingCodes } from '../services/tracking-code.service';
 import { backfillUsers, backfillTherapists, linkAppointmentsToEntities, getOrCreateTherapist, getOrCreateUser } from '../utils/unique-id';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';

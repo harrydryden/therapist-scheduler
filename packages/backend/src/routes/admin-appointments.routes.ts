@@ -18,7 +18,7 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { parseConversationState, parseTherapistAvailability } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import { PAGINATION, RATE_LIMITS } from '../constants';
-import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../utils/conversation-checkpoint';
+import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../services/conversation-checkpoint.service';
 import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
 import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
 import { parseConfirmedDateTime } from '../utils/date-parser';

@@ -9,15 +9,15 @@
  * - Handles timezone conversion
  */
 
-import { logger } from './logger';
-import { MIN_BOOKING_LEAD_HOURS } from './date-parser';
+import { logger } from '../utils/logger';
+import { MIN_BOOKING_LEAD_HOURS } from '../utils/date-parser';
 import {
   DAYS_LONG,
   DAYS_SHORT,
   MONTHS,
   getOrdinalSuffix,
   formatTime12Compact,
-} from './date-formatting';
+} from '../utils/date-formatting';
 import type { AvailabilitySlot, TherapistAvailability } from '../types';
 
 // Re-export for consumers

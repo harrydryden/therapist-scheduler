@@ -11,7 +11,7 @@
 
 import { prisma } from './database';
 import { logger } from './logger';
-import { extractTrackingCode } from './tracking-code';
+import { extractTrackingCode } from '../services/tracking-code.service';
 
 /**
  * Minimal email fields needed for appointment matching.

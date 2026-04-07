@@ -20,13 +20,13 @@ import { logger } from '../utils/logger';
 import { TIMEOUTS } from '../constants';
 import { knowledgeService } from './knowledge.service';
 import { getSettingValues } from './settings.service';
-import { formatAvailabilityForUser, type SlotConfig } from '../utils/availability-formatter';
+import { formatAvailabilityForUser, type SlotConfig } from '../services/availability-formatter.service';
 import { checkForInjection } from '../utils/content-sanitizer';
 import {
   type ConversationCheckpoint,
   getStageDescription,
   getValidActionsForStage,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 import {
   type ConversationFacts,
   formatFactsForPrompt,

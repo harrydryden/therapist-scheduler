@@ -26,7 +26,7 @@ import {
   parseEmailAddresses,
   type EmailContext,
   type AppointmentContext,
-} from '../utils/thread-divergence';
+} from '../services/thread-divergence.service';
 
 function makeEmailContext(overrides: Partial<EmailContext> = {}): EmailContext {
   return {

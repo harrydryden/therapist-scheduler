@@ -11,7 +11,7 @@
  * allows urgent/frustrated messages to trigger special handling.
  */
 
-import { logger } from './logger';
+import { logger } from '../utils/logger';
 
 export type EmailIntent =
   | 'slot_selection'      // User selecting a time slot

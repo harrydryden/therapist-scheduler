@@ -10,8 +10,8 @@
  * Provides strategies for recovery and thread merging.
  */
 
-import { logger } from './logger';
-import { prisma } from './database';
+import { logger } from '../utils/logger';
+import { prisma } from '../utils/database';
 import { slackNotificationService } from '../services/slack-notification.service';
 
 /**

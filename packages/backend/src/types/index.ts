@@ -6,7 +6,7 @@
  * (ConversationState, ParsedEmail, etc.) are defined here.
  */
 
-import type { ConversationCheckpoint } from '../utils/conversation-checkpoint';
+import type { ConversationCheckpoint } from '../services/conversation-checkpoint.service';
 import type { ConversationFacts } from '../utils/conversation-facts';
 import type { ResponseEvent } from '../utils/response-time-tracking';
 

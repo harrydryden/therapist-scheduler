@@ -16,7 +16,7 @@ import { emailQueueService } from '../services/email-queue.service';
 import { validateEmail } from '../utils/email-validator';
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
-import { getOrCreateTrackingCode } from '../utils/tracking-code';
+import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { validateVoucherToken, getDisplayCodeFromToken } from '../utils/voucher-token';
 
