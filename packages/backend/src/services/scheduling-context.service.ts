@@ -15,7 +15,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import type { ConversationAction } from '../utils/conversation-checkpoint';
+import type { ConversationAction } from '../services/conversation-checkpoint.service';
 
 /**
  * FIX T1: Tool execution result type for explicit success/failure reporting

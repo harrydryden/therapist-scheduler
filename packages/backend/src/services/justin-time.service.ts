@@ -24,10 +24,10 @@ import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
-import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
+import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../services/email-classifier.service';
 import {
   createCheckpoint,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 import {
   createEmptyFacts,
   updateFacts,

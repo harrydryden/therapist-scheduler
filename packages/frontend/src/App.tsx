@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Routes, Route, Link } from 'react-router-dom';
+import { Routes, Route, Link, Outlet } from 'react-router-dom';
 import TherapistsPage from './pages/TherapistsPage';
 import TherapistDetailPage from './pages/TherapistDetailPage';
 import FeedbackFormPage from './pages/FeedbackFormPage';
@@ -52,17 +52,34 @@ function App() {
         <Route path="/feedback" element={<FeedbackFormPage />} />
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
-        {/* Admin routes with sidebar layout - lazy loaded */}
-        <Route path="/admin" element={<AuthProvider><AdminLayout /></AuthProvider>}>
-          <Route index element={<Suspense fallback={<AdminLoadingFallback />}><AdminHomePage /></Suspense>} />
-          <Route path="dashboard" element={<Suspense fallback={<AdminLoadingFallback />}><AdminDashboardPage /></Suspense>} />
-          <Route path="appointments" element={<Suspense fallback={<AdminLoadingFallback />}><AdminAppointmentsPage /></Suspense>} />
-          <Route path="vouchers" element={<Suspense fallback={<AdminLoadingFallback />}><AdminVouchersPage /></Suspense>} />
-          <Route path="ingestion" element={<Suspense fallback={<AdminLoadingFallback />}><AdminIngestionPage /></Suspense>} />
-          <Route path="knowledge" element={<Suspense fallback={<AdminLoadingFallback />}><AdminKnowledgePage /></Suspense>} />
-          <Route path="forms" element={<Suspense fallback={<AdminLoadingFallback />}><AdminFormsPage /></Suspense>} />
-          <Route path="settings" element={<Suspense fallback={<AdminLoadingFallback />}><AdminSettingsPage /></Suspense>} />
-          <Route path="work-reports" element={<Suspense fallback={<AdminLoadingFallback />}><AdminWorkReportsPage /></Suspense>} />
+        {/* Admin routes with sidebar layout - lazy loaded.
+            A single Suspense boundary wraps all admin children so we
+            don't repeat the fallback wiring for every route. */}
+        <Route
+          path="/admin"
+          element={
+            <AuthProvider>
+              <AdminLayout />
+            </AuthProvider>
+          }
+        >
+          <Route
+            element={
+              <Suspense fallback={<AdminLoadingFallback />}>
+                <Outlet />
+              </Suspense>
+            }
+          >
+            <Route index element={<AdminHomePage />} />
+            <Route path="dashboard" element={<AdminDashboardPage />} />
+            <Route path="appointments" element={<AdminAppointmentsPage />} />
+            <Route path="vouchers" element={<AdminVouchersPage />} />
+            <Route path="ingestion" element={<AdminIngestionPage />} />
+            <Route path="knowledge" element={<AdminKnowledgePage />} />
+            <Route path="forms" element={<AdminFormsPage />} />
+            <Route path="settings" element={<AdminSettingsPage />} />
+            <Route path="work-reports" element={<AdminWorkReportsPage />} />
+          </Route>
         </Route>
 
         {/* 404 catch-all route */}

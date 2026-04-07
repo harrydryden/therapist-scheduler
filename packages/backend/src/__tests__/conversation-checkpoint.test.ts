@@ -26,7 +26,7 @@ import {
   type ConversationStage,
   type ConversationAction,
   type ConversationCheckpoint,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 
 // ============================================
 // All defined stages and actions for exhaustive checks

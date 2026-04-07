@@ -17,7 +17,7 @@ import {
   extractTrackingCode,
   formatTrackingCodeForSubject,
   prependTrackingCodeToSubject,
-} from '../utils/tracking-code';
+} from '../services/tracking-code.service';
 
 describe('extractTrackingCode', () => {
   describe('new format (SPL-XXXX-XXXX-N)', () => {

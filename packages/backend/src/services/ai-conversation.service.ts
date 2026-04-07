@@ -30,7 +30,7 @@ import {
   updateCheckpoint,
   type ConversationAction,
   type ConversationCheckpoint,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 
 import type { ConversationMessage } from './scheduling-context.service';
 

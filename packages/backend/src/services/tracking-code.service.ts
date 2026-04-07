@@ -20,8 +20,8 @@
 
 import crypto from 'crypto';
 import { Prisma } from '@prisma/client';
-import { prisma } from './database';
-import { logger } from './logger';
+import { prisma } from '../utils/database';
+import { logger } from '../utils/logger';
 
 type TransactionClient = Prisma.TransactionClient;
 

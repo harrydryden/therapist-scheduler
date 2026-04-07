@@ -33,7 +33,7 @@ import { appointmentNotificationsService } from './appointment-notifications.ser
 import { transitionSideEffectsService } from './transition-side-effects.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { aiConversationService } from './ai-conversation.service';
-import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
+import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../services/conversation-checkpoint.service';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)

@@ -32,7 +32,7 @@ import {
   updateCheckpoint,
   stageFromAction,
   wouldRegress,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 import { truncateMessageContent } from './ai-conversation.service';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';

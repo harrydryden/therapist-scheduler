@@ -30,7 +30,7 @@ import {
   wouldRegress,
   type ConversationStage,
   type ConversationCheckpoint,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 
 // ============================================
 // Chase target determination logic

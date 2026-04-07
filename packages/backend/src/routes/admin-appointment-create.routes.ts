@@ -21,7 +21,7 @@ import { slackNotificationService } from '../services/slack-notification.service
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
-import { getOrCreateTrackingCode } from '../utils/tracking-code';
+import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { JustinTimeService } from '../services/justin-time.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
 

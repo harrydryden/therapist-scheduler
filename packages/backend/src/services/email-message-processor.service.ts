@@ -48,7 +48,7 @@ import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { recordAppointmentEvent } from './appointment-event.service';
-import { classifyEmail } from '../utils/email-classifier';
+import { classifyEmail } from '../services/email-classifier.service';
 import { runWithTrace, extendTraceContext } from '../utils/request-tracing';
 import { ConcurrentModificationError } from '../errors';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
@@ -60,7 +60,7 @@ import {
   recordDivergenceAlert,
   type EmailContext,
   type AppointmentContext,
-} from '../utils/thread-divergence';
+} from '../services/thread-divergence.service';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
 import { CLEANUP_CHECK_AND_RESET_SCRIPT, ATOMIC_LOCK_CHECK_SCRIPT } from '../utils/redis-scripts';
 import { findMatchingAppointmentRequest } from '../utils/thread-matcher';

@@ -1,4 +1,4 @@
-import { ConversationStage, STAGE_DESCRIPTIONS } from './conversation-checkpoint';
+import { ConversationStage, STAGE_DESCRIPTIONS } from '../services/conversation-checkpoint.service';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 interface SummaryAppointment {

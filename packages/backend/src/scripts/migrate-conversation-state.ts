@@ -14,7 +14,7 @@ import {
   type ConversationCheckpoint,
   type ConversationStage,
   createCheckpoint,
-} from '../utils/conversation-checkpoint';
+} from '../services/conversation-checkpoint.service';
 import {
   type ConversationFacts,
   extractFacts,

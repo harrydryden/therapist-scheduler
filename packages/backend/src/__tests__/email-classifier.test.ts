@@ -12,7 +12,7 @@ import {
   needsSpecialHandling,
   formatClassificationForPrompt,
   type EmailClassification,
-} from '../utils/email-classifier';
+} from '../services/email-classifier.service';
 
 const THERAPIST_EMAIL = 'therapist@example.com';
 const USER_EMAIL = 'user@example.com';

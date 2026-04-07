@@ -7,7 +7,7 @@
  * - Enables metrics on where bookings drop off
  */
 
-import { logger } from './logger';
+import { logger } from '../utils/logger';
 import type { ConversationStage } from '@therapist-scheduler/shared';
 
 // Re-export for consumers

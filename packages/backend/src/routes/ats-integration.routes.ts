@@ -23,7 +23,7 @@ import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
-import { getOrCreateTrackingCode } from '../utils/tracking-code';
+import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
 import { JustinTimeService } from '../services/justin-time.service';
 import { slackNotificationService } from '../services/slack-notification.service';

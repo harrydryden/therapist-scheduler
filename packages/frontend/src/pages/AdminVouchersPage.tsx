@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { Toast, useToast } from '../components/Toast';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   getVouchers,
@@ -54,33 +55,7 @@ function StrikeIndicator({ count, max }: { count: number; max: number }) {
 // Toast Notification
 // ============================================
 
-function Toast({ message, type, onClose }: { message: string; type: 'success' | 'error'; onClose: () => void }) {
-  return (
-    <div className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium transition-all ${
-      type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-    }`}>
-      <span>{message}</span>
-      <button type="button" onClick={onClose} className="text-white/80 hover:text-white">
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-        </svg>
-      </button>
-    </div>
-  );
-}
-
-function useToast() {
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-
-  const dismiss = useCallback(() => setToast(null), []);
-
-  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 4000);
-  }, []);
-
-  return { toast, showToast, dismiss };
-}
+// Toast / useToast moved to ../components/Toast
 
 // ============================================
 // Relative Time Helper

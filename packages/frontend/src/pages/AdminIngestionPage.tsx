@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { previewTherapistCV, createTherapistFromCV } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
+import { Toast } from '../components/Toast';
 import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability, CategoryWithEvidence } from '../types';
 import {
   APPROACH_OPTIONS,
@@ -37,23 +38,6 @@ interface IngestionFormState {
   overrideAreasOfFocus: string[];
   overrideAvailability: AvailabilityByDay;
   internalNotes: string;
-}
-
-// Toast notification component for file validation errors
-function Toast({ message, onClose }: { message: string; onClose: () => void }) {
-  return (
-    <div className="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 z-50 animate-fade-in">
-      <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-      </svg>
-      <span>{message}</span>
-      <button onClick={onClose} className="ml-2 hover:opacity-75" aria-label="Dismiss">
-        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-        </svg>
-      </button>
-    </div>
-  );
 }
 
 // Evidence tooltip component
