@@ -14,7 +14,6 @@ const HISTORY_ID_KEY = 'gmail:lastHistoryId';
 const {
   PROCESSED_MESSAGES_KEY,
   MESSAGE_LOCK_PREFIX,
-  PROCESSING_FAILURE_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
 } = EMAIL_PROCESSING;
 
@@ -713,26 +712,25 @@ export class EmailIngestService {
       });
       cleared = dbCleared;
 
-      // Clear from Redis (best effort): dedup set, locks, and retry counters.
-      // The counter clear gives users a fresh attempt budget when they explicitly
-      // recover messages — otherwise a previously abandoned message would
-      // re-abandon on its first failed retry. All ops issued concurrently.
+      // Clear from Redis (best effort): dedup set and locks. All concurrent.
       await Promise.all(
         forceMessageIds.flatMap((messageId) => [
           redis.zrem(PROCESSED_MESSAGES_KEY, messageId).catch(() => {}),
           redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`).catch(() => {}),
-          redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`).catch(() => {}),
           redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`).catch(() => {}),
         ])
       );
 
-      // Also reset any database-tracked unmatched attempts (best-effort)
+      // Reset DB-tracked retry counters so users get a fresh attempt budget
+      // when they explicitly recover messages — otherwise a previously
+      // abandoned message would re-abandon on its first failed retry.
       try {
-        await prisma.unmatchedEmailAttempt.deleteMany({
-          where: { id: { in: forceMessageIds } },
-        });
+        await Promise.all([
+          prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: forceMessageIds } } }),
+          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: forceMessageIds } } }),
+        ]);
       } catch (err) {
-        logger.warn({ traceId, err }, 'Failed to clear unmatched attempt records during force reprocess');
+        logger.warn({ traceId, err }, 'Failed to clear attempt tracking records during force reprocess');
       }
 
       logger.info(

@@ -24,7 +24,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
-import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt } from '../utils/email-classifier';
+import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
 import {
   createCheckpoint,
 } from '../utils/conversation-checkpoint';
@@ -202,7 +202,8 @@ export class JustinTimeService {
     appointmentRequestId: string,
     emailContent: string,
     fromEmail: string,
-    threadContext?: string
+    threadContext?: string,
+    precomputedClassification?: EmailClassification,
   ): Promise<{ success: boolean; message: string }> {
     logger.info(
       { traceId: this.traceId, appointmentRequestId, fromEmail },
@@ -219,8 +220,10 @@ export class JustinTimeService {
         throw new Error('Appointment request not found');
       }
 
-      // Classify the incoming email for intent, sentiment, and special handling
-      const emailClassification = classifyEmail(
+      // Reuse classification if the caller already computed it (e.g. the
+      // message processor classifies early for the closure auto-dismiss gate).
+      // Falls back to a fresh classification if called directly.
+      const emailClassification = precomputedClassification ?? classifyEmail(
         emailContent,
         fromEmail,
         appointmentRequest.therapistEmail,

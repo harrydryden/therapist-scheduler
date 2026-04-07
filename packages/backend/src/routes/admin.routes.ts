@@ -292,10 +292,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
    * migration). Without this endpoint, abandoned messages stay marked as
    * processed in the dedup table forever.
    *
-   * Body: { messageIds: string[] } — explicit list, OR
-   *       { all: true } — retry every abandoned failure (use with care)
+   * Body: { messageIds: string[] }            — explicit list (capped at 500)
+   *       { all: true, limit?: number }       — retry abandoned failures, oldest first
+   *
+   * Uses oldest-first ordering so repeated calls drain the backlog in the
+   * order failures occurred. The response includes `remaining` so the caller
+   * knows whether another page is needed.
    */
-  fastify.post<{ Body: { messageIds?: string[]; all?: boolean } }>(
+  fastify.post<{ Body: { messageIds?: string[]; all?: boolean; limit?: number } }>(
     '/api/admin/processing-failures/retry',
     {
       config: {
@@ -307,52 +311,82 @@ export async function adminRoutes(fastify: FastifyInstance) {
     },
     async (request, reply) => {
       const requestId = request.id;
-      const { messageIds, all } = request.body || {};
+      const { messageIds, all, limit } = request.body || {};
 
       if (!all && (!messageIds || messageIds.length === 0)) {
         return Errors.badRequest(reply, 'messageIds (non-empty array) or all=true required');
       }
 
+      // Cap the batch size so a mass-failure incident can't produce a single
+      // recovery run that hammers Gmail rate limits. The scanner processes
+      // recovered messages synchronously, and each one does ≥1 Gmail API call.
+      const MAX_BATCH = 500;
+      const effectiveLimit = Math.min(limit ?? MAX_BATCH, MAX_BATCH);
+
       try {
         let targetIds: string[];
+        let totalAbandoned = 0;
         if (all) {
+          totalAbandoned = await prisma.messageProcessingFailure.count({
+            where: { abandoned: true },
+          });
           const records = await prisma.messageProcessingFailure.findMany({
             where: { abandoned: true },
+            orderBy: { firstFailedAt: 'asc' }, // oldest first so repeated calls drain in order
             select: { id: true },
+            take: effectiveLimit,
           });
           targetIds = records.map((r) => r.id);
         } else {
+          if (messageIds!.length > MAX_BATCH) {
+            return Errors.badRequest(
+              reply,
+              `messageIds capped at ${MAX_BATCH} per call; paginate if you have more`,
+            );
+          }
           targetIds = messageIds!;
         }
 
         if (targetIds.length === 0) {
-          return sendSuccess(reply, { cleared: 0, message: 'No abandoned failures to retry' });
+          return sendSuccess(reply, {
+            cleared: 0,
+            remaining: 0,
+            message: 'No abandoned failures to retry',
+          });
         }
 
-        // Clear from dedup table so the scanner re-discovers them
-        const deletedDedup = await prisma.processedGmailMessage.deleteMany({
-          where: { id: { in: targetIds } },
-        });
+        // Clear dedup + failure records in parallel — independent writes
+        const [deletedDedup, deletedFailures] = await Promise.all([
+          prisma.processedGmailMessage.deleteMany({ where: { id: { in: targetIds } } }),
+          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: targetIds } } }),
+        ]);
 
-        // Clear failure records so the attempt counter starts fresh
-        const deletedFailures = await prisma.messageProcessingFailure.deleteMany({
-          where: { id: { in: targetIds } },
-        });
+        const remaining = all ? Math.max(0, totalAbandoned - targetIds.length) : 0;
 
         logger.info(
-          { requestId, count: targetIds.length, deletedDedup: deletedDedup.count, deletedFailures: deletedFailures.count },
+          {
+            requestId,
+            count: targetIds.length,
+            deletedDedup: deletedDedup.count,
+            deletedFailures: deletedFailures.count,
+            remaining,
+          },
           'Cleared processing failures for retry'
         );
 
-        // Trigger an immediate scan so the operator gets immediate feedback
+        // Trigger an immediate scan so the operator gets feedback
         const scanResult = await missedMessageScannerService.triggerManualScan();
 
         return sendSuccess(reply, {
           cleared: targetIds.length,
           deletedDedup: deletedDedup.count,
           deletedFailures: deletedFailures.count,
+          remaining,
           scanResult,
-          message: `Cleared ${targetIds.length} failure(s) and triggered a fresh scan`,
+          message:
+            remaining > 0
+              ? `Cleared ${targetIds.length}; ${remaining} abandoned failure(s) remain — call again to continue`
+              : `Cleared ${targetIds.length} failure(s) and triggered a fresh scan`,
         });
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to retry processing failures');

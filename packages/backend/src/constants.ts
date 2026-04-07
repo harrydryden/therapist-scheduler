@@ -307,8 +307,6 @@ export const EMAIL_PROCESSING = {
   MESSAGE_LOCK_PREFIX: 'gmail:lock:message:',
   /** Redis key prefix for unmatched attempt tracking */
   UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
-  /** Redis key prefix for processing-failure attempt count cache (DB is source of truth) */
-  PROCESSING_FAILURE_PREFIX: 'gmail:processingFailure:',
   /** Redis key prefix for first-failure Slack alert dedup */
   PROCESSING_ALERT_DEDUP_PREFIX: 'gmail:processingAlertDedup:',
   /** Days to keep processed message IDs */
@@ -319,8 +317,6 @@ export const EMAIL_PROCESSING = {
   MAX_PROCESSING_FAILURES: 3,
   /** TTL for unmatched attempt tracking (seconds) */
   UNMATCHED_ATTEMPT_TTL_SECONDS: 3600,
-  /** TTL for processing-failure tracking (seconds) — generous so failures across hourly scans accumulate */
-  PROCESSING_FAILURE_TTL_SECONDS: 7 * 24 * 60 * 60,
   /** TTL for first-failure alert dedup (seconds) — prevents alert spam from hourly scans */
   PROCESSING_ALERT_DEDUP_TTL_SECONDS: 60 * 60,
   /** Only run cleanup every N messages */

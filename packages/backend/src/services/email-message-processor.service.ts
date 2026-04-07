@@ -17,6 +17,7 @@ export interface AgentProcessor {
     body: string,
     from: string,
     threadContext?: unknown,
+    precomputedClassification?: unknown,
   ): Promise<{ success: boolean; message: string } | void>;
   processInquiryReply(
     inquiryId: string,
@@ -66,13 +67,11 @@ const {
   PROCESSED_MESSAGES_KEY,
   MESSAGE_LOCK_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
-  PROCESSING_FAILURE_PREFIX,
   PROCESSING_ALERT_DEDUP_PREFIX,
   PROCESSED_MESSAGE_TTL_DAYS,
   MAX_UNMATCHED_ATTEMPTS,
   MAX_PROCESSING_FAILURES,
   UNMATCHED_ATTEMPT_TTL_SECONDS,
-  PROCESSING_FAILURE_TTL_SECONDS,
   PROCESSING_ALERT_DEDUP_TTL_SECONDS,
   CLEANUP_INTERVAL_MESSAGES,
   CLEANUP_COUNTER_KEY,
@@ -150,8 +149,9 @@ async function safeRedisOp<T>(
  *
  * Database is the source of truth (the previous Redis-only counter returned
  * 1 forever when Redis was down, so abandonment never triggered and the
- * scanner looped). Redis is used as a write-through cache so the hot path
- * doesn't pay a DB round trip on every check.
+ * scanner looped). No Redis cache — preview reads the DB directly via
+ * getLastProcessingErrors, and the counter is only read by this same path
+ * on the next failure, which already goes through the DB.
  *
  * Truncates errorMessage to MAX_ERROR_LENGTH so a runaway stack trace can't
  * blow up the row.
@@ -159,11 +159,9 @@ async function safeRedisOp<T>(
 async function trackProcessingFailure(
   messageId: string,
   errorMessage: string,
-  traceId: string,
 ): Promise<number> {
   const truncated = errorMessage.slice(0, MAX_ERROR_LENGTH);
 
-  // DB write is authoritative — must succeed for abandonment to work
   const record = await prisma.messageProcessingFailure.upsert({
     where: { id: messageId },
     create: { id: messageId, lastError: truncated },
@@ -173,16 +171,6 @@ async function trackProcessingFailure(
       lastFailedAt: new Date(),
     },
   });
-
-  // Cache in Redis (best-effort) for fast preview lookups
-  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
-  safeRedisOp(
-    async () => {
-      await redis.set(key, String(record.attempts), 'EX', PROCESSING_FAILURE_TTL_SECONDS);
-    },
-    'cache processing failure count',
-    traceId,
-  );
 
   return record.attempts;
 }
@@ -234,11 +222,6 @@ export async function getLastProcessingErrors(messageIds: string[]): Promise<Map
  */
 async function clearProcessingFailure(messageId: string): Promise<void> {
   await prisma.messageProcessingFailure.deleteMany({ where: { id: messageId } });
-  // Best-effort Redis cleanup
-  safeRedisOp(
-    () => redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`),
-    'clear processing failure cache',
-  );
 }
 
 /**
@@ -739,7 +722,7 @@ export class EmailMessageProcessorService {
       // only marked permanently processed once the budget is exhausted.
       if (shouldBlockProcessing(divergence)) {
         const divergenceError = `Thread divergence (${divergence.type}, ${divergence.severity}): ${divergence.description}`;
-        const attempts = await trackProcessingFailure(messageId, divergenceError, traceId);
+        const attempts = await trackProcessingFailure(messageId, divergenceError);
 
         logger.warn(
           {
@@ -805,13 +788,16 @@ export class EmailMessageProcessorService {
         }
       }
 
-      // Process with AI agent, including full thread context
+      // Process with AI agent, including full thread context.
+      // Pass the classification computed earlier for the closure auto-dismiss
+      // gate so the agent path doesn't redo the same regex work.
       const agentProcessor = getAgentProcessor(traceId);
       await agentProcessor.processEmailReply(
         appointmentRequest.id,
         email.body,
         email.from,
-        threadContext
+        threadContext,
+        earlyClassification,
       );
 
       // Mark as processed AFTER successful processing, then clear the failure
@@ -840,7 +826,7 @@ export class EmailMessageProcessorService {
       const errorMessage = error instanceof Error ? error.message : String(error);
       let attempts: number;
       try {
-        attempts = await trackProcessingFailure(messageId, errorMessage, traceId);
+        attempts = await trackProcessingFailure(messageId, errorMessage);
       } catch (trackErr) {
         // DB write failed — abandon this attempt cycle but log loudly so the
         // operator sees that the failure tracking itself is broken.
