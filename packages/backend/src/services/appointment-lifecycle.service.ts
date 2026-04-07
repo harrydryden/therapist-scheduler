@@ -1511,6 +1511,69 @@ class AppointmentLifecycleService {
 
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
   }
+
+  /**
+   * Dismiss a pending closure recommendation and reset chase state so the
+   * conversation can resume. Mirrors the admin "Dismiss" action but is callable
+   * from automated paths (e.g. when an incoming therapist reply arrives on a
+   * closure-recommended thread — the recommendation is now stale by definition).
+   *
+   * Idempotent: returns { dismissed: false } when there's nothing to dismiss
+   * (no recommendation, already actioned, or appointment not found).
+   */
+  async dismissClosureRecommendation(params: {
+    appointmentId: string;
+    source: 'admin' | 'system' | 'agent';
+    reason: string;
+  }): Promise<{ dismissed: boolean }> {
+    const { appointmentId, source, reason } = params;
+
+    const appointment = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: {
+        closureRecommendedAt: true,
+        closureRecommendationActioned: true,
+        humanControlTakenBy: true,
+        conversationState: true,
+      },
+    });
+
+    if (!appointment || !appointment.closureRecommendedAt || appointment.closureRecommendationActioned) {
+      return { dismissed: false };
+    }
+
+    const convState = appointment.conversationState as { checkpoint?: { stage?: string } } | null;
+    const originalStage = convState?.checkpoint?.stage || null;
+
+    await prisma.appointmentRequest.update({
+      where: { id: appointmentId },
+      data: {
+        closureRecommendationActioned: true,
+        closureRecommendedAt: null,
+        closureRecommendedReason: null,
+        chaseSentAt: null,
+        chaseSentTo: null,
+        chaseTargetEmail: null,
+        // Restore the underlying checkpoint stage so a fresh chase cycle can
+        // identify the right party. Avoid putting it back into chased/closure_recommended.
+        checkpointStage: originalStage !== 'chased' && originalStage !== 'closure_recommended'
+          ? originalStage
+          : null,
+        // Release agent-flagged human control so the agent can resume processing.
+        ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+          humanControlEnabled: false,
+        }),
+      },
+      select: { id: true },
+    });
+
+    logger.info(
+      { appointmentId, source, reason, restoredStage: originalStage },
+      'Closure recommendation dismissed'
+    );
+
+    return { dismissed: true };
+  }
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();

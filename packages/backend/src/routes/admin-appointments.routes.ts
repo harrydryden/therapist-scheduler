@@ -1524,37 +1524,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             'Admin accepted closure recommendation - appointment cancelled'
           );
         } else {
-          // Dismiss: mark as actioned, clear chase/closure fields so a new cycle can begin
-          // Also reset checkpointStage so determineChaseTarget can evaluate it correctly
-          const currentAppt = await prisma.appointmentRequest.findUnique({
-            where: { id },
-            select: { conversationState: true },
-          });
-          const convState = currentAppt?.conversationState as { checkpoint?: { stage?: string } } | null;
-          const originalStage = convState?.checkpoint?.stage || null;
-
-          await prisma.appointmentRequest.update({
-            where: { id },
-            data: {
-              closureRecommendationActioned: true,
-              // Reset chase fields so a new cycle can begin if needed
-              chaseSentAt: null,
-              chaseSentTo: null,
-              chaseTargetEmail: null,
-              closureRecommendedAt: null,
-              closureRecommendedReason: null,
-              // Reset checkpointStage to the checkpoint's actual stage (from conversationState JSON)
-              // so that the next chase cycle can correctly determine who to chase
-              checkpointStage: originalStage !== 'chased' && originalStage !== 'closure_recommended'
-                ? originalStage
-                : null,
-              // Release human control if it was set by the agent (not by an admin manually)
-              // so the agent can resume processing emails
-              ...(appointment.humanControlTakenBy === 'agent-flagged' && {
-                humanControlEnabled: false,
-              }),
-            },
-            select: { id: true },
+          await appointmentLifecycleService.dismissClosureRecommendation({
+            appointmentId: id,
+            source: 'admin',
+            reason: `Admin dismissed (${adminId})`,
           });
 
           logger.info(

@@ -45,6 +45,7 @@ function getAgentProcessor(traceId: string): AgentProcessor {
 import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
+import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
   detectThreadDivergence,
@@ -517,6 +518,41 @@ export class EmailMessageProcessorService {
         { traceId, messageId, appointmentRequestId: appointmentRequest.id },
         'Found matching appointment request'
       );
+
+      // Auto-dismiss any pending closure recommendation: the recipient has now
+      // replied, so the recommendation is stale. Without this, the appointment
+      // stays excluded from chase cycles forever and the admin keeps seeing the
+      // closure banner even though the conversation has resumed.
+      try {
+        const result = await appointmentLifecycleService.dismissClosureRecommendation({
+          appointmentId: appointmentRequest.id,
+          source: 'system',
+          reason: `Incoming reply from ${email.from}`,
+        });
+        if (result.dismissed) {
+          slackNotificationService.sendAlert({
+            title: 'Closure Recommendation Auto-Dismissed',
+            severity: 'medium',
+            appointmentId: appointmentRequest.id,
+            details:
+              `An incoming reply arrived on a closure-recommended thread. The closure ` +
+              `recommendation was auto-dismissed and the chase cycle reset so the agent ` +
+              `can resume processing.`,
+            additionalFields: {
+              'From': email.from,
+              'Subject': email.subject.slice(0, 100),
+            },
+          }).catch((err) => {
+            logger.warn({ traceId, err }, 'Failed to send Slack alert for closure auto-dismissal');
+          });
+        }
+      } catch (err) {
+        // Don't block message processing if dismissal fails — log and continue
+        logger.warn(
+          { traceId, messageId, appointmentId: appointmentRequest.id, err },
+          'Failed to auto-dismiss closure recommendation; continuing with message processing'
+        );
+      }
 
       // Detect thread divergence (CC issues, wrong thread replies, etc.)
       // Fetch all active appointments for this user/therapist to check for cross-thread issues
