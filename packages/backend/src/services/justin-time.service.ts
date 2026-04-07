@@ -24,7 +24,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
-import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt } from '../utils/email-classifier';
+import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../utils/email-classifier';
 import {
   createCheckpoint,
 } from '../utils/conversation-checkpoint';
@@ -45,6 +45,7 @@ import { buildSystemPrompt } from './system-prompt-builder';
 import { runToolLoop } from './agent-tool-loop';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from './ai-tool-executor.service';
+import { ConcurrentModificationError } from '../errors';
 import {
   buildSchedulingContext,
   type SchedulingContext,
@@ -202,7 +203,8 @@ export class JustinTimeService {
     appointmentRequestId: string,
     emailContent: string,
     fromEmail: string,
-    threadContext?: string
+    threadContext?: string,
+    precomputedClassification?: EmailClassification,
   ): Promise<{ success: boolean; message: string }> {
     logger.info(
       { traceId: this.traceId, appointmentRequestId, fromEmail },
@@ -219,8 +221,10 @@ export class JustinTimeService {
         throw new Error('Appointment request not found');
       }
 
-      // Classify the incoming email for intent, sentiment, and special handling
-      const emailClassification = classifyEmail(
+      // Reuse classification if the caller already computed it (e.g. the
+      // message processor classifies early for the closure auto-dismiss gate).
+      // Falls back to a fresh classification if called directly.
+      const emailClassification = precomputedClassification ?? classifyEmail(
         emailContent,
         fromEmail,
         appointmentRequest.therapistEmail,
@@ -458,13 +462,12 @@ ${formatClassificationForPrompt(emailClassification)}`;
                 'Conversation state checkpointed before side-effecting tool execution'
               );
             } catch (checkpointError) {
-              const errorMsg = checkpointError instanceof Error ? checkpointError.message : 'Unknown';
-              if (errorMsg.includes('Optimistic locking conflict')) {
+              if (checkpointError instanceof ConcurrentModificationError) {
                 logger.warn(
                   { traceId: this.traceId, appointmentRequestId },
                   'Optimistic lock conflict at checkpoint - another process modified state'
                 );
-                throw new Error('Concurrent modification detected - request will be reprocessed');
+                throw checkpointError;
               }
               throw checkpointError;
             }
@@ -638,6 +641,10 @@ ${formatClassificationForPrompt(emailClassification)}`;
         );
       } else if (initiatedReschedule) {
         // Agent confirmed this is a reschedule. Clear the confirmed date/time.
+        // checkpointStage is intentionally NOT set here — the agent tool loop
+        // already advanced the JSON checkpoint via the `initiated_reschedule`
+        // action, and the subsequent storeConversationState call will sync
+        // the denormalized column from the JSON.
         await prisma.appointmentRequest.update({
           where: { id: appointmentRequestId },
           data: {
@@ -646,7 +653,6 @@ ${formatClassificationForPrompt(emailClassification)}`;
             previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
             confirmedDateTime: null,
             confirmedDateTimeParsed: null,
-            checkpointStage: 'rescheduling',
           },
           select: { id: true },
         });

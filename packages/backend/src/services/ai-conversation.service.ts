@@ -23,7 +23,14 @@ import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS } from '../constants';
 import { resilientCall } from '../utils/resilient-call';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
+import { ConcurrentModificationError } from '../errors';
 import type { ConversationState } from '../types';
+import type { Prisma } from '@prisma/client';
+import {
+  updateCheckpoint,
+  type ConversationAction,
+  type ConversationCheckpoint,
+} from '../utils/conversation-checkpoint';
 
 import type { ConversationMessage } from './scheduling-context.service';
 
@@ -86,10 +93,10 @@ export class AIConversationService {
       });
 
       if (result.count === 0) {
-        // Version mismatch - another process modified the state
-        throw new Error(
-          `Optimistic locking conflict: conversation state was modified by another process for appointment ${appointmentRequestId}`
-        );
+        // Version mismatch - another process modified the state.
+        // Use the typed error so callers can `instanceof`-check rather than
+        // string-matching the message (which is fragile across rephrasings).
+        throw new ConcurrentModificationError(appointmentRequestId);
       }
     } else {
       // Legacy call without version check (for initial state creation)
@@ -111,6 +118,131 @@ export class AIConversationService {
   }
 
   /**
+   * Atomically apply a checkpoint mutation AND optional extra field updates.
+   *
+   * The single source of truth for checkpoint state is
+   * `conversationState.checkpoint` (JSON). The denormalized DB column
+   * `checkpointStage` is derived from the JSON and must never be written
+   * directly by callers — use this helper instead.
+   *
+   * This exists because prior code had ~4 different direct writers of
+   * `appointmentRequest.checkpointStage` (chase-email, ai-tool-executor,
+   * justin-time reschedule path, dismissClosureRecommendation). They drifted
+   * out of sync with the JSON and caused real bugs. Routing everything
+   * through this helper enforces the invariant column == derive(JSON).
+   *
+   * Handles optimistic-lock conflicts with a small retry budget. If the
+   * caller supplies `extraWhere` (e.g. a sentinel guard), a lost-lock is
+   * treated as a semantic failure — we don't retry past a changed guard.
+   *
+   * Use `applyCheckpointAction` for the common case of "advance via a
+   * ConversationAction". Use this lower-level `applyCheckpointUpdate` when
+   * the new checkpoint depends on the current one (e.g. dismissing closure
+   * and restoring an inferred prior stage).
+   */
+  async applyCheckpointUpdate(
+    appointmentRequestId: string,
+    mutate: (current: ConversationCheckpoint | null) => ConversationCheckpoint,
+    options?: {
+      extraUpdates?: Prisma.AppointmentRequestUpdateInput;
+      extraWhere?: Prisma.AppointmentRequestWhereInput;
+      maxRetries?: number;
+    }
+  ): Promise<{ applied: boolean; stage: string | null }> {
+    const maxRetries = options?.maxRetries ?? 3;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const record = await prisma.appointmentRequest.findUnique({
+        where: { id: appointmentRequestId },
+        select: { conversationState: true, updatedAt: true },
+      });
+      if (!record) {
+        return { applied: false, stage: null };
+      }
+
+      const state = record.conversationState
+        ? parseConversationState(record.conversationState as Prisma.JsonValue)
+        : null;
+      if (!state) {
+        // No conversation state yet — can't apply a checkpoint mutation.
+        // Happens very early in the lifecycle before the agent runs.
+        return { applied: false, stage: null };
+      }
+
+      state.checkpoint = mutate(state.checkpoint ?? null);
+      const stateJson = JSON.stringify(state);
+      const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
+
+      const now = new Date();
+      const result = await prisma.appointmentRequest.updateMany({
+        where: {
+          id: appointmentRequestId,
+          updatedAt: record.updatedAt,
+          ...options?.extraWhere,
+        },
+        data: {
+          conversationState: stateJson,
+          messageCount,
+          checkpointStage,
+          updatedAt: now,
+          ...options?.extraUpdates,
+        },
+      });
+
+      if (result.count === 1) {
+        return { applied: true, stage: checkpointStage };
+      }
+
+      // Lost the optimistic lock. If the caller's extraWhere guard failed
+      // (e.g. sentinel changed), that's a semantic failure — stop retrying.
+      if (options?.extraWhere) {
+        const stillMatchesGuard = await prisma.appointmentRequest.count({
+          where: { id: appointmentRequestId, ...options.extraWhere },
+        });
+        if (stillMatchesGuard === 0) {
+          logger.info(
+            { appointmentRequestId },
+            'applyCheckpointUpdate: caller guard no longer matches, stopping retry'
+          );
+          return { applied: false, stage: null };
+        }
+      }
+
+      logger.debug(
+        { appointmentRequestId, attempt: attempt + 1 },
+        'applyCheckpointUpdate: optimistic lock conflict, retrying'
+      );
+    }
+
+    logger.warn(
+      { appointmentRequestId, maxRetries },
+      'applyCheckpointUpdate: exhausted retry budget on optimistic lock conflicts'
+    );
+    return { applied: false, stage: null };
+  }
+
+  /**
+   * Convenience wrapper for the common "advance checkpoint via a
+   * ConversationAction" case. Delegates to `applyCheckpointUpdate`.
+   */
+  async applyCheckpointAction(
+    appointmentRequestId: string,
+    action: ConversationAction,
+    options?: {
+      extraUpdates?: Prisma.AppointmentRequestUpdateInput;
+      extraWhere?: Prisma.AppointmentRequestWhereInput;
+      contextUpdates?: { lastEmailSentTo?: 'user' | 'therapist' };
+      maxRetries?: number;
+    }
+  ): Promise<{ applied: boolean; stage: string | null }> {
+    return this.applyCheckpointUpdate(
+      appointmentRequestId,
+      (current) => updateCheckpoint(current, action, null, options?.contextUpdates),
+      options,
+    );
+  }
+
+  /**
    * FIX RSA-4: Retry state save with exponential backoff
    * If all retries fail, records compensation data for manual recovery
    */
@@ -128,16 +260,15 @@ export class AIConversationService {
         await this.storeConversationState(appointmentRequestId, state, expectedUpdatedAt);
         return { success: true, retriesUsed: attempt };
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : 'Unknown';
-
         // Don't retry optimistic locking conflicts - they indicate a real conflict
-        if (errorMsg.includes('Optimistic locking conflict')) {
+        if (error instanceof ConcurrentModificationError) {
           logger.warn(
             { traceId: this.traceId, appointmentRequestId, attempt },
             'State save conflict - not retrying (concurrent modification)'
           );
           break;
         }
+        const errorMsg = error instanceof Error ? error.message : 'Unknown';
 
         if (attempt < MAX_RETRIES - 1) {
           const delay = BASE_DELAY_MS * Math.pow(2, attempt);
@@ -229,42 +360,70 @@ export class AIConversationService {
   }
 
   /**
-   * Trim conversation state to prevent unbounded growth
-   * Keeps the most recent messages while preserving conversation coherence
+   * Trim conversation state to prevent unbounded growth.
+   *
+   * Strategy: keep BOTH ends of the conversation, drop the middle.
+   *   - First TRIM_KEEP_FIRST messages: initial booking context (who, what, when).
+   *     The agent always needs these to understand what the conversation is about,
+   *     even after a long reschedule chain.
+   *   - Last (TRIM_TO_MESSAGES - TRIM_KEEP_FIRST - 1) messages: recent context.
+   *   - One placeholder message in between explaining how many messages were dropped.
+   *
+   * The previous strategy kept only the tail, which meant a long reschedule
+   * conversation could lose all the original booking context (who's involved,
+   * what slots were considered, what the original ask was). At ~100 appts/day
+   * this didn't bite often but it produced confusing agent behaviour on the
+   * rare long thread.
    */
   trimConversationState(
     state: { systemPrompt?: string; messages: ConversationMessage[] }
   ): { systemPrompt?: string; messages: ConversationMessage[] } {
-    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES } = CONVERSATION_LIMITS;
+    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
 
-    // Check if trimming is needed
+    // Fast path: well below limits, return as-is. Skipping the JSON.stringify
+    // here matters because storeConversationState stringifies the result on
+    // every save — paying the cost twice on the hot path is wasted work.
+    // The byte-size check below only fires when the count threshold doesn't.
     if (state.messages.length <= MAX_MESSAGES) {
-      // Also check byte size
-      const stateSize = JSON.stringify(state).length;
-      if (stateSize <= MAX_STATE_BYTES) {
+      // Only stringify-for-size-check when the count is high enough that the
+      // message blob could plausibly approach the byte limit. ~50KB per
+      // message is a generous upper bound (we cap individual messages at 50KB
+      // via truncateMessageContent).
+      const couldBeOversized = state.messages.length * 2_000 > MAX_STATE_BYTES;
+      if (!couldBeOversized || JSON.stringify(state).length <= MAX_STATE_BYTES) {
         return state;
       }
     }
 
-    // Trim to TRIM_TO_MESSAGES, keeping most recent
-    const trimmedMessages = state.messages.slice(-TRIM_TO_MESSAGES);
+    // Reserve one slot for the placeholder summary message; split the rest
+    // between head (initial context) and tail (recent context).
+    const keepFirst = Math.min(TRIM_KEEP_FIRST, state.messages.length);
+    const keepLast = Math.max(0, TRIM_TO_MESSAGES - keepFirst - 1);
+    const droppedCount = state.messages.length - keepFirst - keepLast;
 
-    // Add a summary message at the beginning to indicate context was trimmed
-    const droppedCount = state.messages.length - TRIM_TO_MESSAGES;
-    if (droppedCount > 0) {
-      trimmedMessages.unshift({
-        role: 'user' as const,
-        content: `[System Note: ${droppedCount} older messages were trimmed to maintain performance. Recent context preserved.]`,
-      });
+    // If nothing would actually be dropped (very short conversation), return as-is
+    if (droppedCount <= 0) {
+      return state;
     }
+
+    const head = state.messages.slice(0, keepFirst);
+    const tail = state.messages.slice(-keepLast);
+    const placeholder: ConversationMessage = {
+      role: 'user',
+      content: `[System Note: ${droppedCount} middle messages were trimmed to maintain performance. The first ${keepFirst} messages (initial booking context) and the last ${keepLast} messages (recent activity) are preserved.]`,
+    };
+
+    const trimmedMessages = [...head, placeholder, ...tail];
 
     logger.info(
       {
         originalCount: state.messages.length,
         trimmedCount: trimmedMessages.length,
+        keepFirst,
+        keepLast,
         droppedCount,
       },
-      'Trimmed conversation state to prevent unbounded growth'
+      'Trimmed conversation state (head+tail strategy)'
     );
 
     return {
@@ -602,3 +761,8 @@ Example unsubscribe response:
 - unsubscribe_user: Use this to remove a user from the weekly mailing list when they request it`;
   }
 }
+
+// Singleton for callers that don't need per-request tracing (chase-email,
+// lifecycle transitions, etc). The traceId is only used for logging inside
+// the instance, so a default is fine here.
+export const aiConversationService = new AIConversationService('shared');

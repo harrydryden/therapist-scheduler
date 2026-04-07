@@ -336,6 +336,26 @@ class StaleCheckService {
         );
       }
 
+      // 5b. Delete old abandoned message processing failures.
+      // These accumulate during incidents (e.g. the booking_method migration
+      // gap in March 2026) and are useful for post-mortem debugging. 30 days
+      // is enough to investigate after the fact without growing unbounded.
+      const failureThreshold = new Date(
+        now.getTime() - 30 * 24 * 60 * 60 * 1000
+      );
+      const deletedFailures = await prisma.messageProcessingFailure.deleteMany({
+        where: {
+          abandoned: true,
+          lastFailedAt: { lt: failureThreshold },
+        },
+      });
+      if (deletedFailures.count > 0) {
+        logger.info(
+          { cleanupId, deletedCount: deletedFailures.count },
+          'Deleted old abandoned message processing failure records'
+        );
+      }
+
       // 6. Log orphaned appointments (missing User/Therapist links) for visibility
       const orphanedCount = await prisma.appointmentRequest.count({
         where: {

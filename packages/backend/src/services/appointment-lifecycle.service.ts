@@ -31,8 +31,8 @@ import { logger } from '../utils/logger';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
-import { auditEventService } from './audit-event.service';
-import { AIConversationService } from './ai-conversation.service';
+import { recordAppointmentEvent } from './appointment-event.service';
+import { aiConversationService } from './ai-conversation.service';
 import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
 
 // ============================================
@@ -1283,6 +1283,16 @@ class AppointmentLifecycleService {
    * Force-update an appointment's status and/or confirmedDateTime, bypassing state machine
    * validation. Used by the admin appointments page where admins need unrestricted control.
    *
+   * GUARDRAILS:
+   * - `bypassStateMachine: true` is REQUIRED on every call. The flag exists
+   *   to make accidental new callers impossible — the type system rejects
+   *   omitting it, and routine updates should go through updateStatus()
+   *   instead.
+   * - `reason` is REQUIRED when bypassStateMachine is set. The reason is
+   *   logged loudly, persisted to the audit trail, and (for status changes)
+   *   sent as a high-severity Slack alert so any non-routine bypass is
+   *   visible to the team.
+   *
    * Always performs: audit trail, SSE notification, confirmedAt timestamp management,
    * therapist booking status updates, Notion sync (data consistency).
    * Optionally performs: emails, Slack (controlled by skipNotifications, default true).
@@ -1294,13 +1304,32 @@ class AppointmentLifecycleService {
       confirmedDateTime?: string | null;
       confirmedDateTimeParsed?: Date | null;
       adminId: string;
-      reason?: string;
+      /** Required acknowledgement that this call bypasses state machine validation. */
+      bypassStateMachine: true;
+      /** Required justification — logged + audited + (for status changes) Slack-alerted. */
+      reason: string;
       skipNotifications?: boolean;
     }
   ): Promise<TransitionResult> {
-    const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason } = options;
+    const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason, bypassStateMachine } = options;
     const skipNotifications = options.skipNotifications ?? true;
     const logContext = { appointmentId, adminId };
+
+    // Runtime checks defend against the route layer constructing this
+    // options object from a request body (where TypeScript can't enforce
+    // the literal-true type) or any caller using `as any`.
+    if (bypassStateMachine !== true) {
+      throw new Error('adminForceUpdate requires bypassStateMachine: true');
+    }
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('adminForceUpdate requires a non-empty reason');
+    }
+
+    // Loud warning so any bypass shows up in logs at WARN level (not just info).
+    logger.warn(
+      { ...logContext, reason, newStatus, confirmedDateTime },
+      'STATE MACHINE BYPASS: adminForceUpdate called'
+    );
 
     // Use transaction with FOR UPDATE NOWAIT row lock to prevent TOCTOU races.
     // Without this, another process could change the status between our read and write,
@@ -1512,6 +1541,39 @@ class AppointmentLifecycleService {
       'Appointment force-updated by admin (state machine bypassed)'
     );
 
+    // Audit + Slack alert for visibility. Only the status-change case sends
+    // a Slack alert (severity=high) — date-only edits are routine and would
+    // be alert spam. Audit log fires for both so the bypass is always traceable.
+    const isStatusChange = !!(newStatus && newStatus !== previousStatus);
+    await recordAppointmentEvent({
+      appointmentId,
+      type: 'admin_force_update',
+      actor: 'admin',
+      reason,
+      payload: {
+        adminId,
+        previousStatus,
+        newStatus: effectiveNewStatus,
+        confirmedDateTime,
+        bypassedStateMachine: true,
+      },
+      ...(isStatusChange && {
+        slack: {
+          title: 'Admin force-updated appointment status (state machine bypassed)',
+          severity: 'high',
+          details:
+            `An admin used the force-update path to change status from ` +
+            `*${previousStatus}* to *${effectiveNewStatus}*, bypassing state machine ` +
+            `validation. This path skips the normal lifecycle guards — ensure the ` +
+            `outcome is correct.\n\nReason: ${reason}`,
+          additionalFields: {
+            'Admin': adminId,
+            'Appointment': appointmentId,
+          },
+        },
+      }),
+    });
+
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
   }
 
@@ -1550,7 +1612,9 @@ class AppointmentLifecycleService {
    *
    * Idempotent: returns { dismissed: false } when there's nothing to dismiss.
    */
-  async dismissClosureRecommendation(params: BaseTransitionParams): Promise<{ dismissed: boolean }> {
+  async dismissClosureRecommendation(
+    params: BaseTransitionParams
+  ): Promise<{ dismissed: boolean; previousStage?: string; restoredStage?: string | null }> {
     const { appointmentId, source, adminId, reason } = params;
 
     const appointment = await prisma.appointmentRequest.findUnique({
@@ -1561,7 +1625,6 @@ class AppointmentLifecycleService {
         checkpointStage: true,
         chaseSentTo: true,
         humanControlTakenBy: true,
-        conversationState: true,
       },
     });
 
@@ -1569,78 +1632,70 @@ class AppointmentLifecycleService {
       return { dismissed: false };
     }
 
-    // Step 1: reconcile the JSON checkpoint if it's wedged at closure_recommended.
-    // Failures here are logged but don't block the rest of the dismissal — at worst
-    // the agent sees a stale JSON until the next save corrects it.
-    const conversationStateJson = appointment.conversationState as
-      | { checkpoint?: ConversationCheckpoint; messages?: unknown[]; systemPrompt?: string }
-      | null;
-    const jsonStage = conversationStateJson?.checkpoint?.stage;
-    let restoredStage: ConversationStage | null = jsonStage ?? null;
+    const previousStage = appointment.checkpointStage || 'closure_recommended';
 
-    if (jsonStage === 'closure_recommended') {
-      restoredStage = inferRestoredStage(conversationStateJson?.checkpoint, appointment.chaseSentTo);
-      try {
-        const aiConversation = new AIConversationService(`dismiss-closure:${appointmentId}`);
-        const stateWithVersion = await aiConversation.getConversationState(appointmentId);
-        if (stateWithVersion?.checkpoint?.stage === 'closure_recommended') {
-          const { _version, ...state } = stateWithVersion;
-          state.checkpoint = {
-            ...state.checkpoint,
+    // Atomic: reconcile JSON checkpoint + derive column + clear closure/chase fields.
+    // The JSON checkpoint is the source of truth — we mutate it in the callback
+    // and the helper derives the column from the result. We preserve
+    // closureRecommendedAt and closureRecommendedReason for historical reporting
+    // (work-report counts per period); the actionable signal is
+    // closureRecommendationActioned.
+    const result = await aiConversationService.applyCheckpointUpdate(
+      appointmentId,
+      (current) => {
+        // Only rewrite the JSON checkpoint if it was actually at closure_recommended
+        // (the chase-recommended path leaves the JSON at the underlying stage).
+        // For everything else, keep the checkpoint as-is and let the helper
+        // derive the column from it.
+        if (current?.stage === 'closure_recommended') {
+          const restoredStage = inferRestoredStage(current, appointment.chaseSentTo);
+          return {
+            ...current,
             stage: restoredStage,
             pendingAction: null,
             checkpoint_at: new Date().toISOString(),
           };
-          await aiConversation.storeConversationState(appointmentId, state, _version);
         }
-      } catch (err) {
-        logger.warn(
-          { appointmentId, err },
-          'Failed to reconcile JSON checkpoint during closure dismissal — continuing'
-        );
-      }
+        return current ?? {
+          stage: inferRestoredStage(null, appointment.chaseSentTo),
+          lastSuccessfulAction: null,
+          pendingAction: null,
+          checkpoint_at: new Date().toISOString(),
+        };
+      },
+      {
+        extraUpdates: {
+          closureRecommendationActioned: true,
+          chaseSentAt: null,
+          chaseSentTo: null,
+          chaseTargetEmail: null,
+          // Release agent-flagged human control so the agent can resume processing.
+          // Admin-set human control is left alone — the admin opted in explicitly.
+          ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+            humanControlEnabled: false,
+          }),
+        },
+      },
+    );
+
+    if (!result.applied) {
+      logger.warn(
+        { appointmentId, source, reason },
+        'Closure dismissal lost optimistic lock after retries'
+      );
+      return { dismissed: false };
     }
 
-    // Don't put the denormalized column back into a recovery stage.
-    const safeRestoredStage =
-      restoredStage && restoredStage !== 'chased' && restoredStage !== 'closure_recommended'
-        ? restoredStage
-        : null;
-
-    // Step 2: action the closure recommendation. We preserve closureRecommendedAt
-    // and closureRecommendedReason for historical reporting (work-report counts
-    // recommendations per period). The actionable signal is closureRecommendationActioned.
-    await prisma.appointmentRequest.update({
-      where: { id: appointmentId },
-      data: {
-        closureRecommendationActioned: true,
-        chaseSentAt: null,
-        chaseSentTo: null,
-        chaseTargetEmail: null,
-        checkpointStage: safeRestoredStage,
-        // Release agent-flagged human control so the agent can resume processing.
-        // Admin-set human control is left alone — the admin opted in explicitly.
-        ...(appointment.humanControlTakenBy === 'agent-flagged' && {
-          humanControlEnabled: false,
-        }),
-      },
-      select: { id: true },
-    });
-
-    await auditEventService.log(appointmentId, 'checkpoint_update', actorForSource(source), {
-      previousStage: appointment.checkpointStage || 'closure_recommended',
-      newStage: safeRestoredStage || 'none',
-      action: 'closure_dismissed',
-      reason,
-      ...(adminId && { adminId }),
-    } as never);
-
     logger.info(
-      { appointmentId, source, reason, restoredStage: safeRestoredStage },
+      { appointmentId, source, reason, restoredStage: result.stage },
       'Closure recommendation dismissed'
     );
 
-    return { dismissed: true };
+    // Audit event + Slack notification are emitted by the caller via
+    // recordAppointmentEvent (the auto-dismiss path uses
+    // 'closure_dismissed_auto', the admin manual path uses 'closure_dismissed').
+    // Returning previousStage so the caller has it for the audit payload.
+    return { dismissed: true, previousStage, restoredStage: result.stage };
   }
 }
 
@@ -1663,15 +1718,6 @@ function inferRestoredStage(
   }
   if (chaseSentTo === 'user') return 'awaiting_user_slot_selection';
   return 'awaiting_therapist_availability';
-}
-
-/**
- * Map a TransitionSource to the AuditActor enum used by audit events.
- */
-function actorForSource(source: TransitionSource): 'agent' | 'admin' | 'system' {
-  if (source === 'admin') return 'admin';
-  if (source === 'agent') return 'agent';
-  return 'system';
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();

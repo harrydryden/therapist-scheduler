@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
-import { emailMessageProcessorService, getLastProcessingError } from './email-message-processor.service';
+import { emailMessageProcessorService, getLastProcessingErrors } from './email-message-processor.service';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
@@ -14,7 +14,6 @@ const HISTORY_ID_KEY = 'gmail:lastHistoryId';
 const {
   PROCESSED_MESSAGES_KEY,
   MESSAGE_LOCK_PREFIX,
-  PROCESSING_FAILURE_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
 } = EMAIL_PROCESSING;
 
@@ -599,6 +598,7 @@ export class EmailIngestService {
       status: 'processed' | 'unprocessed';
       snippet: string;
       lastError?: string;
+      processedContext?: string;
     }>;
   }> {
     const gmail = await emailOAuthService.ensureGmailClient();
@@ -639,23 +639,23 @@ export class EmailIngestService {
       return { messages: [] };
     }
 
-    // Check which are already processed
+    // Check which are already processed, and fetch the context tag so the UI
+    // can show WHY (successfully processed vs divergence-blocked-abandoned etc).
     const alreadyProcessed = await prisma.processedGmailMessage.findMany({
       where: { id: { in: inboundMessages.map((m) => m.id) } },
-      select: { id: true },
+      select: { id: true, context: true },
     });
-    const processedIds = new Set(alreadyProcessed.map((p) => p.id));
+    const processedMap = new Map(alreadyProcessed.map((p) => [p.id, p.context]));
 
     // Fetch last-known processing errors for unprocessed messages so the UI
-    // can show the admin exactly why each message is stuck.
-    const unprocessedIds = inboundMessages.filter(m => !processedIds.has(m.id)).map(m => m.id);
-    const errorEntries = await Promise.all(
-      unprocessedIds.map(async (id) => [id, await getLastProcessingError(id)] as const)
-    );
-    const errorMap = new Map(errorEntries);
+    // can show the admin exactly why each message is stuck. Single batched
+    // DB query rather than N+1.
+    const unprocessedIds = inboundMessages.filter(m => !processedMap.has(m.id)).map(m => m.id);
+    const errorMap = await getLastProcessingErrors(unprocessedIds);
 
     const messages = inboundMessages.map((m) => {
-      const status = processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const;
+      const status = processedMap.has(m.id) ? 'processed' as const : 'unprocessed' as const;
+      const processedContext = processedMap.get(m.id);
       const lastError = status === 'unprocessed' ? errorMap.get(m.id) || undefined : undefined;
       return {
         messageId: m.id,
@@ -665,6 +665,7 @@ export class EmailIngestService {
         status,
         snippet: m.snippet.substring(0, 120),
         ...(lastError ? { lastError } : {}),
+        ...(processedContext ? { processedContext } : {}),
       };
     });
 
@@ -715,26 +716,25 @@ export class EmailIngestService {
       });
       cleared = dbCleared;
 
-      // Clear from Redis (best effort): dedup set, locks, and retry counters.
-      // The counter clear gives users a fresh attempt budget when they explicitly
-      // recover messages — otherwise a previously abandoned message would
-      // re-abandon on its first failed retry. All ops issued concurrently.
+      // Clear from Redis (best effort): dedup set and locks. All concurrent.
       await Promise.all(
         forceMessageIds.flatMap((messageId) => [
           redis.zrem(PROCESSED_MESSAGES_KEY, messageId).catch(() => {}),
           redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`).catch(() => {}),
-          redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`).catch(() => {}),
           redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`).catch(() => {}),
         ])
       );
 
-      // Also reset any database-tracked unmatched attempts (best-effort)
+      // Reset DB-tracked retry counters so users get a fresh attempt budget
+      // when they explicitly recover messages — otherwise a previously
+      // abandoned message would re-abandon on its first failed retry.
       try {
-        await prisma.unmatchedEmailAttempt.deleteMany({
-          where: { id: { in: forceMessageIds } },
-        });
+        await Promise.all([
+          prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: forceMessageIds } } }),
+          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: forceMessageIds } } }),
+        ]);
       } catch (err) {
-        logger.warn({ traceId, err }, 'Failed to clear unmatched attempt records during force reprocess');
+        logger.warn({ traceId, err }, 'Failed to clear attempt tracking records during force reprocess');
       }
 
       logger.info(

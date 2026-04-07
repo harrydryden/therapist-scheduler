@@ -9,6 +9,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { emailProcessingService } from '../services/email-processing.service';
 import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../services/appointment-lifecycle.service';
+import { recordAppointmentEvent } from '../services/appointment-event.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
@@ -685,7 +686,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             confirmedDateTime,
             confirmedDateTimeParsed,
             adminId,
-            reason: reason || 'Date/time updated',
+            bypassStateMachine: true,
+            reason: reason || 'Admin date/time edit (no status change)',
           });
         }
 
@@ -1011,6 +1013,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               status: 'processed' | 'unprocessed';
               snippet: string;
               lastError?: string;
+              processedContext?: string;
             }>;
           }> = [];
 
@@ -1395,12 +1398,18 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         }
 
         // Use lifecycle service's force update — bypasses state machine validation
-        // but still records audit trail and emits SSE notifications.
+        // but still records audit trail, emits SSE notifications, and (for status
+        // changes) sends a high-severity Slack alert so the bypass is visible.
+        // bypassStateMachine + reason are required by the lifecycle method.
+        if (!reason || reason.trim().length === 0) {
+          return Errors.badRequest(reply, 'reason is required when force-updating an appointment');
+        }
         await appointmentLifecycleService.adminForceUpdate(id, {
           newStatus: newStatus as AppointmentStatus | undefined,
           confirmedDateTime,
           confirmedDateTimeParsed,
           adminId,
+          bypassStateMachine: true,
           reason,
         });
 
@@ -1525,12 +1534,26 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             'Admin accepted closure recommendation - appointment cancelled'
           );
         } else {
-          await appointmentLifecycleService.dismissClosureRecommendation({
+          const result = await appointmentLifecycleService.dismissClosureRecommendation({
             appointmentId: id,
             source: 'admin',
             adminId,
             reason: 'Admin dismissed closure recommendation',
           });
+
+          if (result.dismissed) {
+            await recordAppointmentEvent({
+              appointmentId: id,
+              type: 'closure_dismissed',
+              actor: 'admin',
+              reason: 'Admin dismissed closure recommendation',
+              payload: {
+                adminId,
+                previousStage: result.previousStage,
+                restoredStage: result.restoredStage,
+              },
+            });
+          }
 
           logger.info(
             { requestId, appointmentId: id, adminId },

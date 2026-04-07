@@ -5,6 +5,8 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { aiConversationService } from './ai-conversation.service';
+import { recordAppointmentEvent } from './appointment-event.service';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {
@@ -156,36 +158,59 @@ class ChaseEmailService {
 
             const now = new Date();
 
-            // Atomic update: verify sentinel still ours, then record chase
-            const updateResult = await prisma.appointmentRequest.updateMany({
-              where: {
-                id: appointment.id,
-                chaseSentAt: new Date(0), // Must still be our sentinel
-              },
-              data: {
-                chaseSentAt: now,
-                chaseSentTo: target,
-                chaseTargetEmail: email,
-                checkpointStage: 'chased',
-                lastActivityAt: now,
-                isStale: false,
-              },
-            });
+            // Atomic update via the checkpoint helper: verify sentinel still ours,
+            // advance the JSON checkpoint via `sent_chase_followup` (which derives
+            // stage = 'chased'), record chase metadata. The column `checkpointStage`
+            // is derived from the JSON — do NOT write it directly.
+            const checkpointResult = await aiConversationService.applyCheckpointAction(
+              appointment.id,
+              'sent_chase_followup',
+              {
+                extraWhere: { chaseSentAt: new Date(0) }, // sentinel guard
+                extraUpdates: {
+                  chaseSentAt: now,
+                  chaseSentTo: target,
+                  chaseTargetEmail: email,
+                  lastActivityAt: now,
+                  isStale: false,
+                },
+              }
+            );
 
-            if (updateResult.count === 0) {
+            if (!checkpointResult.applied) {
               logger.error(
                 { checkId, appointmentId: appointment.id },
                 'ALERT: Chase email sent but sentinel update failed - possible duplicate'
               );
             } else {
-              // Send Slack notification
-              await slackNotificationService.notifyChaseFollowUp(
-                appointment.id,
-                appointment.userName,
-                appointment.therapistName,
-                target,
-                Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
+              const inactiveHours = Math.round(
+                (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
               );
+              await recordAppointmentEvent({
+                appointmentId: appointment.id,
+                type: 'chase_sent',
+                actor: 'system',
+                reason: `Inactive ${inactiveHours}h, chasing ${target}`,
+                payload: {
+                  target,
+                  chasedEmail: email,
+                  inactiveHours,
+                  userName: appointment.userName,
+                  therapistName: appointment.therapistName,
+                },
+                slack: {
+                  title: 'Chase follow-up sent',
+                  severity: 'medium',
+                  details:
+                    `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
+                    `*${inactiveHours}h*. Sent a follow-up nudge.`,
+                  additionalFields: {
+                    'To': email,
+                    'User': appointment.userName || '(unknown)',
+                    'Therapist': appointment.therapistName || '(unknown)',
+                  },
+                },
+              });
 
               logger.info(
                 {
@@ -387,26 +412,52 @@ class ChaseEmailService {
           );
           const reason = `No response from ${appointment.chaseSentTo} (${chasedParty}) after chase follow-up sent ${hoursSinceChase}h ago. Total inactivity: ${inactiveHours}h.`;
 
-          await prisma.appointmentRequest.update({
-            where: { id: appointment.id },
-            data: {
-              closureRecommendedAt: new Date(),
-              closureRecommendedReason: reason,
-              closureRecommendationActioned: false,
-              checkpointStage: 'closure_recommended',
-            },
-            select: { id: true },
-          });
-
-          // Send Slack notification recommending closure
-          await slackNotificationService.notifyClosureRecommendation(
+          // Route the checkpoint stage update through the helper (JSON is the
+          // source of truth; column is derived) alongside the closure flags.
+          const closureResult = await aiConversationService.applyCheckpointAction(
             appointment.id,
-            appointment.userName,
-            appointment.therapistName,
-            appointment.chaseSentTo || 'unknown',
-            inactiveHours,
-            reason
+            'closure_recommended_to_admin',
+            {
+              extraUpdates: {
+                closureRecommendedAt: new Date(),
+                closureRecommendedReason: reason,
+                closureRecommendationActioned: false,
+              },
+            }
           );
+          if (!closureResult.applied) {
+            logger.warn(
+              { checkId, appointmentId: appointment.id },
+              'Closure recommendation write failed (optimistic lock conflict)'
+            );
+            continue;
+          }
+
+          await recordAppointmentEvent({
+            appointmentId: appointment.id,
+            type: 'closure_recommended',
+            actor: 'system',
+            reason,
+            payload: {
+              chasedParty: appointment.chaseSentTo || 'unknown',
+              inactiveHours,
+              hoursSinceChase,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+            },
+            slack: {
+              title: 'Closure recommended',
+              severity: 'high',
+              details:
+                `No response from *${appointment.chaseSentTo}* (${chasedParty}) ` +
+                `after chase follow-up *${hoursSinceChase}h* ago. ` +
+                `Total inactivity: *${inactiveHours}h*. Admin review needed.`,
+              additionalFields: {
+                'User': appointment.userName || '(unknown)',
+                'Therapist': appointment.therapistName || '(unknown)',
+              },
+            },
+          });
 
           logger.info(
             {

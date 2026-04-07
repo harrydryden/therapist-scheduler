@@ -51,7 +51,9 @@ export default function ScanResultsPanel({
                 <p className="text-xs text-slate-500 italic">No inbound messages</p>
               ) : (
                 <div className="space-y-1">
-                  {thread.messages.map((msg) => (
+                  {thread.messages.map((msg) => {
+                    const isAbandoned = msg.processedContext?.endsWith('-abandoned') ?? false;
+                    return (
                     <div
                       key={msg.messageId}
                       className={`text-xs p-1.5 rounded border ${
@@ -66,10 +68,17 @@ export default function ScanResultsPanel({
                           className={`ml-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${
                             msg.status === 'unprocessed'
                               ? 'bg-yellow-200 text-yellow-800'
-                              : 'bg-slate-200 text-slate-600'
+                              : isAbandoned
+                                ? 'bg-orange-200 text-orange-800'
+                                : 'bg-slate-200 text-slate-600'
                           }`}
+                          title={msg.processedContext || undefined}
                         >
-                          {msg.status === 'unprocessed' ? 'MISSED' : 'OK'}
+                          {msg.status === 'unprocessed'
+                            ? 'MISSED'
+                            : isAbandoned
+                              ? 'ABANDONED'
+                              : 'OK'}
                         </span>
                       </div>
                       {msg.snippet && (
@@ -84,7 +93,8 @@ export default function ScanResultsPanel({
                         </p>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

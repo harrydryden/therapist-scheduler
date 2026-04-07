@@ -99,6 +99,20 @@ export interface CheckpointPayload extends BasePayload {
 }
 
 /**
+ * Payload for appointment lifecycle events emitted via recordAppointmentEvent.
+ * Looser than CheckpointPayload — chase_sent and closure_recommended events
+ * don't represent stage transitions and have no newStage.
+ */
+export interface AppointmentEventPayload extends BasePayload {
+  action: string;
+  reason?: string;
+  previousStage?: string;
+  newStage?: string;
+  // Free-form per-event context (e.g. chasedParty, inactiveHours, adminId)
+  [key: string]: unknown;
+}
+
+/**
  * Payload for facts extraction events
  */
 export interface FactsPayload extends BasePayload {
@@ -157,6 +171,7 @@ export type AuditEventPayload =
   | StatusChangePayload
   | HumanControlPayload
   | CheckpointPayload
+  | AppointmentEventPayload
   | FactsPayload
   | ErrorPayload
   | ClaudeResponsePayload

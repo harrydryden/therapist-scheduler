@@ -5,6 +5,7 @@ import { emailProcessingService } from '../services/email-processing.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { redis } from '../utils/redis';
 import { logger } from '../utils/logger';
+import { prisma } from '../utils/database';
 import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
 import { getSettingValues } from '../services/settings.service';
@@ -251,6 +252,145 @@ export async function adminRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to trigger missed message scan');
         return Errors.internal(reply, 'Failed to trigger missed message scan');
+      }
+    }
+  );
+
+  /**
+   * GET /api/admin/processing-failures
+   * List recent message processing failures (active and abandoned). Used by
+   * the admin diagnostics UI to show what's currently failing in the scanner
+   * pipeline. Optional query: ?abandoned=true to filter to abandoned only.
+   */
+  fastify.get<{ Querystring: { abandoned?: string; limit?: string } }>(
+    '/api/admin/processing-failures',
+    async (request, reply) => {
+      const { abandoned, limit } = request.query;
+      const take = Math.min(parseInt(limit || '50', 10) || 50, 200);
+      const where = abandoned === 'true' ? { abandoned: true } : {};
+
+      try {
+        const failures = await prisma.messageProcessingFailure.findMany({
+          where,
+          orderBy: { lastFailedAt: 'desc' },
+          take,
+        });
+        return sendSuccess(reply, { failures, count: failures.length });
+      } catch (err) {
+        logger.error({ err }, 'Failed to list processing failures');
+        return Errors.internal(reply, 'Failed to list processing failures');
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/processing-failures/retry
+   * Force-retry a list of abandoned (or active-failing) messages. Clears the
+   * dedup record + failure record so the next scanner cycle picks them up.
+   *
+   * Use this after fixing the underlying issue (e.g. running a missing
+   * migration). Without this endpoint, abandoned messages stay marked as
+   * processed in the dedup table forever.
+   *
+   * Body: { messageIds: string[] }            — explicit list (capped at 500)
+   *       { all: true, limit?: number }       — retry abandoned failures, oldest first
+   *
+   * Uses oldest-first ordering so repeated calls drain the backlog in the
+   * order failures occurred. The response includes `remaining` so the caller
+   * knows whether another page is needed.
+   */
+  fastify.post<{ Body: { messageIds?: string[]; all?: boolean; limit?: number } }>(
+    '/api/admin/processing-failures/retry',
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: 60 * 1000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const requestId = request.id;
+      const { messageIds, all, limit } = request.body || {};
+
+      if (!all && (!messageIds || messageIds.length === 0)) {
+        return Errors.badRequest(reply, 'messageIds (non-empty array) or all=true required');
+      }
+
+      // Cap the batch size so a mass-failure incident can't produce a single
+      // recovery run that hammers Gmail rate limits. The scanner processes
+      // recovered messages synchronously, and each one does ≥1 Gmail API call.
+      const MAX_BATCH = 500;
+      const effectiveLimit = Math.min(limit ?? MAX_BATCH, MAX_BATCH);
+
+      try {
+        let targetIds: string[];
+        let totalAbandoned = 0;
+        if (all) {
+          totalAbandoned = await prisma.messageProcessingFailure.count({
+            where: { abandoned: true },
+          });
+          const records = await prisma.messageProcessingFailure.findMany({
+            where: { abandoned: true },
+            orderBy: { firstFailedAt: 'asc' }, // oldest first so repeated calls drain in order
+            select: { id: true },
+            take: effectiveLimit,
+          });
+          targetIds = records.map((r) => r.id);
+        } else {
+          if (messageIds!.length > MAX_BATCH) {
+            return Errors.badRequest(
+              reply,
+              `messageIds capped at ${MAX_BATCH} per call; paginate if you have more`,
+            );
+          }
+          targetIds = messageIds!;
+        }
+
+        if (targetIds.length === 0) {
+          return sendSuccess(reply, {
+            cleared: 0,
+            remaining: 0,
+            message: 'No abandoned failures to retry',
+          });
+        }
+
+        // Clear dedup + failure records in parallel — independent writes
+        const [deletedDedup, deletedFailures] = await Promise.all([
+          prisma.processedGmailMessage.deleteMany({ where: { id: { in: targetIds } } }),
+          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: targetIds } } }),
+        ]);
+
+        const remaining = all ? Math.max(0, totalAbandoned - targetIds.length) : 0;
+
+        logger.info(
+          {
+            requestId,
+            count: targetIds.length,
+            deletedDedup: deletedDedup.count,
+            deletedFailures: deletedFailures.count,
+            remaining,
+          },
+          'Cleared processing failures for retry'
+        );
+
+        // Trigger an immediate scan so the operator gets feedback
+        const scanResult = await missedMessageScannerService.triggerManualScan();
+
+        return sendSuccess(reply, {
+          cleared: targetIds.length,
+          deletedDedup: deletedDedup.count,
+          deletedFailures: deletedFailures.count,
+          remaining,
+          scanResult,
+          message:
+            remaining > 0
+              ? `Cleared ${targetIds.length}; ${remaining} abandoned failure(s) remain — call again to continue`
+              : `Cleared ${targetIds.length} failure(s) and triggered a fresh scan`,
+        });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to retry processing failures');
+        return Errors.internal(reply, 'Failed to retry processing failures');
       }
     }
   );

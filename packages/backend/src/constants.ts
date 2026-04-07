@@ -141,8 +141,14 @@ export const CONVERSATION_LIMITS = {
   MAX_MESSAGES: 100,
   // Max total state size in bytes (prevents DB issues)
   MAX_STATE_BYTES: 500 * 1024, // 500KB
-  // Number of messages to keep when trimming (keeps recent context)
+  // Total messages to keep after trimming
   TRIM_TO_MESSAGES: 50,
+  // When trimming, keep the first N messages (initial booking context)
+  // so the agent always sees how the conversation started, not just the
+  // most recent reschedule chatter. The middle is dropped with a summary
+  // placeholder. The remaining slots are filled from the tail (recent
+  // context). This preserves coherence on long-running threads.
+  TRIM_KEEP_FIRST: 4,
   // Max individual message length (truncate longer messages)
   // Prevents single large email from causing memory issues
   MAX_MESSAGE_LENGTH: 50 * 1024, // 50KB per message
@@ -307,10 +313,6 @@ export const EMAIL_PROCESSING = {
   MESSAGE_LOCK_PREFIX: 'gmail:lock:message:',
   /** Redis key prefix for unmatched attempt tracking */
   UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
-  /** Redis key prefix for processing-failure attempt tracking */
-  PROCESSING_FAILURE_PREFIX: 'gmail:processingFailure:',
-  /** Redis key prefix for last processing error message (diagnostic) */
-  PROCESSING_ERROR_PREFIX: 'gmail:processingError:',
   /** Redis key prefix for first-failure Slack alert dedup */
   PROCESSING_ALERT_DEDUP_PREFIX: 'gmail:processingAlertDedup:',
   /** Days to keep processed message IDs */
@@ -321,8 +323,6 @@ export const EMAIL_PROCESSING = {
   MAX_PROCESSING_FAILURES: 3,
   /** TTL for unmatched attempt tracking (seconds) */
   UNMATCHED_ATTEMPT_TTL_SECONDS: 3600,
-  /** TTL for processing-failure tracking (seconds) — generous so failures across hourly scans accumulate */
-  PROCESSING_FAILURE_TTL_SECONDS: 7 * 24 * 60 * 60,
   /** TTL for first-failure alert dedup (seconds) — prevents alert spam from hourly scans */
   PROCESSING_ALERT_DEDUP_TTL_SECONDS: 60 * 60,
   /** Only run cleanup every N messages */

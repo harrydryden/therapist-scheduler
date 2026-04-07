@@ -164,6 +164,13 @@ export interface ThreadMessagePreview {
   snippet: string;
   /** Last processing error recorded by the scanner, if any. Only set for unprocessed messages. */
   lastError?: string;
+  /**
+   * Why this message was marked processed. Only set for processed messages.
+   * Values: successfully-processed, unparseable, bounce, own-email,
+   * weekly-mailing-reply, unmatched-abandoned, divergence-blocked-abandoned,
+   * processing-failed-abandoned, legacy.
+   */
+  processedContext?: string;
 }
 
 export interface ReprocessPreviewResult {

@@ -293,6 +293,11 @@ export class AIToolExecutorService {
             return { success: false, toolName: name, error: 'Appointment not found' };
           }
 
+          // checkpointStage column is intentionally NOT set here — the agent
+          // tool loop returns checkpointAction='initiated_reschedule', which
+          // advances the JSON checkpoint, and the subsequent storeConversationState
+          // syncs the denormalized column. Writing it here would be a redundant
+          // direct write that splits the source of truth.
           const rescheduleResult = await prisma.appointmentRequest.updateMany({
             where: {
               id: context.appointmentRequestId,
@@ -304,7 +309,6 @@ export class AIToolExecutorService {
               reschedulingInitiatedBy: 'agent',
               previousConfirmedDateTime: rescheduleAppointment.confirmedDateTime,
               confirmedDateTime: null,
-              checkpointStage: 'rescheduling',
               meetingLinkCheckSentAt: null,
               reminderSentAt: null,
               lastActivityAt: new Date(),
