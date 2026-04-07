@@ -165,18 +165,6 @@ async function trackProcessingFailure(messageId: string, traceId: string): Promi
 }
 
 /**
- * Clear the processing-failure counter (called on successful processing).
- */
-async function clearProcessingFailures(messageId: string, traceId: string): Promise<void> {
-  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
-  await safeRedisOp(
-    () => redis.del(key),
-    'clear processing failure counter',
-    traceId,
-  );
-}
-
-/**
  * Mark a Gmail message as processed in both Redis (fast) and database (durable).
  * Extracted to eliminate 7x duplication of this pattern across processMessage().
  */
@@ -662,10 +650,11 @@ export class EmailMessageProcessorService {
         threadContext
       );
 
-      // Mark as processed AFTER successful processing
+      // Mark as processed AFTER successful processing.
+      // We deliberately do NOT clear the failure counter here — if a message
+      // succeeds once but then fails MAX times within the 7-day TTL, that's
+      // legitimate flakiness and should still trip the abandonment threshold.
       await markMessageProcessed(messageId, traceId, 'successfully-processed');
-      // Clear any prior failure counter (best-effort)
-      await clearProcessingFailures(messageId, traceId);
 
       // Mark as read in Gmail
       const gmailClient = await emailOAuthService.ensureGmailClient();

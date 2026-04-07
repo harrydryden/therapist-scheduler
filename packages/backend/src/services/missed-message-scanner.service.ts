@@ -144,9 +144,11 @@ class MissedMessageScannerService {
         severity: 'high',
         details: `Scanner has been skipped *${this.consecutiveSkips}* consecutive times (reason: ${reason}). ` +
           'Incoming messages may not be detected. Check OAuth token status and server health.',
-      }).catch(() => {
-        // Best-effort alerting
-      });
+        additionalFields: {
+          'Scan ID': scanId,
+          'Trigger': trigger,
+        },
+      }).catch(() => {});
     }
   }
 
@@ -223,28 +225,21 @@ class MissedMessageScannerService {
 
       for (const appointment of batch) {
         const traceId = `${scanId}:${appointment.id}`;
-        let appointmentRecovered = 0;
+        const threadIds = [
+          appointment.therapistGmailThreadId,
+          appointment.gmailThreadId,
+        ].filter((id): id is string => id !== null);
+
+        totalScanned += threadIds.length;
 
         try {
-          // Check therapist thread
-          if (appointment.therapistGmailThreadId) {
-            totalScanned++;
-            const result = await emailProcessingService.checkThreadForUnprocessedReplies(
-              appointment.therapistGmailThreadId,
-              traceId
-            );
-            appointmentRecovered += result;
-          }
-
-          // Check client thread
-          if (appointment.gmailThreadId) {
-            totalScanned++;
-            const result = await emailProcessingService.checkThreadForUnprocessedReplies(
-              appointment.gmailThreadId,
-              traceId
-            );
-            appointmentRecovered += result;
-          }
+          // The therapist and client threads are independent Gmail API calls.
+          const results = await Promise.all(
+            threadIds.map(threadId =>
+              emailProcessingService.checkThreadForUnprocessedReplies(threadId, traceId)
+            )
+          );
+          const appointmentRecovered = results.reduce((sum, n) => sum + n, 0);
 
           if (appointmentRecovered > 0) {
             totalRecovered += appointmentRecovered;
@@ -331,7 +326,7 @@ class MissedMessageScannerService {
 interface ScanResult {
   scanned: number;
   recovered: number;
-  failed?: number;
+  failed: number;
 }
 
 const EMPTY_RESULT: ScanResult = { scanned: 0, recovered: 0, failed: 0 };
