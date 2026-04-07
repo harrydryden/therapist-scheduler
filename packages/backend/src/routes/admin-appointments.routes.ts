@@ -1527,7 +1527,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           await appointmentLifecycleService.dismissClosureRecommendation({
             appointmentId: id,
             source: 'admin',
-            reason: `Admin dismissed (${adminId})`,
+            adminId,
+            reason: 'Admin dismissed closure recommendation',
           });
 
           logger.info(

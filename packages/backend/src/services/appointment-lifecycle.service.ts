@@ -31,6 +31,7 @@ import { logger } from '../utils/logger';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
+import { auditEventService } from './audit-event.service';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)
@@ -1514,25 +1515,29 @@ class AppointmentLifecycleService {
 
   /**
    * Dismiss a pending closure recommendation and reset chase state so the
-   * conversation can resume. Mirrors the admin "Dismiss" action but is callable
-   * from automated paths (e.g. when an incoming therapist reply arrives on a
-   * closure-recommended thread — the recommendation is now stale by definition).
+   * conversation can resume. Used by both the admin "Dismiss" action and the
+   * automated path that fires when an incoming reply arrives on a closure-
+   * recommended thread (the recommendation is stale by definition once the
+   * other party responds).
+   *
+   * This is NOT a state-machine status transition — closure flags live alongside
+   * `status` rather than within it, so we don't go through transitionSideEffectsService.
+   * The JSON `conversationState.checkpoint.stage` is also intentionally untouched:
+   * the chase service only writes to the denormalized DB column `checkpointStage`,
+   * never to the JSON, so the JSON already holds the correct underlying stage.
    *
    * Idempotent: returns { dismissed: false } when there's nothing to dismiss
    * (no recommendation, already actioned, or appointment not found).
    */
-  async dismissClosureRecommendation(params: {
-    appointmentId: string;
-    source: 'admin' | 'system' | 'agent';
-    reason: string;
-  }): Promise<{ dismissed: boolean }> {
-    const { appointmentId, source, reason } = params;
+  async dismissClosureRecommendation(params: BaseTransitionParams): Promise<{ dismissed: boolean }> {
+    const { appointmentId, source, adminId, reason } = params;
 
     const appointment = await prisma.appointmentRequest.findUnique({
       where: { id: appointmentId },
       select: {
         closureRecommendedAt: true,
         closureRecommendationActioned: true,
+        checkpointStage: true,
         humanControlTakenBy: true,
         conversationState: true,
       },
@@ -1543,7 +1548,11 @@ class AppointmentLifecycleService {
     }
 
     const convState = appointment.conversationState as { checkpoint?: { stage?: string } } | null;
-    const originalStage = convState?.checkpoint?.stage || null;
+    const restoredStage = convState?.checkpoint?.stage || null;
+    // Don't put the denormalized column back into a recovery stage — those are
+    // set by the chase pipeline, not by the agent's tool loop.
+    const safeRestoredStage =
+      restoredStage !== 'chased' && restoredStage !== 'closure_recommended' ? restoredStage : null;
 
     await prisma.appointmentRequest.update({
       where: { id: appointmentId },
@@ -1554,12 +1563,9 @@ class AppointmentLifecycleService {
         chaseSentAt: null,
         chaseSentTo: null,
         chaseTargetEmail: null,
-        // Restore the underlying checkpoint stage so a fresh chase cycle can
-        // identify the right party. Avoid putting it back into chased/closure_recommended.
-        checkpointStage: originalStage !== 'chased' && originalStage !== 'closure_recommended'
-          ? originalStage
-          : null,
+        checkpointStage: safeRestoredStage,
         // Release agent-flagged human control so the agent can resume processing.
+        // Admin-set human control is left alone — the admin opted in explicitly.
         ...(appointment.humanControlTakenBy === 'agent-flagged' && {
           humanControlEnabled: false,
         }),
@@ -1567,13 +1573,30 @@ class AppointmentLifecycleService {
       select: { id: true },
     });
 
+    await auditEventService.log(appointmentId, 'checkpoint_update', actorForSource(source), {
+      previousStage: appointment.checkpointStage || 'closure_recommended',
+      newStage: safeRestoredStage || 'none',
+      action: 'closure_dismissed',
+      reason,
+      ...(adminId && { adminId }),
+    } as never);
+
     logger.info(
-      { appointmentId, source, reason, restoredStage: originalStage },
+      { appointmentId, source, reason, restoredStage: safeRestoredStage },
       'Closure recommendation dismissed'
     );
 
     return { dismissed: true };
   }
+}
+
+/**
+ * Map a TransitionSource to the AuditActor enum used by audit events.
+ */
+function actorForSource(source: TransitionSource): 'agent' | 'admin' | 'system' {
+  if (source === 'admin') return 'admin';
+  if (source === 'agent') return 'agent';
+  return 'system';
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();
