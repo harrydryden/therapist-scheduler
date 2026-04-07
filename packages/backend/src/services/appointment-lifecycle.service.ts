@@ -31,6 +31,9 @@ import { logger } from '../utils/logger';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
+import { auditEventService } from './audit-event.service';
+import { AIConversationService } from './ai-conversation.service';
+import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)
@@ -1511,6 +1514,164 @@ class AppointmentLifecycleService {
 
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
   }
+
+  /**
+   * Dismiss a pending closure recommendation and reset chase state so the
+   * conversation can resume. Used by both the admin "Dismiss" action and the
+   * automated path that fires when an incoming reply arrives on a closure-
+   * recommended thread (the recommendation is stale by definition once the
+   * other party responds).
+   *
+   * This is NOT a state-machine status transition — closure flags live alongside
+   * `status` rather than within it, so we don't go through transitionSideEffectsService.
+   *
+   * Two paths can set closure_recommended, and they handle the JSON checkpoint
+   * differently — both must be reconciled here:
+   *
+   * 1. **Chase-recommended** (chase-email.service.ts): writes only the
+   *    denormalized DB column `checkpointStage = 'closure_recommended'`. The
+   *    JSON `conversationState.checkpoint.stage` is left unchanged.
+   * 2. **Agent-recommended** (recommend_cancel_match tool → agent-tool-loop):
+   *    routes through `updateCheckpoint`, which writes BOTH the JSON and
+   *    (via storeConversationState's extractConversationMeta) the DB column.
+   *
+   * In path #2, leaving the JSON wedged at `closure_recommended` would cause the
+   * system prompt to tell the agent "wait for admin action" forever — even after
+   * we clear the DB column, the next agent save would re-derive the column from
+   * the JSON and undo our dismissal. So we reconcile the JSON checkpoint via
+   * aiConversationService (with optimistic locking) when it's stuck in the
+   * closure stage, restoring it to whatever stage `lastSuccessfulAction` maps
+   * to (or a sensible default).
+   *
+   * Reporting fidelity: we DO NOT null `closureRecommendedAt` / `closureRecommendedReason`.
+   * Those are historical records used by work-report and the daily Slack summary.
+   * Instead we set `closureRecommendationActioned = true` (mirroring the admin
+   * "cancel" path) and rely on chase-email's filter to use that flag for gating.
+   *
+   * Idempotent: returns { dismissed: false } when there's nothing to dismiss.
+   */
+  async dismissClosureRecommendation(params: BaseTransitionParams): Promise<{ dismissed: boolean }> {
+    const { appointmentId, source, adminId, reason } = params;
+
+    const appointment = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: {
+        closureRecommendedAt: true,
+        closureRecommendationActioned: true,
+        checkpointStage: true,
+        chaseSentTo: true,
+        humanControlTakenBy: true,
+        conversationState: true,
+      },
+    });
+
+    if (!appointment || !appointment.closureRecommendedAt || appointment.closureRecommendationActioned) {
+      return { dismissed: false };
+    }
+
+    // Step 1: reconcile the JSON checkpoint if it's wedged at closure_recommended.
+    // Failures here are logged but don't block the rest of the dismissal — at worst
+    // the agent sees a stale JSON until the next save corrects it.
+    const conversationStateJson = appointment.conversationState as
+      | { checkpoint?: ConversationCheckpoint; messages?: unknown[]; systemPrompt?: string }
+      | null;
+    const jsonStage = conversationStateJson?.checkpoint?.stage;
+    let restoredStage: ConversationStage | null = jsonStage ?? null;
+
+    if (jsonStage === 'closure_recommended') {
+      restoredStage = inferRestoredStage(conversationStateJson?.checkpoint, appointment.chaseSentTo);
+      try {
+        const aiConversation = new AIConversationService(`dismiss-closure:${appointmentId}`);
+        const stateWithVersion = await aiConversation.getConversationState(appointmentId);
+        if (stateWithVersion?.checkpoint?.stage === 'closure_recommended') {
+          const { _version, ...state } = stateWithVersion;
+          state.checkpoint = {
+            ...state.checkpoint,
+            stage: restoredStage,
+            pendingAction: null,
+            checkpoint_at: new Date().toISOString(),
+          };
+          await aiConversation.storeConversationState(appointmentId, state, _version);
+        }
+      } catch (err) {
+        logger.warn(
+          { appointmentId, err },
+          'Failed to reconcile JSON checkpoint during closure dismissal — continuing'
+        );
+      }
+    }
+
+    // Don't put the denormalized column back into a recovery stage.
+    const safeRestoredStage =
+      restoredStage && restoredStage !== 'chased' && restoredStage !== 'closure_recommended'
+        ? restoredStage
+        : null;
+
+    // Step 2: action the closure recommendation. We preserve closureRecommendedAt
+    // and closureRecommendedReason for historical reporting (work-report counts
+    // recommendations per period). The actionable signal is closureRecommendationActioned.
+    await prisma.appointmentRequest.update({
+      where: { id: appointmentId },
+      data: {
+        closureRecommendationActioned: true,
+        chaseSentAt: null,
+        chaseSentTo: null,
+        chaseTargetEmail: null,
+        checkpointStage: safeRestoredStage,
+        // Release agent-flagged human control so the agent can resume processing.
+        // Admin-set human control is left alone — the admin opted in explicitly.
+        ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+          humanControlEnabled: false,
+        }),
+      },
+      select: { id: true },
+    });
+
+    await auditEventService.log(appointmentId, 'checkpoint_update', actorForSource(source), {
+      previousStage: appointment.checkpointStage || 'closure_recommended',
+      newStage: safeRestoredStage || 'none',
+      action: 'closure_dismissed',
+      reason,
+      ...(adminId && { adminId }),
+    } as never);
+
+    logger.info(
+      { appointmentId, source, reason, restoredStage: safeRestoredStage },
+      'Closure recommendation dismissed'
+    );
+
+    return { dismissed: true };
+  }
+}
+
+/**
+ * Choose the stage to fall back to when dismissing a closure recommendation
+ * whose JSON checkpoint is wedged at `closure_recommended`. Prefers the stage
+ * implied by the previous successful action; otherwise infers from which party
+ * was being chased; otherwise gives up and returns 'awaiting_therapist_availability'
+ * as a safe default that the chase pipeline can re-evaluate.
+ */
+function inferRestoredStage(
+  checkpoint: ConversationCheckpoint | undefined,
+  chaseSentTo: string | null,
+): ConversationStage {
+  if (checkpoint?.lastSuccessfulAction) {
+    const inferred = stageFromAction(checkpoint.lastSuccessfulAction);
+    if (inferred !== 'closure_recommended' && inferred !== 'chased') {
+      return inferred;
+    }
+  }
+  if (chaseSentTo === 'user') return 'awaiting_user_slot_selection';
+  return 'awaiting_therapist_availability';
+}
+
+/**
+ * Map a TransitionSource to the AuditActor enum used by audit events.
+ */
+function actorForSource(source: TransitionSource): 'agent' | 'admin' | 'system' {
+  if (source === 'admin') return 'admin';
+  if (source === 'agent') return 'agent';
+  return 'system';
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();

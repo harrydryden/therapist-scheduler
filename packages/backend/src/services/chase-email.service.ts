@@ -45,17 +45,29 @@ class ChaseEmailService {
       }
 
       // Find stale conversations that haven't been chased yet
-      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments
+      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments.
+      // Excludes appointments with an ACTIVE closure recommendation; previously
+      // dismissed/actioned recommendations are fine — see dismissClosureRecommendation
+      // for why we preserve closureRecommendedAt and gate on actioned instead.
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
-          OR: [
-            { status: { in: [...PRE_BOOKING_STATUSES] } },
-            { status: 'confirmed', reschedulingInProgress: true },
+          AND: [
+            {
+              OR: [
+                { status: { in: [...PRE_BOOKING_STATUSES] } },
+                { status: 'confirmed', reschedulingInProgress: true },
+              ],
+            },
+            {
+              OR: [
+                { closureRecommendedAt: null },
+                { closureRecommendationActioned: true },
+              ],
+            },
           ],
           lastActivityAt: { lt: chaseThreshold },
           chaseSentAt: null, // Never chased (and not currently being sent)
           humanControlEnabled: false, // Don't chase while under human control
-          closureRecommendedAt: null, // Not already recommended for closure
         },
         select: {
           id: true,
@@ -315,19 +327,31 @@ class ChaseEmailService {
       const closureThreshold = new Date(Date.now() - closureHours * 60 * 60 * 1000);
 
       // Find conversations where chase was sent but no response received
-      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments
+      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments.
+      // Excludes appointments with an ACTIVE closure recommendation (one that
+      // exists and hasn't been actioned yet); a previously dismissed/actioned
+      // recommendation is fine — we keep the timestamp for reporting fidelity
+      // and gate on closureRecommendationActioned.
       const candidates = await prisma.appointmentRequest.findMany({
         where: {
-          OR: [
-            { status: { in: [...PRE_BOOKING_STATUSES] } },
-            { status: 'confirmed', reschedulingInProgress: true },
+          AND: [
+            {
+              OR: [
+                { status: { in: [...PRE_BOOKING_STATUSES] } },
+                { status: 'confirmed', reschedulingInProgress: true },
+              ],
+            },
+            {
+              OR: [
+                { closureRecommendedAt: null },
+                { closureRecommendationActioned: true },
+              ],
+            },
           ],
           chaseSentAt: {
             gt: new Date(0), // Exclude null and sentinels (in-flight sends)
             lt: closureThreshold, // Chase sent > threshold ago
           },
-          closureRecommendedAt: null, // Not already recommended
-          // Ensure no activity since the chase was sent (no response received)
           lastActivityAt: { lt: closureThreshold },
         },
         select: {
