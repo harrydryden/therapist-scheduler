@@ -27,7 +27,8 @@ export type AppointmentEventType =
   | 'chase_sent'
   | 'closure_recommended'
   | 'closure_dismissed'
-  | 'closure_dismissed_auto';
+  | 'closure_dismissed_auto'
+  | 'admin_force_update';
 
 export interface AppointmentEvent {
   appointmentId: string;

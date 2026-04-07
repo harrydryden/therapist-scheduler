@@ -31,6 +31,7 @@ import { logger } from '../utils/logger';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
+import { recordAppointmentEvent } from './appointment-event.service';
 import { aiConversationService } from './ai-conversation.service';
 import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
 
@@ -1282,6 +1283,16 @@ class AppointmentLifecycleService {
    * Force-update an appointment's status and/or confirmedDateTime, bypassing state machine
    * validation. Used by the admin appointments page where admins need unrestricted control.
    *
+   * GUARDRAILS (Phase 5):
+   * - `bypassStateMachine: true` is REQUIRED on every call. The flag exists
+   *   to make accidental new callers impossible — the type system rejects
+   *   omitting it, and routine updates should go through updateStatus()
+   *   instead.
+   * - `reason` is REQUIRED when bypassStateMachine is set. The reason is
+   *   logged loudly, persisted to the audit trail, and (for status changes)
+   *   sent as a high-severity Slack alert so any non-routine bypass is
+   *   visible to the team.
+   *
    * Always performs: audit trail, SSE notification, confirmedAt timestamp management,
    * therapist booking status updates, Notion sync (data consistency).
    * Optionally performs: emails, Slack (controlled by skipNotifications, default true).
@@ -1293,13 +1304,31 @@ class AppointmentLifecycleService {
       confirmedDateTime?: string | null;
       confirmedDateTimeParsed?: Date | null;
       adminId: string;
-      reason?: string;
+      /** Required acknowledgement that this call bypasses state machine validation. */
+      bypassStateMachine: true;
+      /** Required justification — logged + audited + (for status changes) Slack-alerted. */
+      reason: string;
       skipNotifications?: boolean;
     }
   ): Promise<TransitionResult> {
-    const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason } = options;
+    const { newStatus, confirmedDateTime, confirmedDateTimeParsed, adminId, reason, bypassStateMachine } = options;
     const skipNotifications = options.skipNotifications ?? true;
     const logContext = { appointmentId, adminId };
+
+    // Defensive runtime checks — even though TypeScript enforces these,
+    // the route layer might pass typed-as-any objects from request bodies.
+    if (bypassStateMachine !== true) {
+      throw new Error('adminForceUpdate requires bypassStateMachine: true');
+    }
+    if (!reason || reason.trim().length === 0) {
+      throw new Error('adminForceUpdate requires a non-empty reason');
+    }
+
+    // Loud warning so any bypass shows up in logs at WARN level (not just info).
+    logger.warn(
+      { ...logContext, reason, newStatus, confirmedDateTime },
+      'STATE MACHINE BYPASS: adminForceUpdate called'
+    );
 
     // Use transaction with FOR UPDATE NOWAIT row lock to prevent TOCTOU races.
     // Without this, another process could change the status between our read and write,
@@ -1510,6 +1539,39 @@ class AppointmentLifecycleService {
       { ...logContext, previousStatus, newStatus: effectiveNewStatus, confirmedDateTime, reason, skipNotifications },
       'Appointment force-updated by admin (state machine bypassed)'
     );
+
+    // Audit + Slack alert for visibility. Only the status-change case sends
+    // a Slack alert (severity=high) — date-only edits are routine and would
+    // be alert spam. Audit log fires for both so the bypass is always traceable.
+    const isStatusChange = !!(newStatus && newStatus !== previousStatus);
+    await recordAppointmentEvent({
+      appointmentId,
+      type: 'admin_force_update',
+      actor: 'admin',
+      reason,
+      payload: {
+        adminId,
+        previousStatus,
+        newStatus: effectiveNewStatus,
+        confirmedDateTime,
+        bypassedStateMachine: true,
+      },
+      ...(isStatusChange && {
+        slack: {
+          title: 'Admin force-updated appointment status (state machine bypassed)',
+          severity: 'high',
+          details:
+            `An admin used the force-update path to change status from ` +
+            `*${previousStatus}* to *${effectiveNewStatus}*, bypassing state machine ` +
+            `validation. This path skips the normal lifecycle guards — ensure the ` +
+            `outcome is correct.\n\nReason: ${reason}`,
+          additionalFields: {
+            'Admin': adminId,
+            'Appointment': appointmentId,
+          },
+        },
+      }),
+    });
 
     return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
   }

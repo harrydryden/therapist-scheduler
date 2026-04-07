@@ -686,7 +686,8 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             confirmedDateTime,
             confirmedDateTimeParsed,
             adminId,
-            reason: reason || 'Date/time updated',
+            bypassStateMachine: true,
+            reason: reason || 'Admin date/time edit (no status change)',
           });
         }
 
@@ -1397,12 +1398,18 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         }
 
         // Use lifecycle service's force update — bypasses state machine validation
-        // but still records audit trail and emits SSE notifications.
+        // but still records audit trail, emits SSE notifications, and (for status
+        // changes) sends a high-severity Slack alert so the bypass is visible.
+        // Phase 5: bypassStateMachine + reason are required.
+        if (!reason || reason.trim().length === 0) {
+          return Errors.badRequest(reply, 'reason is required when force-updating an appointment');
+        }
         await appointmentLifecycleService.adminForceUpdate(id, {
           newStatus: newStatus as AppointmentStatus | undefined,
           confirmedDateTime,
           confirmedDateTimeParsed,
           adminId,
+          bypassStateMachine: true,
           reason,
         });
 
