@@ -1315,8 +1315,9 @@ class AppointmentLifecycleService {
     const skipNotifications = options.skipNotifications ?? true;
     const logContext = { appointmentId, adminId };
 
-    // Defensive runtime checks — even though TypeScript enforces these,
-    // the route layer might pass typed-as-any objects from request bodies.
+    // Runtime checks defend against the route layer constructing this
+    // options object from a request body (where TypeScript can't enforce
+    // the literal-true type) or any caller using `as any`.
     if (bypassStateMachine !== true) {
       throw new Error('adminForceUpdate requires bypassStateMachine: true');
     }
