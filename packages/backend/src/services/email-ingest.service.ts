@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
-import { emailMessageProcessorService } from './email-message-processor.service';
+import { emailMessageProcessorService, getLastProcessingError } from './email-message-processor.service';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
@@ -582,6 +582,10 @@ export class EmailIngestService {
   /**
    * Preview which messages in a thread are unprocessed vs already processed.
    * Used by the admin UI to show a dry-run before triggering reprocessing.
+   *
+   * Each unprocessed message is annotated with the last recorded processing
+   * error (if any) so the admin can see WHY it's failing without diving into
+   * the logs.
    */
   async previewThreadMessages(
     threadId: string,
@@ -594,6 +598,7 @@ export class EmailIngestService {
       date: string;
       status: 'processed' | 'unprocessed';
       snippet: string;
+      lastError?: string;
     }>;
   }> {
     const gmail = await emailOAuthService.ensureGmailClient();
@@ -641,14 +646,27 @@ export class EmailIngestService {
     });
     const processedIds = new Set(alreadyProcessed.map((p) => p.id));
 
-    const messages = inboundMessages.map((m) => ({
-      messageId: m.id,
-      from: m.headers['from'] || 'Unknown',
-      subject: m.headers['subject'] || '(no subject)',
-      date: m.headers['date'] || '',
-      status: processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const,
-      snippet: m.snippet.substring(0, 120),
-    }));
+    // Fetch last-known processing errors for unprocessed messages so the UI
+    // can show the admin exactly why each message is stuck.
+    const unprocessedIds = inboundMessages.filter(m => !processedIds.has(m.id)).map(m => m.id);
+    const errorEntries = await Promise.all(
+      unprocessedIds.map(async (id) => [id, await getLastProcessingError(id)] as const)
+    );
+    const errorMap = new Map(errorEntries);
+
+    const messages = inboundMessages.map((m) => {
+      const status = processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const;
+      const lastError = status === 'unprocessed' ? errorMap.get(m.id) || undefined : undefined;
+      return {
+        messageId: m.id,
+        from: m.headers['from'] || 'Unknown',
+        subject: m.headers['subject'] || '(no subject)',
+        date: m.headers['date'] || '',
+        status,
+        snippet: m.snippet.substring(0, 120),
+        ...(lastError ? { lastError } : {}),
+      };
+    });
 
     logger.info(
       { traceId, threadId, total: messages.length, unprocessed: messages.filter(m => m.status === 'unprocessed').length },
