@@ -81,6 +81,22 @@ const {
 const MAX_ERROR_LENGTH = 2000;
 
 /**
+ * Detect errors that represent a lost optimistic lock on the appointment row.
+ * These are BENIGN concurrency races (another process updated the row while
+ * we were mid-save) and must not count against the abandonment retry budget —
+ * otherwise ~3 concurrent updates could silently abandon a perfectly valid
+ * message. The scanner will retry on its next cycle.
+ *
+ * Matches both error strings the codebase currently emits for this condition.
+ */
+function isOptimisticLockError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('Optimistic locking conflict') ||
+    errorMessage.includes('Concurrent modification detected')
+  );
+}
+
+/**
  * Lock renewal configuration
  * Renew lock every 60 seconds to prevent expiry during long processing
  * Lock TTL is 300 seconds (5 minutes), so renewal at 60s gives 4x buffer
@@ -824,6 +840,22 @@ export class EmailMessageProcessorService {
       // truth, so a Redis outage can't suppress abandonment) and records the
       // error text for UI surfacing.
       const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Optimistic-lock races are BENIGN. They happen when another process
+      // (stale-check, lifecycle transition, dismissClosureRecommendation,
+      // closure auto-dismiss) updates the appointment row while the agent is
+      // mid-save. The correct response is to retry, not to count this as a
+      // real processing failure. Without this check, ~3 concurrent
+      // lifecycle updates on the same appointment would abandon the
+      // message even though nothing was actually broken.
+      if (isOptimisticLockError(errorMessage)) {
+        logger.info(
+          { traceId, messageId, errorMessage },
+          'Optimistic-lock conflict during processMessage — returning false without counting as failure; scanner will retry on next cycle'
+        );
+        return false;
+      }
+
       let attempts: number;
       try {
         attempts = await trackProcessingFailure(messageId, errorMessage);
