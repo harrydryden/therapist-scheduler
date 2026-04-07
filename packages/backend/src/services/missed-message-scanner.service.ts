@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
-import { runWithContext } from '../utils/request-context';
+import { runWithTrace } from '../utils/request-tracing';
 import { emailProcessingService } from './email-processing.service';
 import { slackNotificationService } from './slack-notification.service';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
@@ -245,7 +245,7 @@ class MissedMessageScannerService {
         // downstream processMessage call automatically gets traceId +
         // appointmentId. Makes log correlation across the recovery chain
         // possible without joining on message IDs by hand.
-        const appointmentRecovered = await runWithContext(
+        const appointmentRecovered = await runWithTrace(
           { traceId, appointmentId: appointment.id, source: 'missed-message-scanner' },
           async () => {
             try {

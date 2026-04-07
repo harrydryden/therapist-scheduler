@@ -2,23 +2,35 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { logger } from './logger';
 
 /**
- * Lightweight request tracing using AsyncLocalStorage
+ * Lightweight request tracing using AsyncLocalStorage.
  *
  * Propagates trace context through async operations without parameter passing.
- * Each incoming request gets a trace ID that flows through all service calls.
+ * Each incoming request (or background task) gets a trace ID that flows
+ * through every service call it makes. The pino logger reads from this
+ * store on every log call, so any log line emitted within a runWithTrace
+ * scope automatically picks up traceId/appointmentId/source.
  *
  * Usage:
- *   - Trace ID is set automatically by the Fastify hook registered in server.ts
- *   - Access current trace via getTraceContext() from anywhere in the call stack
- *   - External services receive trace ID via X-Trace-ID header
+ *   - HTTP requests: trace ID is set automatically by the Fastify hook
+ *     registered in server.ts (full TraceContext with method/url/startTime).
+ *   - Background tasks (message processor, scanner): use runWithTrace with
+ *     a minimal { traceId, source } context.
+ *   - Access current trace via getTraceContext() from anywhere in the
+ *     call stack. Most code shouldn't need to — pass values explicitly.
+ *   - Mutate the current scope mid-flight via extendTraceContext (e.g.
+ *     to add the appointmentId once it's been matched).
  */
 
 export interface TraceContext {
   traceId: string;
-  requestId: string;
-  method: string;
-  url: string;
-  startTime: number;
+  /** HTTP-only fields, omitted for background tasks. */
+  requestId?: string;
+  method?: string;
+  url?: string;
+  startTime?: number;
+  /** Optional context for background processing. */
+  appointmentId?: string;
+  source?: string;
 }
 
 const traceStorage = new AsyncLocalStorage<TraceContext>();
@@ -27,16 +39,30 @@ const traceStorage = new AsyncLocalStorage<TraceContext>();
  * Get the current trace context from the async call stack.
  * Returns undefined if called outside a traced request.
  */
-function getTraceContext(): TraceContext | undefined {
+export function getTraceContext(): TraceContext | undefined {
   return traceStorage.getStore();
 }
 
 /**
- * Run a function within a trace context.
- * Used by the Fastify hook to wrap request handling.
+ * Run a function within a trace context. Used by both the Fastify request
+ * hook and by background tasks (message processor, scanner) to scope a
+ * unit of work.
  */
 export function runWithTrace<T>(context: TraceContext, fn: () => T): T {
   return traceStorage.run(context, fn);
+}
+
+/**
+ * Mutate the current trace context to add fields. Useful when an inner
+ * layer (e.g. the appointment matcher inside processMessage) discovers a
+ * value after the outer scope was created. Mutates in place — the next
+ * log line will pick up the new fields. No-op outside any scope.
+ */
+export function extendTraceContext(extra: Partial<TraceContext>): void {
+  const current = traceStorage.getStore();
+  if (current) {
+    Object.assign(current, extra);
+  }
 }
 
 /**
@@ -55,7 +81,7 @@ export function generateTraceId(requestId?: string): string {
  */
 export function logRequestMetrics(statusCode: number) {
   const ctx = getTraceContext();
-  if (!ctx) return;
+  if (!ctx || ctx.startTime === undefined) return;
 
   const durationMs = Date.now() - ctx.startTime;
 

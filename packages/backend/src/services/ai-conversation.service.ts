@@ -23,6 +23,7 @@ import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS } from '../constants';
 import { resilientCall } from '../utils/resilient-call';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
+import { ConcurrentModificationError } from '../errors';
 import type { ConversationState } from '../types';
 import type { Prisma } from '@prisma/client';
 import {
@@ -92,10 +93,10 @@ export class AIConversationService {
       });
 
       if (result.count === 0) {
-        // Version mismatch - another process modified the state
-        throw new Error(
-          `Optimistic locking conflict: conversation state was modified by another process for appointment ${appointmentRequestId}`
-        );
+        // Version mismatch - another process modified the state.
+        // Use the typed error so callers can `instanceof`-check rather than
+        // string-matching the message (which is fragile across rephrasings).
+        throw new ConcurrentModificationError(appointmentRequestId);
       }
     } else {
       // Legacy call without version check (for initial state creation)
@@ -259,16 +260,15 @@ export class AIConversationService {
         await this.storeConversationState(appointmentRequestId, state, expectedUpdatedAt);
         return { success: true, retriesUsed: attempt };
       } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : 'Unknown';
-
         // Don't retry optimistic locking conflicts - they indicate a real conflict
-        if (errorMsg.includes('Optimistic locking conflict')) {
+        if (error instanceof ConcurrentModificationError) {
           logger.warn(
             { traceId: this.traceId, appointmentRequestId, attempt },
             'State save conflict - not retrying (concurrent modification)'
           );
           break;
         }
+        const errorMsg = error instanceof Error ? error.message : 'Unknown';
 
         if (attempt < MAX_RETRIES - 1) {
           const delay = BASE_DELAY_MS * Math.pow(2, attempt);
@@ -362,7 +362,7 @@ export class AIConversationService {
   /**
    * Trim conversation state to prevent unbounded growth.
    *
-   * Strategy (Phase 6): keep BOTH ends of the conversation, drop the middle.
+   * Strategy: keep BOTH ends of the conversation, drop the middle.
    *   - First TRIM_KEEP_FIRST messages: initial booking context (who, what, when).
    *     The agent always needs these to understand what the conversation is about,
    *     even after a long reschedule chain.
@@ -380,10 +380,17 @@ export class AIConversationService {
   ): { systemPrompt?: string; messages: ConversationMessage[] } {
     const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
 
-    // Fast path: nothing to trim
+    // Fast path: well below limits, return as-is. Skipping the JSON.stringify
+    // here matters because storeConversationState stringifies the result on
+    // every save — paying the cost twice on the hot path is wasted work.
+    // The byte-size check below only fires when the count threshold doesn't.
     if (state.messages.length <= MAX_MESSAGES) {
-      const stateSize = JSON.stringify(state).length;
-      if (stateSize <= MAX_STATE_BYTES) {
+      // Only stringify-for-size-check when the count is high enough that the
+      // message blob could plausibly approach the byte limit. ~50KB per
+      // message is a generous upper bound (we cap individual messages at 50KB
+      // via truncateMessageContent).
+      const couldBeOversized = state.messages.length * 2_000 > MAX_STATE_BYTES;
+      if (!couldBeOversized || JSON.stringify(state).length <= MAX_STATE_BYTES) {
         return state;
       }
     }

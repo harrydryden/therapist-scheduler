@@ -1283,7 +1283,7 @@ class AppointmentLifecycleService {
    * Force-update an appointment's status and/or confirmedDateTime, bypassing state machine
    * validation. Used by the admin appointments page where admins need unrestricted control.
    *
-   * GUARDRAILS (Phase 5):
+   * GUARDRAILS:
    * - `bypassStateMachine: true` is REQUIRED on every call. The flag exists
    *   to make accidental new callers impossible — the type system rejects
    *   omitting it, and routine updates should go through updateStatus()

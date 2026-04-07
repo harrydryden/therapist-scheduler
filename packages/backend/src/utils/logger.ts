@@ -1,6 +1,6 @@
 import pino from 'pino';
 import { config } from '../config';
-import { getContext } from './request-context';
+import { getTraceContext } from './request-tracing';
 
 /**
  * Mask sensitive email addresses for logging
@@ -71,17 +71,15 @@ const redactPaths = config.env === 'production' ? [
 export const logger = pino({
   level: config.logLevel,
   // Auto-inject traceId/appointmentId/source from the AsyncLocalStorage
-  // request context if present. Caller-supplied values in the explicit log
-  // payload still take precedence — the mixin runs BEFORE the merge so
-  // explicit fields override these.
+  // trace context if present. Explicit values in the log payload still
+  // win because pino merges them after the mixin output.
   mixin() {
-    const ctx = getContext();
+    const ctx = getTraceContext();
     if (!ctx) return {};
-    return {
-      ...(ctx.traceId ? { traceId: ctx.traceId } : {}),
-      ...(ctx.appointmentId ? { appointmentId: ctx.appointmentId } : {}),
-      ...(ctx.source ? { source: ctx.source } : {}),
-    };
+    const out: Record<string, unknown> = { traceId: ctx.traceId };
+    if (ctx.appointmentId) out.appointmentId = ctx.appointmentId;
+    if (ctx.source) out.source = ctx.source;
+    return out;
   },
   redact: {
     paths: redactPaths,

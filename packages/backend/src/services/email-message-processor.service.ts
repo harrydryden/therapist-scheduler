@@ -49,7 +49,8 @@ import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { classifyEmail } from '../utils/email-classifier';
-import { runWithContext, extendContext } from '../utils/request-context';
+import { runWithTrace, extendTraceContext } from '../utils/request-tracing';
+import { ConcurrentModificationError } from '../errors';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
   detectThreadDivergence,
@@ -81,22 +82,6 @@ const {
 
 // Truncate processing-failure errors so a runaway stack trace can't blow up the row
 const MAX_ERROR_LENGTH = 2000;
-
-/**
- * Detect errors that represent a lost optimistic lock on the appointment row.
- * These are BENIGN concurrency races (another process updated the row while
- * we were mid-save) and must not count against the abandonment retry budget —
- * otherwise ~3 concurrent updates could silently abandon a perfectly valid
- * message. The scanner will retry on its next cycle.
- *
- * Matches both error strings the codebase currently emits for this condition.
- */
-function isOptimisticLockError(errorMessage: string): boolean {
-  return (
-    errorMessage.includes('Optimistic locking conflict') ||
-    errorMessage.includes('Concurrent modification detected')
-  );
-}
 
 /**
  * Lock renewal configuration
@@ -340,17 +325,10 @@ export class EmailMessageProcessorService {
    * only one worker will process each message.
    */
   async processMessage(messageId: string, traceId: string): Promise<boolean> {
-    // Wrap the entire processMessage in a request context so every log line
-    // emitted by anything we await automatically picks up traceId. The
-    // appointmentId gets added to the context after we match the appointment
-    // (see extendContext() call below). Existing explicit traceId arguments
-    // in log payloads are preserved unchanged — they merge over the mixin.
-    return runWithContext({ traceId, source: 'message-processor' }, () =>
-      this.processMessageInner(messageId, traceId)
-    );
-  }
-
-  private async processMessageInner(messageId: string, traceId: string): Promise<boolean> {
+    // Wrap in a trace context so every log line emitted by anything we
+    // await auto-picks up traceId. appointmentId is added to the context
+    // via extendTraceContext below once the appointment is matched.
+    return runWithTrace({ traceId, source: 'message-processor' }, async () => {
     // Acquire a distributed lock AND check if already processed atomically
     // This eliminates the TOCTOU race condition window
     const lockKey = `${MESSAGE_LOCK_PREFIX}${messageId}`;
@@ -641,16 +619,15 @@ export class EmailMessageProcessorService {
 
       // Extend the request context with the matched appointmentId so every
       // log line emitted from here on auto-includes it via the pino mixin.
-      extendContext({ appointmentId: appointmentRequest.id });
+      extendTraceContext({ appointmentId: appointmentRequest.id });
 
       logger.info(
         { traceId, messageId, appointmentRequestId: appointmentRequest.id },
         'Found matching appointment request'
       );
 
-      // Classify the email here so we can use the result both for the
-      // closure auto-dismiss gate (below) and again later in the agent path.
-      // The classifier is pure and cheap, so calling it twice is fine.
+      // Classify once and reuse for both the closure auto-dismiss gate
+      // (below) and the agent path (passed via precomputedClassification).
       const earlyClassification = classifyEmail(
         email.body,
         email.from,
@@ -895,7 +872,7 @@ export class EmailMessageProcessorService {
       // real processing failure. Without this check, ~3 concurrent
       // lifecycle updates on the same appointment would abandon the
       // message even though nothing was actually broken.
-      if (isOptimisticLockError(errorMessage)) {
+      if (error instanceof ConcurrentModificationError) {
         logger.info(
           { traceId, messageId, errorMessage },
           'Optimistic-lock conflict during processMessage — returning false without counting as failure; scanner will retry on next cycle'
@@ -1006,6 +983,7 @@ export class EmailMessageProcessorService {
       // Note: Database "lock" (processedGmailMessage) is not deleted - it serves as
       // permanent deduplication record. This is intentional for the fallback case.
     }
+    });
   }
 
   // ─── Email parsing ──────────────────────────────────────────────────

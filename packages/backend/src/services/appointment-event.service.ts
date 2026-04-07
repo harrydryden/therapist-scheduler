@@ -1,19 +1,15 @@
 /**
  * Centralised emitter for appointment lifecycle events that aren't status
  * transitions (chase sent, closure recommended, closure dismissed,
- * closure auto-dismissed). Each event always writes an audit log entry
- * and optionally fires a Slack alert. Pre-Phase-4 these were ad-hoc:
- * chase-email called slackNotificationService.notify* directly with NO
- * audit logging; the closure auto-dismiss path called Slack and audit
- * separately and they could drift; new code paths had no convention
- * to follow and tended to forget the audit event.
+ * closure auto-dismissed, admin force update). Each event always writes
+ * an audit log entry and optionally fires a Slack alert.
  *
- * The transition-side-effects.service.ts handles status-change side
- * effects (Notion sync, therapist freezes, etc) — that's a parallel
- * concept keyed off `status` rather than checkpoint events.
+ * transition-side-effects.service.ts handles status-change side effects
+ * (Notion sync, therapist freezes, etc) — that's the parallel concept
+ * keyed off `status` rather than checkpoint events.
  */
 
-import { auditEventService, type AuditActor } from './audit-event.service';
+import { auditEventService, type AuditActor, type AppointmentEventPayload } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { logger } from '../utils/logger';
 import type { AlertSeverity } from './slack-notification.service';
@@ -53,21 +49,22 @@ export interface AppointmentEvent {
  * on Slack delivery).
  *
  * The audit entry uses `checkpoint_update` as the event type with `action`
- * set to the AppointmentEventType. This matches the existing convention
- * established by Phase 1's dismissClosureRecommendation.
+ * set to the AppointmentEventType.
  */
 export async function recordAppointmentEvent(event: AppointmentEvent): Promise<void> {
-  // Audit log is the durable record. Failure to write it should NOT throw —
-  // auditEventService.log already swallows + logs internally.
+  // Audit log is the durable record. auditEventService.log catches and logs
+  // internally, so the await never throws — but we still await so the audit
+  // entry lands before the (fire-and-forget) Slack call below.
+  const payload: AppointmentEventPayload = {
+    action: event.type,
+    ...(event.reason ? { reason: event.reason } : {}),
+    ...event.payload,
+  };
   await auditEventService.log(
     event.appointmentId,
     'checkpoint_update',
     event.actor,
-    {
-      action: event.type,
-      ...(event.reason ? { reason: event.reason } : {}),
-      ...event.payload,
-    } as never,
+    payload,
   );
 
   // Slack is fire-and-forget. We never block the caller on Slack delivery

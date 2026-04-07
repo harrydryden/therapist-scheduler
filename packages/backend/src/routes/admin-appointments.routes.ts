@@ -1400,7 +1400,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         // Use lifecycle service's force update — bypasses state machine validation
         // but still records audit trail, emits SSE notifications, and (for status
         // changes) sends a high-severity Slack alert so the bypass is visible.
-        // Phase 5: bypassStateMachine + reason are required.
+        // bypassStateMachine + reason are required by the lifecycle method.
         if (!reason || reason.trim().length === 0) {
           return Errors.badRequest(reply, 'reason is required when force-updating an appointment');
         }

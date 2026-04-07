@@ -1,5 +1,5 @@
 /**
- * Tests for trimConversationState's head+tail strategy (Phase 6).
+ * Tests for trimConversationState's head+tail strategy.
  * Verifies that long conversations preserve both the initial booking
  * context and the most recent activity, with a placeholder for the
  * dropped middle.

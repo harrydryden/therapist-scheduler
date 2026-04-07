@@ -243,9 +243,10 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
   });
 
   it('returns previousStage and restoredStage so callers can record audit events', async () => {
-    // Phase 4 moved audit logging to recordAppointmentEvent at the call site,
-    // so dismissClosureRecommendation now returns the stage info the caller
-    // needs for the audit payload rather than emitting it directly.
+    // dismissClosureRecommendation returns the stage info the caller needs
+    // for the audit payload rather than emitting the audit event itself —
+    // the recordAppointmentEvent helper at the call site picks the right
+    // event type ('closure_dismissed' vs 'closure_dismissed_auto').
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: new Date(),
       closureRecommendationActioned: false,

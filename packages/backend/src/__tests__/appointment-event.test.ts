@@ -1,5 +1,5 @@
 /**
- * Tests for the recordAppointmentEvent helper added in Phase 4.
+ * Tests for recordAppointmentEvent.
  * Verifies that every event always writes an audit log entry, that Slack
  * is fire-and-forget (doesn't throw on failure), and that omitting the
  * slack option silently skips the notification.

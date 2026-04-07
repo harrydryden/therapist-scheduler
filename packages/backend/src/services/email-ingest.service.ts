@@ -654,8 +654,8 @@ export class EmailIngestService {
     const errorMap = await getLastProcessingErrors(unprocessedIds);
 
     const messages = inboundMessages.map((m) => {
+      const status = processedMap.has(m.id) ? 'processed' as const : 'unprocessed' as const;
       const processedContext = processedMap.get(m.id);
-      const status = processedContext !== undefined ? 'processed' as const : 'unprocessed' as const;
       const lastError = status === 'unprocessed' ? errorMap.get(m.id) || undefined : undefined;
       return {
         messageId: m.id,

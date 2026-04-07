@@ -45,6 +45,7 @@ import { buildSystemPrompt } from './system-prompt-builder';
 import { runToolLoop } from './agent-tool-loop';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from './ai-tool-executor.service';
+import { ConcurrentModificationError } from '../errors';
 import {
   buildSchedulingContext,
   type SchedulingContext,
@@ -461,13 +462,12 @@ ${formatClassificationForPrompt(emailClassification)}`;
                 'Conversation state checkpointed before side-effecting tool execution'
               );
             } catch (checkpointError) {
-              const errorMsg = checkpointError instanceof Error ? checkpointError.message : 'Unknown';
-              if (errorMsg.includes('Optimistic locking conflict')) {
+              if (checkpointError instanceof ConcurrentModificationError) {
                 logger.warn(
                   { traceId: this.traceId, appointmentRequestId },
                   'Optimistic lock conflict at checkpoint - another process modified state'
                 );
-                throw new Error('Concurrent modification detected - request will be reprocessed');
+                throw checkpointError;
               }
               throw checkpointError;
             }

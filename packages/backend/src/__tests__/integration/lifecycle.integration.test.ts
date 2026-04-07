@@ -1,5 +1,5 @@
 /**
- * End-to-end lifecycle integration test (Phase 9).
+ * End-to-end lifecycle integration test.
  *
  * Walks an appointment through every legitimate state transition against a
  * REAL Postgres database. Verifies that:
@@ -365,7 +365,7 @@ integrationDescribe('Appointment lifecycle (e2e)', () => {
       expect(result.dismissed).toBe(true);
 
       const after = await prisma.appointmentRequest.findUnique({ where: { id: apt.id } });
-      // closureRecommendedAt is preserved for reporting fidelity (Phase prior)
+      // closureRecommendedAt is preserved for reporting fidelity
       expect(after?.closureRecommendedAt).not.toBeNull();
       expect(after?.closureRecommendationActioned).toBe(true);
       // Chase fields cleared
@@ -388,7 +388,7 @@ integrationDescribe('Appointment lifecycle (e2e)', () => {
     });
   });
 
-  describe('adminForceUpdate guardrails (Phase 5)', () => {
+  describe('adminForceUpdate guardrails', () => {
     it('throws when bypassStateMachine flag is missing (defensive runtime check)', async () => {
       const apt = await createTestAppointment();
       // Use `as any` to bypass the compile-time check
@@ -432,7 +432,7 @@ integrationDescribe('Appointment lifecycle (e2e)', () => {
     });
   });
 
-  describe('checkpoint stage column stays in sync with JSON (Phase 1 invariant)', () => {
+  describe('checkpoint stage column stays in sync with JSON', () => {
     it('after multiple transitions, checkpointStage column matches JSON', async () => {
       const apt = await createTestAppointment();
 

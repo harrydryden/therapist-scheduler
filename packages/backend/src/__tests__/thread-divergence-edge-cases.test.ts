@@ -1,15 +1,14 @@
 /**
- * Edge-case tests for the thread-divergence detector (Phase 8).
+ * Edge-case tests for the thread-divergence detector.
  *
  * The base divergence tests in thread-divergence.test.ts cover the happy
- * path. This file documents and pins down behavior on the FALSE-POSITIVE
- * RISK cases that matter most now that divergence-blocked messages
- * consume the same MAX_PROCESSING_FAILURES retry budget as real failures
- * (Phase 6 of the prior hardening pass).
+ * path. This file pins down behavior on the FALSE-POSITIVE RISK cases
+ * that matter most because divergence-blocked messages consume the same
+ * MAX_PROCESSING_FAILURES retry budget as real failures — a persistent
+ * false positive permanently abandons a legitimate message after 3 attempts.
  *
  * If any of these tests start failing, someone has changed the heuristics
- * in a way that may cause legitimate messages to be permanently abandoned
- * after 3 attempts. Investigate before merging.
+ * in a way that may abandon legitimate messages. Investigate before merging.
  */
 
 jest.mock('../utils/logger', () => ({
