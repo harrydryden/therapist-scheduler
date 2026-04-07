@@ -2,6 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
+import { runWithContext } from '../utils/request-context';
 import { emailProcessingService } from './email-processing.service';
 import { slackNotificationService } from './slack-notification.service';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
@@ -239,30 +240,41 @@ class MissedMessageScannerService {
 
         totalScanned += threadIds.length;
 
-        try {
-          // The therapist and client threads are independent Gmail API calls.
-          const results = await Promise.all(
-            threadIds.map(threadId =>
-              emailProcessingService.checkThreadForUnprocessedReplies(threadId, traceId)
-            )
-          );
-          const appointmentRecovered = results.reduce((sum, n) => sum + n, 0);
+        // Wrap the per-appointment thread scan in a request context so every
+        // log line emitted by checkThreadForUnprocessedReplies and the
+        // downstream processMessage call automatically gets traceId +
+        // appointmentId. Makes log correlation across the recovery chain
+        // possible without joining on message IDs by hand.
+        const appointmentRecovered = await runWithContext(
+          { traceId, appointmentId: appointment.id, source: 'missed-message-scanner' },
+          async () => {
+            try {
+              // The therapist and client threads are independent Gmail API calls.
+              const results = await Promise.all(
+                threadIds.map(threadId =>
+                  emailProcessingService.checkThreadForUnprocessedReplies(threadId, traceId)
+                )
+              );
+              return results.reduce((sum, n) => sum + n, 0);
+            } catch (error) {
+              totalFailed++;
+              logger.warn(
+                { scanId, appointmentId: appointment.id, error },
+                'Failed to scan appointment threads — continuing with next'
+              );
+              return 0;
+            }
+          },
+        );
 
-          if (appointmentRecovered > 0) {
-            totalRecovered += appointmentRecovered;
-            recoveredAppointments.push({
-              id: appointment.id,
-              therapistName: appointment.therapistName || 'Unknown',
-              userName: appointment.userName || 'Unknown',
-              count: appointmentRecovered,
-            });
-          }
-        } catch (error) {
-          totalFailed++;
-          logger.warn(
-            { scanId, appointmentId: appointment.id, error },
-            'Failed to scan appointment threads — continuing with next'
-          );
+        if (appointmentRecovered > 0) {
+          totalRecovered += appointmentRecovered;
+          recoveredAppointments.push({
+            id: appointment.id,
+            therapistName: appointment.therapistName || 'Unknown',
+            userName: appointment.userName || 'Unknown',
+            count: appointmentRecovered,
+          });
         }
       }
 

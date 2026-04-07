@@ -49,6 +49,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { classifyEmail } from '../utils/email-classifier';
+import { runWithContext, extendContext } from '../utils/request-context';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
   detectThreadDivergence,
@@ -339,6 +340,17 @@ export class EmailMessageProcessorService {
    * only one worker will process each message.
    */
   async processMessage(messageId: string, traceId: string): Promise<boolean> {
+    // Wrap the entire processMessage in a request context so every log line
+    // emitted by anything we await automatically picks up traceId. The
+    // appointmentId gets added to the context after we match the appointment
+    // (see extendContext() call below). Existing explicit traceId arguments
+    // in log payloads are preserved unchanged — they merge over the mixin.
+    return runWithContext({ traceId, source: 'message-processor' }, () =>
+      this.processMessageInner(messageId, traceId)
+    );
+  }
+
+  private async processMessageInner(messageId: string, traceId: string): Promise<boolean> {
     // Acquire a distributed lock AND check if already processed atomically
     // This eliminates the TOCTOU race condition window
     const lockKey = `${MESSAGE_LOCK_PREFIX}${messageId}`;
@@ -626,6 +638,10 @@ export class EmailMessageProcessorService {
         );
         return false;
       }
+
+      // Extend the request context with the matched appointmentId so every
+      // log line emitted from here on auto-includes it via the pino mixin.
+      extendContext({ appointmentId: appointmentRequest.id });
 
       logger.info(
         { traceId, messageId, appointmentRequestId: appointmentRequest.id },
