@@ -12,6 +12,8 @@ import {
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
 const PROCESSED_MESSAGES_KEY = 'gmail:processedMessages'; // ZSET with timestamp scores
 const MESSAGE_LOCK_PREFIX = 'gmail:lock:message:';
+const PROCESSING_FAILURE_PREFIX = 'gmail:processingFailure:';
+const UNMATCHED_ATTEMPT_PREFIX = 'gmail:unmatched:';
 
 // DB key for Gmail history ID persistence (SystemSetting id)
 const HISTORY_ID_SETTING_KEY = 'gmail.lastHistoryId';
@@ -692,15 +694,28 @@ export class EmailIngestService {
       });
       cleared = dbCleared;
 
-      // Clear from Redis (best effort)
+      // Clear from Redis (best effort): dedup set, locks, and any retry counters.
+      // Clearing the failure/unmatched counters gives the user a fresh attempt budget
+      // when they explicitly choose to recover messages — otherwise a previously
+      // abandoned message would immediately re-abandon on the next failed attempt.
       for (const messageId of forceMessageIds) {
         try {
           await redis.zrem(PROCESSED_MESSAGES_KEY, messageId);
-          // Also clear any lingering locks
           await redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`);
+          await redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`);
+          await redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`);
         } catch {
           // Redis failure is non-fatal
         }
+      }
+
+      // Also reset any database-tracked unmatched attempts (best-effort)
+      try {
+        await prisma.unmatchedEmailAttempt.deleteMany({
+          where: { id: { in: forceMessageIds } },
+        });
+      } catch (err) {
+        logger.warn({ traceId, err }, 'Failed to clear unmatched attempt records during force reprocess');
       }
 
       logger.info(

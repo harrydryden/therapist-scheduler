@@ -64,9 +64,12 @@ const {
   PROCESSED_MESSAGES_KEY,
   MESSAGE_LOCK_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
+  PROCESSING_FAILURE_PREFIX,
   PROCESSED_MESSAGE_TTL_DAYS,
   MAX_UNMATCHED_ATTEMPTS,
+  MAX_PROCESSING_FAILURES,
   UNMATCHED_ATTEMPT_TTL_SECONDS,
+  PROCESSING_FAILURE_TTL_SECONDS,
   CLEANUP_INTERVAL_MESSAGES,
   CLEANUP_COUNTER_KEY,
 } = EMAIL_PROCESSING;
@@ -131,6 +134,46 @@ async function safeRedisOp<T>(
     logger.warn({ err, context, traceId }, 'Redis operation failed - continuing without Redis');
     return null;
   }
+}
+
+/**
+ * Track and increment a processing-failure attempt counter for a message.
+ * Returns the updated attempt count.
+ *
+ * Uses Redis as the source of truth (with a generous 7-day TTL so failures
+ * across hourly scans accumulate). Falls back to attempt=1 on Redis failure
+ * to allow processing to continue degraded.
+ *
+ * This prevents the missed-message-scanner from infinitely re-attempting
+ * the same broken messages every hour.
+ */
+async function trackProcessingFailure(messageId: string, traceId: string): Promise<number> {
+  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
+  const result = await safeRedisOp(
+    async () => {
+      const attempts = await redis.incr(key);
+      // Only set TTL on first increment to avoid resetting it
+      if (attempts === 1) {
+        await redis.expire(key, PROCESSING_FAILURE_TTL_SECONDS);
+      }
+      return attempts;
+    },
+    'increment processing failure counter',
+    traceId,
+  );
+  return result ?? 1;
+}
+
+/**
+ * Clear the processing-failure counter (called on successful processing).
+ */
+async function clearProcessingFailures(messageId: string, traceId: string): Promise<void> {
+  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
+  await safeRedisOp(
+    () => redis.del(key),
+    'clear processing failure counter',
+    traceId,
+  );
 }
 
 /**
@@ -621,6 +664,8 @@ export class EmailMessageProcessorService {
 
       // Mark as processed AFTER successful processing
       await markMessageProcessed(messageId, traceId, 'successfully-processed');
+      // Clear any prior failure counter (best-effort)
+      await clearProcessingFailures(messageId, traceId);
 
       // Mark as read in Gmail
       const gmailClient = await emailOAuthService.ensureGmailClient();
@@ -634,7 +679,18 @@ export class EmailMessageProcessorService {
 
       return true;
     } catch (error) {
-      logger.error({ error, traceId, messageId }, 'Failed to process message - will retry on next poll');
+      // Track the failure across attempts so we don't retry forever.
+      // The missed-message scanner re-discovers failed messages every hour;
+      // without this counter, a persistently broken message would loop forever
+      // and block the scanner from progressing past it.
+      const attempts = await trackProcessingFailure(messageId, traceId);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      logger.error(
+        { error, traceId, messageId, attempts, maxAttempts: MAX_PROCESSING_FAILURES },
+        `Failed to process message (attempt ${attempts}/${MAX_PROCESSING_FAILURES})`
+      );
+
       // FIX E4: If using database fallback, delete the lock record to allow retry
       if (usingDatabaseFallback) {
         try {
@@ -649,7 +705,40 @@ export class EmailMessageProcessorService {
           }
         }
       }
-      // Don't mark as processed on error - will retry
+
+      // After max attempts, abandon the message and alert admin.
+      // The message is marked as processed (with a failure context) so the scanner
+      // stops re-discovering it. The admin must intervene manually.
+      if (attempts >= MAX_PROCESSING_FAILURES) {
+        logger.error(
+          { traceId, messageId, attempts, errorMessage },
+          'Message processing failed after max attempts — marking as abandoned to prevent infinite scanner loop'
+        );
+
+        try {
+          await markMessageProcessed(messageId, traceId, 'processing-failed-abandoned');
+        } catch (markErr) {
+          logger.error({ traceId, messageId, markErr }, 'Failed to mark abandoned message as processed');
+        }
+
+        // Best-effort Slack alert so admin knows manual intervention is needed
+        slackNotificationService.sendAlert({
+          title: 'Message Processing Abandoned',
+          severity: 'high',
+          details:
+            `A Gmail message failed to process after *${attempts}* attempts and has been abandoned ` +
+            'to prevent the scanner from looping. Manual review required.\n\n' +
+            `Last error: ${errorMessage.slice(0, 500)}`,
+          additionalFields: {
+            'Message ID': messageId,
+            'Attempts': String(attempts),
+          },
+        }).catch((slackErr) => {
+          logger.warn({ traceId, slackErr }, 'Failed to send Slack alert for abandoned message');
+        });
+      }
+
+      // Don't mark as processed on error (unless abandoned above) - will retry
       return false;
     } finally {
       // Only manage Redis lock if not using database fallback

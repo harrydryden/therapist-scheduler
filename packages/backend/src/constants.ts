@@ -307,12 +307,18 @@ export const EMAIL_PROCESSING = {
   MESSAGE_LOCK_PREFIX: 'gmail:lock:message:',
   /** Redis key prefix for unmatched attempt tracking */
   UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
+  /** Redis key prefix for processing-failure attempt tracking */
+  PROCESSING_FAILURE_PREFIX: 'gmail:processingFailure:',
   /** Days to keep processed message IDs */
   PROCESSED_MESSAGE_TTL_DAYS: 30,
   /** Max attempts to match a message before giving up */
   MAX_UNMATCHED_ATTEMPTS: 3,
+  /** Max attempts to process a message (post-match) before giving up to prevent infinite scanner loops */
+  MAX_PROCESSING_FAILURES: 3,
   /** TTL for unmatched attempt tracking (seconds) */
   UNMATCHED_ATTEMPT_TTL_SECONDS: 3600,
+  /** TTL for processing-failure tracking (seconds) — generous so failures across hourly scans accumulate */
+  PROCESSING_FAILURE_TTL_SECONDS: 7 * 24 * 60 * 60,
   /** Only run cleanup every N messages */
   CLEANUP_INTERVAL_MESSAGES: 100,
   /** Redis key for atomic cleanup counter */
