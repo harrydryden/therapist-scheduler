@@ -24,6 +24,12 @@ import { CONVERSATION_LIMITS } from '../constants';
 import { resilientCall } from '../utils/resilient-call';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
 import type { ConversationState } from '../types';
+import type { Prisma } from '@prisma/client';
+import {
+  updateCheckpoint,
+  type ConversationAction,
+  type ConversationCheckpoint,
+} from '../utils/conversation-checkpoint';
 
 import type { ConversationMessage } from './scheduling-context.service';
 
@@ -108,6 +114,131 @@ export class AIConversationService {
         select: { id: true },
       });
     }
+  }
+
+  /**
+   * Atomically apply a checkpoint mutation AND optional extra field updates.
+   *
+   * The single source of truth for checkpoint state is
+   * `conversationState.checkpoint` (JSON). The denormalized DB column
+   * `checkpointStage` is derived from the JSON and must never be written
+   * directly by callers — use this helper instead.
+   *
+   * This exists because prior code had ~4 different direct writers of
+   * `appointmentRequest.checkpointStage` (chase-email, ai-tool-executor,
+   * justin-time reschedule path, dismissClosureRecommendation). They drifted
+   * out of sync with the JSON and caused real bugs. Routing everything
+   * through this helper enforces the invariant column == derive(JSON).
+   *
+   * Handles optimistic-lock conflicts with a small retry budget. If the
+   * caller supplies `extraWhere` (e.g. a sentinel guard), a lost-lock is
+   * treated as a semantic failure — we don't retry past a changed guard.
+   *
+   * Use `applyCheckpointAction` for the common case of "advance via a
+   * ConversationAction". Use this lower-level `applyCheckpointUpdate` when
+   * the new checkpoint depends on the current one (e.g. dismissing closure
+   * and restoring an inferred prior stage).
+   */
+  async applyCheckpointUpdate(
+    appointmentRequestId: string,
+    mutate: (current: ConversationCheckpoint | null) => ConversationCheckpoint,
+    options?: {
+      extraUpdates?: Prisma.AppointmentRequestUpdateInput;
+      extraWhere?: Prisma.AppointmentRequestWhereInput;
+      maxRetries?: number;
+    }
+  ): Promise<{ applied: boolean; stage: string | null }> {
+    const maxRetries = options?.maxRetries ?? 3;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const record = await prisma.appointmentRequest.findUnique({
+        where: { id: appointmentRequestId },
+        select: { conversationState: true, updatedAt: true },
+      });
+      if (!record) {
+        return { applied: false, stage: null };
+      }
+
+      const state = record.conversationState
+        ? parseConversationState(record.conversationState as Prisma.JsonValue)
+        : null;
+      if (!state) {
+        // No conversation state yet — can't apply a checkpoint mutation.
+        // Happens very early in the lifecycle before the agent runs.
+        return { applied: false, stage: null };
+      }
+
+      state.checkpoint = mutate(state.checkpoint ?? null);
+      const stateJson = JSON.stringify(state);
+      const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
+
+      const now = new Date();
+      const result = await prisma.appointmentRequest.updateMany({
+        where: {
+          id: appointmentRequestId,
+          updatedAt: record.updatedAt,
+          ...options?.extraWhere,
+        },
+        data: {
+          conversationState: stateJson,
+          messageCount,
+          checkpointStage,
+          updatedAt: now,
+          ...options?.extraUpdates,
+        },
+      });
+
+      if (result.count === 1) {
+        return { applied: true, stage: checkpointStage };
+      }
+
+      // Lost the optimistic lock. If the caller's extraWhere guard failed
+      // (e.g. sentinel changed), that's a semantic failure — stop retrying.
+      if (options?.extraWhere) {
+        const stillMatchesGuard = await prisma.appointmentRequest.count({
+          where: { id: appointmentRequestId, ...options.extraWhere },
+        });
+        if (stillMatchesGuard === 0) {
+          logger.info(
+            { appointmentRequestId },
+            'applyCheckpointUpdate: caller guard no longer matches, stopping retry'
+          );
+          return { applied: false, stage: null };
+        }
+      }
+
+      logger.debug(
+        { appointmentRequestId, attempt: attempt + 1 },
+        'applyCheckpointUpdate: optimistic lock conflict, retrying'
+      );
+    }
+
+    logger.warn(
+      { appointmentRequestId, maxRetries },
+      'applyCheckpointUpdate: exhausted retry budget on optimistic lock conflicts'
+    );
+    return { applied: false, stage: null };
+  }
+
+  /**
+   * Convenience wrapper for the common "advance checkpoint via a
+   * ConversationAction" case. Delegates to `applyCheckpointUpdate`.
+   */
+  async applyCheckpointAction(
+    appointmentRequestId: string,
+    action: ConversationAction,
+    options?: {
+      extraUpdates?: Prisma.AppointmentRequestUpdateInput;
+      extraWhere?: Prisma.AppointmentRequestWhereInput;
+      contextUpdates?: { lastEmailSentTo?: 'user' | 'therapist' };
+      maxRetries?: number;
+    }
+  ): Promise<{ applied: boolean; stage: string | null }> {
+    return this.applyCheckpointUpdate(
+      appointmentRequestId,
+      (current) => updateCheckpoint(current, action, null, options?.contextUpdates),
+      options,
+    );
   }
 
   /**
@@ -602,3 +733,8 @@ Example unsubscribe response:
 - unsubscribe_user: Use this to remove a user from the weekly mailing list when they request it`;
   }
 }
+
+// Singleton for callers that don't need per-request tracing (chase-email,
+// lifecycle transitions, etc). The traceId is only used for logging inside
+// the instance, so a default is fine here.
+export const aiConversationService = new AIConversationService('shared');

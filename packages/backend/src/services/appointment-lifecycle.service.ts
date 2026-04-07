@@ -32,7 +32,7 @@ import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
 import { auditEventService } from './audit-event.service';
-import { AIConversationService } from './ai-conversation.service';
+import { aiConversationService } from './ai-conversation.service';
 import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../utils/conversation-checkpoint';
 
 // ============================================
@@ -1561,7 +1561,6 @@ class AppointmentLifecycleService {
         checkpointStage: true,
         chaseSentTo: true,
         humanControlTakenBy: true,
-        conversationState: true,
       },
     });
 
@@ -1569,74 +1568,70 @@ class AppointmentLifecycleService {
       return { dismissed: false };
     }
 
-    // Step 1: reconcile the JSON checkpoint if it's wedged at closure_recommended.
-    // Failures here are logged but don't block the rest of the dismissal — at worst
-    // the agent sees a stale JSON until the next save corrects it.
-    const conversationStateJson = appointment.conversationState as
-      | { checkpoint?: ConversationCheckpoint; messages?: unknown[]; systemPrompt?: string }
-      | null;
-    const jsonStage = conversationStateJson?.checkpoint?.stage;
-    let restoredStage: ConversationStage | null = jsonStage ?? null;
+    const previousStage = appointment.checkpointStage || 'closure_recommended';
 
-    if (jsonStage === 'closure_recommended') {
-      restoredStage = inferRestoredStage(conversationStateJson?.checkpoint, appointment.chaseSentTo);
-      try {
-        const aiConversation = new AIConversationService(`dismiss-closure:${appointmentId}`);
-        const stateWithVersion = await aiConversation.getConversationState(appointmentId);
-        if (stateWithVersion?.checkpoint?.stage === 'closure_recommended') {
-          const { _version, ...state } = stateWithVersion;
-          state.checkpoint = {
-            ...state.checkpoint,
+    // Atomic: reconcile JSON checkpoint + derive column + clear closure/chase fields.
+    // The JSON checkpoint is the source of truth — we mutate it in the callback
+    // and the helper derives the column from the result. We preserve
+    // closureRecommendedAt and closureRecommendedReason for historical reporting
+    // (work-report counts per period); the actionable signal is
+    // closureRecommendationActioned.
+    const result = await aiConversationService.applyCheckpointUpdate(
+      appointmentId,
+      (current) => {
+        // Only rewrite the JSON checkpoint if it was actually at closure_recommended
+        // (the chase-recommended path leaves the JSON at the underlying stage).
+        // For everything else, keep the checkpoint as-is and let the helper
+        // derive the column from it.
+        if (current?.stage === 'closure_recommended') {
+          const restoredStage = inferRestoredStage(current, appointment.chaseSentTo);
+          return {
+            ...current,
             stage: restoredStage,
             pendingAction: null,
             checkpoint_at: new Date().toISOString(),
           };
-          await aiConversation.storeConversationState(appointmentId, state, _version);
         }
-      } catch (err) {
-        logger.warn(
-          { appointmentId, err },
-          'Failed to reconcile JSON checkpoint during closure dismissal — continuing'
-        );
-      }
+        return current ?? {
+          stage: inferRestoredStage(null, appointment.chaseSentTo),
+          lastSuccessfulAction: null,
+          pendingAction: null,
+          checkpoint_at: new Date().toISOString(),
+        };
+      },
+      {
+        extraUpdates: {
+          closureRecommendationActioned: true,
+          chaseSentAt: null,
+          chaseSentTo: null,
+          chaseTargetEmail: null,
+          // Release agent-flagged human control so the agent can resume processing.
+          // Admin-set human control is left alone — the admin opted in explicitly.
+          ...(appointment.humanControlTakenBy === 'agent-flagged' && {
+            humanControlEnabled: false,
+          }),
+        },
+      },
+    );
+
+    if (!result.applied) {
+      logger.warn(
+        { appointmentId, source, reason },
+        'Closure dismissal lost optimistic lock after retries'
+      );
+      return { dismissed: false };
     }
 
-    // Don't put the denormalized column back into a recovery stage.
-    const safeRestoredStage =
-      restoredStage && restoredStage !== 'chased' && restoredStage !== 'closure_recommended'
-        ? restoredStage
-        : null;
-
-    // Step 2: action the closure recommendation. We preserve closureRecommendedAt
-    // and closureRecommendedReason for historical reporting (work-report counts
-    // recommendations per period). The actionable signal is closureRecommendationActioned.
-    await prisma.appointmentRequest.update({
-      where: { id: appointmentId },
-      data: {
-        closureRecommendationActioned: true,
-        chaseSentAt: null,
-        chaseSentTo: null,
-        chaseTargetEmail: null,
-        checkpointStage: safeRestoredStage,
-        // Release agent-flagged human control so the agent can resume processing.
-        // Admin-set human control is left alone — the admin opted in explicitly.
-        ...(appointment.humanControlTakenBy === 'agent-flagged' && {
-          humanControlEnabled: false,
-        }),
-      },
-      select: { id: true },
-    });
-
     await auditEventService.log(appointmentId, 'checkpoint_update', actorForSource(source), {
-      previousStage: appointment.checkpointStage || 'closure_recommended',
-      newStage: safeRestoredStage || 'none',
+      previousStage,
+      newStage: result.stage || 'none',
       action: 'closure_dismissed',
       reason,
       ...(adminId && { adminId }),
     } as never);
 
     logger.info(
-      { appointmentId, source, reason, restoredStage: safeRestoredStage },
+      { appointmentId, source, reason, restoredStage: result.stage },
       'Closure recommendation dismissed'
     );
 

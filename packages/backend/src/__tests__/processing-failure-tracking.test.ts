@@ -4,7 +4,7 @@
  * auto-dismiss OOO gate.
  *
  * These cover the code paths added in the booking_method-incident response.
- * They are unit tests with mocked Prisma + Redis — the integration test in
+ * They are unit tests with mocked Prisma — the integration test in
  * src/__tests__/integration/ exercises the same flows against a real DB.
  */
 
@@ -29,36 +29,8 @@ jest.mock('../utils/database', () => ({
       findUnique: jest.fn(),
       update: jest.fn(),
     },
-    messageProcessingFailure: {
-      upsert: jest.fn(),
-      findUnique: jest.fn(),
-      findMany: jest.fn(),
-      update: jest.fn(),
-      deleteMany: jest.fn(),
-    },
-    processedGmailMessage: {
-      deleteMany: jest.fn(),
-    },
   },
 }));
-
-jest.mock('../utils/redis', () => {
-  const store = new Map<string, string>();
-  return {
-    redis: {
-      get: jest.fn((key: string) => Promise.resolve(store.get(key) || null)),
-      set: jest.fn((key: string, value: string) => {
-        store.set(key, value);
-        return Promise.resolve('OK');
-      }),
-      del: jest.fn((key: string) => {
-        store.delete(key);
-        return Promise.resolve(1);
-      }),
-      __store: store,
-    },
-  };
-});
 
 jest.mock('../services/audit-event.service', () => ({
   auditEventService: {
@@ -70,11 +42,17 @@ jest.mock('../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {},
 }));
 
+// Mock the aiConversationService singleton that dismissClosureRecommendation
+// now calls for the unified JSON-checkpoint write path. The tests exercise the
+// dismissal's control flow — whether it calls the helper with the right mutation
+// closure, whether it records audit events, etc. The helper's own behavior
+// (lock retry, DB write) is exercised by the integration test suite.
+const mockApplyCheckpointUpdate = jest.fn();
 jest.mock('../services/ai-conversation.service', () => ({
-  AIConversationService: jest.fn().mockImplementation(() => ({
-    getConversationState: jest.fn().mockResolvedValue(null),
-    storeConversationState: jest.fn().mockResolvedValue(undefined),
-  })),
+  aiConversationService: {
+    applyCheckpointUpdate: mockApplyCheckpointUpdate,
+  },
+  AIConversationService: jest.fn(),
 }));
 
 // ============================================
@@ -82,12 +60,8 @@ jest.mock('../services/ai-conversation.service', () => ({
 // ============================================
 
 import { prisma } from '../utils/database';
-import { redis } from '../utils/redis';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { auditEventService } from '../services/audit-event.service';
-import { AIConversationService } from '../services/ai-conversation.service';
-
-const testRedis = redis as unknown as { __store: Map<string, string> };
 
 // ============================================
 // dismissClosureRecommendation
@@ -96,7 +70,7 @@ const testRedis = redis as unknown as { __store: Map<string, string> };
 describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    testRedis.__store.clear();
+    mockApplyCheckpointUpdate.mockResolvedValue({ applied: true, stage: 'awaiting_therapist_availability' });
   });
 
   it('returns dismissed=false when appointment has no closure recommendation', async () => {
@@ -106,7 +80,6 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       checkpointStage: null,
       chaseSentTo: null,
       humanControlTakenBy: null,
-      conversationState: null,
     });
 
     const result = await appointmentLifecycleService.dismissClosureRecommendation({
@@ -115,7 +88,7 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     });
 
     expect(result.dismissed).toBe(false);
-    expect(prisma.appointmentRequest.update).not.toHaveBeenCalled();
+    expect(mockApplyCheckpointUpdate).not.toHaveBeenCalled();
   });
 
   it('returns dismissed=false when recommendation already actioned (idempotent)', async () => {
@@ -125,7 +98,6 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       checkpointStage: 'closure_recommended',
       chaseSentTo: null,
       humanControlTakenBy: null,
-      conversationState: null,
     });
 
     const result = await appointmentLifecycleService.dismissClosureRecommendation({
@@ -134,10 +106,10 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     });
 
     expect(result.dismissed).toBe(false);
-    expect(prisma.appointmentRequest.update).not.toHaveBeenCalled();
+    expect(mockApplyCheckpointUpdate).not.toHaveBeenCalled();
   });
 
-  it('preserves closureRecommendedAt when dismissing (for reporting fidelity)', async () => {
+  it('preserves closureRecommendedAt in extraUpdates (for reporting fidelity)', async () => {
     const closureTime = new Date('2026-04-01');
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: closureTime,
@@ -145,9 +117,7 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       checkpointStage: 'closure_recommended',
       chaseSentTo: 'therapist',
       humanControlTakenBy: null,
-      conversationState: { checkpoint: { stage: 'awaiting_therapist_availability' } },
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
 
     const result = await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
@@ -156,97 +126,85 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     });
 
     expect(result.dismissed).toBe(true);
-    const updateData = (prisma.appointmentRequest.update as jest.Mock).mock.calls[0][0].data;
-    expect(updateData.closureRecommendationActioned).toBe(true);
+    expect(mockApplyCheckpointUpdate).toHaveBeenCalledTimes(1);
+    const [, , options] = mockApplyCheckpointUpdate.mock.calls[0];
+    const extraUpdates = options.extraUpdates;
     // Crucial: timestamp must NOT be nulled — work-report counts on it
-    expect(updateData).not.toHaveProperty('closureRecommendedAt');
-    expect(updateData).not.toHaveProperty('closureRecommendedReason');
+    expect(extraUpdates.closureRecommendationActioned).toBe(true);
+    expect(extraUpdates).not.toHaveProperty('closureRecommendedAt');
+    expect(extraUpdates).not.toHaveProperty('closureRecommendedReason');
   });
 
-  it('clears chase fields and restores checkpoint stage from JSON', async () => {
+  it('clears chase fields via extraUpdates', async () => {
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: new Date(),
       closureRecommendationActioned: false,
       checkpointStage: 'closure_recommended',
       chaseSentTo: 'therapist',
       humanControlTakenBy: null,
-      conversationState: { checkpoint: { stage: 'awaiting_therapist_availability' } },
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
 
     await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
       source: 'system',
     });
 
-    const updateData = (prisma.appointmentRequest.update as jest.Mock).mock.calls[0][0].data;
-    expect(updateData.chaseSentAt).toBeNull();
-    expect(updateData.chaseSentTo).toBeNull();
-    expect(updateData.chaseTargetEmail).toBeNull();
-    expect(updateData.checkpointStage).toBe('awaiting_therapist_availability');
+    const [, , options] = mockApplyCheckpointUpdate.mock.calls[0];
+    const extraUpdates = options.extraUpdates;
+    expect(extraUpdates.chaseSentAt).toBeNull();
+    expect(extraUpdates.chaseSentTo).toBeNull();
+    expect(extraUpdates.chaseTargetEmail).toBeNull();
   });
 
-  it('reconciles JSON checkpoint when stage is closure_recommended (agent-recommended path)', async () => {
-    const fakeAi = {
-      getConversationState: jest.fn().mockResolvedValue({
-        _version: new Date(),
-        checkpoint: {
-          stage: 'closure_recommended',
-          lastSuccessfulAction: 'sent_initial_email_to_therapist',
-        },
-        messages: [],
-      }),
-      storeConversationState: jest.fn().mockResolvedValue(undefined),
+  it('mutation callback restores stage from lastSuccessfulAction when JSON is at closure_recommended', async () => {
+    (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
+      closureRecommendedAt: new Date(),
+      closureRecommendationActioned: false,
+      checkpointStage: 'closure_recommended',
+      chaseSentTo: 'therapist',
+      humanControlTakenBy: null,
+    });
+
+    await appointmentLifecycleService.dismissClosureRecommendation({
+      appointmentId: 'apt-1',
+      source: 'system',
+    });
+
+    // Invoke the mutation closure with a checkpoint that's currently at closure_recommended
+    const [, mutate] = mockApplyCheckpointUpdate.mock.calls[0];
+    const newCheckpoint = mutate({
+      stage: 'closure_recommended',
+      lastSuccessfulAction: 'sent_initial_email_to_therapist',
+      pendingAction: 'waiting',
+      checkpoint_at: new Date().toISOString(),
+    });
+    expect(newCheckpoint.stage).toBe('awaiting_therapist_availability');
+    expect(newCheckpoint.pendingAction).toBeNull();
+  });
+
+  it('mutation callback leaves stage alone when JSON is already non-closure', async () => {
+    (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
+      closureRecommendedAt: new Date(),
+      closureRecommendationActioned: false,
+      checkpointStage: 'closure_recommended',
+      chaseSentTo: 'therapist',
+      humanControlTakenBy: null,
+    });
+
+    await appointmentLifecycleService.dismissClosureRecommendation({
+      appointmentId: 'apt-1',
+      source: 'system',
+    });
+
+    const [, mutate] = mockApplyCheckpointUpdate.mock.calls[0];
+    const existing = {
+      stage: 'awaiting_therapist_availability' as const,
+      lastSuccessfulAction: 'sent_initial_email_to_therapist' as const,
+      pendingAction: null,
+      checkpoint_at: '2026-04-01T00:00:00Z',
     };
-    (AIConversationService as jest.Mock).mockImplementation(() => fakeAi);
-
-    (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
-      closureRecommendedAt: new Date(),
-      closureRecommendationActioned: false,
-      checkpointStage: 'closure_recommended',
-      chaseSentTo: 'therapist',
-      humanControlTakenBy: null,
-      conversationState: { checkpoint: { stage: 'closure_recommended', lastSuccessfulAction: 'sent_initial_email_to_therapist' } },
-    });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
-
-    await appointmentLifecycleService.dismissClosureRecommendation({
-      appointmentId: 'apt-1',
-      source: 'system',
-    });
-
-    expect(fakeAi.storeConversationState).toHaveBeenCalled();
-    const storedState = fakeAi.storeConversationState.mock.calls[0][1];
-    // The stage should be inferred from lastSuccessfulAction
-    expect(storedState.checkpoint.stage).toBe('awaiting_therapist_availability');
-    expect(storedState.checkpoint.pendingAction).toBeNull();
-  });
-
-  it('does not reconcile JSON checkpoint when stage is not closure_recommended', async () => {
-    const fakeAi = {
-      getConversationState: jest.fn(),
-      storeConversationState: jest.fn(),
-    };
-    (AIConversationService as jest.Mock).mockImplementation(() => fakeAi);
-
-    (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
-      closureRecommendedAt: new Date(),
-      closureRecommendationActioned: false,
-      checkpointStage: 'closure_recommended',
-      chaseSentTo: 'therapist',
-      humanControlTakenBy: null,
-      conversationState: { checkpoint: { stage: 'awaiting_therapist_availability' } },
-    });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
-
-    await appointmentLifecycleService.dismissClosureRecommendation({
-      appointmentId: 'apt-1',
-      source: 'system',
-    });
-
-    // JSON checkpoint already correct → no AI service call needed
-    expect(fakeAi.getConversationState).not.toHaveBeenCalled();
-    expect(fakeAi.storeConversationState).not.toHaveBeenCalled();
+    const newCheckpoint = mutate(existing);
+    expect(newCheckpoint).toBe(existing); // same reference — unmodified
   });
 
   it('releases agent-flagged human control but leaves admin-flagged alone', async () => {
@@ -256,37 +214,33 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       checkpointStage: 'closure_recommended',
       chaseSentTo: null,
       humanControlTakenBy: 'agent-flagged',
-      conversationState: null,
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
 
     await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
       source: 'system',
     });
 
-    let updateData = (prisma.appointmentRequest.update as jest.Mock).mock.calls[0][0].data;
-    expect(updateData.humanControlEnabled).toBe(false);
+    let [, , options] = mockApplyCheckpointUpdate.mock.calls[0];
+    expect(options.extraUpdates.humanControlEnabled).toBe(false);
 
-    // Reset and try with admin-set human control
     jest.clearAllMocks();
+    mockApplyCheckpointUpdate.mockResolvedValue({ applied: true, stage: 'awaiting_therapist_availability' });
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValueOnce({
       closureRecommendedAt: new Date(),
       closureRecommendationActioned: false,
       checkpointStage: 'closure_recommended',
       chaseSentTo: null,
       humanControlTakenBy: 'admin',
-      conversationState: null,
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
 
     await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
       source: 'system',
     });
 
-    updateData = (prisma.appointmentRequest.update as jest.Mock).mock.calls[0][0].data;
-    expect(updateData).not.toHaveProperty('humanControlEnabled');
+    [, , options] = mockApplyCheckpointUpdate.mock.calls[0];
+    expect(options.extraUpdates).not.toHaveProperty('humanControlEnabled');
   });
 
   it('logs an audit event with the correct actor for the source', async () => {
@@ -296,9 +250,7 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
       checkpointStage: 'closure_recommended',
       chaseSentTo: null,
       humanControlTakenBy: null,
-      conversationState: { checkpoint: { stage: 'awaiting_therapist_availability' } },
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
 
     await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
@@ -319,25 +271,22 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     );
   });
 
-  it('infers stage from chaseSentTo when JSON has no usable lastSuccessfulAction', async () => {
+  it('returns dismissed=false when helper loses optimistic lock', async () => {
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: new Date(),
       closureRecommendationActioned: false,
       checkpointStage: 'closure_recommended',
-      chaseSentTo: 'user',
+      chaseSentTo: null,
       humanControlTakenBy: null,
-      conversationState: null, // No checkpoint to read
     });
-    (prisma.appointmentRequest.update as jest.Mock).mockResolvedValue({});
+    mockApplyCheckpointUpdate.mockResolvedValue({ applied: false, stage: null });
 
-    await appointmentLifecycleService.dismissClosureRecommendation({
+    const result = await appointmentLifecycleService.dismissClosureRecommendation({
       appointmentId: 'apt-1',
       source: 'system',
     });
 
-    const updateData = (prisma.appointmentRequest.update as jest.Mock).mock.calls[0][0].data;
-    // No JSON stage to restore → falls back based on chaseSentTo
-    // (null since the conversationState was null, which is a valid restored stage)
-    expect(updateData.checkpointStage).toBeNull();
+    expect(result.dismissed).toBe(false);
+    expect(auditEventService.log).not.toHaveBeenCalled();
   });
 });

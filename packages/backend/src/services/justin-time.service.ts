@@ -641,6 +641,10 @@ ${formatClassificationForPrompt(emailClassification)}`;
         );
       } else if (initiatedReschedule) {
         // Agent confirmed this is a reschedule. Clear the confirmed date/time.
+        // checkpointStage is intentionally NOT set here — the agent tool loop
+        // already advanced the JSON checkpoint via the `initiated_reschedule`
+        // action, and the subsequent storeConversationState call will sync
+        // the denormalized column from the JSON.
         await prisma.appointmentRequest.update({
           where: { id: appointmentRequestId },
           data: {
@@ -649,7 +653,6 @@ ${formatClassificationForPrompt(emailClassification)}`;
             previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
             confirmedDateTime: null,
             confirmedDateTimeParsed: null,
-            checkpointStage: 'rescheduling',
           },
           select: { id: true },
         });
