@@ -23,9 +23,6 @@ export interface TemplateVariables {
   // Voucher variables (weekly mailing with voucher codes)
   voucherCode?: string;
   voucherExpiry?: string;
-  // Unified weekly email sections
-  newTherapistsSection?: string;
-  voucherSection?: string;
   // Allow arbitrary template variables
   [key: string]: string | undefined;
 }

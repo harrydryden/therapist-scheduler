@@ -898,20 +898,8 @@ Justin`,
   },
 
   // === VOUCHER EMAIL TEMPLATES ===
-  'email.voucherReminderSubject': {
-    category: 'emailTemplates',
-    label: 'Voucher Reminder - Subject (unused, kept for compatibility)',
-    description: 'No longer used — reminders are now part of the unified weekly email.',
-    valueType: 'string',
-    defaultValue: 'Your weekly therapy update',
-  },
-  'email.voucherReminderBody': {
-    category: 'emailTemplates',
-    label: 'Voucher Reminder - Body (unused, kept for compatibility)',
-    description: 'No longer used — reminders are now part of the unified weekly email.',
-    valueType: 'string',
-    defaultValue: 'Reminder: your booking link expires on {voucherExpiry}. Don\'t miss out on your free therapy session — book before it expires.',
-  },
+  // Voucher reminders are now part of the unified weekly email body
+  // (see email.weeklyMailingBody / {voucherSection}).
   'email.voucherFinalNoticeSubject': {
     category: 'emailTemplates',
     label: 'Voucher Final Notice - Subject',

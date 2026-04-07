@@ -7,11 +7,16 @@ import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
 } from '../utils/gmail-auth';
+import { EMAIL_PROCESSING } from '../constants';
 
 // Redis keys
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
-const PROCESSED_MESSAGES_KEY = 'gmail:processedMessages'; // ZSET with timestamp scores
-const MESSAGE_LOCK_PREFIX = 'gmail:lock:message:';
+const {
+  PROCESSED_MESSAGES_KEY,
+  MESSAGE_LOCK_PREFIX,
+  PROCESSING_FAILURE_PREFIX,
+  UNMATCHED_ATTEMPT_PREFIX,
+} = EMAIL_PROCESSING;
 
 // DB key for Gmail history ID persistence (SystemSetting id)
 const HISTORY_ID_SETTING_KEY = 'gmail.lastHistoryId';
@@ -692,15 +697,26 @@ export class EmailIngestService {
       });
       cleared = dbCleared;
 
-      // Clear from Redis (best effort)
-      for (const messageId of forceMessageIds) {
-        try {
-          await redis.zrem(PROCESSED_MESSAGES_KEY, messageId);
-          // Also clear any lingering locks
-          await redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`);
-        } catch {
-          // Redis failure is non-fatal
-        }
+      // Clear from Redis (best effort): dedup set, locks, and retry counters.
+      // The counter clear gives users a fresh attempt budget when they explicitly
+      // recover messages — otherwise a previously abandoned message would
+      // re-abandon on its first failed retry. All ops issued concurrently.
+      await Promise.all(
+        forceMessageIds.flatMap((messageId) => [
+          redis.zrem(PROCESSED_MESSAGES_KEY, messageId).catch(() => {}),
+          redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`).catch(() => {}),
+          redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`).catch(() => {}),
+          redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`).catch(() => {}),
+        ])
+      );
+
+      // Also reset any database-tracked unmatched attempts (best-effort)
+      try {
+        await prisma.unmatchedEmailAttempt.deleteMany({
+          where: { id: { in: forceMessageIds } },
+        });
+      } catch (err) {
+        logger.warn({ traceId, err }, 'Failed to clear unmatched attempt records during force reprocess');
       }
 
       logger.info(
