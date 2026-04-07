@@ -291,11 +291,22 @@ async function buildServer() {
       ...timeoutStats,
     };
 
+    // Missed-message scanner — heartbeat freshness check.
+    // The scanner writes a heartbeat to Redis on every successful scan.
+    // If it's stale (or missing), the scanner is unhealthy and incoming
+    // therapist replies may be sitting unprocessed.
+    const scannerStatus = await missedMessageScannerService.getStatus();
+    checks.missedMessageScanner = {
+      status: scannerStatus.healthy ? 'ok' : 'degraded',
+      ...scannerStatus,
+    };
+
     // Overall status
     const overallStatus = dbHealth.connected &&
       openCircuits.length === 0 &&
       taskHealth.healthy &&
-      timeoutStats.recentCount < 10
+      timeoutStats.recentCount < 10 &&
+      scannerStatus.healthy
       ? 'ok' : 'degraded';
 
     return {

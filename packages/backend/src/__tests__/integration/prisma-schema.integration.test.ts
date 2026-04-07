@@ -192,6 +192,15 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
         },
       },
       {
+        name: 'MessageProcessingFailure',
+        run: async () => {
+          await prisma.messageProcessingFailure.create({
+            data: { id: 'msg-3', lastError: 'test error' },
+          });
+          return prisma.messageProcessingFailure.findMany();
+        },
+      },
+      {
         name: 'SystemSetting',
         run: async () => {
           await prisma.systemSetting.create({

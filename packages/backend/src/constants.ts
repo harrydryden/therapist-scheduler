@@ -307,10 +307,8 @@ export const EMAIL_PROCESSING = {
   MESSAGE_LOCK_PREFIX: 'gmail:lock:message:',
   /** Redis key prefix for unmatched attempt tracking */
   UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
-  /** Redis key prefix for processing-failure attempt tracking */
+  /** Redis key prefix for processing-failure attempt count cache (DB is source of truth) */
   PROCESSING_FAILURE_PREFIX: 'gmail:processingFailure:',
-  /** Redis key prefix for last processing error message (diagnostic) */
-  PROCESSING_ERROR_PREFIX: 'gmail:processingError:',
   /** Redis key prefix for first-failure Slack alert dedup */
   PROCESSING_ALERT_DEDUP_PREFIX: 'gmail:processingAlertDedup:',
   /** Days to keep processed message IDs */

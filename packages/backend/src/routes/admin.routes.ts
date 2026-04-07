@@ -5,6 +5,7 @@ import { emailProcessingService } from '../services/email-processing.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { redis } from '../utils/redis';
 import { logger } from '../utils/logger';
+import { prisma } from '../utils/database';
 import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
 import { getSettingValues } from '../services/settings.service';
@@ -251,6 +252,111 @@ export async function adminRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to trigger missed message scan');
         return Errors.internal(reply, 'Failed to trigger missed message scan');
+      }
+    }
+  );
+
+  /**
+   * GET /api/admin/processing-failures
+   * List recent message processing failures (active and abandoned). Used by
+   * the admin diagnostics UI to show what's currently failing in the scanner
+   * pipeline. Optional query: ?abandoned=true to filter to abandoned only.
+   */
+  fastify.get<{ Querystring: { abandoned?: string; limit?: string } }>(
+    '/api/admin/processing-failures',
+    async (request, reply) => {
+      const { abandoned, limit } = request.query;
+      const take = Math.min(parseInt(limit || '50', 10) || 50, 200);
+      const where = abandoned === 'true' ? { abandoned: true } : {};
+
+      try {
+        const failures = await prisma.messageProcessingFailure.findMany({
+          where,
+          orderBy: { lastFailedAt: 'desc' },
+          take,
+        });
+        return sendSuccess(reply, { failures, count: failures.length });
+      } catch (err) {
+        logger.error({ err }, 'Failed to list processing failures');
+        return Errors.internal(reply, 'Failed to list processing failures');
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/processing-failures/retry
+   * Force-retry a list of abandoned (or active-failing) messages. Clears the
+   * dedup record + failure record so the next scanner cycle picks them up.
+   *
+   * Use this after fixing the underlying issue (e.g. running a missing
+   * migration). Without this endpoint, abandoned messages stay marked as
+   * processed in the dedup table forever.
+   *
+   * Body: { messageIds: string[] } — explicit list, OR
+   *       { all: true } — retry every abandoned failure (use with care)
+   */
+  fastify.post<{ Body: { messageIds?: string[]; all?: boolean } }>(
+    '/api/admin/processing-failures/retry',
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: 60 * 1000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const requestId = request.id;
+      const { messageIds, all } = request.body || {};
+
+      if (!all && (!messageIds || messageIds.length === 0)) {
+        return Errors.badRequest(reply, 'messageIds (non-empty array) or all=true required');
+      }
+
+      try {
+        let targetIds: string[];
+        if (all) {
+          const records = await prisma.messageProcessingFailure.findMany({
+            where: { abandoned: true },
+            select: { id: true },
+          });
+          targetIds = records.map((r) => r.id);
+        } else {
+          targetIds = messageIds!;
+        }
+
+        if (targetIds.length === 0) {
+          return sendSuccess(reply, { cleared: 0, message: 'No abandoned failures to retry' });
+        }
+
+        // Clear from dedup table so the scanner re-discovers them
+        const deletedDedup = await prisma.processedGmailMessage.deleteMany({
+          where: { id: { in: targetIds } },
+        });
+
+        // Clear failure records so the attempt counter starts fresh
+        const deletedFailures = await prisma.messageProcessingFailure.deleteMany({
+          where: { id: { in: targetIds } },
+        });
+
+        logger.info(
+          { requestId, count: targetIds.length, deletedDedup: deletedDedup.count, deletedFailures: deletedFailures.count },
+          'Cleared processing failures for retry'
+        );
+
+        // Trigger an immediate scan so the operator gets immediate feedback
+        const scanResult = await missedMessageScannerService.triggerManualScan();
+
+        return sendSuccess(reply, {
+          cleared: targetIds.length,
+          deletedDedup: deletedDedup.count,
+          deletedFailures: deletedFailures.count,
+          scanResult,
+          message: `Cleared ${targetIds.length} failure(s) and triggered a fresh scan`,
+        });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to retry processing failures');
+        return Errors.internal(reply, 'Failed to retry processing failures');
       }
     }
   );

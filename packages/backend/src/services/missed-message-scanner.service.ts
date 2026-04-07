@@ -1,9 +1,16 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { redis } from '../utils/redis';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { emailProcessingService } from './email-processing.service';
 import { slackNotificationService } from './slack-notification.service';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
+
+// Redis key for the scanner heartbeat — written on every successful scan completion.
+// External monitoring (or /health/full) reads this to detect a hung/crashed scanner:
+// if the timestamp is older than ~2× SCAN_INTERVAL_MS, the service is unhealthy.
+const HEARTBEAT_KEY = 'missed-message-scanner:heartbeat';
+const HEARTBEAT_TTL_SECONDS = 24 * 60 * 60; // 24h — long enough to detect "missing for a day"
 
 const {
   SCAN_INTERVAL_MS,
@@ -294,6 +301,10 @@ class MissedMessageScannerService {
       }).catch(() => {});
     }
 
+    // Record heartbeat: this scan ran to completion. External monitoring +
+    // /health/full reads this to detect a hung/crashed scanner.
+    await this.writeHeartbeat();
+
     return { scanned: totalScanned, recovered: totalRecovered, failed: totalFailed };
   }
 
@@ -306,19 +317,65 @@ class MissedMessageScannerService {
   }
 
   /**
-   * Get service status
+   * Write the heartbeat key to Redis. Called from the success path of every
+   * scan. Best-effort — if Redis is down, the heartbeat is missing and the
+   * health check correctly reports degraded.
    */
-  getStatus(): {
+  private async writeHeartbeat(): Promise<void> {
+    try {
+      await redis.set(HEARTBEAT_KEY, new Date().toISOString(), 'EX', HEARTBEAT_TTL_SECONDS);
+    } catch (err) {
+      logger.warn({ err }, 'Failed to write missed-message-scanner heartbeat');
+    }
+  }
+
+  /**
+   * Read the heartbeat key. Returns null if no heartbeat has been written
+   * since process start (or Redis is unavailable).
+   */
+  private async readHeartbeat(): Promise<Date | null> {
+    try {
+      const value = await redis.get(HEARTBEAT_KEY);
+      return value ? new Date(value) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get service status, including a freshness check on the heartbeat.
+   * "healthy" means the scanner has completed a scan recently — within
+   * 2× the scan interval, with a 5-minute floor for short intervals.
+   */
+  async getStatus(): Promise<{
     running: boolean;
     intervalMs: number;
     intervalMinutes: number;
     consecutiveSkips: number;
-  } {
+    lastScanAt: string | null;
+    secondsSinceLastScan: number | null;
+    healthy: boolean;
+  }> {
+    const lastScanAt = await this.readHeartbeat();
+    const now = Date.now();
+    const secondsSinceLastScan = lastScanAt
+      ? Math.round((now - lastScanAt.getTime()) / 1000)
+      : null;
+
+    const stalenessThresholdMs = Math.max(2 * SCAN_INTERVAL_MS, 5 * 60 * 1000);
+    const healthy =
+      this.intervalId !== null &&
+      lastScanAt !== null &&
+      now - lastScanAt.getTime() < stalenessThresholdMs;
+
     return {
       running: this.intervalId !== null,
       intervalMs: SCAN_INTERVAL_MS,
       intervalMinutes: Math.round(SCAN_INTERVAL_MS / (60 * 1000)),
       consecutiveSkips: this.consecutiveSkips,
+      lastScanAt: lastScanAt?.toISOString() ?? null,
+      secondsSinceLastScan,
+      healthy,
     };
   }
 }

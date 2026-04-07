@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
-import { emailMessageProcessorService, getLastProcessingError } from './email-message-processor.service';
+import { emailMessageProcessorService, getLastProcessingErrors } from './email-message-processor.service';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
@@ -647,12 +647,10 @@ export class EmailIngestService {
     const processedIds = new Set(alreadyProcessed.map((p) => p.id));
 
     // Fetch last-known processing errors for unprocessed messages so the UI
-    // can show the admin exactly why each message is stuck.
+    // can show the admin exactly why each message is stuck. Single batched
+    // DB query rather than N+1.
     const unprocessedIds = inboundMessages.filter(m => !processedIds.has(m.id)).map(m => m.id);
-    const errorEntries = await Promise.all(
-      unprocessedIds.map(async (id) => [id, await getLastProcessingError(id)] as const)
-    );
-    const errorMap = new Map(errorEntries);
+    const errorMap = await getLastProcessingErrors(unprocessedIds);
 
     const messages = inboundMessages.map((m) => {
       const status = processedIds.has(m.id) ? 'processed' as const : 'unprocessed' as const;

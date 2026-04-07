@@ -295,6 +295,28 @@ model UnmatchedEmailAttempt {
   @@map("unmatched_email_attempts")
 }
 
+// Track per-message processing failures (post-match, e.g. agent throws).
+// Database is authoritative — Redis is used as a cache only. This prevents
+// the missed-message scanner from looping forever if Redis is unavailable
+// (the previous Redis-only counter returned 1 every time on failure, so
+// abandonment never triggered).
+//
+// Also stores the last error text so the admin scan-preview UI can show
+// WHY each MISSED message is stuck without diving into logs.
+model MessageProcessingFailure {
+  id            String   @id // Gmail message ID
+  attempts      Int      @default(1)
+  lastError     String   @map("last_error") @db.Text
+  firstFailedAt DateTime @default(now()) @map("first_failed_at")
+  lastFailedAt  DateTime @default(now()) @map("last_failed_at")
+  abandoned     Boolean  @default(false) // True after exceeding MAX_PROCESSING_FAILURES
+
+  @@index([abandoned])
+  @@index([lastFailedAt])
+  @@index([abandoned, lastFailedAt]) // For admin "retry recent abandonments" queries
+  @@map("message_processing_failures")
+}
+
 // Runtime-configurable system settings
 // Each setting is stored as a key-value pair with metadata
 model SystemSetting {

@@ -46,6 +46,7 @@ import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { classifyEmail } from '../utils/email-classifier';
 import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
 import {
   detectThreadDivergence,
@@ -66,7 +67,6 @@ const {
   MESSAGE_LOCK_PREFIX,
   UNMATCHED_ATTEMPT_PREFIX,
   PROCESSING_FAILURE_PREFIX,
-  PROCESSING_ERROR_PREFIX,
   PROCESSING_ALERT_DEDUP_PREFIX,
   PROCESSED_MESSAGE_TTL_DAYS,
   MAX_UNMATCHED_ATTEMPTS,
@@ -77,6 +77,9 @@ const {
   CLEANUP_INTERVAL_MESSAGES,
   CLEANUP_COUNTER_KEY,
 } = EMAIL_PROCESSING;
+
+// Truncate processing-failure errors so a runaway stack trace can't blow up the row
+const MAX_ERROR_LENGTH = 2000;
 
 /**
  * Lock renewal configuration
@@ -141,53 +144,101 @@ async function safeRedisOp<T>(
 }
 
 /**
- * Track and increment a processing-failure attempt counter for a message.
- * Returns the updated attempt count.
+ * Track a processing failure: increment the attempt counter, store the last
+ * error, and return the new attempt count. Used by processMessage's catch
+ * block to drive the abandonment threshold.
  *
- * Uses Redis as the source of truth (with a generous 7-day TTL so failures
- * across hourly scans accumulate). Falls back to attempt=1 on Redis failure
- * to allow processing to continue degraded.
+ * Database is the source of truth (the previous Redis-only counter returned
+ * 1 forever when Redis was down, so abandonment never triggered and the
+ * scanner looped). Redis is used as a write-through cache so the hot path
+ * doesn't pay a DB round trip on every check.
  *
- * This prevents the missed-message-scanner from infinitely re-attempting
- * the same broken messages every hour.
+ * Truncates errorMessage to MAX_ERROR_LENGTH so a runaway stack trace can't
+ * blow up the row.
  */
-async function trackProcessingFailure(messageId: string, traceId: string): Promise<number> {
-  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
-  const result = await safeRedisOp(
-    async () => {
-      const attempts = await redis.incr(key);
-      // Only set TTL on first increment to avoid resetting it
-      if (attempts === 1) {
-        await redis.expire(key, PROCESSING_FAILURE_TTL_SECONDS);
-      }
-      return attempts;
+async function trackProcessingFailure(
+  messageId: string,
+  errorMessage: string,
+  traceId: string,
+): Promise<number> {
+  const truncated = errorMessage.slice(0, MAX_ERROR_LENGTH);
+
+  // DB write is authoritative — must succeed for abandonment to work
+  const record = await prisma.messageProcessingFailure.upsert({
+    where: { id: messageId },
+    create: { id: messageId, lastError: truncated },
+    update: {
+      attempts: { increment: 1 },
+      lastError: truncated,
+      lastFailedAt: new Date(),
     },
-    'increment processing failure counter',
+  });
+
+  // Cache in Redis (best-effort) for fast preview lookups
+  const key = `${PROCESSING_FAILURE_PREFIX}${messageId}`;
+  safeRedisOp(
+    async () => {
+      await redis.set(key, String(record.attempts), 'EX', PROCESSING_FAILURE_TTL_SECONDS);
+    },
+    'cache processing failure count',
     traceId,
   );
-  return result ?? 1;
+
+  return record.attempts;
 }
 
 /**
- * Record the last error message for a processing failure, so it can be
- * surfaced in the admin scan preview UI next to the MISSED label.
+ * Mark a processing failure as abandoned (after exceeding MAX_PROCESSING_FAILURES).
+ * The dedup record is created separately via markMessageProcessed; this only
+ * flips the abandoned flag so the admin retry endpoint can find it.
  */
-async function recordProcessingError(messageId: string, errorMessage: string, traceId: string): Promise<void> {
-  const key = `${PROCESSING_ERROR_PREFIX}${messageId}`;
-  await safeRedisOp(
-    () => redis.set(key, errorMessage.slice(0, 500), 'EX', PROCESSING_FAILURE_TTL_SECONDS),
-    'record processing error message',
-    traceId,
-  );
+async function markFailureAbandoned(messageId: string): Promise<void> {
+  await prisma.messageProcessingFailure.update({
+    where: { id: messageId },
+    data: { abandoned: true },
+  });
 }
 
 /**
  * Look up the last recorded error for a message (or null if none). Used by
  * previewThreadMessages to annotate MISSED messages with their failure reason.
+ *
+ * Reads from the database (source of truth). The Redis cache holds attempt
+ * counts only, not error text — error strings can be large and we want
+ * persistence anyway.
  */
 export async function getLastProcessingError(messageId: string): Promise<string | null> {
-  const key = `${PROCESSING_ERROR_PREFIX}${messageId}`;
-  return safeRedisOp(() => redis.get(key), 'read processing error message');
+  const record = await prisma.messageProcessingFailure.findUnique({
+    where: { id: messageId },
+    select: { lastError: true },
+  });
+  return record?.lastError ?? null;
+}
+
+/**
+ * Batch lookup of last errors for many messages, used by previewThreadMessages
+ * so we don't N+1 a single thread.
+ */
+export async function getLastProcessingErrors(messageIds: string[]): Promise<Map<string, string>> {
+  if (messageIds.length === 0) return new Map();
+  const records = await prisma.messageProcessingFailure.findMany({
+    where: { id: { in: messageIds } },
+    select: { id: true, lastError: true },
+  });
+  return new Map(records.map((r) => [r.id, r.lastError]));
+}
+
+/**
+ * Clear the failure record on successful processing so the UI shows a clean
+ * state and a future failure starts a fresh attempt count.
+ */
+async function clearProcessingFailure(messageId: string): Promise<void> {
+  await prisma.messageProcessingFailure.deleteMany({ where: { id: messageId } });
+  // Best-effort Redis cleanup
+  safeRedisOp(
+    () => redis.del(`${PROCESSING_FAILURE_PREFIX}${messageId}`),
+    'clear processing failure cache',
+  );
 }
 
 /**
@@ -560,38 +611,62 @@ export class EmailMessageProcessorService {
         'Found matching appointment request'
       );
 
+      // Classify the email here so we can use the result both for the
+      // closure auto-dismiss gate (below) and again later in the agent path.
+      // The classifier is pure and cheap, so calling it twice is fine.
+      const earlyClassification = classifyEmail(
+        email.body,
+        email.from,
+        appointmentRequest.therapistEmail,
+        appointmentRequest.userEmail,
+      );
+
       // Auto-dismiss any pending closure recommendation: the recipient has now
       // replied, so the recommendation is stale. Without this, the appointment
       // stays excluded from chase cycles forever and the admin keeps seeing the
       // closure banner even though the conversation has resumed.
-      try {
-        const result = await appointmentLifecycleService.dismissClosureRecommendation({
-          appointmentId: appointmentRequest.id,
-          source: 'system',
-          reason: `Incoming reply from ${email.from}`,
-        });
-        if (result.dismissed) {
-          slackNotificationService.sendAlert({
-            title: 'Closure Recommendation Auto-Dismissed',
-            severity: 'medium',
+      //
+      // Gating: skip the auto-dismiss for auto-replies / out-of-office responses.
+      // Those mean the recipient is unreachable, NOT that they've actually
+      // re-engaged — closing the recommendation on an OOO would silently undo
+      // a valid admin signal. Bounces and own-outbound emails were already
+      // short-circuited above this point, so the only false-positive risk left
+      // is auto-replies.
+      if (!earlyClassification.flags.isAutoReply) {
+        try {
+          const result = await appointmentLifecycleService.dismissClosureRecommendation({
             appointmentId: appointmentRequest.id,
-            details:
-              `An incoming reply arrived on a closure-recommended thread. The closure ` +
-              `recommendation was auto-dismissed and the chase cycle reset so the agent ` +
-              `can resume processing.`,
-            additionalFields: {
-              'From': email.from,
-              'Subject': email.subject.slice(0, 100),
-            },
-          }).catch((err) => {
-            logger.warn({ traceId, err }, 'Failed to send Slack alert for closure auto-dismissal');
+            source: 'system',
+            reason: `Incoming reply from ${email.from}`,
           });
+          if (result.dismissed) {
+            slackNotificationService.sendAlert({
+              title: 'Closure Recommendation Auto-Dismissed',
+              severity: 'medium',
+              appointmentId: appointmentRequest.id,
+              details:
+                `An incoming reply arrived on a closure-recommended thread. The closure ` +
+                `recommendation was auto-dismissed and the chase cycle reset so the agent ` +
+                `can resume processing.`,
+              additionalFields: {
+                'From': email.from,
+                'Subject': email.subject.slice(0, 100),
+              },
+            }).catch((err) => {
+              logger.warn({ traceId, err }, 'Failed to send Slack alert for closure auto-dismissal');
+            });
+          }
+        } catch (err) {
+          // Don't block message processing if dismissal fails — log and continue
+          logger.warn(
+            { traceId, messageId, appointmentId: appointmentRequest.id, err },
+            'Failed to auto-dismiss closure recommendation; continuing with message processing'
+          );
         }
-      } catch (err) {
-        // Don't block message processing if dismissal fails — log and continue
-        logger.warn(
-          { traceId, messageId, appointmentId: appointmentRequest.id, err },
-          'Failed to auto-dismiss closure recommendation; continuing with message processing'
+      } else {
+        logger.info(
+          { traceId, messageId, appointmentId: appointmentRequest.id, from: email.from },
+          'Skipping closure auto-dismiss: incoming email is an auto-reply / out-of-office'
         );
       }
 
@@ -656,8 +731,16 @@ export class EmailMessageProcessorService {
       // Log divergence for metrics
       logDivergence(divergence, { appointmentId: appointmentRequest.id, emailId: email.id, traceId });
 
-      // If divergence is critical, skip automatic processing
+      // If divergence is critical, treat it as a retriable processing failure.
+      // Divergence can be transient (race in CC handling, in-flight email
+      // ordering) so we give it the same MAX_PROCESSING_FAILURES retry budget
+      // as any other failure. The admin alert + note still fire on the FIRST
+      // occurrence so divergence is visible immediately, but the message is
+      // only marked permanently processed once the budget is exhausted.
       if (shouldBlockProcessing(divergence)) {
+        const divergenceError = `Thread divergence (${divergence.type}, ${divergence.severity}): ${divergence.description}`;
+        const attempts = await trackProcessingFailure(messageId, divergenceError, traceId);
+
         logger.warn(
           {
             traceId,
@@ -665,31 +748,35 @@ export class EmailMessageProcessorService {
             appointmentId: appointmentRequest.id,
             divergenceType: divergence.type,
             severity: divergence.severity,
+            attempts,
+            maxAttempts: MAX_PROCESSING_FAILURES,
           },
-          `Thread divergence blocking processing: ${divergence.description}`
+          `Thread divergence blocking processing (attempt ${attempts}/${MAX_PROCESSING_FAILURES}): ${divergence.description}`
         );
 
-        // FIX R3: Record divergence alert for admin notification dashboard
-        // This ensures admins are notified via the alerts system, not just notes
-        await recordDivergenceAlert(appointmentRequest.id, divergence);
+        // Record alert + note only on the first failure so we don't spam the
+        // admin dashboard / notes column on every retry cycle.
+        if (attempts === 1) {
+          await recordDivergenceAlert(appointmentRequest.id, divergence);
 
-        // Store divergence info for admin review in notes (legacy, keep for backwards compat)
-        // Uses atomic SQL concatenation to prevent race conditions where concurrent
-        // updates could overwrite each other's notes (the previous read-modify-write
-        // pattern with inline findUnique had a TOCTOU window)
-        const divergenceNote = `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n`;
-        await prisma.$executeRaw`
-          UPDATE "AppointmentRequest"
-          SET "notes" = ${divergenceNote} || COALESCE("notes", '')
-          WHERE "id" = ${appointmentRequest.id}
-        `;
+          const divergenceNote = `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n`;
+          await prisma.$executeRaw`
+            UPDATE "AppointmentRequest"
+            SET "notes" = ${divergenceNote} || COALESCE("notes", '')
+            WHERE "id" = ${appointmentRequest.id}
+          `;
+        }
 
-        // Mark as processed to prevent infinite re-detection by the scanner.
-        // Without this, every hourly scan cycle would re-find the same message,
-        // re-record a divergence alert, and append another note — forever.
-        // The admin has been notified via the alert dashboard and can use
-        // the "Scan Messages" button to force-reprocess if needed.
-        await markMessageProcessed(messageId, traceId, 'divergence-blocked');
+        // After max attempts, abandon to break the scanner loop.
+        if (attempts >= MAX_PROCESSING_FAILURES) {
+          logger.error(
+            { traceId, messageId, attempts, divergenceType: divergence.type },
+            'Divergence-blocked message abandoned after max attempts'
+          );
+          await markMessageProcessed(messageId, traceId, 'divergence-blocked-abandoned');
+          await markFailureAbandoned(messageId);
+        }
+
         return false;
       }
 
@@ -727,17 +814,11 @@ export class EmailMessageProcessorService {
         threadContext
       );
 
-      // Mark as processed AFTER successful processing.
-      // We deliberately do NOT clear the failure counter here — if a message
-      // succeeds once but then fails MAX times within the 7-day TTL, that's
-      // legitimate flakiness and should still trip the abandonment threshold.
-      // We DO clear the stored error string so it doesn't linger in the UI.
+      // Mark as processed AFTER successful processing, then clear the failure
+      // record so the UI shows a clean state and a future failure starts a
+      // fresh attempt count.
       await markMessageProcessed(messageId, traceId, 'successfully-processed');
-      await safeRedisOp(
-        () => redis.del(`${PROCESSING_ERROR_PREFIX}${messageId}`),
-        'clear processing error on success',
-        traceId,
-      );
+      await clearProcessingFailure(messageId);
 
       // Mark as read in Gmail
       const gmailClient = await emailOAuthService.ensureGmailClient();
@@ -753,12 +834,22 @@ export class EmailMessageProcessorService {
     } catch (error) {
       // The missed-message scanner re-discovers failed messages every hour.
       // Without retry budget + visibility, a persistently broken message loops
-      // forever and we can't see why. We track attempts, store the last error
-      // for UI surfacing, and alert on both the first failure and abandonment.
-      const attempts = await trackProcessingFailure(messageId, traceId);
+      // forever. trackProcessingFailure increments the DB counter (source of
+      // truth, so a Redis outage can't suppress abandonment) and records the
+      // error text for UI surfacing.
       const errorMessage = error instanceof Error ? error.message : String(error);
-
-      await recordProcessingError(messageId, errorMessage, traceId);
+      let attempts: number;
+      try {
+        attempts = await trackProcessingFailure(messageId, errorMessage, traceId);
+      } catch (trackErr) {
+        // DB write failed — abandon this attempt cycle but log loudly so the
+        // operator sees that the failure tracking itself is broken.
+        logger.error(
+          { trackErr, traceId, messageId, originalError: error },
+          'CRITICAL: Failed to record processing failure in DB. Scanner abandonment is degraded.'
+        );
+        return false;
+      }
 
       logger.error(
         { error, traceId, messageId, attempts, maxAttempts: MAX_PROCESSING_FAILURES, errorMessage },
@@ -806,6 +897,7 @@ export class EmailMessageProcessorService {
 
         try {
           await markMessageProcessed(messageId, traceId, 'processing-failed-abandoned');
+          await markFailureAbandoned(messageId);
         } catch (markErr) {
           logger.error({ traceId, messageId, markErr }, 'Failed to mark abandoned message as processed');
         }
