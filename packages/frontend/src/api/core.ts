@@ -329,14 +329,47 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
       }
 
       if (!response.ok) {
-        throw new Error((errorData.error as string) || 'An error occurred');
+        // Throw ApiError (not plain Error) so callers can inspect code/details
+        // consistently with fetchApi. Previously only fetchApi threw ApiError,
+        // which meant admin pages lost access to structured error metadata.
+        throw new ApiError(
+          (errorData.error as string) || 'An error occurred',
+          errorData.code as string | undefined,
+          errorData.details as ApiError['details']
+        );
       }
 
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
-        throw new Error('Invalid API response format');
+        throw new ApiError('Invalid API response format');
       }
 
       return data as unknown as ApiResponse<T> & { pagination?: PaginationInfo; total?: number };
     }
   );
+}
+
+/**
+ * Unwrap an ApiResponse, returning `data` or throwing an ApiError if missing.
+ *
+ * Eliminates the repetitive `if (!response.data) throw new Error(...)` pattern
+ * from every API function. Pass a resource name for clearer error messages.
+ *
+ * @example
+ *   const response = await fetchAdminApi<Entry>('/admin/entry/123');
+ *   return unwrap(response, 'entry');
+ */
+export function unwrap<T>(response: ApiResponse<T>, resource = 'resource'): T {
+  if (response.data == null) {
+    throw new ApiError(`No ${resource} returned from server`);
+  }
+  return response.data;
+}
+
+/**
+ * Extract a user-facing message from any thrown value.
+ * Returns the fallback if the value is not an Error or has no message.
+ */
+export function getErrorMessage(error: unknown, fallback = 'An unexpected error occurred'): string {
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
 }

@@ -406,15 +406,6 @@ export default function AdminKnowledgePage() {
           )}
         </div>
 
-        {/* Delete error display */}
-        {deleteMutation.isError && (
-          <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
-            <p className="text-red-600 text-sm">
-              {deleteMutation.error instanceof Error ? deleteMutation.error.message : 'Failed to delete entry'}
-            </p>
-          </div>
-        )}
-
         {/* Help Text */}
         <div className="mt-6 p-4 bg-slate-100 rounded-xl">
           <h3 className="font-medium text-slate-700 mb-2">How it works</h3>
@@ -439,7 +430,7 @@ export default function AdminKnowledgePage() {
       {deleteConfirmEntry && (
         <ConfirmDialog
           title="Delete Entry"
-          confirmLabel={deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+          confirmLabel="Delete"
           confirmVariant="danger"
           isPending={deleteMutation.isPending}
           onConfirm={confirmDelete}
@@ -448,6 +439,11 @@ export default function AdminKnowledgePage() {
           <p className="text-slate-600">
             Are you sure you want to delete {deleteConfirmEntry.title ? `"${deleteConfirmEntry.title}"` : 'this entry'}? This cannot be undone.
           </p>
+          {deleteMutation.isError && (
+            <p className="mt-3 text-sm text-red-600">
+              {deleteMutation.error instanceof Error ? deleteMutation.error.message : 'Failed to delete entry'}
+            </p>
+          )}
         </ConfirmDialog>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { fetchAdminApi } from './core';
+import { fetchAdminApi, unwrap } from './core';
 
 // Slack Diagnostics API functions
 
@@ -28,22 +28,17 @@ export interface SlackStatus {
 }
 
 export async function getSlackStatus(): Promise<SlackStatus> {
-  const response = await fetchAdminApi<SlackStatus>('/admin/slack/status');
-  if (!response.data) {
-    throw new Error('Failed to fetch Slack status');
-  }
-  return response.data;
+  return unwrap(await fetchAdminApi<SlackStatus>('/admin/slack/status'), 'Slack status');
 }
 
 export async function sendSlackTest(): Promise<{ message: string; sent: boolean }> {
-  const response = await fetchAdminApi<{ message: string; sent: boolean }>(
-    '/admin/slack/test',
-    { method: 'POST' }
+  return unwrap(
+    await fetchAdminApi<{ message: string; sent: boolean }>(
+      '/admin/slack/test',
+      { method: 'POST' }
+    ),
+    'Slack test'
   );
-  if (!response.data) {
-    throw new Error('Failed to send test notification');
-  }
-  return response.data;
 }
 
 export async function resetSlackCircuit(): Promise<{
@@ -51,13 +46,12 @@ export async function resetSlackCircuit(): Promise<{
   before: { state: string; failures: number };
   after: { state: string; failures: number };
 }> {
-  const response = await fetchAdminApi<{
-    message: string;
-    before: { state: string; failures: number };
-    after: { state: string; failures: number };
-  }>('/admin/slack/reset', { method: 'POST' });
-  if (!response.data) {
-    throw new Error('Failed to reset circuit breaker');
-  }
-  return response.data;
+  return unwrap(
+    await fetchAdminApi<{
+      message: string;
+      before: { state: string; failures: number };
+      after: { state: string; failures: number };
+    }>('/admin/slack/reset', { method: 'POST' }),
+    'circuit reset'
+  );
 }

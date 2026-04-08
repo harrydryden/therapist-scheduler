@@ -6,6 +6,7 @@ import FeedbackFormPage from './pages/FeedbackFormPage';
 import Layout from './components/Layout';
 import AdminLayout from './components/AdminLayout';
 import ErrorBoundary from './components/ErrorBoundary';
+import { ToastProvider } from './components/Toast';
 import { AuthProvider } from './context/AuthContext';
 
 // Lazy-load admin pages to reduce initial bundle size for public users
@@ -59,7 +60,9 @@ function App() {
           path="/admin"
           element={
             <AuthProvider>
-              <AdminLayout />
+              <ToastProvider>
+                <AdminLayout />
+              </ToastProvider>
             </AuthProvider>
           }
         >
