@@ -11,7 +11,7 @@ import { logger } from '../utils/logger';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
-import { parseConfirmedDateTime } from '../utils/date-parser';
+import { parseConfirmedDateTime } from '../utils/date';
 import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';

@@ -873,7 +873,7 @@ export class AIToolExecutorService {
 
     // IDEMPOTENCY CHECK: If already confirmed with the same datetime, skip duplicate processing
     // Use semantic comparison to handle variations like "Monday 3rd" vs "Monday 3"
-    const { areDatetimesEqual } = await import('../utils/date-parser');
+    const { areDatetimesEqual } = await import('../utils/date');
     if (
       existing?.status === 'confirmed' &&
       areDatetimesEqual(existing?.confirmedDateTime, params.confirmed_datetime)
@@ -900,7 +900,7 @@ export class AIToolExecutorService {
       : [APPOINTMENT_STATUS.PENDING, APPOINTMENT_STATUS.CONTACTED, APPOINTMENT_STATUS.NEGOTIATING];
 
     // Parse the confirmed datetime for post-booking follow-ups
-    const { parseConfirmedDateTime } = await import('../utils/date-parser');
+    const { parseConfirmedDateTime } = await import('../utils/date');
     const confirmedDateTimeParsed = parseConfirmedDateTime(
       params.confirmed_datetime,
       new Date()

@@ -20,9 +20,8 @@ import { publicSettingsRoutes } from './routes/admin-settings.routes';
 // Admin routes (webhook secret auth required)
 import { adminRoutes } from './routes/admin.routes';
 import { adminDashboardRoutes } from './routes/admin-dashboard.routes';
-import { adminKnowledgeRoutes } from './routes/admin-knowledge.routes';
+import { adminContentRoutes } from './routes/admin-content.routes';
 import { adminSettingsRoutes } from './routes/admin-settings.routes';
-import { adminFormsRoutes } from './routes/admin-forms.routes';
 import { adminWorkReportRoutes } from './routes/admin-work-reports.routes';
 import { adminVoucherRoutes } from './routes/admin-vouchers.routes';
 import { ingestionRoutes } from './routes/ingestion.routes';
@@ -330,9 +329,8 @@ async function buildServer() {
   // --- Admin routes (webhook secret authentication) ---
   await fastify.register(adminRoutes);              // Gmail setup, Slack diagnostics, weekly mailing
   await fastify.register(adminDashboardRoutes);     // Appointments CRUD, therapist management, stats, SSE
-  await fastify.register(adminKnowledgeRoutes);     // Knowledge base CRUD
+  await fastify.register(adminContentRoutes);      // Knowledge base + feedback forms
   await fastify.register(adminSettingsRoutes);      // System settings CRUD, alerts, health
-  await fastify.register(adminFormsRoutes);         // Feedback form config & submissions
   await fastify.register(adminWorkReportRoutes);   // Daily work reports
   await fastify.register(adminVoucherRoutes);      // Voucher management
   await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion

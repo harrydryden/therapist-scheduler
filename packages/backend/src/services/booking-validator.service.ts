@@ -14,7 +14,7 @@ import { prisma } from '../utils/database';
 import { notionService } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { logger } from '../utils/logger';
-import { parseConfirmedDateTime } from '../utils/date-parser';
+import { parseConfirmedDateTime } from '../utils/date';
 
 export interface ValidationResult {
   valid: boolean;

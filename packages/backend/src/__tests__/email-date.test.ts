@@ -8,12 +8,17 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
+// Mock config (utils/date imports config for parseConfirmedDateTime defaults)
+jest.mock('../config', () => ({
+  config: { timezone: 'Europe/London' },
+}));
+
 // Mock settings service
 jest.mock('../services/settings.service', () => ({
   getSettingValue: jest.fn(),
 }));
 
-import { formatEmailDate, formatEmailDateFromSettings } from '../utils/email-date-formatter';
+import { formatEmailDate, formatEmailDateFromSettings } from '../utils/date';
 import { getSettingValue } from '../services/settings.service';
 
 const mockGetSettingValue = getSettingValue as jest.MockedFunction<typeof getSettingValue>;

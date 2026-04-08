@@ -24,9 +24,9 @@ import {
   calculateMeetingLinkCheckTime,
   calculateFeedbackFormTime,
   isInPast,
-} from '../utils/date-parser';
+  formatEmailDateFromSettings,
+} from '../utils/date';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
-import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
 import { getSettingValue } from './settings.service';
 import { auditEventService } from './audit-event.service';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';

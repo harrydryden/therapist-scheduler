@@ -1,4 +1,4 @@
-import { fetchAdminApi } from './core';
+import { fetchAdminApi, unwrap } from './core';
 
 export interface VoucherRecord {
   email: string;
@@ -44,32 +44,29 @@ export interface VoucherFilters {
   sortOrder?: string;
 }
 
-export async function getVouchers(filters: VoucherFilters = {}): Promise<VoucherListResponse> {
+function buildQueryString(filters: object): string {
   const params = new URLSearchParams();
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== '') {
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== '' && value !== null) {
       params.append(key, String(value));
     }
-  });
-
-  const queryString = params.toString();
-  const response = await fetchAdminApi<VoucherListResponse>(
-    `/admin/vouchers${queryString ? `?${queryString}` : ''}`
-  );
-  if (!response.data) {
-    throw new Error('Failed to fetch vouchers');
   }
-  return response.data;
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+export async function getVouchers(filters: VoucherFilters = {}): Promise<VoucherListResponse> {
+  return unwrap(
+    await fetchAdminApi<VoucherListResponse>(`/admin/vouchers${buildQueryString(filters)}`),
+    'vouchers'
+  );
 }
 
 export async function getVoucher(email: string): Promise<VoucherRecord> {
-  const response = await fetchAdminApi<VoucherRecord>(
-    `/admin/vouchers/${encodeURIComponent(email)}`
+  return unwrap(
+    await fetchAdminApi<VoucherRecord>(`/admin/vouchers/${encodeURIComponent(email)}`),
+    'voucher'
   );
-  if (!response.data) {
-    throw new Error('Failed to fetch voucher');
-  }
-  return response.data;
 }
 
 export async function issueVoucher(data: {
@@ -77,45 +74,41 @@ export async function issueVoucher(data: {
   expiryDays?: number;
   sendEmail?: boolean;
 }): Promise<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }> {
-  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }>(
-    '/admin/vouchers/issue',
-    { method: 'POST', body: JSON.stringify(data) }
+  return unwrap(
+    await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; voucherUrl: string; emailSent: boolean }>(
+      '/admin/vouchers/issue',
+      { method: 'POST', body: JSON.stringify(data) }
+    ),
+    'voucher'
   );
-  if (!response.data) {
-    throw new Error('Failed to issue voucher');
-  }
-  return response.data;
 }
 
 export async function resetStrikes(email: string): Promise<{ email: string; strikeCount: number; previousStrikes: number }> {
-  const response = await fetchAdminApi<{ email: string; strikeCount: number; previousStrikes: number }>(
-    `/admin/vouchers/${encodeURIComponent(email)}/reset-strikes`,
-    { method: 'POST', body: JSON.stringify({}) }
+  return unwrap(
+    await fetchAdminApi<{ email: string; strikeCount: number; previousStrikes: number }>(
+      `/admin/vouchers/${encodeURIComponent(email)}/reset-strikes`,
+      { method: 'POST', body: JSON.stringify({}) }
+    ),
+    'strike reset'
   );
-  if (!response.data) {
-    throw new Error('Failed to reset strikes');
-  }
-  return response.data;
 }
 
 export async function resubscribeUser(email: string): Promise<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }> {
-  const response = await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }>(
-    `/admin/vouchers/${encodeURIComponent(email)}/resubscribe`,
-    { method: 'POST', body: JSON.stringify({}) }
+  return unwrap(
+    await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }>(
+      `/admin/vouchers/${encodeURIComponent(email)}/resubscribe`,
+      { method: 'POST', body: JSON.stringify({}) }
+    ),
+    'resubscribe'
   );
-  if (!response.data) {
-    throw new Error('Failed to resubscribe user');
-  }
-  return response.data;
 }
 
 export async function revokeVoucher(email: string): Promise<{ email: string; revoked: boolean }> {
-  const response = await fetchAdminApi<{ email: string; revoked: boolean }>(
-    `/admin/vouchers/${encodeURIComponent(email)}/revoke`,
-    { method: 'POST', body: JSON.stringify({}) }
+  return unwrap(
+    await fetchAdminApi<{ email: string; revoked: boolean }>(
+      `/admin/vouchers/${encodeURIComponent(email)}/revoke`,
+      { method: 'POST', body: JSON.stringify({}) }
+    ),
+    'voucher revocation'
   );
-  if (!response.data) {
-    throw new Error('Failed to revoke voucher');
-  }
-  return response.data;
 }

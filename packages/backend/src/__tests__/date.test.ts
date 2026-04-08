@@ -21,7 +21,7 @@ import {
   isWithinHours,
   isTooSoonToBook,
   MIN_BOOKING_LEAD_HOURS,
-} from '../utils/date-parser';
+} from '../utils/date';
 
 describe('parseConfirmedDateTime', () => {
   // Fixed reference date: Wednesday 5th February 2025, 12:00 UTC

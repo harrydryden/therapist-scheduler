@@ -18,8 +18,11 @@ import {
 } from '../types';
 import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
 import StatusBadge from '../components/StatusBadge';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
+import { useToastContext } from '../components/Toast';
+import { getErrorMessage } from '../api/core';
 
 const STAGE_OPTIONS: { value: AdminAppointmentStage; label: string }[] = [
   { value: 'confirmed', label: 'Confirmed' },
@@ -599,9 +602,10 @@ function AppointmentsTable() {
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
   const [savingId, setSavingId] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [clearDateId, setClearDateId] = useState<string | null>(null);
   const limit = 20;
   const queryClient = useQueryClient();
+  const { showToast } = useToastContext();
 
   // Reset page when debounced search changes
   useEffect(() => {
@@ -638,16 +642,13 @@ function AppointmentsTable() {
   const updateMutation = useMutation({
     mutationFn: ({ id, ...rest }: { id: string; status?: string; confirmedDateTime?: string | null; adminId: string }) =>
       updateAdminAppointment(id, rest),
-    onMutate: () => {
-      setUpdateError(null);
-    },
     onSuccess: () => {
       setSavingId(null);
       queryClient.invalidateQueries({ queryKey: ['admin-all-appointments'] });
     },
     onError: (error) => {
       setSavingId(null);
-      setUpdateError(error instanceof Error ? error.message : 'Failed to update appointment');
+      showToast(getErrorMessage(error, 'Failed to update appointment'), 'error');
     },
   });
 
@@ -662,10 +663,24 @@ function AppointmentsTable() {
   }, [updateMutation]);
 
   const handleClearDate = useCallback((appointmentId: string) => {
-    if (!confirm('Clear the confirmed date? This will mark the appointment for rescheduling.')) return;
-    setSavingId(appointmentId);
-    updateMutation.mutate({ id: appointmentId, confirmedDateTime: null, adminId: 'admin' });
-  }, [updateMutation]);
+    // Replaces blocking window.confirm() with in-app ConfirmDialog so the
+    // action matches the rest of the admin UI and can show a pending state.
+    setClearDateId(appointmentId);
+  }, []);
+
+  const confirmClearDate = useCallback(() => {
+    if (!clearDateId || updateMutation.isPending) return;
+    setSavingId(clearDateId);
+    updateMutation.mutate(
+      { id: clearDateId, confirmedDateTime: null, adminId: 'admin' },
+      { onSettled: () => setClearDateId(null) }
+    );
+  }, [clearDateId, updateMutation]);
+
+  const cancelClearDate = useCallback(() => {
+    if (updateMutation.isPending) return;
+    setClearDateId(null);
+  }, [updateMutation.isPending]);
 
   const handleSort = useCallback((column: string) => {
     if (sortBy === column) {
@@ -729,22 +744,6 @@ function AppointmentsTable() {
           </div>
         </div>
       </div>
-
-      {/* Update error banner */}
-      {updateError && (
-        <div className="mx-6 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
-          <p className="text-sm text-red-800">{updateError}</p>
-          <button
-            type="button"
-            onClick={() => setUpdateError(null)}
-            className="text-red-400 hover:text-red-600 ml-3"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-      )}
 
       {/* Table */}
       {isLoading ? (
@@ -849,6 +848,22 @@ function AppointmentsTable() {
           limit={pagination.limit}
           onPageChange={setPage}
         />
+      )}
+
+      {/* Clear confirmed date confirmation */}
+      {clearDateId && (
+        <ConfirmDialog
+          title="Clear Confirmed Date"
+          confirmLabel="Clear Date"
+          confirmVariant="danger"
+          isPending={updateMutation.isPending}
+          onConfirm={confirmClearDate}
+          onCancel={cancelClearDate}
+        >
+          <p className="text-slate-600">
+            Clear the confirmed date? This will mark the appointment for rescheduling.
+          </p>
+        </ConfirmDialog>
       )}
     </div>
   );

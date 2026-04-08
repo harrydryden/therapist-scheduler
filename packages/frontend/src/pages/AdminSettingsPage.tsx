@@ -358,6 +358,10 @@ export default function AdminSettingsPage() {
     mutationFn: resetSetting,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['settings'] });
+      // Close the confirmation dialog only after the reset has actually
+      // succeeded so the user sees the pending state and any error messages
+      // in-context, rather than a dialog that vanishes silently.
+      setResetConfirmSetting(null);
     },
   });
 
@@ -384,11 +388,16 @@ export default function AdminSettingsPage() {
   }, []);
 
   const confirmReset = useCallback(() => {
-    if (resetConfirmSetting) {
+    if (resetConfirmSetting && !resetMutation.isPending) {
       resetMutation.mutate(resetConfirmSetting.key);
-      setResetConfirmSetting(null);
     }
   }, [resetConfirmSetting, resetMutation]);
+
+  const cancelReset = useCallback(() => {
+    if (resetMutation.isPending) return;
+    resetMutation.reset();
+    setResetConfirmSetting(null);
+  }, [resetMutation]);
 
   const handleCancel = () => {
     setEditingKey(null);
@@ -709,14 +718,19 @@ export default function AdminSettingsPage() {
       {resetConfirmSetting && (
         <ConfirmDialog
           title="Reset Setting"
-          confirmLabel={resetMutation.isPending ? 'Resetting...' : 'Reset to Default'}
+          confirmLabel="Reset to Default"
           isPending={resetMutation.isPending}
           onConfirm={confirmReset}
-          onCancel={() => setResetConfirmSetting(null)}
+          onCancel={cancelReset}
         >
           <p className="text-slate-500 text-sm">
             Reset "{resetConfirmSetting.label}" to default value ({String(resetConfirmSetting.defaultValue).slice(0, 100)})?
           </p>
+          {resetMutation.isError && (
+            <p className="mt-3 text-sm text-red-600">
+              {resetMutation.error instanceof Error ? resetMutation.error.message : 'Failed to reset setting'}
+            </p>
+          )}
         </ConfirmDialog>
       )}
     </div>
