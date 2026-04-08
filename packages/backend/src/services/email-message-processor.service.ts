@@ -1,13 +1,14 @@
-import { gmail_v1 } from 'googleapis';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { renewLock, releaseLock } from '../utils/redis-locks';
+import { encodeEmailHeader } from '../utils/email-encoding';
 import {
-  decodeHtmlEntities,
-  stripHtml,
-  encodeEmailHeader,
-} from '../utils/email-encoding';
+  parseEmailMessage,
+  extractNameFromEmail,
+  type EmailMessage,
+} from '../utils/email-mime-parser';
+import { convertPlainTextToHtml } from '../utils/email-html-body';
 // FIX #5 (refactored): Dependency injection to break circular dependency.
 // Instead of require() at call sites, the AgentProcessor interface is registered
 // at startup by server.ts after all modules are loaded.
@@ -283,19 +284,6 @@ async function markMessageProcessed(
   ]);
 }
 
-interface EmailMessage {
-  id: string;
-  threadId: string;
-  from: string;
-  to: string;
-  cc?: string[];
-  subject: string;
-  body: string;
-  date: Date;
-  inReplyTo?: string;
-  references?: string[];
-}
-
 /**
  * EmailMessageProcessorService — Individual message processing
  *
@@ -483,7 +471,7 @@ export class EmailMessageProcessorService {
         })
       );
 
-      const email = this.parseEmailMessage(messageResponse.data);
+      const email = parseEmailMessage(messageResponse.data);
       if (!email) {
         logger.warn({ traceId, messageId }, 'Failed to parse email - marking as processed to avoid retry loop');
         // Mark unparseable emails as processed to prevent infinite retries
@@ -986,203 +974,6 @@ export class EmailMessageProcessorService {
     });
   }
 
-  // ─── Email parsing ──────────────────────────────────────────────────
-
-  /**
-   * Parse a Gmail message into our EmailMessage format
-   * Returns null if message is malformed or missing required fields
-   */
-  parseEmailMessage(message: gmail_v1.Schema$Message): EmailMessage | null {
-    // Validate required fields exist
-    if (!message || !message.id || !message.threadId) {
-      logger.warn({ messageId: message?.id }, 'Message missing id or threadId');
-      return null;
-    }
-
-    // Safely access payload - may not exist for malformed messages
-    if (!message.payload) {
-      logger.warn({ messageId: message.id }, 'Message has no payload');
-      return null;
-    }
-
-    const headers = message.payload.headers || [];
-    const getHeader = (name: string): string =>
-      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
-
-    const from = this.extractEmail(getHeader('from'));
-    const to = this.extractEmail(getHeader('to'));
-    const ccHeader = getHeader('cc');
-    const cc = ccHeader ? this.extractAllEmails(ccHeader) : undefined;
-    const subject = getHeader('subject');
-    const inReplyTo = getHeader('in-reply-to');
-    const references = getHeader('references')?.split(/\s+/).filter(Boolean);
-
-    // Parse date safely
-    let date: Date;
-    try {
-      const dateHeader = getHeader('date');
-      const dateValue = dateHeader || message.internalDate;
-      date = dateValue ? new Date(dateValue) : new Date();
-      // Validate date is valid
-      if (isNaN(date.getTime())) {
-        date = new Date();
-      }
-    } catch {
-      date = new Date();
-    }
-
-    // Extract body safely - prioritize plain text, fallback to HTML
-    // Also handle charset detection for non-UTF-8 emails
-    let body = '';
-    try {
-      if (message.payload.body?.data) {
-        // Simple message with body directly in payload
-        // Check mimeType to determine if HTML processing is needed
-        const mimeType = message.payload.mimeType || '';
-        const rawBody = this.decodeEmailBody(message.payload.body.data, mimeType);
-        if (mimeType.includes('text/html')) {
-          body = stripHtml(rawBody);
-        } else {
-          body = decodeHtmlEntities(rawBody);
-        }
-      } else if (message.payload.parts) {
-        // Multipart message - try plain text first
-        const textPart = message.payload.parts.find(
-          (p) => p.mimeType === 'text/plain'
-        );
-        if (textPart?.body?.data) {
-          // Decode with charset detection and clean up HTML entities
-          const contentType = textPart.mimeType || 'text/plain; charset=utf-8';
-          const rawBody = this.decodeEmailBody(textPart.body.data, contentType);
-          body = decodeHtmlEntities(rawBody);
-        } else {
-          // Fall back to HTML if no plain text available
-          const htmlPart = message.payload.parts.find(
-            (p) => p.mimeType === 'text/html'
-          );
-          if (htmlPart?.body?.data) {
-            const contentType = htmlPart.mimeType || 'text/html; charset=utf-8';
-            const rawBody = this.decodeEmailBody(htmlPart.body.data, contentType);
-            body = stripHtml(rawBody);
-            logger.debug({ messageId: message.id }, 'Extracted body from HTML part (no plain text available)');
-          }
-        }
-      }
-    } catch (err) {
-      logger.warn({ messageId: message.id, err }, 'Failed to decode email body');
-      body = '';
-    }
-
-    if (!from) {
-      logger.warn({ messageId: message.id }, 'Message has no from address');
-      return null;
-    }
-
-    return {
-      id: message.id,
-      threadId: message.threadId,
-      from,
-      to,
-      cc,
-      subject,
-      body,
-      date,
-      inReplyTo,
-      references,
-    };
-  }
-
-  /**
-   * Extract email address from a "Name <email>" format
-   */
-  private extractEmail(headerValue: string): string {
-    const match = headerValue.match(/<([^>]+)>/);
-    return match ? match[1] : headerValue.trim();
-  }
-
-  /**
-   * Extract all email addresses from a header value (e.g., CC with multiple recipients)
-   * Handles formats: "Name <email>", "email", comma-separated lists
-   */
-  private extractAllEmails(headerValue: string): string[] {
-    if (!headerValue) return [];
-
-    const emails: string[] = [];
-    const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    const matches = headerValue.match(regex);
-
-    if (matches) {
-      for (const match of matches) {
-        const normalized = match.toLowerCase();
-        if (!emails.includes(normalized)) {
-          emails.push(normalized);
-        }
-      }
-    }
-
-    return emails;
-  }
-
-  /**
-   * Extract charset from Content-Type header or MIME type string
-   * Returns 'utf-8' as default if not found
-   */
-  private extractCharset(contentType: string): BufferEncoding {
-    const match = contentType.match(/charset=["']?([^"';\s]+)/i);
-    const charset = match ? match[1].toLowerCase() : 'utf-8';
-
-    // Map common charset names to Node.js BufferEncoding
-    const charsetMap: Record<string, BufferEncoding> = {
-      'utf-8': 'utf-8',
-      'utf8': 'utf-8',
-      'iso-8859-1': 'latin1',
-      'iso_8859-1': 'latin1',
-      'latin1': 'latin1',
-      'windows-1252': 'latin1', // Close enough for most cases
-      'ascii': 'ascii',
-      'us-ascii': 'ascii',
-    };
-
-    return charsetMap[charset] || 'utf-8';
-  }
-
-  /**
-   * Decode base64 email body with proper charset handling
-   *
-   * IMPORTANT: Gmail API returns body data in URL-safe Base64 format:
-   * - Uses '-' instead of '+'
-   * - Uses '_' instead of '/'
-   * - May omit padding '='
-   *
-   * Node.js Buffer.from('base64') handles URL-safe Base64 since v15.14.0,
-   * but we convert explicitly for maximum compatibility.
-   */
-  private decodeEmailBody(base64Data: string, contentType: string): string {
-    const charset = this.extractCharset(contentType);
-    try {
-      // Convert URL-safe Base64 to standard Base64 for maximum compatibility
-      const standardBase64 = base64Data
-        .replace(/-/g, '+')
-        .replace(/_/g, '/');
-
-      // Add padding if needed (Base64 must be multiple of 4)
-      const paddedBase64 = standardBase64 + '='.repeat((4 - (standardBase64.length % 4)) % 4);
-
-      return Buffer.from(paddedBase64, 'base64').toString(charset);
-    } catch {
-      // Fall back to UTF-8 if charset decoding fails
-      logger.debug({ contentType, charset }, 'Charset decoding failed, falling back to UTF-8');
-      try {
-        const standardBase64 = base64Data.replace(/-/g, '+').replace(/_/g, '/');
-        const paddedBase64 = standardBase64 + '='.repeat((4 - (standardBase64.length % 4)) % 4);
-        return Buffer.from(paddedBase64, 'base64').toString('utf-8');
-      } catch {
-        // Last resort: try direct decoding
-        return Buffer.from(base64Data, 'base64').toString('utf-8');
-      }
-    }
-  }
-
   // ─── Weekly mailing ─────────────────────────────────────────────────
 
   /**
@@ -1233,7 +1024,7 @@ export class EmailMessageProcessorService {
         inquiry = await prisma.weeklyMailingInquiry.create({
           data: {
             userEmail: email.from.toLowerCase(),
-            userName: this.extractNameFromEmail(email.from),
+            userName: extractNameFromEmail(email.from),
             gmailThreadId: email.threadId,
             status: 'active',
           },
@@ -1301,175 +1092,7 @@ export class EmailMessageProcessorService {
     }
   }
 
-  /**
-   * Extract name from email address "Name <email@example.com>" format
-   */
-  private extractNameFromEmail(emailHeader: string): string | undefined {
-    // Check for "Name <email>" format
-    const match = emailHeader.match(/^([^<]+)\s*<[^>]+>$/);
-    if (match) {
-      return match[1].trim().replace(/^["']|["']$/g, ''); // Remove quotes if present
-    }
-    // Fallback: use email prefix
-    const emailMatch = emailHeader.match(/([^@]+)@/);
-    if (emailMatch) {
-      // Convert "john.doe" to "John Doe"
-      return emailMatch[1]
-        .replace(/[._]/g, ' ')
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-    }
-    return undefined;
-  }
-
   // ─── Email sending ──────────────────────────────────────────────────
-
-  /**
-   * Convert plain text email body to simple HTML for proper mobile rendering.
-   * This prevents awkward mid-sentence line breaks on narrow screens by allowing
-   * the email client to reflow text properly.
-   *
-   * - Escapes HTML special characters
-   * - Converts paragraph breaks (\n\n) to <p> tags
-   * - Converts list items (- or * prefixed) to proper <ul>/<li> elements
-   * - Preserves line breaks in email signatures (e.g., "Best wishes\nJustin")
-   * - Joins other single line breaks with spaces for text reflow
-   */
-  private convertToHtml(body: string): string {
-    // Normalize line endings
-    let text = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-
-    // Extract markdown formatting before escaping HTML (preserve them)
-    const placeholders: { placeholder: string; html: string }[] = [];
-    let placeholderIndex = 0;
-
-    // Pattern: [link text](url)
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, linkText, url) => {
-      const placeholder = `__PLACEHOLDER_${placeholderIndex}__`;
-      // Escape the link text but not the URL structure
-      const escapedText = linkText
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-      placeholders.push({
-        placeholder,
-        html: `<a href="${url}" style="color: #0066cc; text-decoration: underline;">${escapedText}</a>`,
-      });
-      placeholderIndex++;
-      return placeholder;
-    });
-
-    // Pattern: **bold text**
-    text = text.replace(/\*\*([^*]+)\*\*/g, (_match, boldText) => {
-      const placeholder = `__PLACEHOLDER_${placeholderIndex}__`;
-      const escapedText = boldText
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;');
-      placeholders.push({
-        placeholder,
-        html: `<strong>${escapedText}</strong>`,
-      });
-      placeholderIndex++;
-      return placeholder;
-    });
-
-    // Escape HTML special characters
-    text = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-
-    // Restore placeholders with actual HTML (links, bold, etc.)
-    for (const { placeholder, html } of placeholders) {
-      text = text.replace(placeholder, html);
-    }
-
-    // Split into paragraphs (double newlines)
-    const paragraphs = text.split(/\n\n+/);
-
-    const htmlParts: string[] = [];
-
-    for (const para of paragraphs) {
-      const trimmed = para.trim();
-      if (!trimmed) continue;
-
-      // Check if this paragraph is a list (lines starting with - or *)
-      const lines = trimmed.split('\n');
-      const isListParagraph = lines.every(
-        (line) => /^\s*[-*•]\s/.test(line) || !line.trim()
-      );
-
-      if (isListParagraph && lines.some((l) => l.trim())) {
-        // Convert to HTML list
-        const listItems = lines
-          .filter((line) => line.trim())
-          .map((line) => {
-            const content = line.replace(/^\s*[-*•]\s*/, '').trim();
-            return `<li>${content}</li>`;
-          })
-          .join('');
-        htmlParts.push(`<ul style="margin: 0 0 16px 0; padding-left: 20px;">${listItems}</ul>`);
-      } else if (this.looksLikeSignature(lines)) {
-        // Signature block - preserve line breaks with <br>
-        const htmlLines = lines.map((l) => l.trim()).join('<br>');
-        htmlParts.push(`<p style="margin: 0 0 16px 0;">${htmlLines}</p>`);
-      } else {
-        // Regular paragraph - join lines with spaces (remove single newlines within paragraph)
-        const joined = lines.map((l) => l.trim()).join(' ');
-        htmlParts.push(`<p style="margin: 0 0 16px 0;">${joined}</p>`);
-      }
-    }
-
-    // Wrap in minimal HTML structure with responsive styling
-    return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #333; margin: 0; padding: 0; }
-p, ul { margin: 0 0 16px 0; }
-p:last-child, ul:last-child { margin-bottom: 0; }
-</style>
-</head>
-<body>
-${htmlParts.join('\n')}
-</body>
-</html>`;
-  }
-
-  /**
-   * Detect if a paragraph looks like an email signature
-   * (closing phrase followed by name on separate lines)
-   * This ensures signatures preserve line breaks even if templates
-   * use single newlines instead of double newlines.
-   */
-  private looksLikeSignature(lines: string[]): boolean {
-    // Signatures typically have 2-3 lines (closing phrase, optional comma, name)
-    if (lines.length < 2 || lines.length > 3) return false;
-
-    const closingPhrases = [
-      'best wishes',
-      'best',
-      'thanks',
-      'thank you',
-      'regards',
-      'cheers',
-      'sincerely',
-      'kind regards',
-      'warm regards',
-      'all the best',
-      'many thanks',
-      'with thanks',
-    ];
-
-    // Check if first line is a closing phrase (with optional comma/exclamation)
-    const firstLine = lines[0].toLowerCase().replace(/[,!]?\s*$/, '').trim();
-    return closingPhrases.includes(firstLine);
-  }
 
   /**
    * Send an email via Gmail API
@@ -1493,7 +1116,7 @@ ${htmlParts.join('\n')}
 
     // Convert plain text body to simple HTML for proper text reflow on mobile
     // This prevents awkward mid-sentence line breaks on narrow screens
-    const htmlBody = this.convertToHtml(params.body);
+    const htmlBody = convertPlainTextToHtml(params.body);
 
     // Determine In-Reply-To and References headers
     // If replyTo is provided, use it directly

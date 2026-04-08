@@ -7,6 +7,7 @@ import {
   stripHtml,
   truncateText,
 } from '../utils/email-encoding';
+import { extractEmail, decodeEmailBody } from '../utils/email-mime-parser';
 import {
   loadGmailCredentials,
   createOAuth2Client,
@@ -343,8 +344,8 @@ export class ThreadFetchingService {
     const getHeader = (name: string): string =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
 
-    const from = this.extractEmail(getHeader('from'));
-    const to = this.extractEmail(getHeader('to'));
+    const from = extractEmail(getHeader('from'));
+    const to = extractEmail(getHeader('to'));
     const subject = getHeader('subject');
 
     // Parse date
@@ -366,7 +367,7 @@ export class ThreadFetchingService {
       if (message.payload?.body?.data) {
         // Decode with charset detection and clean up HTML entities
         const contentType = message.payload.mimeType || 'text/plain; charset=utf-8';
-        const rawBody = this.decodeEmailBody(message.payload.body.data, contentType);
+        const rawBody = decodeEmailBody(message.payload.body.data, contentType);
         if (contentType.includes('text/html')) {
           body = stripHtml(rawBody);
         } else {
@@ -380,7 +381,7 @@ export class ThreadFetchingService {
         if (textPart?.body?.data) {
           // Decode with charset detection and clean up HTML entities
           const contentType = textPart.mimeType || 'text/plain; charset=utf-8';
-          const rawBody = this.decodeEmailBody(textPart.body.data, contentType);
+          const rawBody = decodeEmailBody(textPart.body.data, contentType);
           body = decodeHtmlEntities(rawBody);
         } else {
           // Fall back to HTML if no plain text
@@ -389,7 +390,7 @@ export class ThreadFetchingService {
           );
           if (htmlPart?.body?.data) {
             const contentType = htmlPart.mimeType || 'text/html; charset=utf-8';
-            const rawBody = this.decodeEmailBody(htmlPart.body.data, contentType);
+            const rawBody = decodeEmailBody(htmlPart.body.data, contentType);
             body = stripHtml(rawBody);
           }
         }
@@ -411,74 +412,6 @@ export class ThreadFetchingService {
       date,
       isFromScheduler,
     };
-  }
-
-  /**
-   * Extract email address from "Name <email>" format
-   */
-  private extractEmail(headerValue: string): string {
-    const match = headerValue.match(/<([^>]+)>/);
-    return match ? match[1] : headerValue.trim();
-  }
-
-  /**
-   * Extract charset from Content-Type header or MIME type string
-   * Returns 'utf-8' as default if not found
-   */
-  private extractCharset(contentType: string): BufferEncoding {
-    const match = contentType.match(/charset=["']?([^"';\s]+)/i);
-    const charset = match ? match[1].toLowerCase() : 'utf-8';
-
-    // Map common charset names to Node.js BufferEncoding
-    const charsetMap: Record<string, BufferEncoding> = {
-      'utf-8': 'utf-8',
-      'utf8': 'utf-8',
-      'iso-8859-1': 'latin1',
-      'iso_8859-1': 'latin1',
-      'latin1': 'latin1',
-      'windows-1252': 'latin1', // Close enough for most cases
-      'ascii': 'ascii',
-      'us-ascii': 'ascii',
-    };
-
-    return charsetMap[charset] || 'utf-8';
-  }
-
-  /**
-   * Decode base64 email body with proper charset handling
-   *
-   * IMPORTANT: Gmail API returns body data in URL-safe Base64 format:
-   * - Uses '-' instead of '+'
-   * - Uses '_' instead of '/'
-   * - May omit padding '='
-   *
-   * Node.js Buffer.from('base64') handles URL-safe Base64 since v15.14.0,
-   * but we convert explicitly for maximum compatibility.
-   */
-  private decodeEmailBody(base64Data: string, contentType: string): string {
-    const charset = this.extractCharset(contentType);
-    try {
-      // Convert URL-safe Base64 to standard Base64 for maximum compatibility
-      const standardBase64 = base64Data
-        .replace(/-/g, '+')
-        .replace(/_/g, '/');
-
-      // Add padding if needed (Base64 must be multiple of 4)
-      const paddedBase64 = standardBase64 + '='.repeat((4 - (standardBase64.length % 4)) % 4);
-
-      return Buffer.from(paddedBase64, 'base64').toString(charset);
-    } catch {
-      // Fall back to UTF-8 if charset decoding fails
-      logger.debug({ contentType, charset }, 'Charset decoding failed, falling back to UTF-8');
-      try {
-        const standardBase64 = base64Data.replace(/-/g, '+').replace(/_/g, '/');
-        const paddedBase64 = standardBase64 + '='.repeat((4 - (standardBase64.length % 4)) % 4);
-        return Buffer.from(paddedBase64, 'base64').toString('utf-8');
-      } catch {
-        // Last resort: try direct decoding
-        return Buffer.from(base64Data, 'base64').toString('utf-8');
-      }
-    }
   }
 
   /**

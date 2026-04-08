@@ -21,7 +21,7 @@ import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../services/conversation-checkpoint.service';
 import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
 import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
-import { parseConfirmedDateTime } from '../utils/date-parser';
+import { parseConfirmedDateTime } from '../utils/date';
 import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
 import { auditEventService } from '../services/audit-event.service';

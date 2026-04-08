@@ -10,14 +10,14 @@
  */
 
 import { logger } from '../utils/logger';
-import { MIN_BOOKING_LEAD_HOURS } from '../utils/date-parser';
 import {
+  MIN_BOOKING_LEAD_HOURS,
   DAYS_LONG,
   DAYS_SHORT,
   MONTHS,
   getOrdinalSuffix,
   formatTime12Compact,
-} from '../utils/date-formatting';
+} from '../utils/date';
 import type { AvailabilitySlot, TherapistAvailability } from '../types';
 
 // Re-export for consumers

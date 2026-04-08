@@ -1,29 +1,61 @@
 /**
- * Admin Forms Routes
+ * Admin Content Routes
  *
- * Admin API for managing feedback form configuration.
+ * Consolidates admin endpoints for content management:
+ *   - Knowledge base CRUD (formerly admin-knowledge.routes.ts)
+ *   - Feedback form config, submissions, stats, export
+ *     (formerly admin-forms.routes.ts)
  *
- * Routes:
- * - GET /api/admin/forms/feedback - Get feedback form config
- * - PUT /api/admin/forms/feedback - Update feedback form config
- * - GET /api/admin/forms/feedback/submissions - List feedback submissions
- * - GET /api/admin/forms/feedback/submissions/:id - Get single submission
- * - GET /api/admin/forms/feedback/stats - Get feedback statistics
+ * Both were small, single-domain plugin files. Merging reduces the total
+ * admin-route file count without adding coupling — neither section imports
+ * anything from the other.
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { sendSuccess, sendError, Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { RATE_LIMITS } from '../constants';
+import { knowledgeService } from '../services/knowledge.service';
+import { sendSuccess, sendError, Errors } from '../utils/response';
 import { getOrCreateFeedbackFormConfig, DEFAULT_QUESTIONS } from '../utils/feedback-form-config';
 
 // Re-export for backward compatibility (feedback-form.routes.ts dynamic import)
 export { DEFAULT_QUESTIONS };
 
 // ============================================
-// Validation Schemas
+// Knowledge Base — Validation Schemas
+// ============================================
+
+const KNOWLEDGE_LIMITS = {
+  TITLE_MAX_LENGTH: 200,
+  CONTENT_MAX_LENGTH: 10000, // 10KB max for knowledge base content
+  CONTENT_MIN_LENGTH: 1,
+};
+
+const createKnowledgeSchema = z.object({
+  title: z.string().max(KNOWLEDGE_LIMITS.TITLE_MAX_LENGTH, `Title must be under ${KNOWLEDGE_LIMITS.TITLE_MAX_LENGTH} characters`).optional(),
+  content: z.string()
+    .min(KNOWLEDGE_LIMITS.CONTENT_MIN_LENGTH, 'Content is required')
+    .max(KNOWLEDGE_LIMITS.CONTENT_MAX_LENGTH, `Content must be under ${KNOWLEDGE_LIMITS.CONTENT_MAX_LENGTH} characters`),
+  audience: z.enum(['therapist', 'user', 'both']),
+  sortOrder: z.number().int().min(0).max(1000).optional(),
+});
+
+const updateKnowledgeSchema = z.object({
+  title: z.string().max(KNOWLEDGE_LIMITS.TITLE_MAX_LENGTH, `Title must be under ${KNOWLEDGE_LIMITS.TITLE_MAX_LENGTH} characters`).optional().nullable(),
+  content: z.string()
+    .min(KNOWLEDGE_LIMITS.CONTENT_MIN_LENGTH, 'Content is required')
+    .max(KNOWLEDGE_LIMITS.CONTENT_MAX_LENGTH, `Content must be under ${KNOWLEDGE_LIMITS.CONTENT_MAX_LENGTH} characters`)
+    .optional(),
+  audience: z.enum(['therapist', 'user', 'both']).optional(),
+  active: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).max(1000).optional(),
+});
+
+// ============================================
+// Feedback Forms — Validation Schemas
 // ============================================
 
 const questionSchema = z.object({
@@ -62,9 +94,167 @@ const updateFormConfigSchema = z.object({
 // Routes
 // ============================================
 
-export async function adminFormsRoutes(fastify: FastifyInstance) {
+export async function adminContentRoutes(fastify: FastifyInstance) {
   // All admin routes require authentication
   fastify.addHook('preHandler', verifyWebhookSecret);
+
+  // --------------------------------------------
+  // Knowledge Base
+  // --------------------------------------------
+
+  /**
+   * GET /api/admin/knowledge
+   * List all knowledge entries
+   */
+  fastify.get('/api/admin/knowledge', async (request: FastifyRequest, reply: FastifyReply) => {
+    const requestId = request.id;
+    logger.info({ requestId }, 'Fetching knowledge base entries');
+
+    try {
+      const entries = await prisma.knowledgeBase.findMany({
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+      });
+
+      return sendSuccess(reply, entries);
+    } catch (err) {
+      logger.error({ err, requestId }, 'Failed to fetch knowledge entries');
+      return Errors.internal(reply, 'Failed to fetch knowledge entries');
+    }
+  });
+
+  /**
+   * POST /api/admin/knowledge
+   * Create a new knowledge entry
+   */
+  fastify.post(
+    '/api/admin/knowledge',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+
+      const validation = createKnowledgeSchema.safeParse(request.body);
+      if (!validation.success) {
+        return Errors.validationFailed(reply, validation.error.errors);
+      }
+
+      const { title, content, audience, sortOrder } = validation.data;
+
+      try {
+        const entry = await prisma.knowledgeBase.create({
+          data: {
+            title: title || null,
+            content,
+            audience,
+            sortOrder: sortOrder ?? 0,
+            active: true,
+          },
+        });
+
+        knowledgeService.invalidateCache();
+        logger.info({ requestId, entryId: entry.id }, 'Created knowledge entry');
+
+        return sendSuccess(reply, entry, { statusCode: 201 });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to create knowledge entry');
+        return Errors.internal(reply, 'Failed to create knowledge entry');
+      }
+    }
+  );
+
+  /**
+   * PUT /api/admin/knowledge/:id
+   * Update an existing knowledge entry
+   */
+  fastify.put<{ Params: { id: string } }>(
+    '/api/admin/knowledge/:id',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const { id } = request.params;
+      const requestId = request.id;
+
+      const validation = updateKnowledgeSchema.safeParse(request.body);
+      if (!validation.success) {
+        return Errors.validationFailed(reply, validation.error.errors);
+      }
+
+      try {
+        const existing = await prisma.knowledgeBase.findUnique({ where: { id } });
+
+        if (!existing) {
+          return Errors.notFound(reply, 'Knowledge entry');
+        }
+
+        const entry = await prisma.knowledgeBase.update({
+          where: { id },
+          data: validation.data,
+        });
+
+        knowledgeService.invalidateCache();
+        logger.info({ requestId, entryId: id }, 'Updated knowledge entry');
+
+        return sendSuccess(reply, entry);
+      } catch (err) {
+        logger.error({ err, requestId, entryId: id }, 'Failed to update knowledge entry');
+        return Errors.internal(reply, 'Failed to update knowledge entry');
+      }
+    }
+  );
+
+  /**
+   * DELETE /api/admin/knowledge/:id
+   * Delete a knowledge entry
+   */
+  fastify.delete<{ Params: { id: string } }>(
+    '/api/admin/knowledge/:id',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+      const { id } = request.params;
+      const requestId = request.id;
+
+      try {
+        const existing = await prisma.knowledgeBase.findUnique({ where: { id } });
+
+        if (!existing) {
+          return Errors.notFound(reply, 'Knowledge entry');
+        }
+
+        await prisma.knowledgeBase.delete({ where: { id } });
+
+        knowledgeService.invalidateCache();
+        logger.info({ requestId, entryId: id }, 'Deleted knowledge entry');
+
+        return sendSuccess(reply, null, { message: 'Knowledge entry deleted' });
+      } catch (err) {
+        logger.error({ err, requestId, entryId: id }, 'Failed to delete knowledge entry');
+        return Errors.internal(reply, 'Failed to delete knowledge entry');
+      }
+    }
+  );
+
+  // --------------------------------------------
+  // Feedback Forms — Config
+  // --------------------------------------------
 
   /**
    * GET /api/admin/forms/feedback
@@ -132,6 +322,10 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
     }
   });
 
+  // --------------------------------------------
+  // Feedback Forms — Submissions
+  // --------------------------------------------
+
   /**
    * GET /api/admin/forms/feedback/submissions
    * List feedback submissions with pagination and filtering
@@ -153,7 +347,6 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
       const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
       const skip = (pageNum - 1) * limitNum;
 
-      // Build where clause
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const where: any = {};
 
@@ -253,7 +446,6 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
     try {
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
-      // Get form config to know what questions exist
       const formConfig = await prisma.feedbackFormConfig.findUnique({
         where: { id: 'default' },
         select: { questions: true },
@@ -333,7 +525,6 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
         });
 
         if (!submission) {
-          // Also check if the appointment exists
           const appointment = await prisma.appointmentRequest.findFirst({
             where: { trackingCode: code.toUpperCase() },
             select: {
@@ -369,7 +560,6 @@ export async function adminFormsRoutes(fastify: FastifyInstance) {
    */
   fastify.get('/api/admin/forms/feedback/submissions/export', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      // Get form config to build CSV headers from current questions
       const formConfig = await prisma.feedbackFormConfig.findUnique({
         where: { id: 'default' },
         select: { questions: true },

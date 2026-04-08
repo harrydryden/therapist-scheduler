@@ -17,7 +17,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
-import { formatEmailDateFromSettings } from '../utils/email-date-formatter';
+import { formatEmailDateFromSettings } from '../utils/date';
 import { runBackgroundTask } from '../utils/background-task';
 import type { TransitionSource } from './appointment-lifecycle.service';
 

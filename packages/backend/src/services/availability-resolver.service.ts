@@ -10,13 +10,13 @@
  *   - Minimum booking lead-time enforcement
  *
  * The heavier availability formatting (slot rendering for emails) lives in
- * utils/availability-formatter.ts, and date parsing utilities live in
- * utils/date-parser.ts. This service composes those utilities into
+ * services/availability-formatter.service.ts, and date parsing utilities
+ * live in utils/date.ts. This service composes those utilities into
  * business-rule validation used by the tool executor.
  */
 
 import { logger } from '../utils/logger';
-import { parseConfirmedDateTime, isTooSoonToBook } from '../utils/date-parser';
+import { parseConfirmedDateTime, isTooSoonToBook } from '../utils/date';
 import { getSettingValue } from './settings.service';
 
 export class AvailabilityResolverService {
