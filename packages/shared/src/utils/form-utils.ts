@@ -18,6 +18,21 @@ export const SLACK_CHOICE_TEXT_MAX = 80;
 export const SLACK_FREE_TEXT_MAX = 100;
 
 // ============================================
+// Word counting
+// ============================================
+
+/**
+ * Count words in a string. Words are non-whitespace runs separated by any
+ * whitespace (spaces, tabs, newlines). Returns 0 for empty / whitespace-only.
+ */
+export function countWords(value: string | null | undefined): number {
+  if (!value || typeof value !== 'string') return 0;
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+// ============================================
 // Conditional question evaluation
 // ============================================
 
@@ -100,6 +115,14 @@ export function validateResponses(
         if (!textVal || (typeof textVal === 'string' && !textVal.trim())) {
           return `Please provide an explanation for "${q.question}" when answering "${choiceVal}"`;
         }
+      }
+    }
+
+    // Enforce maxWords on free-text answers (applies whether required or not)
+    if (q.type === 'text' && typeof q.maxWords === 'number' && q.maxWords > 0) {
+      const textVal = responses[q.id];
+      if (typeof textVal === 'string' && countWords(textVal) > q.maxWords) {
+        return `Please keep "${q.question}" to ${q.maxWords} words or fewer`;
       }
     }
   }

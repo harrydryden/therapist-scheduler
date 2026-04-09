@@ -71,6 +71,7 @@ const questionSchema = z.object({
   scaleMaxLabel: z.string().optional(),
   options: z.array(z.string()).optional(),
   followUpPlaceholder: z.string().optional(),
+  maxWords: z.number().int().positive().optional(),
   conditionalOn: z.object({
     questionId: z.string().min(1),
     values: z.array(z.string()).min(1),

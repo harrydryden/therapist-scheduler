@@ -8,6 +8,7 @@
  * - GET /api/v1/ats/feedback/form (ATS)
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { logger } from './logger';
 
@@ -77,7 +78,18 @@ export const DEFAULT_QUESTIONS = [
     required: true,
     conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
   },
+  {
+    id: 'therapist_feedback',
+    type: 'text',
+    question: 'Would you like to provide any feedback to your therapist?',
+    helperText: 'Optional - up to 100 words.',
+    required: false,
+    maxWords: 100,
+  },
 ];
+
+/** Current questions schema version. Increment when DEFAULT_QUESTIONS changes. */
+export const CURRENT_QUESTIONS_VERSION = 3;
 
 const DEFAULT_CONFIG = {
   id: 'default',
@@ -89,6 +101,7 @@ const DEFAULT_CONFIG = {
   questions: DEFAULT_QUESTIONS,
   isActive: true,
   requiresAuth: true,
+  questionsVersion: CURRENT_QUESTIONS_VERSION,
 };
 
 /**
@@ -113,24 +126,52 @@ export async function getOrCreateFeedbackFormConfig(
     logger.info('Created feedback form config with default questions');
   }
 
-  // Auto-migrate to v2 questions if needed
+  // Auto-migrate to v2 questions if needed (replaces legacy question set)
   const questions = config.questions as unknown[];
   const questionIds = Array.isArray(questions)
     ? (questions as Array<{ id?: string }>).map(q => q.id)
     : [];
   const hasNewQuestions = questionIds.includes('met_goals');
-  const needsMigration = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
+  const needsV2Migration = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
 
-  if (needsMigration) {
+  if (needsV2Migration) {
     config = await prisma.feedbackFormConfig.update({
       where: { id: 'default' },
       data: {
         questions: DEFAULT_QUESTIONS,
         requiresAuth: true,
-        questionsVersion: 2,
+        questionsVersion: CURRENT_QUESTIONS_VERSION,
       },
     });
     logger.info('Migrated feedback form config to v2 questions');
+    return config;
+  }
+
+  // Auto-migrate to v3: append the optional therapist feedback question if it
+  // doesn't already exist. This preserves any admin customizations to the
+  // existing question set rather than overwriting them.
+  if (config.questionsVersion < CURRENT_QUESTIONS_VERSION && !questionIds.includes('therapist_feedback')) {
+    const therapistFeedbackQuestion = DEFAULT_QUESTIONS.find(q => q.id === 'therapist_feedback');
+    if (therapistFeedbackQuestion) {
+      const updatedQuestions = [
+        ...(questions as Prisma.InputJsonValue[]),
+        therapistFeedbackQuestion as Prisma.InputJsonValue,
+      ];
+      config = await prisma.feedbackFormConfig.update({
+        where: { id: 'default' },
+        data: {
+          questions: updatedQuestions,
+          questionsVersion: CURRENT_QUESTIONS_VERSION,
+        },
+      });
+      logger.info('Migrated feedback form config to v3 (added therapist_feedback question)');
+    }
+  } else if (config.questionsVersion < CURRENT_QUESTIONS_VERSION) {
+    // Question already exists (e.g. admin added it manually), just bump version.
+    config = await prisma.feedbackFormConfig.update({
+      where: { id: 'default' },
+      data: { questionsVersion: CURRENT_QUESTIONS_VERSION },
+    });
   }
 
   return config;

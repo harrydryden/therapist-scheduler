@@ -4,7 +4,7 @@ import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
-import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions } from '@therapist-scheduler/shared/utils/form-utils';
+import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions, countWords } from '@therapist-scheduler/shared/utils/form-utils';
 
 interface PrefilledData {
   trackingCode: string;
@@ -431,6 +431,16 @@ export default function FeedbackFormPage() {
       if (!textResponse || !textResponse.trim()) return false;
     }
 
+    // Enforce word limit on free-text answers
+    if (
+      currentQuestion.type === 'text' &&
+      typeof currentQuestion.maxWords === 'number' &&
+      typeof response === 'string' &&
+      countWords(response) > currentQuestion.maxWords
+    ) {
+      return false;
+    }
+
     return true;
   };
 
@@ -608,15 +618,47 @@ export default function FeedbackFormPage() {
 
         {/* Input based on question type */}
         <div className="mb-8">
-          {currentQuestion.type === 'text' && (
-            <textarea
-              value={(responses[currentQuestion.id] as string) || ''}
-              onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
-              rows={4}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none"
-              placeholder="Type your answer..."
-            />
-          )}
+          {currentQuestion.type === 'text' && (() => {
+            const textValue = (responses[currentQuestion.id] as string) || '';
+            const maxWords = currentQuestion.maxWords;
+            const wordCount = maxWords ? countWords(textValue) : 0;
+            const overLimit = !!maxWords && wordCount > maxWords;
+
+            const handleTextChange = (next: string) => {
+              // Hard-limit: if the user is over the cap, truncate to maxWords words
+              // (preserves their leading content). We split by whitespace runs and
+              // rejoin with single spaces, which is acceptable for free-text feedback.
+              if (maxWords && countWords(next) > maxWords) {
+                const truncated = next.trim().split(/\s+/).slice(0, maxWords).join(' ');
+                handleResponseChange(currentQuestion.id, truncated);
+                return;
+              }
+              handleResponseChange(currentQuestion.id, next);
+            };
+
+            return (
+              <div className="space-y-1">
+                <textarea
+                  value={textValue}
+                  onChange={(e) => handleTextChange(e.target.value)}
+                  rows={4}
+                  className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none ${
+                    overLimit ? 'border-red-400' : 'border-gray-300'
+                  }`}
+                  placeholder="Type your answer..."
+                  aria-describedby={maxWords ? `${currentQuestion.id}-word-count` : undefined}
+                />
+                {maxWords && (
+                  <p
+                    id={`${currentQuestion.id}-word-count`}
+                    className={`text-xs text-right ${overLimit ? 'text-red-600' : 'text-gray-500'}`}
+                  >
+                    {wordCount} / {maxWords} words
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           {currentQuestion.type === 'scale' && (
             <ScaleQuestion

@@ -8,7 +8,7 @@
  * - Edge cases: case-insensitivity, empty arrays, back-and-forth answers
  */
 
-import { requiresExplanation, validateResponses } from '@therapist-scheduler/shared/utils/form-utils';
+import { countWords, requiresExplanation, validateResponses } from '@therapist-scheduler/shared/utils/form-utils';
 import type { FormQuestion } from '@therapist-scheduler/shared/types/feedback';
 
 /** Minimal subset of FormQuestion used by test fixtures — compatible with FormQuestion */
@@ -177,6 +177,83 @@ describe('validateResponses (server-side submission validation)', () => {
       const responses = { comfortable: 'No', heard: 'Unsure' };
       expect(validateResponses(responses, questions, [])).toBeNull();
     });
+  });
+});
+
+describe('countWords', () => {
+  it('returns 0 for empty / whitespace / null / undefined', () => {
+    expect(countWords('')).toBe(0);
+    expect(countWords('   ')).toBe(0);
+    expect(countWords(null)).toBe(0);
+    expect(countWords(undefined)).toBe(0);
+  });
+
+  it('counts simple word sequences', () => {
+    expect(countWords('hello')).toBe(1);
+    expect(countWords('hello world')).toBe(2);
+    expect(countWords('one two three four five')).toBe(5);
+  });
+
+  it('collapses repeated whitespace, tabs, and newlines', () => {
+    expect(countWords('hello   world')).toBe(2);
+    expect(countWords('hello\tworld')).toBe(2);
+    expect(countWords('hello\nworld')).toBe(2);
+    expect(countWords('  leading and trailing  ')).toBe(3);
+  });
+});
+
+describe('maxWords validation on text questions', () => {
+  const questions: FormQuestion[] = [
+    {
+      id: 'therapist_feedback',
+      type: 'text',
+      question: 'Would you like to provide any feedback to your therapist?',
+      required: false,
+      maxWords: 5,
+    },
+  ];
+
+  it('passes when text is empty (optional question)', () => {
+    expect(validateResponses({}, questions, [])).toBeNull();
+    expect(validateResponses({ therapist_feedback: '' }, questions, [])).toBeNull();
+  });
+
+  it('passes when word count is at the limit', () => {
+    expect(
+      validateResponses({ therapist_feedback: 'one two three four five' }, questions, []),
+    ).toBeNull();
+  });
+
+  it('passes when word count is below the limit', () => {
+    expect(
+      validateResponses({ therapist_feedback: 'just three words' }, questions, []),
+    ).toBeNull();
+  });
+
+  it('fails when word count exceeds the limit', () => {
+    const error = validateResponses(
+      { therapist_feedback: 'one two three four five six' },
+      questions,
+      [],
+    );
+    expect(error).toContain('5 words');
+  });
+
+  it('counts whitespace-separated tokens regardless of newlines', () => {
+    const error = validateResponses(
+      { therapist_feedback: 'one two\nthree four\nfive six' },
+      questions,
+      [],
+    );
+    expect(error).not.toBeNull();
+  });
+
+  it('does not enforce a limit when maxWords is not set', () => {
+    const noLimitQuestions: FormQuestion[] = [
+      { id: 'feedback', type: 'text', question: 'Feedback', required: false },
+    ];
+    const longText = Array(500).fill('word').join(' ');
+    expect(validateResponses({ feedback: longText }, noLimitQuestions, [])).toBeNull();
   });
 });
 
