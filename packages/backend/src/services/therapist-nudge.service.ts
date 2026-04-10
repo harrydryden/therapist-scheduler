@@ -3,8 +3,10 @@ import { logger } from '../utils/logger';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
-import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { renderTemplate } from '../utils/email-templates';
 import { ACTIVE_STATUSES } from '../constants';
+import { notionService } from './notion.service';
+import { therapistBookingStatusService } from './therapist-booking-status.service';
 
 // Check every 6 hours whether any therapists are due a nudge
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -74,6 +76,8 @@ class TherapistNudgeService {
    *  2. They have NO appointments in an active status (pending → feedback_requested)
    *  3. They have NO completed appointments (they've never been matched)
    *  4. Enough time has passed since ingestedAt or lastNudgeAt (whichever is later)
+   *  5. They are active in Notion (Active checkbox = true)
+   *  6. They are not frozen/unavailable (no active booking threads)
    */
   private async sendNudges(isLockValid: () => boolean): Promise<void> {
     const enabled = await getSettingValue<boolean>('therapistNudge.enabled');
@@ -82,22 +86,50 @@ class TherapistNudgeService {
       return;
     }
 
-    const intervalWeeks = await getSettingValue<number>('therapistNudge.intervalWeeks');
-    const intervalMs = intervalWeeks * 7 * 24 * 60 * 60 * 1000;
-    const cutoff = new Date(Date.now() - intervalMs);
+    // Fetch all independent data in parallel:
+    //  - settings (intervalWeeks, agentName, email templates)
+    //  - appointment exclusions
+    //  - Notion active therapists
+    //  - frozen/unavailable therapist IDs
+    const [
+      intervalWeeks,
+      agentName,
+      subjectTemplate,
+      bodyTemplate,
+      therapistsWithAppointments,
+      activeTherapists,
+      unavailableIds,
+    ] = await Promise.all([
+      getSettingValue<number>('therapistNudge.intervalWeeks'),
+      getSettingValue<string>('agent.fromName'),
+      getSettingValue<string>('email.therapistNudgeSubject'),
+      getSettingValue<string>('email.therapistNudgeBody'),
+      prisma.appointmentRequest.findMany({
+        where: {
+          status: { in: [...ACTIVE_STATUSES, 'completed'] },
+        },
+        select: { therapistNotionId: true },
+        distinct: ['therapistNotionId'],
+      }),
+      notionService.fetchTherapists().catch((err) => {
+        logger.error({ err }, 'Failed to fetch active therapists from Notion for nudge filtering — aborting nudge run');
+        return null;
+      }),
+      therapistBookingStatusService.getUnavailableTherapistIds(),
+    ]);
 
-    const agentName = await getSettingValue<string>('agent.fromName');
+    // If we can't determine which therapists are active, skip this run
+    // to avoid sending nudges to inactive therapists
+    if (!activeTherapists) {
+      return;
+    }
+
+    const cutoff = new Date(Date.now() - intervalWeeks * 7 * 24 * 60 * 60 * 1000);
     const agentFirstName = agentName.split(' ')[0];
 
-    // Find therapists with active or completed appointments (to exclude)
-    const therapistsWithAppointments = await prisma.appointmentRequest.findMany({
-      where: {
-        status: { in: [...ACTIVE_STATUSES, 'completed'] },
-      },
-      select: { therapistNotionId: true },
-      distinct: ['therapistNotionId'],
-    });
     const excludedNotionIds = new Set(therapistsWithAppointments.map(a => a.therapistNotionId));
+    const activeNotionIds = new Set(activeTherapists.map(t => t.id));
+    const unavailableNotionIds = new Set(unavailableIds);
 
     // Find eligible therapists:
     //  - Have an ingestedAt date
@@ -107,12 +139,10 @@ class TherapistNudgeService {
       where: {
         ingestedAt: { not: null },
         OR: [
-          // Never nudged — use ingestedAt as the anchor
           {
             lastNudgeAt: null,
             ingestedAt: { lte: cutoff },
           },
-          // Previously nudged — use lastNudgeAt as the anchor
           {
             lastNudgeAt: { lte: cutoff },
           },
@@ -126,8 +156,15 @@ class TherapistNudgeService {
       },
     });
 
-    // Filter out therapists with active/completed appointments
-    const eligible = candidates.filter(t => !excludedNotionIds.has(t.notionId));
+    // Filter out:
+    //  - therapists with active/completed appointments (already have a thread)
+    //  - therapists not active in Notion (inactive therapists)
+    //  - therapists that are frozen/unavailable (have active booking threads)
+    const eligible = candidates.filter(t =>
+      !excludedNotionIds.has(t.notionId) &&
+      activeNotionIds.has(t.notionId) &&
+      !unavailableNotionIds.has(t.notionId)
+    );
 
     if (eligible.length === 0) {
       logger.debug('No therapists due for nudge email');
@@ -153,8 +190,8 @@ class TherapistNudgeService {
           agentFirstName,
         };
 
-        const subject = await getEmailSubject('therapistNudge', variables);
-        const body = await getEmailBody('therapistNudge', variables);
+        const subject = renderTemplate(subjectTemplate, variables);
+        const body = renderTemplate(bodyTemplate, variables);
 
         await emailProcessingService.sendEmail({
           to: therapist.email,
