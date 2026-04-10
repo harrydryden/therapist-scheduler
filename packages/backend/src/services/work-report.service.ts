@@ -206,18 +206,12 @@ class WorkReportService extends PeriodicService {
 
       const response = await anthropicClient.messages.create({
         model: CLAUDE_MODELS.FAST,
-        max_tokens: 400,
+        max_tokens: 200,
         messages: [
           {
             role: 'user',
-            content: `You are summarising a scheduling agent's daily activity for a Slack work report. Write a concise synopsis (max 600 chars) covering:
-1. Which appointments were worked on and with whom
-2. Key progress made (e.g. confirmations, new contacts, negotiations)
-3. Any issues needing attention (stale threads, human control, escalations)
+            content: `Summarise this scheduling agent activity for a Slack daily report in max 300 chars. One short bullet per appointment with therapist name + what happened. Flag issues. No headers, no markdown.
 
-Use plain text, no markdown headers. Use short bullet points. Be factual and brief.
-
-Activity this period:
 ${appointmentSummaries.join('\n\n')}`,
           },
         ],
@@ -226,8 +220,7 @@ ${appointmentSummaries.join('\n\n')}`,
       const text = response.content[0]?.type === 'text' ? response.content[0].text : null;
       if (!text) return null;
 
-      // Hard-cap at 800 chars to stay well within Slack limits when combined with report
-      return text.length > 800 ? text.slice(0, 797) + '...' : text;
+      return text.length > 400 ? text.slice(0, 397) + '...' : text;
     } catch (error) {
       logger.warn({ error }, 'Failed to generate work report synopsis — report will send without it');
       return null;

@@ -40,6 +40,7 @@ model Therapist {
   name       String
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
   lastNudgeAt DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
+  lastNudgeThreadId String? @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)
   createdAt  DateTime  @default(now()) @map("created_at")
   updatedAt  DateTime  @updatedAt @map("updated_at")
 

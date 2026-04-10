@@ -978,51 +978,38 @@ class SlackNotificationService {
 
     const totalPipeline = stats.pipelinePending + stats.pipelineContacted + stats.pipelineNegotiating + stats.pipelineConfirmed;
 
-    let reportText = `📋 *Daily Work Report*\n`;
-    reportText += `_${periodLabel}_\n\n`;
-
-    // Messages
-    reportText += `*Messages*\n`;
-    reportText += `Sent: *${stats.emailsSent}* | Received: *${stats.emailsReceived}*\n\n`;
-
-    // Appointments
-    reportText += `*Appointments*\n`;
-    reportText += `New: *${stats.appointmentsCreated}* | Confirmed: *${stats.appointmentsConfirmed}* | Completed: *${stats.appointmentsCompleted}* | Cancelled: *${stats.appointmentsCancelled}*\n\n`;
-
-    // Pipeline
-    reportText += `*Current Pipeline* (${totalPipeline} active)\n`;
-    reportText += `Pending: ${stats.pipelinePending} | Contacted: ${stats.pipelineContacted} | Negotiating: ${stats.pipelineNegotiating} | Confirmed: ${stats.pipelineConfirmed}\n`;
+    let reportText = `📋 *Daily Report* · _${periodLabel}_\n`;
+    reportText += `📨 Sent *${stats.emailsSent}* · Recv *${stats.emailsReceived}* | 📅 New *${stats.appointmentsCreated}* · Conf *${stats.appointmentsConfirmed}* · Done *${stats.appointmentsCompleted}* · Canc *${stats.appointmentsCancelled}*\n`;
+    reportText += `📊 *${totalPipeline} active* — ${stats.pipelinePending} pending · ${stats.pipelineContacted} contacted · ${stats.pipelineNegotiating} negotiating · ${stats.pipelineConfirmed} confirmed`;
 
     // Alerts (only show if there are any)
-    const totalAlerts = stats.staleConversationsFlagged + stats.humanControlTakeovers + stats.chaseFollowUpsSent + stats.closureRecommendations;
-    if (totalAlerts > 0) {
-      reportText += `\n⚠️ *Alerts & Escalations*\n`;
-      const alertParts: string[] = [];
-      if (stats.staleConversationsFlagged > 0) alertParts.push(`Stale: ${stats.staleConversationsFlagged}`);
-      if (stats.humanControlTakeovers > 0) alertParts.push(`Human takeover: ${stats.humanControlTakeovers}`);
-      if (stats.chaseFollowUpsSent > 0) alertParts.push(`Chase sent: ${stats.chaseFollowUpsSent}`);
-      if (stats.closureRecommendations > 0) alertParts.push(`Closure recommended: ${stats.closureRecommendations}`);
-      reportText += alertParts.join(' | ');
+    const alertParts: string[] = [];
+    if (stats.staleConversationsFlagged > 0) alertParts.push(`${stats.staleConversationsFlagged} stale`);
+    if (stats.humanControlTakeovers > 0) alertParts.push(`${stats.humanControlTakeovers} takeover`);
+    if (stats.chaseFollowUpsSent > 0) alertParts.push(`${stats.chaseFollowUpsSent} chased`);
+    if (stats.closureRecommendations > 0) alertParts.push(`${stats.closureRecommendations} closure rec`);
+    if (alertParts.length > 0) {
+      reportText += `\n⚠️ ${alertParts.join(' · ')}`;
     }
 
-    // Feedback
     if (stats.feedbackSubmissions > 0) {
-      reportText += `\n\n📝 *Feedback:* ${stats.feedbackSubmissions} submission${stats.feedbackSubmissions === 1 ? '' : 's'} received`;
+      reportText += ` | 📝 ${stats.feedbackSubmissions} feedback`;
     }
 
-    // Slack section text has a 3000-character limit.
-    // The work report is naturally compact (~500 chars) but add safety truncation
-    // to match the defensive pattern used in sendAlert.
+    // Append synopsis inline if available
+    if (stats.synopsis) {
+      reportText += `\n\n🤖 ${stats.synopsis}`;
+    }
+
+    // Slack section text has a 3000-character limit
     const SLACK_SECTION_TEXT_LIMIT = 3000;
     if (reportText.length > SLACK_SECTION_TEXT_LIMIT) {
       const truncated = reportText.substring(0, SLACK_SECTION_TEXT_LIMIT - 20);
       const lastNewline = truncated.lastIndexOf('\n');
       reportText = lastNewline > 0
-        ? truncated.substring(0, lastNewline) + '\n_…report truncated_'
+        ? truncated.substring(0, lastNewline) + '\n_…truncated_'
         : truncated + '…';
     }
-
-    const contextText = `${new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' })} | <${this.adminDashboardBaseUrl}/work-reports|View Reports> | <${this.adminDashboardBaseUrl}/dashboard|Dashboard>`;
 
     const blocks: SlackTextBlock[] = [
       {
@@ -1032,37 +1019,18 @@ class SlackNotificationService {
           text: reportText,
         },
       },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `<${this.adminDashboardBaseUrl}/work-reports|Reports> · <${this.adminDashboardBaseUrl}/dashboard|Dashboard>`,
+          },
+        ],
+      },
     ];
 
-    // Add AI synopsis as a separate section if available
-    if (stats.synopsis) {
-      let synopsisText = `\n🤖 *Synopsis*\n${stats.synopsis}`;
-      if (synopsisText.length > SLACK_SECTION_TEXT_LIMIT) {
-        synopsisText = synopsisText.substring(0, SLACK_SECTION_TEXT_LIMIT - 20) + '\n_…truncated_';
-      }
-      blocks.push(
-        { type: 'divider' },
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: synopsisText,
-          },
-        },
-      );
-    }
-
-    blocks.push({
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: contextText.length > 3000 ? contextText.substring(0, 2997) + '...' : contextText,
-        },
-      ],
-    });
-
-    const fallbackText = `📋 Daily Work Report: ${stats.emailsSent} emails sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`;
+    const fallbackText = `📋 Daily Report: ${stats.emailsSent} sent, ${stats.appointmentsConfirmed} confirmed, ${totalPipeline} active`;
 
     return this.sendToSlack({
       text: fallbackText.length > 3000 ? fallbackText.substring(0, 2997) + '...' : fallbackText,

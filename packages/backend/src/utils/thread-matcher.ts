@@ -12,6 +12,7 @@
 import { prisma } from './database';
 import { logger } from './logger';
 import { extractTrackingCode } from '../services/tracking-code.service';
+import { TERMINAL_STATUSES } from '../constants';
 
 /**
  * Minimal email fields needed for appointment matching.
@@ -163,6 +164,12 @@ function byMostRecent(
  * Legacy fallback matching: sender email + therapist name in subject.
  * Limited to 50 results to prevent memory issues with high-volume users.
  *
+ * IMPORTANT: Excludes terminal statuses (cancelled, completed) to prevent
+ * replies to unrelated emails (e.g. therapist nudge reminders) from being
+ * matched to old, closed appointments. Deterministic matches (thread ID,
+ * In-Reply-To, tracking code) are NOT filtered by status because those are
+ * explicit thread replies.
+ *
  * When multiple matches exist, uses deterministic selection:
  * - Prefer unique therapist-name match in subject
  * - Then prefer unique therapist-email match
@@ -177,6 +184,7 @@ async function findByLegacyMatch(
         { userEmail: email.from },
         { therapistEmail: email.from },
       ],
+      status: { notIn: [...TERMINAL_STATUSES] },
     },
     orderBy: {
       updatedAt: 'desc',
