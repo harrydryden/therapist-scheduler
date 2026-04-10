@@ -5,6 +5,8 @@ import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { ACTIVE_STATUSES } from '../constants';
+import { notionService } from './notion.service';
+import { therapistBookingStatusService } from './therapist-booking-status.service';
 
 // Check every 6 hours whether any therapists are due a nudge
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -74,6 +76,8 @@ class TherapistNudgeService {
    *  2. They have NO appointments in an active status (pending → feedback_requested)
    *  3. They have NO completed appointments (they've never been matched)
    *  4. Enough time has passed since ingestedAt or lastNudgeAt (whichever is later)
+   *  5. They are active in Notion (Active checkbox = true)
+   *  6. They are not frozen/unavailable (no active booking threads)
    */
   private async sendNudges(isLockValid: () => boolean): Promise<void> {
     const enabled = await getSettingValue<boolean>('therapistNudge.enabled');
@@ -98,6 +102,25 @@ class TherapistNudgeService {
       distinct: ['therapistNotionId'],
     });
     const excludedNotionIds = new Set(therapistsWithAppointments.map(a => a.therapistNotionId));
+
+    // Get active therapist Notion IDs (only Active=true therapists from Notion)
+    // and frozen/unavailable therapist IDs in parallel
+    const [activeTherapists, unavailableIds] = await Promise.all([
+      notionService.fetchTherapists().catch((err) => {
+        logger.error({ err }, 'Failed to fetch active therapists from Notion for nudge filtering — aborting nudge run');
+        return null;
+      }),
+      therapistBookingStatusService.getUnavailableTherapistIds(),
+    ]);
+
+    // If we can't determine which therapists are active, skip this run
+    // to avoid sending nudges to inactive therapists
+    if (!activeTherapists) {
+      return;
+    }
+
+    const activeNotionIds = new Set(activeTherapists.map(t => t.id));
+    const unavailableNotionIds = new Set(unavailableIds);
 
     // Find eligible therapists:
     //  - Have an ingestedAt date
@@ -126,8 +149,15 @@ class TherapistNudgeService {
       },
     });
 
-    // Filter out therapists with active/completed appointments
-    const eligible = candidates.filter(t => !excludedNotionIds.has(t.notionId));
+    // Filter out:
+    //  - therapists with active/completed appointments (already have a thread)
+    //  - therapists not active in Notion (inactive therapists)
+    //  - therapists that are frozen/unavailable (have active booking threads)
+    const eligible = candidates.filter(t =>
+      !excludedNotionIds.has(t.notionId) &&
+      activeNotionIds.has(t.notionId) &&
+      !unavailableNotionIds.has(t.notionId)
+    );
 
     if (eligible.length === 0) {
       logger.debug('No therapists due for nudge email');
