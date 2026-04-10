@@ -193,16 +193,20 @@ class TherapistNudgeService {
         const subject = renderTemplate(subjectTemplate, variables);
         const body = renderTemplate(bodyTemplate, variables);
 
-        await emailProcessingService.sendEmail({
+        const { threadId } = await emailProcessingService.sendEmail({
           to: therapist.email,
           subject,
           body,
         });
 
-        // Mark as nudged
+        // Mark as nudged and store the Gmail thread ID so replies can be
+        // identified as nudge responses (not routed to an appointment).
         await prisma.therapist.update({
           where: { id: therapist.id },
-          data: { lastNudgeAt: new Date() },
+          data: {
+            lastNudgeAt: new Date(),
+            lastNudgeThreadId: threadId || null,
+          },
         });
 
         sent++;

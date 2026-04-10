@@ -255,6 +255,7 @@ export type ProcessedMessageContext =
   | 'bounce'
   | 'own-email'
   | 'weekly-mailing-reply'
+  | 'therapist-nudge-reply'
   | 'unmatched-abandoned'
   | 'divergence-blocked-abandoned'
   | 'processing-failed-abandoned';
@@ -511,6 +512,38 @@ export class EmailMessageProcessorService {
         );
         await markMessageProcessed(messageId, traceId, 'own-email');
         return false;
+      }
+
+      // Check if this is a reply to a therapist nudge email ("still looking for a client").
+      // Nudge replies must be intercepted BEFORE the appointment matcher to prevent
+      // them from being incorrectly routed to an old or unrelated appointment thread.
+      if (email.threadId) {
+        const nudgeTherapist = await prisma.therapist.findFirst({
+          where: { lastNudgeThreadId: email.threadId },
+          select: { id: true, name: true, email: true },
+        });
+        if (nudgeTherapist) {
+          logger.info(
+            { traceId, messageId, from: email.from, therapistId: nudgeTherapist.id, therapistName: nudgeTherapist.name },
+            'Detected reply to therapist nudge email — routing to admin notification instead of appointment matching'
+          );
+          // Notify admins so the availability can be acted on manually
+          slackNotificationService.sendAlert({
+            title: 'Therapist Nudge Reply',
+            severity: 'medium',
+            therapistName: nudgeTherapist.name,
+            details: `Therapist replied to a nudge email with potential availability. ` +
+              `No active appointment thread exists — manual review needed to match with a client.`,
+            additionalFields: {
+              'Therapist email': nudgeTherapist.email,
+              'Subject': email.subject.slice(0, 100),
+            },
+          }).catch((err) => {
+            logger.warn({ traceId, err }, 'Failed to send Slack alert for therapist nudge reply');
+          });
+          await markMessageProcessed(messageId, traceId, 'therapist-nudge-reply');
+          return true;
+        }
       }
 
       // Check if this is a reply to the weekly promotional email
