@@ -123,58 +123,74 @@ class ChaseEmailService {
           }
 
           try {
-            // PRE-SEND SAFETY CHECK: Verify Gmail threads for unprocessed replies
-            // before sending a chase. This catches cases where the reply was missed
-            // by push notifications AND the hourly missed-message scanner (e.g. due
-            // to race conditions, scanner failures, or OAuth token issues).
-            // Check BOTH threads (therapist + user) — a reply on either side means
-            // the conversation is not truly stale.
-            const threadIdsToCheck = [
-              appointment.therapistGmailThreadId,
-              appointment.gmailThreadId,
-            ].filter((id): id is string => id !== null && id !== threadId);
-            // Put the target thread first (most likely to have the reply we care about)
-            if (threadId) threadIdsToCheck.unshift(threadId);
+            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for ANY inbound
+            // reply — not just unprocessed ones. This catches cases where the
+            // reply was received but abandoned after MAX_UNMATCHED_ATTEMPTS or
+            // MAX_PROCESSING_FAILURES (typically within ~3 hours). In that
+            // scenario the message is permanently in processedGmailMessage and
+            // checkThreadForUnprocessedReplies would find nothing, yet the
+            // therapist/user DID reply and should not be chased.
+            //
+            // We check both the therapist and user threads — a reply on either
+            // side means the conversation is not truly stale.
+            const threadIdsToCheck = new Set<string>();
+            if (threadId) threadIdsToCheck.add(threadId);
+            if (appointment.therapistGmailThreadId) threadIdsToCheck.add(appointment.therapistGmailThreadId);
+            if (appointment.gmailThreadId) threadIdsToCheck.add(appointment.gmailThreadId);
 
-            if (threadIdsToCheck.length > 0) {
+            if (threadIdsToCheck.size > 0) {
               try {
-                let totalRecovered = 0;
+                let hasReply = false;
                 for (const tid of threadIdsToCheck) {
-                  const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
+                  if (await emailProcessingService.threadContainsInboundReplies(
                     tid,
                     `chase-presend:${appointment.id}`
-                  );
-                  totalRecovered += recovered;
+                  )) {
+                    hasReply = true;
+                    break;
+                  }
                 }
-                if (totalRecovered > 0) {
-                  logger.info(
+
+                if (hasReply) {
+                  logger.warn(
                     {
                       checkId,
                       appointmentId: appointment.id,
                       target,
-                      recovered: totalRecovered,
                     },
-                    'Recovered missed reply before sending chase — skipping chase'
+                    'Thread contains inbound reply — skipping chase (reply may have been abandoned during processing)'
                   );
 
-                  // Release the sentinel so the appointment can be re-evaluated
-                  // on the next cycle (its lastActivityAt will now be fresh).
+                  // Release the sentinel so the appointment can be re-evaluated.
                   await prisma.appointmentRequest.updateMany({
                     where: { id: appointment.id, chaseSentAt: new Date(0) },
                     data: { chaseSentAt: null },
                   });
 
-                  // Alert admins about the near-miss so they can investigate
-                  // why the normal recovery paths failed.
+                  // Also attempt to recover any unprocessed messages (best-effort).
+                  // This handles the case where the reply was never processed at all.
+                  for (const tid of threadIdsToCheck) {
+                    try {
+                      await emailProcessingService.checkThreadForUnprocessedReplies(
+                        tid,
+                        `chase-presend-recovery:${appointment.id}`
+                      );
+                    } catch {
+                      // Non-fatal — the important thing is we don't send the chase
+                    }
+                  }
+
+                  // Alert admins so they can investigate why the reply wasn't
+                  // processed successfully through normal paths.
                   slackNotificationService.sendAlert({
-                    title: 'Chase prevented — missed reply recovered',
-                    severity: 'medium',
+                    title: 'Chase prevented — reply exists on thread',
+                    severity: 'high',
                     appointmentId: appointment.id,
                     therapistName: appointment.therapistName,
                     details:
-                      `Recovered *${totalRecovered}* missed message(s) just before sending a chase ` +
-                      `to *${target}*. Normal push notification and scanner recovery both failed ` +
-                      `for this thread — investigate why.`,
+                      `Blocked chase to *${target}* because the Gmail thread already ` +
+                      `contains an inbound reply. The reply was likely abandoned ` +
+                      `after processing failures — investigate and manually recover.`,
                     additionalFields: {
                       'User': appointment.userName || '(unknown)',
                       'Therapist': appointment.therapistName || '(unknown)',

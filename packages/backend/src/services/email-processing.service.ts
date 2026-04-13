@@ -57,6 +57,10 @@ class EmailProcessingServiceFacade {
     return emailIngestService.checkThreadForUnprocessedReplies(threadId, traceId);
   }
 
+  threadContainsInboundReplies(threadId: string, traceId: string) {
+    return emailIngestService.threadContainsInboundReplies(threadId, traceId);
+  }
+
   previewThreadMessages(threadId: string, traceId: string) {
     return emailIngestService.previewThreadMessages(threadId, traceId);
   }
