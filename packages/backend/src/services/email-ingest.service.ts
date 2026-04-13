@@ -579,6 +579,40 @@ export class EmailIngestService {
   }
 
   /**
+   * Check whether a Gmail thread contains any inbound (non-system) messages.
+   *
+   * Unlike checkThreadForUnprocessedReplies, this does NOT filter by processing
+   * status — it answers the question "did anyone reply in this thread at all?"
+   * regardless of whether the reply was successfully processed, failed, or was
+   * abandoned after MAX_UNMATCHED_ATTEMPTS / MAX_PROCESSING_FAILURES.
+   *
+   * Used as a pre-flight check before sending chase follow-ups to avoid chasing
+   * someone who already replied (even if our system failed to handle their reply).
+   */
+  async threadContainsInboundReplies(threadId: string, traceId: string): Promise<boolean> {
+    const gmail = await emailOAuthService.ensureGmailClient();
+
+    const threadResponse = await gmail.users.threads.get({
+      userId: 'me',
+      id: threadId,
+      format: 'minimal',
+    });
+
+    const messages = threadResponse.data.messages || [];
+
+    for (const message of messages) {
+      if (!message.id) continue;
+      const labels = message.labelIds || [];
+      // Messages with SENT (but not INBOX) are our outgoing emails — skip.
+      // Anything else is an inbound reply.
+      if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
+      return true; // Found at least one inbound message
+    }
+
+    return false;
+  }
+
+  /**
    * Preview which messages in a thread are unprocessed vs already processed.
    * Used by the admin UI to show a dry-run before triggering reprocessing.
    *
