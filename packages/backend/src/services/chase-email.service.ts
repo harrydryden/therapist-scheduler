@@ -123,6 +123,46 @@ class ChaseEmailService {
           }
 
           try {
+            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for unprocessed replies
+            // before sending a chase. This catches cases where the reply was missed
+            // by push notifications AND the hourly missed-message scanner (e.g. due
+            // to race conditions, scanner failures, or OAuth token issues).
+            if (threadId) {
+              try {
+                const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
+                  threadId,
+                  `chase-presend:${appointment.id}`
+                );
+                if (recovered > 0) {
+                  logger.info(
+                    {
+                      checkId,
+                      appointmentId: appointment.id,
+                      target,
+                      recovered,
+                    },
+                    'Recovered missed reply before sending chase — skipping chase'
+                  );
+
+                  // Release the sentinel so the appointment can be re-evaluated
+                  // on the next cycle (its lastActivityAt will now be fresh).
+                  await prisma.appointmentRequest.updateMany({
+                    where: { id: appointment.id, chaseSentAt: new Date(0) },
+                    data: { chaseSentAt: null },
+                  });
+
+                  continue; // Skip to next candidate
+                }
+              } catch (preCheckErr) {
+                // Non-fatal: if the thread check fails (OAuth issue, API error),
+                // still send the chase rather than silently dropping it.
+                logger.warn(
+                  { checkId, appointmentId: appointment.id, error: preCheckErr },
+                  'Pre-chase thread check failed — proceeding with chase send'
+                );
+              }
+            }
+
             const therapistFirstName = (appointment.therapistName || 'there').split(' ')[0];
             const clientFirstName = (appointment.userName || 'the client').split(' ')[0];
 
