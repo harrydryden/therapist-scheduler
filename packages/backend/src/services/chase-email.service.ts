@@ -123,23 +123,36 @@ class ChaseEmailService {
           }
 
           try {
-            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for unprocessed replies
+            // PRE-SEND SAFETY CHECK: Verify Gmail threads for unprocessed replies
             // before sending a chase. This catches cases where the reply was missed
             // by push notifications AND the hourly missed-message scanner (e.g. due
             // to race conditions, scanner failures, or OAuth token issues).
-            if (threadId) {
+            // Check BOTH threads (therapist + user) — a reply on either side means
+            // the conversation is not truly stale.
+            const threadIdsToCheck = [
+              appointment.therapistGmailThreadId,
+              appointment.gmailThreadId,
+            ].filter((id): id is string => id !== null && id !== threadId);
+            // Put the target thread first (most likely to have the reply we care about)
+            if (threadId) threadIdsToCheck.unshift(threadId);
+
+            if (threadIdsToCheck.length > 0) {
               try {
-                const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
-                  threadId,
-                  `chase-presend:${appointment.id}`
-                );
-                if (recovered > 0) {
+                let totalRecovered = 0;
+                for (const tid of threadIdsToCheck) {
+                  const recovered = await emailProcessingService.checkThreadForUnprocessedReplies(
+                    tid,
+                    `chase-presend:${appointment.id}`
+                  );
+                  totalRecovered += recovered;
+                }
+                if (totalRecovered > 0) {
                   logger.info(
                     {
                       checkId,
                       appointmentId: appointment.id,
                       target,
-                      recovered,
+                      recovered: totalRecovered,
                     },
                     'Recovered missed reply before sending chase — skipping chase'
                   );
@@ -150,6 +163,24 @@ class ChaseEmailService {
                     where: { id: appointment.id, chaseSentAt: new Date(0) },
                     data: { chaseSentAt: null },
                   });
+
+                  // Alert admins about the near-miss so they can investigate
+                  // why the normal recovery paths failed.
+                  slackNotificationService.sendAlert({
+                    title: 'Chase prevented — missed reply recovered',
+                    severity: 'medium',
+                    appointmentId: appointment.id,
+                    therapistName: appointment.therapistName,
+                    details:
+                      `Recovered *${totalRecovered}* missed message(s) just before sending a chase ` +
+                      `to *${target}*. Normal push notification and scanner recovery both failed ` +
+                      `for this thread — investigate why.`,
+                    additionalFields: {
+                      'User': appointment.userName || '(unknown)',
+                      'Therapist': appointment.therapistName || '(unknown)',
+                      'Chase target': target,
+                    },
+                  }).catch(() => {});
 
                   continue; // Skip to next candidate
                 }
