@@ -40,6 +40,12 @@ export interface LockedTaskRunnerConfig {
   instanceId: string;
   /** Context label for log messages (e.g., 'pending-email', 'stale-check') */
   context?: string;
+  /**
+   * Hard timeout for task execution (ms). If the task doesn't complete within
+   * this window, it is aborted and the lock is released to prevent deadlocks.
+   * Defaults to lockTtlSeconds * 10 * 1000 (10x the lock TTL).
+   */
+  maxExecutionMs?: number;
 }
 
 export interface LockedTaskContext {
@@ -63,6 +69,7 @@ export class LockedTaskRunner {
     this.config = {
       ...config,
       context: config.context || config.lockKey,
+      maxExecutionMs: config.maxExecutionMs ?? config.lockTtlSeconds * 10 * 1000,
     };
   }
 
@@ -76,7 +83,7 @@ export class LockedTaskRunner {
   async run<T>(
     task: (ctx: LockedTaskContext) => Promise<T>
   ): Promise<LockedTaskResult<T>> {
-    const { lockKey, lockTtlSeconds, renewalIntervalMs, instanceId, context } = this.config;
+    const { lockKey, lockTtlSeconds, renewalIntervalMs, instanceId, context, maxExecutionMs } = this.config;
 
     const acquired = await acquireLock(lockKey, instanceId, lockTtlSeconds);
     if (!acquired) {
@@ -105,11 +112,23 @@ export class LockedTaskRunner {
     };
 
     try {
-      const result = await task(ctx);
+      // Race the task against a hard timeout to prevent deadlocked tasks
+      // from holding the lock indefinitely via the renewal loop.
+      const result = await Promise.race([
+        task(ctx),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            lockValid = false;
+            reject(new Error(
+              `Locked task '${context}' exceeded max execution time (${maxExecutionMs}ms)`
+            ));
+          }, maxExecutionMs);
+        }),
+      ]);
       return { acquired: true, result };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      logger.error({ err: error, lockKey, context }, 'Locked task failed');
+      logger.error({ err: error, lockKey, context, maxExecutionMs }, 'Locked task failed');
       return { acquired: true, error };
     } finally {
       if (renewalId) {

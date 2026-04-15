@@ -75,11 +75,24 @@ export const Errors = {
   unauthorized: (reply: FastifyReply) =>
     sendError(reply, 401, 'Unauthorized'),
 
+  forbidden: (reply: FastifyReply, message = 'Forbidden') =>
+    sendError(reply, 403, message),
+
   notFound: (reply: FastifyReply, resource = 'Resource', details?: unknown) =>
     sendError(reply, 404, `${resource} not found`, details),
 
   badRequest: (reply: FastifyReply, message = 'Invalid request', details?: unknown) =>
     sendError(reply, 400, message, details),
+
+  conflict: (reply: FastifyReply, message = 'Conflict', details?: unknown) =>
+    sendError(reply, 409, message, details),
+
+  tooManyRequests: (reply: FastifyReply, message = 'Too many requests', retryAfter?: number) => {
+    if (retryAfter) {
+      reply.header('Retry-After', retryAfter.toString());
+    }
+    return sendError(reply, 429, message);
+  },
 
   internal: (reply: FastifyReply, message = 'Internal server error') =>
     sendError(reply, 500, message),

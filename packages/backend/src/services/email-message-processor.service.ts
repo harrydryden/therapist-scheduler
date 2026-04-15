@@ -52,7 +52,8 @@ import { recordAppointmentEvent } from './appointment-event.service';
 import { classifyEmail } from '../services/email-classifier.service';
 import { runWithTrace, extendTraceContext } from '../utils/request-tracing';
 import { ConcurrentModificationError } from '../errors';
-import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING } from '../constants';
+import { EMAIL, PENDING_EMAIL_QUEUE, EMAIL_PROCESSING, ACTIVE_STATUSES } from '../constants';
+import { getSettingValue } from './settings.service';
 import {
   detectThreadDivergence,
   shouldBlockProcessing,
@@ -561,6 +562,35 @@ export class EmailMessageProcessorService {
       const appointmentRequest = await findMatchingAppointmentRequest(email);
 
       if (!appointmentRequest) {
+        // Sender-based nudge reply fallback:
+        // The primary threadId-based nudge detection (above) can fail when Gmail
+        // assigns the reply a different thread ID (common for replies arriving
+        // days/weeks later). Before entering the retry/abandon loop, check if the
+        // sender is a therapist who was nudged and has no active appointments.
+        // Combined with a subject-line heuristic this is high-confidence.
+        const nudgeFallback = await this.checkNudgeReplyBySender(email, traceId);
+        if (nudgeFallback) {
+          logger.info(
+            { traceId, messageId, from: email.from, therapistId: nudgeFallback.id, therapistName: nudgeFallback.name },
+            'Detected nudge reply via sender fallback (threadId mismatch) — routing to admin notification'
+          );
+          slackNotificationService.sendAlert({
+            title: 'Therapist Nudge Reply',
+            severity: 'medium',
+            therapistName: nudgeFallback.name,
+            details: `Therapist replied to a nudge email (detected via sender fallback — Gmail assigned a new thread ID). ` +
+              `No active appointment thread exists — manual review needed to match with a client.`,
+            additionalFields: {
+              'Therapist email': nudgeFallback.email,
+              'Subject': email.subject.slice(0, 100),
+            },
+          }).catch((err) => {
+            logger.warn({ traceId, err }, 'Failed to send Slack alert for therapist nudge reply (fallback)');
+          });
+          await markMessageProcessed(messageId, traceId, 'therapist-nudge-reply');
+          return true;
+        }
+
         // Track failed match attempts to prevent infinite reprocessing
         // After MAX_UNMATCHED_ATTEMPTS within the TTL window, mark as processed
         //
@@ -1005,6 +1035,90 @@ export class EmailMessageProcessorService {
       // permanent deduplication record. This is intentional for the fallback case.
     }
     });
+  }
+
+  // ─── Nudge reply fallback ──────────────────────────────────────────
+
+  /**
+   * Sender-based fallback for detecting replies to therapist nudge emails.
+   *
+   * The primary detection (threadId match against therapist.lastNudgeThreadId)
+   * fails when Gmail assigns the reply a different thread ID. This happens
+   * commonly when:
+   *   - The reply comes days/weeks after the nudge was sent
+   *   - The therapist's email client strips In-Reply-To/References headers
+   *   - Gmail's threading heuristic puts the reply in a new conversation
+   *
+   * Fallback criteria (all must be true):
+   *   1. Sender matches a therapist's email address
+   *   2. That therapist has been nudged (lastNudgeAt is set)
+   *   3. That therapist has NO active appointments (same criteria that made
+   *      them eligible for the nudge in the first place)
+   *   4. Subject contains the nudge subject pattern (prevents false positives
+   *      from unrelated therapist emails)
+   *
+   * Returns the therapist if matched, null otherwise.
+   */
+  private async checkNudgeReplyBySender(
+    email: EmailMessage,
+    traceId: string
+  ): Promise<{ id: string; name: string; email: string } | null> {
+    try {
+      // Step 1: Is the sender a nudged therapist?
+      const therapist = await prisma.therapist.findFirst({
+        where: {
+          email: email.from.toLowerCase(),
+          lastNudgeAt: { not: null },
+        },
+        select: { id: true, name: true, email: true, notionId: true },
+      });
+
+      if (!therapist) return null;
+
+      // Step 2: Does the subject look like a reply to a nudge?
+      // Fetch the configured nudge subject (or use default)
+      const nudgeSubject = await getSettingValue<string>('email.therapistNudgeSubject')
+        || 'Spill update - still finding you a client';
+
+      // Strip common reply/forward prefixes and compare
+      const subjectLower = email.subject.toLowerCase().trim();
+      const nudgeSubjectLower = nudgeSubject.toLowerCase().trim();
+      const subjectContainsNudge = subjectLower.includes(nudgeSubjectLower);
+
+      if (!subjectContainsNudge) {
+        logger.debug(
+          { traceId, from: email.from, subject: email.subject },
+          'Sender is a nudged therapist but subject does not match nudge pattern — not a nudge reply'
+        );
+        return null;
+      }
+
+      // Step 3: Does this therapist have any active appointments?
+      // If they do, this email should go through normal appointment matching,
+      // not be captured as a nudge reply.
+      const activeAppointment = await prisma.appointmentRequest.findFirst({
+        where: {
+          therapistNotionId: therapist.notionId,
+          status: { in: [...ACTIVE_STATUSES] },
+        },
+        select: { id: true },
+      });
+
+      if (activeAppointment) {
+        logger.debug(
+          { traceId, from: email.from, therapistId: therapist.id, appointmentId: activeAppointment.id },
+          'Sender is a nudged therapist but has active appointment — not treating as nudge reply'
+        );
+        return null;
+      }
+
+      return { id: therapist.id, name: therapist.name, email: therapist.email };
+    } catch (err) {
+      // Non-fatal: if the fallback fails, the email continues through the
+      // normal unmatched retry/abandon path.
+      logger.warn({ traceId, err, from: email.from }, 'Nudge reply sender fallback check failed');
+      return null;
+    }
   }
 
   // ─── Weekly mailing ─────────────────────────────────────────────────

@@ -51,9 +51,12 @@ export class CacheManager {
     }
   }
 
-  // FIX #17: Use SHA-256 instead of djb2 to prevent hash collisions serving wrong cached data
+  // FIX #17: Use SHA-256 instead of djb2 to prevent hash collisions serving wrong cached data.
+  // Uses full 64-char hex digest — truncating to 16 chars left ~2^32 collision resistance,
+  // which is risky at scale. Full SHA-256 gives ~2^128 collision resistance with negligible
+  // extra memory cost per key.
   private hashKey(input: string): string {
-    return createHash('sha256').update(input).digest('hex').substring(0, 16);
+    return createHash('sha256').update(input).digest('hex');
   }
 
   // Classification caching

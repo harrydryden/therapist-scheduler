@@ -416,23 +416,33 @@ async function start() {
         logger.info('HTTP server closed, all in-flight requests completed');
       }
 
-      // Stop background services (they should check isShuttingDown internally)
+      // Stop background services in dependency order:
+      // 1. Real-time connections (SSE) — stop pushing updates to clients
+      // 2. Producers (polling, scanning, scheduling) — stop generating new work
+      // 3. Side-effect processors — let in-flight retries finish
+      // 4. Consumers (email queue) — drain remaining jobs
       logger.info('Stopping background services...');
       if (slackQueueInterval) clearInterval(slackQueueInterval);
       sseService.stop();
-      await emailQueueService.stop();
-      staleCheckService.stop();
+
+      // Stop producers
       emailPollingService.stop();
       gmailWatchService.stop();
-      pendingEmailService.stop();
-      sideEffectRetryService.stop();
+      missedMessageScannerService.stop();
+      staleCheckService.stop();
       postBookingFollowupService.stop();
       weeklyMailingListService.stop();
       slackWeeklySummaryService.stop();
       workReportService.stop();
       therapistNudgeService.stop();
-      missedMessageScannerService.stop();
       notionSyncManager.stop();
+
+      // Stop side-effect retries and pending email processing
+      sideEffectRetryService.stop();
+      pendingEmailService.stop();
+
+      // Drain the email queue last (it may still have in-flight jobs)
+      await emailQueueService.stop();
 
       // Give services a moment to release locks
       await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -534,20 +544,42 @@ async function start() {
     // email-message-processor needs to call JustinTimeService but can't import it directly
     registerAgentProcessor((traceId) => new JustinTimeService(traceId));
 
-    // Start background services
-    await emailQueueService.start(); // BullMQ email queue (retry with backoff)
-    staleCheckService.start(); // Checks for 48h+ inactive conversations
-    emailPollingService.start(); // Backup polling for missed push notifications
-    gmailWatchService.start(); // Auto-renew Gmail push notification watches
-    pendingEmailService.start(); // Retry failed email sends
-    sideEffectRetryService.start(); // Retry failed side effects (emails, Slack, Notion syncs)
-    postBookingFollowupService.start(); // Post-booking follow-ups (meeting link checks, feedback forms)
-    weeklyMailingListService.start(); // Weekly promotional mailing list
-    notionSyncManager.start(); // Unified Notion sync (therapist freeze, users, feedback read/write)
-    slackWeeklySummaryService.start(); // Weekly Slack summary (Monday 9am)
-    workReportService.start(); // Daily work report (weekdays 9am)
-    therapistNudgeService.start(); // Periodic nudge emails to unmatched therapists
-    missedMessageScannerService.start(); // Scan active threads for missed messages every hour
+    // Start background services with error isolation.
+    // Each service is started independently so a failure in one doesn't prevent
+    // the others from running. Critical services (email queue) log fatal if they
+    // fail; non-critical services log errors but allow the server to continue.
+    const backgroundServices = [
+      { name: 'emailQueueService', service: emailQueueService, critical: true, async: true },
+      { name: 'staleCheckService', service: staleCheckService, critical: false, async: false },
+      { name: 'emailPollingService', service: emailPollingService, critical: false, async: false },
+      { name: 'gmailWatchService', service: gmailWatchService, critical: false, async: false },
+      { name: 'pendingEmailService', service: pendingEmailService, critical: false, async: false },
+      { name: 'sideEffectRetryService', service: sideEffectRetryService, critical: false, async: false },
+      { name: 'postBookingFollowupService', service: postBookingFollowupService, critical: false, async: false },
+      { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
+      { name: 'notionSyncManager', service: notionSyncManager, critical: false, async: false },
+      { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
+      { name: 'workReportService', service: workReportService, critical: false, async: false },
+      { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },
+      { name: 'missedMessageScannerService', service: missedMessageScannerService, critical: false, async: false },
+    ] as const;
+
+    for (const { name, service, critical, async: isAsync } of backgroundServices) {
+      try {
+        if (isAsync) {
+          await service.start();
+        } else {
+          service.start();
+        }
+        logger.info({ service: name }, 'Background service started');
+      } catch (err) {
+        if (critical) {
+          logger.fatal({ err, service: name }, `Critical background service failed to start`);
+          throw err;
+        }
+        logger.error({ err, service: name }, `Non-critical background service failed to start — continuing`);
+      }
+    }
 
     // Recover any emails buffered in Redis WAL during database downtime
     emailQueueService.recoverFromWAL().catch((err) => {

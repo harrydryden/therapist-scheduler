@@ -67,7 +67,7 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
 
       if (!secretValid) {
         logger.warn({ requestId: request.id }, 'SSE connection rejected - invalid secret');
-        return reply.status(401).send({ error: 'Unauthorized' });
+        return Errors.unauthorized(reply);
       }
 
       const connectionId = sseService.addConnection(reply);
@@ -158,10 +158,7 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
           return reply.send({ success: true, data: flagged });
         } catch (err) {
           logger.error({ err, requestId }, 'Failed to fetch flagged therapists');
-          return reply.status(500).send({
-            success: false,
-            error: 'Failed to fetch flagged therapists',
-          });
+          return Errors.internal(reply, 'Failed to fetch flagged therapists');
         }
       }
     );
@@ -197,10 +194,7 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
           });
         } catch (err) {
           logger.error({ err, requestId, therapistId }, 'Failed to acknowledge flagged therapist');
-          return reply.status(500).send({
-            success: false,
-            error: 'Failed to acknowledge flagged therapist',
-          });
+          return Errors.internal(reply, 'Failed to acknowledge flagged therapist');
         }
       }
     );

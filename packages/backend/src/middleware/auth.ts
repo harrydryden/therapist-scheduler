@@ -47,20 +47,27 @@ const AUTH_RATE_LIMIT = {
 // If you have multiple load balancers, increase this value
 const TRUSTED_PROXY_DEPTH = parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10);
 
-// In-memory fallback rate limiter for when Redis is unavailable
+// In-memory fallback rate limiter for when Redis is unavailable.
+// Capped at MAX_TRACKED_IPS to prevent memory exhaustion from distributed attacks.
 const inMemoryAttempts = new Map<string, { count: number; firstAttempt: number }>();
+const MAX_TRACKED_IPS = 10000;
+
+function evictExpiredEntries(now: number): void {
+  const windowMs = AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000;
+  for (const [key, val] of inMemoryAttempts) {
+    if (now - val.firstAttempt > windowMs) {
+      inMemoryAttempts.delete(key);
+    }
+  }
+}
 
 function checkInMemoryRateLimit(ip: string): { allowed: boolean } {
   const now = Date.now();
   const entry = inMemoryAttempts.get(ip);
 
-  // Clean up expired entries periodically (every 100 checks)
+  // Periodic cleanup: evict expired entries when map grows large
   if (inMemoryAttempts.size > 100) {
-    for (const [key, val] of inMemoryAttempts) {
-      if (now - val.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
-        inMemoryAttempts.delete(key);
-      }
-    }
+    evictExpiredEntries(now);
   }
 
   if (!entry || now - entry.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
@@ -74,6 +81,16 @@ function recordInMemoryAttempt(ip: string): void {
   const now = Date.now();
   const entry = inMemoryAttempts.get(ip);
   if (!entry || now - entry.firstAttempt > AUTH_RATE_LIMIT.WINDOW_SECONDS * 1000) {
+    // Enforce cap: if at capacity after eviction, skip tracking this IP.
+    // This is safe because the worst case is allowing an attacker through,
+    // which only matters when Redis is already down (degraded mode).
+    if (inMemoryAttempts.size >= MAX_TRACKED_IPS) {
+      evictExpiredEntries(now);
+      if (inMemoryAttempts.size >= MAX_TRACKED_IPS) {
+        logger.warn({ mapSize: inMemoryAttempts.size }, 'In-memory rate limiter at capacity — cannot track new IP');
+        return;
+      }
+    }
     inMemoryAttempts.set(ip, { count: 1, firstAttempt: now });
   } else {
     entry.count++;
