@@ -8,7 +8,7 @@
  * - Edge cases: case-insensitivity, empty arrays, back-and-forth answers
  */
 
-import { requiresExplanation, validateResponses } from '@therapist-scheduler/shared/utils/form-utils';
+import { requiresExplanation, validateResponses, countWords } from '@therapist-scheduler/shared/utils/form-utils';
 import type { FormQuestion } from '@therapist-scheduler/shared/types/feedback';
 
 /** Minimal subset of FormQuestion used by test fixtures — compatible with FormQuestion */
@@ -17,6 +17,19 @@ type TestQuestion = Pick<FormQuestion, 'id' | 'type' | 'question' | 'required' |
 // ============================================
 // Tests
 // ============================================
+
+describe('countWords', () => {
+  it('counts words correctly', () => {
+    expect(countWords('hello world')).toBe(2);
+    expect(countWords('one')).toBe(1);
+    expect(countWords('  spaced   out  words  ')).toBe(3);
+  });
+
+  it('returns 0 for empty or whitespace-only input', () => {
+    expect(countWords('')).toBe(0);
+    expect(countWords('   ')).toBe(0);
+  });
+});
 
 describe('requiresExplanation', () => {
   const defaultConfig = ['No', 'Unsure'];
@@ -272,6 +285,24 @@ describe('conditional question validation', () => {
       would_recommend: 'Yes',
     };
     expect(validateResponses(responses, fullQuestions, [])).toBeNull();
+  });
+
+  it('enforces maxWords limit on text questions', () => {
+    const questions: TestQuestion[] = [
+      { id: 'feedback', type: 'text', question: 'Any feedback?', required: false, maxWords: 100 },
+    ];
+
+    // Exactly 100 words - should pass
+    const exactlyAtLimit = Array(100).fill('word').join(' ');
+    expect(validateResponses({ feedback: exactlyAtLimit }, questions, [])).toBeNull();
+
+    // 101 words - should fail
+    const overLimit = Array(101).fill('word').join(' ');
+    const error = validateResponses({ feedback: overLimit }, questions, []);
+    expect(error).toContain('100 words');
+
+    // Empty (optional) - should pass
+    expect(validateResponses({}, questions, [])).toBeNull();
   });
 
   it('passes full new question set (all No with details)', () => {

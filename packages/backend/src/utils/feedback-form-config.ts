@@ -80,8 +80,9 @@ export const DEFAULT_QUESTIONS = [
   {
     id: 'additional_feedback',
     type: 'text',
-    question: 'Is there anything else you would like to share about your experience?',
+    question: 'Would you like to provide your therapist with any feedback on the session?',
     required: false,
+    maxWords: 100,
   },
 ];
 
@@ -152,8 +153,9 @@ export async function getOrCreateFeedbackFormConfig(
       {
         id: 'additional_feedback',
         type: 'text',
-        question: 'Is there anything else you would like to share about your experience?',
+        question: 'Would you like to provide your therapist with any feedback on the session?',
         required: false,
+        maxWords: 100,
       },
     ];
     config = await prisma.feedbackFormConfig.update({

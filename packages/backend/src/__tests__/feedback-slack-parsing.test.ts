@@ -84,7 +84,7 @@ const DEFAULT_QUESTIONS: TestFormQuestion[] = [
   {
     id: 'additional_feedback',
     type: 'text',
-    question: 'Is there anything else you would like to share about your experience?',
+    question: 'Would you like to provide your therapist with any feedback on the session?',
     required: false,
   },
 ];
@@ -310,7 +310,7 @@ describe('buildFeedbackDataForSlack', () => {
 
     const result = buildFeedbackDataForSlack(DEFAULT_QUESTIONS, responses);
 
-    const feedbackKey = Object.keys(result).find(k => k.includes('anything else'));
+    const feedbackKey = Object.keys(result).find(k => k.includes('provide your therapist'));
     expect(feedbackKey).toBeDefined();
     expect(result[feedbackKey!]).toBe('The room was a bit cold but otherwise great experience.');
   });
@@ -326,7 +326,7 @@ describe('buildFeedbackDataForSlack', () => {
     const result = buildFeedbackDataForSlack(DEFAULT_QUESTIONS, responses);
 
     expect(Object.keys(result)).toHaveLength(4);
-    const feedbackKey = Object.keys(result).find(k => k.includes('anything else'));
+    const feedbackKey = Object.keys(result).find(k => k.includes('provide your therapist'));
     expect(feedbackKey).toBeUndefined();
   });
 

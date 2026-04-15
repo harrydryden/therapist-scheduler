@@ -65,6 +65,20 @@ export function requiresExplanation(
 }
 
 // ============================================
+// Word count helper
+// ============================================
+
+/**
+ * Count the number of words in a string.
+ * Splits on whitespace, ignoring leading/trailing spaces and consecutive spaces.
+ */
+export function countWords(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+// ============================================
 // Response validation
 // ============================================
 
@@ -88,6 +102,14 @@ export function validateResponses(
       const val = responses[q.id];
       if (val === undefined || val === null || (typeof val === 'string' && !val.trim())) {
         return `Please answer "${q.question}"`;
+      }
+    }
+
+    // Enforce word limit for text questions
+    if (q.maxWords && q.type === 'text') {
+      const val = responses[q.id];
+      if (typeof val === 'string' && countWords(val) > q.maxWords) {
+        return `Please keep your answer to "${q.question}" under ${q.maxWords} words`;
       }
     }
 
