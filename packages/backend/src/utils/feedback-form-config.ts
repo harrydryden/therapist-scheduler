@@ -9,6 +9,7 @@
  */
 
 import { prisma } from './database';
+import { Prisma } from '@prisma/client';
 import { logger } from './logger';
 
 // Default questions used when creating or migrating the form config
@@ -149,7 +150,7 @@ export async function getOrCreateFeedbackFormConfig(
   const hasAdditionalFeedback = questionIds.includes('additional_feedback');
   if (!hasAdditionalFeedback) {
     const updatedQuestions = [
-      ...(questions as Record<string, unknown>[]),
+      ...(questions as Prisma.JsonArray),
       {
         id: 'additional_feedback',
         type: 'text',
@@ -161,7 +162,7 @@ export async function getOrCreateFeedbackFormConfig(
     config = await prisma.feedbackFormConfig.update({
       where: { id: 'default' },
       data: {
-        questions: updatedQuestions,
+        questions: updatedQuestions as Prisma.InputJsonValue,
         questionsVersion: 3,
       },
     });
