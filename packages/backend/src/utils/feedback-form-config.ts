@@ -149,7 +149,7 @@ export async function getOrCreateFeedbackFormConfig(
   const hasAdditionalFeedback = questionIds.includes('additional_feedback');
   if (!hasAdditionalFeedback) {
     const updatedQuestions = [
-      ...questions,
+      ...(questions as Record<string, unknown>[]),
       {
         id: 'additional_feedback',
         type: 'text',
