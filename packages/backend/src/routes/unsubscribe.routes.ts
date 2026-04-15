@@ -6,6 +6,7 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { logger } from '../utils/logger';
+import { Errors } from '../utils/response';
 import { notionUsersService } from '../services/notion-users.service';
 import { extractEmailFromToken } from '../utils/unsubscribe-token';
 import { prisma } from '../utils/database';
@@ -100,10 +101,7 @@ export async function unsubscribeRoutes(fastify: FastifyInstance) {
         logger.error({ err, requestId }, 'Failed to process unsubscribe');
 
         if (request.headers.accept?.includes('application/json')) {
-          return reply.status(500).send({
-            success: false,
-            error: 'Failed to process unsubscribe request',
-          });
+          return Errors.internal(reply, 'Failed to process unsubscribe request');
         }
 
         return reply.status(500).type('text/html').send(`

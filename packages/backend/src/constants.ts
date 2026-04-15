@@ -64,12 +64,19 @@ export const THERAPIST_BOOKING = {
   MAX_UNIQUE_REQUESTS: 2,
 } as const;
 
-// API timeouts
+// API timeouts — single source of truth for all operation timeouts.
+// Previously split between constants.ts and utils/timeout.ts DEFAULT_TIMEOUTS.
 export const TIMEOUTS = {
   ANTHROPIC_API_MS: 60000, // 60 seconds
   GMAIL_API_MS: 30000, // 30 seconds
   KNOWLEDGE_QUERY_MS: 5000, // 5 seconds for knowledge base query
   SYSTEM_PROMPT_BUILD_MS: 10000, // 10 seconds total for system prompt building
+  HTTP_FETCH_MS: 30000, // 30 seconds for HTTP fetch operations
+  DATABASE_MS: 10000, // 10 seconds for database queries
+  CACHE_MS: 5000, // 5 seconds for cache operations
+  EXTERNAL_API_MS: 15000, // 15 seconds for external API calls (Slack, etc.)
+  AI_MODEL_MS: 120000, // 120 seconds for AI model calls (Claude)
+  FILE_IO_MS: 30000, // 30 seconds for file operations
 } as const;
 
 // Redis keys

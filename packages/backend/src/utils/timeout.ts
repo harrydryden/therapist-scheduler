@@ -147,18 +147,15 @@ export function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Default timeouts for common operations
+// Re-exported from centralized TIMEOUTS in constants.ts for backward compatibility.
+// New code should import TIMEOUTS from '../constants' directly.
+import { TIMEOUTS } from '../constants';
+
 export const DEFAULT_TIMEOUTS = {
-  /** HTTP fetch operations */
-  HTTP_FETCH: 30000,
-  /** Database queries */
-  DATABASE: 10000,
-  /** Cache operations */
-  CACHE: 5000,
-  /** External API calls (Slack, etc.) */
-  EXTERNAL_API: 15000,
-  /** AI model calls (Claude) */
-  AI_MODEL: 120000,
-  /** File operations */
-  FILE_IO: 30000,
+  HTTP_FETCH: TIMEOUTS.HTTP_FETCH_MS,
+  DATABASE: TIMEOUTS.DATABASE_MS,
+  CACHE: TIMEOUTS.CACHE_MS,
+  EXTERNAL_API: TIMEOUTS.EXTERNAL_API_MS,
+  AI_MODEL: TIMEOUTS.AI_MODEL_MS,
+  FILE_IO: TIMEOUTS.FILE_IO_MS,
 } as const;

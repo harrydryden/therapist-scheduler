@@ -14,6 +14,37 @@ import { RELEASE_LOCK_SCRIPT } from './redis-locks';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
+// --- Gmail credential types ---
+
+interface OAuthClientConfig {
+  client_id: string;
+  client_secret: string;
+  redirect_uris?: string[];
+}
+
+/** Shape of a Google OAuth credentials.json (installed or web app). */
+export interface GmailCredentials {
+  installed?: OAuthClientConfig;
+  web?: OAuthClientConfig;
+}
+
+/** Shape of a Google OAuth token.json (may come from MCP with nested structure or direct OAuth). */
+export interface GmailToken {
+  refresh_token?: string;
+  access_token?: string;
+  /** MCP-style token field (alias for access_token) */
+  token?: string;
+  token_type?: string;
+  /** ISO date string or epoch ms */
+  expiry?: string;
+  expiry_date?: number;
+}
+
+export interface GmailCredentialPair {
+  credentials: GmailCredentials;
+  token: GmailToken;
+}
+
 // Gmail credentials paths
 const CREDENTIALS_PATH = process.env.MCP_GMAIL_CREDENTIALS_PATH ||
   join(process.cwd(), '../mcp-gmail/credentials.json');
@@ -34,14 +65,14 @@ const TOKEN_REFRESH_MAX_WAIT_MS = 10000;
  * Load Gmail credentials from environment variables (base64-encoded).
  * Returns null if env vars are not set or parsing fails.
  */
-export function loadCredentialsFromEnv(): { credentials: any; token: any } | null {
+export function loadCredentialsFromEnv(): GmailCredentialPair | null {
   const credentialsBase64 = process.env.GMAIL_CREDENTIALS_BASE64;
   const tokenBase64 = process.env.GMAIL_TOKEN_BASE64;
 
   if (credentialsBase64 && tokenBase64) {
     try {
-      const credentials = JSON.parse(Buffer.from(credentialsBase64, 'base64').toString('utf-8'));
-      const token = JSON.parse(Buffer.from(tokenBase64, 'base64').toString('utf-8'));
+      const credentials: GmailCredentials = JSON.parse(Buffer.from(credentialsBase64, 'base64').toString('utf-8'));
+      const token: GmailToken = JSON.parse(Buffer.from(tokenBase64, 'base64').toString('utf-8'));
       return { credentials, token };
     } catch (error) {
       logger.error({ error }, 'Failed to parse Gmail credentials from env vars');
@@ -54,7 +85,7 @@ export function loadCredentialsFromEnv(): { credentials: any; token: any } | nul
  * Load Gmail credentials and token, trying env vars first then falling back to files.
  * Logs security warnings when file-based credentials are used in production.
  */
-export function loadGmailCredentials(serviceName: string): { credentials: any; token: any } | null {
+export function loadGmailCredentials(serviceName: string): GmailCredentialPair | null {
   // Try environment variables first (recommended for production)
   const envCreds = loadCredentialsFromEnv();
   if (envCreds) {
@@ -69,13 +100,13 @@ export function loadGmailCredentials(serviceName: string): { credentials: any; t
     logger.warn({ path: CREDENTIALS_PATH }, `${serviceName}: Gmail credentials file not found`);
     return null;
   }
-  const credentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
+  const credentials: GmailCredentials = JSON.parse(readFileSync(CREDENTIALS_PATH, 'utf-8'));
 
   if (!existsSync(TOKEN_PATH)) {
     logger.warn({ path: TOKEN_PATH }, `${serviceName}: Gmail token file not found`);
     return null;
   }
-  const token = JSON.parse(readFileSync(TOKEN_PATH, 'utf-8'));
+  const token: GmailToken = JSON.parse(readFileSync(TOKEN_PATH, 'utf-8'));
 
   if (isProduction) {
     logger.warn(
@@ -89,8 +120,12 @@ export function loadGmailCredentials(serviceName: string): { credentials: any; t
 /**
  * Create and configure an OAuth2Client from credentials and token.
  */
-export function createOAuth2Client(credentials: any, token: any): OAuth2Client {
-  const { client_id, client_secret, redirect_uris } = credentials.installed || credentials.web;
+export function createOAuth2Client(credentials: GmailCredentials, token: GmailToken): OAuth2Client {
+  const clientConfig = credentials.installed || credentials.web;
+  if (!clientConfig) {
+    throw new Error('Gmail credentials must contain either "installed" or "web" client config');
+  }
+  const { client_id, client_secret, redirect_uris } = clientConfig;
   const oauth2Client = new OAuth2Client(client_id, client_secret, redirect_uris?.[0]);
 
   // Handle token format - might be from MCP (with nested structure) or direct OAuth

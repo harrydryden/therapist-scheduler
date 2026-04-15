@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createHash } from 'crypto';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { Errors, sendError } from '../utils/response';
 import { JustinTimeService } from '../services/justin-time.service';
 import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
@@ -648,17 +649,11 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             { requestId, userEmail, therapistNotionId },
             'Serialization conflict - likely concurrent request'
           );
-          return reply.status(409).send({
-            success: false,
-            error: 'Another request is being processed. Please try again.',
-          });
+          return Errors.conflict(reply, 'Another request is being processed. Please try again.');
         }
 
         logger.error({ err, requestId }, 'Failed to create appointment request');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to process appointment request',
-        });
+        return Errors.internal(reply, 'Failed to process appointment request');
       }
     }
   );
@@ -734,10 +729,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentRequestId: id }, 'Failed to fetch appointment status');
-        return reply.status(500).send({
-          success: false,
-          error: 'Failed to fetch appointment status',
-        });
+        return Errors.internal(reply, 'Failed to fetch appointment status');
       }
     }
   );
