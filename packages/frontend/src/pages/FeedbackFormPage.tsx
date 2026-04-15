@@ -620,6 +620,8 @@ export default function FeedbackFormPage() {
             const words = countWords(textVal);
             const limit = currentQuestion.maxWords;
             const overLimit = limit ? words > limit : false;
+            const showCounter = limit && words > 0;
+            const wordCountId = limit ? `${currentQuestion.id}-word-count` : undefined;
 
             return (
               <div className="space-y-1">
@@ -627,13 +629,14 @@ export default function FeedbackFormPage() {
                   value={textVal}
                   onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
                   rows={4}
+                  aria-describedby={wordCountId}
                   className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none ${
                     overLimit ? 'border-red-300' : 'border-gray-300'
                   }`}
                   placeholder="Type your answer..."
                 />
-                {limit && (
-                  <p className={`text-sm text-right ${overLimit ? 'text-red-600 font-medium' : 'text-gray-400'}`}>
+                {showCounter && (
+                  <p id={wordCountId} className={`text-sm text-right ${overLimit ? 'text-red-600 font-medium' : 'text-gray-400'}`}>
                     {words}/{limit} words
                   </p>
                 )}
