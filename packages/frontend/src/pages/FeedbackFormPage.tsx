@@ -4,7 +4,7 @@ import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
-import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions } from '@therapist-scheduler/shared/utils/form-utils';
+import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions, countWords } from '@therapist-scheduler/shared/utils/form-utils';
 
 interface PrefilledData {
   trackingCode: string;
@@ -424,6 +424,13 @@ export default function FeedbackFormPage() {
       return false;
     }
 
+    // Enforce word limit for text questions
+    if (currentQuestion.type === 'text' && currentQuestion.maxWords) {
+      if (typeof response === 'string' && countWords(response) > currentQuestion.maxWords) {
+        return false;
+      }
+    }
+
     // For choice_with_text, require explanation for configured answers
     // (applies even for non-required questions — if they chose to answer, they must explain)
     if (currentQuestion.type === 'choice_with_text' && requiresExplanationCheck(response as string, formConfig.requireExplanationFor)) {
@@ -608,15 +615,31 @@ export default function FeedbackFormPage() {
 
         {/* Input based on question type */}
         <div className="mb-8">
-          {currentQuestion.type === 'text' && (
-            <textarea
-              value={(responses[currentQuestion.id] as string) || ''}
-              onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
-              rows={4}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none"
-              placeholder="Type your answer..."
-            />
-          )}
+          {currentQuestion.type === 'text' && (() => {
+            const textVal = (responses[currentQuestion.id] as string) || '';
+            const words = countWords(textVal);
+            const limit = currentQuestion.maxWords;
+            const overLimit = limit ? words > limit : false;
+
+            return (
+              <div className="space-y-1">
+                <textarea
+                  value={textVal}
+                  onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
+                  rows={4}
+                  className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none ${
+                    overLimit ? 'border-red-300' : 'border-gray-300'
+                  }`}
+                  placeholder="Type your answer..."
+                />
+                {limit && (
+                  <p className={`text-sm text-right ${overLimit ? 'text-red-600 font-medium' : 'text-gray-400'}`}>
+                    {words}/{limit} words
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           {currentQuestion.type === 'scale' && (
             <ScaleQuestion

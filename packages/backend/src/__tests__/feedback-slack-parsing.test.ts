@@ -81,6 +81,12 @@ const DEFAULT_QUESTIONS: TestFormQuestion[] = [
     required: true,
     conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
   },
+  {
+    id: 'additional_feedback',
+    type: 'text',
+    question: 'Would you like to provide your therapist with any feedback on the session?',
+    required: false,
+  },
 ];
 
 describe('buildFeedbackDataForSlack', () => {
@@ -291,6 +297,37 @@ describe('buildFeedbackDataForSlack', () => {
     });
 
     expect(result['Would you return?']).toBe('No — "The location was too far"');
+  });
+
+  it('includes optional additional_feedback when provided', () => {
+    const responses = {
+      met_goals: 'Yes',
+      felt_heard: 'Yes',
+      would_book_again: 'Yes',
+      would_recommend: 'Yes',
+      additional_feedback: 'The room was a bit cold but otherwise great experience.',
+    };
+
+    const result = buildFeedbackDataForSlack(DEFAULT_QUESTIONS, responses);
+
+    const feedbackKey = Object.keys(result).find(k => k.includes('provide your therapist'));
+    expect(feedbackKey).toBeDefined();
+    expect(result[feedbackKey!]).toBe('The room was a bit cold but otherwise great experience.');
+  });
+
+  it('excludes additional_feedback from Slack output when left empty', () => {
+    const responses = {
+      met_goals: 'Yes',
+      felt_heard: 'Yes',
+      would_book_again: 'Yes',
+      would_recommend: 'Yes',
+    };
+
+    const result = buildFeedbackDataForSlack(DEFAULT_QUESTIONS, responses);
+
+    expect(Object.keys(result)).toHaveLength(4);
+    const feedbackKey = Object.keys(result).find(k => k.includes('provide your therapist'));
+    expect(feedbackKey).toBeUndefined();
   });
 
   it('produces the correct output for a complete worst-case form submission', () => {

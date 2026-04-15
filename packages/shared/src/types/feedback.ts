@@ -15,6 +15,8 @@ export interface FormQuestion {
   scaleMaxLabel?: string;
   options?: string[];
   followUpPlaceholder?: string;
+  /** Maximum number of words allowed for text responses. Enforced on frontend and backend. */
+  maxWords?: number;
   /** If set, this question is only shown when the parent question's answer matches one of the trigger values (case-insensitive). */
   conditionalOn?: {
     questionId: string;

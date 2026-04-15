@@ -224,12 +224,14 @@ class TherapistBookingStatusService {
     therapistName: string,
     userEmail: string
   ): Promise<void> {
-    // Count unique email addresses that have requested this therapist
+    // Count unique email addresses with active (non-terminal) requests for this therapist.
+    // Only ACTIVE_STATUSES are counted so that completed appointments don't inflate the
+    // count and incorrectly freeze the therapist for new bookings.
     const uniqueEmails = await client.appointmentRequest.groupBy({
       by: ['userEmail'],
       where: {
         therapistNotionId,
-        status: { notIn: ['cancelled'] },
+        status: { in: [...ACTIVE_STATUSES] },
       },
     });
 
@@ -773,12 +775,14 @@ class TherapistBookingStatusService {
       try {
         await prisma.$transaction(
           async (tx) => {
-            // Count unique email addresses with active requests
+            // Count unique email addresses with active (non-terminal) requests.
+            // Uses ACTIVE_STATUSES so completed/cancelled appointments don't keep
+            // the booking status record alive with a stale frozenAt.
             const uniqueEmails = await tx.appointmentRequest.groupBy({
               by: ['userEmail'],
               where: {
                 therapistNotionId,
-                status: { notIn: ['cancelled'] },
+                status: { in: [...ACTIVE_STATUSES] },
               },
             });
 

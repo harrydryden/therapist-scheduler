@@ -77,6 +77,13 @@ export const DEFAULT_QUESTIONS = [
     required: true,
     conditionalOn: { questionId: 'would_recommend', values: ['No', 'Unsure'] },
   },
+  {
+    id: 'additional_feedback',
+    type: 'text',
+    question: 'Would you like to provide your therapist with any feedback on the session?',
+    required: false,
+    maxWords: 100,
+  },
 ];
 
 const DEFAULT_CONFIG = {
@@ -93,7 +100,11 @@ const DEFAULT_CONFIG = {
 
 /**
  * Fetch the feedback form config, creating it with defaults if it doesn't exist,
- * and auto-migrating to v2 questions if still on the old question set.
+ * and auto-migrating questions as needed.
+ *
+ * Migration history:
+ * - v2: Replaced original questions with met_goals / felt_heard / would_book_again / would_recommend
+ * - v3: Added optional additional_feedback free-text question at end
  *
  * Returns null only if the config doesn't exist AND createIfMissing is false.
  */
@@ -118,19 +129,43 @@ export async function getOrCreateFeedbackFormConfig(
   const questionIds = Array.isArray(questions)
     ? (questions as Array<{ id?: string }>).map(q => q.id)
     : [];
-  const hasNewQuestions = questionIds.includes('met_goals');
-  const needsMigration = !questions || !Array.isArray(questions) || questions.length === 0 || !hasNewQuestions;
+  const hasV2Questions = questionIds.includes('met_goals');
+  const needsV2Migration = !questions || !Array.isArray(questions) || questions.length === 0 || !hasV2Questions;
 
-  if (needsMigration) {
+  if (needsV2Migration) {
     config = await prisma.feedbackFormConfig.update({
       where: { id: 'default' },
       data: {
         questions: DEFAULT_QUESTIONS,
         requiresAuth: true,
-        questionsVersion: 2,
+        questionsVersion: 3,
       },
     });
-    logger.info('Migrated feedback form config to v2 questions');
+    logger.info('Migrated feedback form config to v3 questions (from pre-v2)');
+    return config;
+  }
+
+  // Auto-migrate v2 → v3: add additional_feedback free-text question
+  const hasAdditionalFeedback = questionIds.includes('additional_feedback');
+  if (!hasAdditionalFeedback) {
+    const updatedQuestions = [
+      ...questions,
+      {
+        id: 'additional_feedback',
+        type: 'text',
+        question: 'Would you like to provide your therapist with any feedback on the session?',
+        required: false,
+        maxWords: 100,
+      },
+    ];
+    config = await prisma.feedbackFormConfig.update({
+      where: { id: 'default' },
+      data: {
+        questions: updatedQuestions,
+        questionsVersion: 3,
+      },
+    });
+    logger.info('Migrated feedback form config to v3: added additional_feedback question');
   }
 
   return config;

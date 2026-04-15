@@ -161,17 +161,28 @@ class TransitionSideEffectsService {
     const logContext = { appointmentId, source, adminId };
 
     // Update therapist booking status and conditionally deactivate in Notion
+    // Each operation has its own try/catch so a failure in one does not block the others.
+    // Previously, a single try/catch meant a failure in unmarkConfirmed or
+    // recalculateUniqueRequestCount would skip deactivation entirely.
     if (therapistNotionId) {
+      // Step 1: Clear confirmed flag and recalculate request count (independent, non-blocking)
       try {
-        // Clear confirmed flag and recalculate request count in parallel (independent operations)
         await Promise.all([
           therapistBookingStatusService.unmarkConfirmed(therapistNotionId),
           therapistBookingStatusService.recalculateUniqueRequestCount(therapistNotionId),
         ]);
+      } catch (err) {
+        logger.error(
+          { ...logContext, therapistNotionId, err },
+          'Failed to update therapist booking status after completion (non-fatal, continuing to deactivation)'
+        );
+      }
 
-        // FIX #6: Only deactivate therapist if they have NO other active appointments.
-        // Previously, completing one appointment would hide the therapist even if they
-        // had other clients in negotiating/confirmed state.
+      // Step 2: Conditionally deactivate therapist in Notion (independent of Step 1)
+      // FIX #6: Only deactivate therapist if they have NO other active appointments.
+      // Uses runBackgroundTask with retry so a transient Notion API failure doesn't
+      // leave the therapist permanently visible on the booking page.
+      try {
         const otherActiveAppointments = await prisma.appointmentRequest.count({
           where: {
             therapistNotionId,
@@ -190,8 +201,16 @@ class TransitionSideEffectsService {
         });
 
         if (otherActiveAppointments === 0) {
-          // No other active appointments - safe to deactivate
-          await notionService.updateTherapistActive(therapistNotionId, false);
+          // No other active appointments - deactivate with retry
+          runBackgroundTask(
+            () => notionService.updateTherapistActive(therapistNotionId, false),
+            {
+              name: 'therapist-deactivate-completion',
+              context: { ...logContext, therapistNotionId },
+              retry: true,
+              maxRetries: 2,
+            }
+          );
           logger.info(
             { ...logContext, therapistNotionId },
             'Marked therapist as inactive after last appointment completed'
@@ -202,16 +221,23 @@ class TransitionSideEffectsService {
             'Therapist still has active appointments - keeping active'
           );
         }
-
-        // Sync frozen status to Notion (will unfreeze since no active requests)
-        await notionSyncManager.syncSingleTherapist(therapistNotionId);
       } catch (err) {
-        // Log but don't fail the completion - therapist status is secondary
         logger.error(
           { ...logContext, therapistNotionId, err },
-          'Failed to update therapist status after completion (non-fatal)'
+          'Failed to deactivate therapist after completion (non-fatal)'
         );
       }
+
+      // Step 3: Sync frozen status to Notion (independent of Steps 1-2)
+      runBackgroundTask(
+        () => notionSyncManager.syncSingleTherapist(therapistNotionId),
+        {
+          name: 'therapist-freeze-sync-completion',
+          context: { ...logContext, therapistNotionId },
+          retry: true,
+          maxRetries: 2,
+        }
+      );
     }
 
     // Sync user to Notion (non-blocking, tracked)
@@ -238,21 +264,26 @@ class TransitionSideEffectsService {
     const logContext = { appointmentId, source, adminId };
 
     // Update therapist status
+    // Each operation has its own try/catch so a failure in one does not block the others.
     if (therapistNotionId) {
+      // Step 1: Update booking status (non-blocking for deactivation)
       try {
-        // If was confirmed, unmark therapist
         if (wasConfirmed) {
           await therapistBookingStatusService.unmarkConfirmed(therapistNotionId);
         }
 
-        // Recalculate unique request count
         await therapistBookingStatusService.recalculateUniqueRequestCount(
           therapistNotionId
         );
+      } catch (err) {
+        logger.error(
+          { ...logContext, therapistNotionId, err },
+          'Failed to update therapist booking status after cancellation (non-fatal, continuing to deactivation)'
+        );
+      }
 
-        // Deactivate therapist if they have NO other active appointments.
-        // Previously missing from cancellation path: if a therapist's last active
-        // appointment was cancelled (not completed), they were never deactivated.
+      // Step 2: Conditionally deactivate therapist in Notion (independent of Step 1)
+      try {
         const otherActiveAppointments = await prisma.appointmentRequest.count({
           where: {
             therapistNotionId,
@@ -271,7 +302,15 @@ class TransitionSideEffectsService {
         });
 
         if (otherActiveAppointments === 0) {
-          await notionService.updateTherapistActive(therapistNotionId, false);
+          runBackgroundTask(
+            () => notionService.updateTherapistActive(therapistNotionId, false),
+            {
+              name: 'therapist-deactivate-cancellation',
+              context: { ...logContext, therapistNotionId },
+              retry: true,
+              maxRetries: 2,
+            }
+          );
           logger.info(
             { ...logContext, therapistNotionId },
             'Marked therapist as inactive after last appointment cancelled'
@@ -282,15 +321,23 @@ class TransitionSideEffectsService {
             'Therapist still has active appointments after cancellation - keeping active'
           );
         }
-
-        // Sync frozen status to Notion
-        await notionSyncManager.syncSingleTherapist(therapistNotionId);
       } catch (err) {
         logger.error(
           { ...logContext, therapistNotionId, err },
-          'Failed to update therapist status after cancellation (non-fatal)'
+          'Failed to deactivate therapist after cancellation (non-fatal)'
         );
       }
+
+      // Step 3: Sync frozen status to Notion (independent of Steps 1-2)
+      runBackgroundTask(
+        () => notionSyncManager.syncSingleTherapist(therapistNotionId),
+        {
+          name: 'therapist-freeze-sync-cancellation',
+          context: { ...logContext, therapistNotionId },
+          retry: true,
+          maxRetries: 2,
+        }
+      );
     }
 
     // Sync user to Notion (non-blocking, tracked).
@@ -333,16 +380,16 @@ class TransitionSideEffectsService {
     const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
 
     // --- Therapist booking status ---
+    // Each operation has its own try/catch so a failure in one does not block the others.
     if (appointment.therapistNotionId) {
+      // Step 1: Update booking status flags
       try {
         if (nowConfirmed && !wasConfirmed) {
-          // Entering confirmed: freeze therapist for other bookings
           await therapistBookingStatusService.markConfirmed(
             appointment.therapistNotionId,
             appointment.therapistName
           );
         } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
-          // Leaving confirmed via completion/cancellation: unfreeze therapist
           await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);
         }
 
@@ -351,11 +398,16 @@ class TransitionSideEffectsService {
             appointment.therapistNotionId
           );
         }
+      } catch (err) {
+        logger.error(
+          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
+          'Failed to update therapist booking status after admin force update (non-fatal, continuing to deactivation)'
+        );
+      }
 
-        // Conditionally deactivate therapist if no other active appointments
-        // Applies to both completed AND cancelled - either terminal status should
-        // trigger deactivation when it's the therapist's last active appointment.
-        if (nowCompleted || nowCancelled) {
+      // Step 2: Conditionally deactivate therapist (independent of Step 1)
+      if (nowCompleted || nowCancelled) {
+        try {
           const otherActiveAppointments = await prisma.appointmentRequest.count({
             where: {
               therapistNotionId: appointment.therapistNotionId,
@@ -374,22 +426,38 @@ class TransitionSideEffectsService {
           });
 
           if (otherActiveAppointments === 0) {
-            await notionService.updateTherapistActive(appointment.therapistNotionId, false);
+            runBackgroundTask(
+              () => notionService.updateTherapistActive(appointment.therapistNotionId!, false),
+              {
+                name: 'therapist-deactivate-admin-force',
+                context: { ...logContext, therapistNotionId: appointment.therapistNotionId },
+                retry: true,
+                maxRetries: 2,
+              }
+            );
             logger.info(
               { ...logContext, therapistNotionId: appointment.therapistNotionId },
               `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`
             );
           }
+        } catch (err) {
+          logger.error(
+            { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
+            'Failed to deactivate therapist after admin force update (non-fatal)'
+          );
         }
-
-        // Sync therapist to Notion
-        await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-      } catch (err) {
-        logger.error(
-          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
-          'Failed to update therapist status after admin force update (non-fatal)'
-        );
       }
+
+      // Step 3: Sync therapist freeze status to Notion (independent of Steps 1-2)
+      runBackgroundTask(
+        () => notionSyncManager.syncSingleTherapist(appointment.therapistNotionId!),
+        {
+          name: 'therapist-freeze-sync-admin-force',
+          context: { ...logContext, therapistNotionId: appointment.therapistNotionId },
+          retry: true,
+          maxRetries: 2,
+        }
+      );
     }
 
     // --- Notion user sync (non-blocking) ---
