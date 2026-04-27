@@ -47,10 +47,14 @@ jest.mock('../services/transition-side-effects.service', () => ({
 // dismissal's control flow — whether it calls the helper with the right mutation
 // closure, whether it records audit events, etc. The helper's own behavior
 // (lock retry, DB write) is exercised by the integration test suite.
-const mockApplyCheckpointUpdate = jest.fn();
+//
+// NOTE: the mock factory creates the jest.fn() inline because @swc/jest hoists
+// `jest.mock()` calls above all top-level statements, so referencing a
+// module-scope `const mockFn = jest.fn()` from inside the factory would hit
+// a TDZ error. We retrieve a typed handle via `jest.requireMock` further down.
 jest.mock('../services/ai-conversation.service', () => ({
   aiConversationService: {
-    applyCheckpointUpdate: mockApplyCheckpointUpdate,
+    applyCheckpointUpdate: jest.fn(),
   },
   AIConversationService: jest.fn(),
 }));
@@ -61,6 +65,10 @@ jest.mock('../services/ai-conversation.service', () => ({
 
 import { prisma } from '../utils/database';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { aiConversationService } from '../services/ai-conversation.service';
+
+// Typed handle to the mock declared inside the factory above.
+const mockApplyCheckpointUpdate = aiConversationService.applyCheckpointUpdate as jest.Mock;
 
 // ============================================
 // dismissClosureRecommendation
