@@ -89,3 +89,6 @@ export const TERMINAL_STATUSES: readonly AppointmentStatus[] = [
 
 // Voucher display code word list (shared between frontend and backend)
 export { VOUCHER_WORD_LIST } from './voucher-words';
+
+// Country and timezone definitions
+export * from './countries';

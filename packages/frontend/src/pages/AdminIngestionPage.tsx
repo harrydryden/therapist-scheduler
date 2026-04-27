@@ -4,6 +4,7 @@ import { previewTherapistCV, createTherapistFromCV } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { Toast } from '../components/Toast';
 import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability, CategoryWithEvidence } from '../types';
+import { COUNTRIES, DEFAULT_COUNTRY, type CountryCode } from '@therapist-scheduler/shared';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
@@ -31,6 +32,7 @@ type AvailabilityByDay = {
 interface IngestionFormState {
   therapistName: string;
   therapistEmail: string;
+  therapistCountry: CountryCode;
   additionalInfo: string;
   overrideEmail: string;
   overrideApproach: string[];
@@ -255,6 +257,7 @@ function convertToTherapistAvailability(availability: AvailabilityByDay): Therap
 export default function AdminIngestionPage() {
   const [therapistName, setTherapistName] = useState('');
   const [therapistEmail, setTherapistEmail] = useState('');
+  const [therapistCountry, setTherapistCountry] = useState<CountryCode>(DEFAULT_COUNTRY);
   const [file, setFile] = useState<File | null>(null);
   const [additionalInfo, setAdditionalInfo] = useState('');
   const [previewData, setPreviewData] = useState<ExtractedTherapistProfile | null>(null);
@@ -316,6 +319,7 @@ export default function AdminIngestionPage() {
       saveDraft({
         therapistName,
         therapistEmail,
+        therapistCountry,
         additionalInfo,
         overrideEmail,
         overrideApproach,
@@ -328,6 +332,7 @@ export default function AdminIngestionPage() {
   }, [
     therapistName,
     therapistEmail,
+    therapistCountry,
     additionalInfo,
     overrideEmail,
     overrideApproach,
@@ -349,6 +354,7 @@ export default function AdminIngestionPage() {
     if (draft) {
       setTherapistName(draft.therapistName);
       setTherapistEmail(draft.therapistEmail);
+      setTherapistCountry(draft.therapistCountry ?? DEFAULT_COUNTRY);
       setAdditionalInfo(draft.additionalInfo);
       setOverrideEmail(draft.overrideEmail);
       setOverrideApproach(draft.overrideApproach);
@@ -433,6 +439,7 @@ export default function AdminIngestionPage() {
         // Availability override
         overrideAvailability: convertToTherapistAvailability(overrideAvailability),
         notes: internalNotes || undefined,
+        country: therapistCountry,
       };
 
       return createTherapistFromCV(file, adminNotes);
@@ -444,6 +451,7 @@ export default function AdminIngestionPage() {
       // Reset form
       setTherapistName('');
       setTherapistEmail('');
+      setTherapistCountry(DEFAULT_COUNTRY);
       setFile(null);
       setAdditionalInfo('');
       setPreviewData(null);
@@ -507,6 +515,7 @@ export default function AdminIngestionPage() {
     clearDraft();
     setTherapistName('');
     setTherapistEmail('');
+    setTherapistCountry(DEFAULT_COUNTRY);
     setFile(null);
     setAdditionalInfo('');
     setPreviewData(null);
@@ -655,6 +664,30 @@ export default function AdminIngestionPage() {
               />
               <p className="text-sm text-slate-500 mt-1">
                 If provided, this will override any email extracted from the PDF
+              </p>
+            </div>
+
+            {/* Therapist Country */}
+            <div>
+              <label htmlFor="therapistCountry" className="block text-sm font-medium text-slate-700 mb-2">
+                Country <span className="text-red-500">*</span>
+              </label>
+              <select
+                id="therapistCountry"
+                value={therapistCountry}
+                onChange={(e) => setTherapistCountry(e.target.value as CountryCode)}
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none bg-white"
+                required
+              >
+                {COUNTRIES.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.flag} {c.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-sm text-slate-500 mt-1">
+                Where the therapist is based. Drives the flag emoji on their card and
+                the timezone the agent uses when communicating with them.
               </p>
             </div>
 

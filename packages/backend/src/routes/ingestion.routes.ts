@@ -3,6 +3,7 @@ import { pdfIngestionService } from '../services/pdf-ingestion.service';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, sendError, Errors } from '../utils/response';
+import { isCountryCode } from '@therapist-scheduler/shared';
 
 interface AdminNotes {
   additionalInfo?: string; // Free text field for admin to add missing info
@@ -16,6 +17,7 @@ interface AdminNotes {
     slots: Array<{ day: string; start: string; end: string }>;
   };
   notes?: string; // Internal admin notes (not shown to users)
+  country?: string; // Country code where the therapist is based
 }
 
 // Simple email format validation
@@ -114,6 +116,15 @@ function parseAdminNoteField(fieldName: string, value: string, adminNotes: Admin
   } else if (fieldName === 'notes') {
     validateFieldLength('notes', value, MAX_FIELD_SIZES.notes);
     adminNotes.notes = value;
+  } else if (fieldName === 'country') {
+    validateFieldLength('country', value, 8);
+    const normalized = value.trim().toUpperCase();
+    if (normalized && !isCountryCode(normalized)) {
+      throw new ValidationError(`Invalid country code: ${value.trim()}`);
+    }
+    if (normalized) {
+      adminNotes.country = normalized;
+    }
   }
 }
 

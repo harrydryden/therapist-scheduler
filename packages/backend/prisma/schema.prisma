@@ -19,6 +19,10 @@ model User {
   odId      String   @unique @map("od_id") // Unique 10-digit ID (e.g., "1234567890")
   email     String   @unique
   name      String?
+  // Country code (ISO-like short code: UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA)
+  // Used to determine timezone for agent communications. Database appointment
+  // times remain in UK time; this controls how times are presented to the user.
+  country   String   @default("UK")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -38,6 +42,9 @@ model Therapist {
   notionId   String    @unique @map("notion_id") // Links to Notion database
   email      String    @unique
   name       String
+  // Country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA). Drives timezone
+  // for agent communication and the flag emoji on the public therapist card.
+  country    String    @default("UK")
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
   lastNudgeAt DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
   lastNudgeThreadId String? @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)

@@ -246,6 +246,8 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
             therapistName,
             therapistAvailability,
             bookingMethod: 'agent_negotiated',
+            userCountry: userEntity.country,
+            therapistCountry: therapistEntity.country,
           })
           .then(() => {
             logger.info(

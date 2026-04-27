@@ -32,6 +32,7 @@ import {
   formatFactsForPrompt,
 } from '../utils/conversation-facts';
 import type { SchedulingContext } from './scheduling-context.service';
+import { buildTimezoneSection } from './timezone-section';
 
 /**
  * Wraps a promise with a timeout
@@ -152,6 +153,7 @@ export async function buildSystemPrompt(
   });
 
   const knowledgeSection = buildKnowledgeSection(knowledge);
+  const timezoneSection = buildTimezoneSection(context, timezone);
   const currentStage = checkpoint?.stage || 'initial_contact';
   const stageGuidance = `
 ## Current Conversation Stage
@@ -165,7 +167,7 @@ ${getValidActionsForStage(currentStage)}
   return `# ${agentName} - Scheduling Coordinator
 
 You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
-${factsSection}${stageGuidance}${knowledgeSection}
+${factsSection}${stageGuidance}${knowledgeSection}${timezoneSection}
 ## Your Identity
 - **Name:** ${agentName}
 - **Role:** Scheduling Coordinator

@@ -89,7 +89,7 @@ export async function generateUniqueTherapistId(): Promise<string> {
 export async function getOrCreateUser(
   email: string,
   name?: string | null
-): Promise<{ id: string; odId: string; email: string; name: string | null; createdAt: Date; updatedAt: Date }> {
+): Promise<{ id: string; odId: string; email: string; name: string | null; country: string; createdAt: Date; updatedAt: Date }> {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if user already exists
@@ -111,6 +111,7 @@ export async function getOrCreateUser(
 
   // Create new user with unique ID
   // Catch P2002 (unique constraint violation) to handle concurrent creation race
+  // Country defaults to 'UK' via the schema default.
   const odId = await generateUniqueUserId();
   try {
     const newUser = await prisma.user.create({
@@ -139,13 +140,18 @@ export async function getOrCreateUser(
 
 /**
  * Get or create a Therapist record by Notion ID
- * Returns the therapist with their unique odId
+ * Returns the therapist with their unique odId.
+ *
+ * `country` is a country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA).
+ * If omitted, the schema default ('UK') is used. When a record already exists
+ * the country is only updated if a value is explicitly provided and differs.
  */
 export async function getOrCreateTherapist(
   notionId: string,
   email: string,
-  name: string
-): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; ingestedAt: Date | null; lastNudgeAt: Date | null; lastNudgeThreadId: string | null; createdAt: Date; updatedAt: Date }> {
+  name: string,
+  country?: string,
+): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; country: string; ingestedAt: Date | null; lastNudgeAt: Date | null; lastNudgeThreadId: string | null; createdAt: Date; updatedAt: Date }> {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if therapist already exists by Notion ID
@@ -154,11 +160,14 @@ export async function getOrCreateTherapist(
   });
 
   if (existing) {
-    // Update email/name if different
-    if (normalizedEmail !== existing.email || name !== existing.name) {
+    const updates: { email?: string; name?: string; country?: string } = {};
+    if (normalizedEmail !== existing.email) updates.email = normalizedEmail;
+    if (name !== existing.name) updates.name = name;
+    if (country && country !== existing.country) updates.country = country;
+    if (Object.keys(updates).length > 0) {
       const updated = await prisma.therapist.update({
         where: { notionId },
-        data: { email: normalizedEmail, name },
+        data: updates,
       });
       return updated;
     }
@@ -176,6 +185,7 @@ export async function getOrCreateTherapist(
         name,
         odId,
         ingestedAt: new Date(),
+        ...(country ? { country } : {}),
       },
     });
 
