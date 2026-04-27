@@ -34,6 +34,9 @@ import type { SchedulingContext, ToolExecutionResult } from './scheduling-contex
 import { availabilityResolver } from './availability-resolver.service';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { getSettingValue } from './settings.service';
+import { Prisma } from '@prisma/client';
+import type { TherapistAvailability } from '@therapist-scheduler/shared';
+import { parseDayStringsToSlots, buildPersistedAvailability } from './availability-day-parser';
 import {
   sendEmailInputSchema,
   updateAvailabilityInputSchema,
@@ -460,7 +463,13 @@ export class AIToolExecutorService {
   // ─── Side-Effect Methods ──────────────────────────────────────────────────
 
   /**
-   * Update therapist availability in Notion
+   * Update therapist availability in Postgres.
+   *
+   * Converts the agent's day-string shape (e.g. {Monday: "09:00-12:00, 14:00-17:00"})
+   * into the structured TherapistAvailability format, stamps the therapist's
+   * timezone (preferring an existing record's timezone, then their country's
+   * default), and writes it to Therapist.availability. Notion is no longer
+   * touched for availability — Postgres is the source of truth.
    */
   private async updateTherapistAvailability(
     context: SchedulingContext,
@@ -468,14 +477,15 @@ export class AIToolExecutorService {
   ): Promise<void> {
     logger.info(
       { traceId: this.traceId, availability: params.availability },
-      'Updating therapist availability'
+      'Updating therapist availability',
     );
 
     try {
-      // Get the therapist's Notion ID from the appointment request
+      // Look up the therapist record so we can preserve their timezone (or
+      // fall back to the country default) when stamping the new slots.
       const appointmentRequest = await prisma.appointmentRequest.findUnique({
         where: { id: context.appointmentRequestId },
-        select: { therapistNotionId: true },
+        select: { therapistId: true, therapistNotionId: true },
       });
 
       if (!appointmentRequest?.therapistNotionId) {
@@ -483,14 +493,54 @@ export class AIToolExecutorService {
         return;
       }
 
-      await notionService.updateTherapistAvailability(
-        appointmentRequest.therapistNotionId,
-        params.availability
-      );
+      const therapist = await prisma.therapist.findUnique({
+        where: { notionId: appointmentRequest.therapistNotionId },
+        select: { id: true, country: true, availability: true },
+      });
+
+      if (!therapist) {
+        logger.error(
+          { traceId: this.traceId, therapistNotionId: appointmentRequest.therapistNotionId },
+          'Therapist not found in Postgres — cannot persist availability',
+        );
+        return;
+      }
+
+      const slots = parseDayStringsToSlots(params.availability);
+      if (slots.length === 0) {
+        logger.warn(
+          { traceId: this.traceId, raw: params.availability },
+          'update_therapist_availability called with no parseable slots — skipping write',
+        );
+        return;
+      }
+
+      // Compose the new TherapistAvailability — preserves any existing
+      // timezone/exceptions and falls back through country → platform default
+      // when the therapist has no prior record. See buildPersistedAvailability
+      // for the precedence rules.
+      const platformTimezone = (await getSettingValue<string>('general.timezone')) || 'Europe/London';
+      const existing = (therapist.availability as unknown) as TherapistAvailability | null;
+      const newAvailability = buildPersistedAvailability({
+        slots,
+        existing,
+        country: therapist.country,
+        platformTimezone,
+      });
+
+      await prisma.therapist.update({
+        where: { id: therapist.id },
+        data: { availability: newAvailability as unknown as Prisma.InputJsonValue },
+      });
 
       logger.info(
-        { traceId: this.traceId, therapistNotionId: appointmentRequest.therapistNotionId },
-        'Therapist availability updated in Notion'
+        {
+          traceId: this.traceId,
+          therapistId: therapist.id,
+          timezone: newAvailability.timezone,
+          slotCount: slots.length,
+        },
+        'Therapist availability updated in Postgres',
       );
     } catch (error) {
       logger.error(
@@ -1218,3 +1268,4 @@ export class AIToolExecutorService {
     );
   }
 }
+

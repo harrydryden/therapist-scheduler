@@ -179,7 +179,7 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
 ];
 
-/** Tools whose execution produces external side effects (DB mutations, emails, Notion updates).
+/** Tools whose execution produces external side effects (DB mutations, emails).
  *  checkpointBeforeSideEffects() is called before these to ensure conversation state
  *  is persisted, so a crash mid-execution doesn't lose prior agent work. */
 const SIDE_EFFECT_TOOLS = new Set([

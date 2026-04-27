@@ -217,9 +217,15 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        // Fetch therapist from Notion FIRST - this is the source of truth for email/name
-        // This prevents frontend from sending fake therapist emails
-        const therapist = await notionService.getTherapist(therapistNotionId);
+        // Fetch therapist profile from Notion (source of truth for email/name)
+        // and the Postgres record (source of truth for availability) in parallel.
+        const [therapist, prismaTherapist] = await Promise.all([
+          notionService.getTherapist(therapistNotionId),
+          prisma.therapist.findUnique({
+            where: { notionId: therapistNotionId },
+            select: { availability: true },
+          }),
+        ]);
 
         if (!therapist) {
           logger.warn({ requestId, therapistNotionId }, 'Therapist not found in Notion');
@@ -246,10 +252,10 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           });
         }
 
-        // Use safe parsing utility to handle malformed availability data
-        // parseTherapistAvailability returns a validated object, but we need to preserve it as JSON for Prisma
-        const parsedAvailability = parseTherapistAvailability(therapist.availability);
-        // For Prisma JSON storage, use the raw availability data (already validated by parseTherapistAvailability)
+        // Availability comes from Postgres now — Notion's day columns are no
+        // longer authoritative. parseTherapistAvailability still runs to
+        // validate the JSON shape and reject malformed records.
+        const parsedAvailability = parseTherapistAvailability(prismaTherapist?.availability);
         const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
         const hasAvailability = parsedAvailability && parsedAvailability.slots && parsedAvailability.slots.length > 0;
 
