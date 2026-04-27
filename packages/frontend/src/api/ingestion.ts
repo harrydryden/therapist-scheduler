@@ -86,6 +86,9 @@ export async function createTherapistFromCV(file: File | null, adminNotes: Admin
   if (adminNotes.notes) {
     formData.append('notes', adminNotes.notes);
   }
+  if (adminNotes.country) {
+    formData.append('country', adminNotes.country);
+  }
 
   return postMultipart<IngestionCreateResponse>(
     '/ingestion/therapist-cv',

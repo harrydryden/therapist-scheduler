@@ -212,9 +212,14 @@ export class JustinTimeService {
     );
 
     try {
-      // Get the appointment request
+      // Get the appointment request along with the related user/therapist
+      // so we can determine each party's country (and timezone) for the agent.
       const appointmentRequest = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
+        include: {
+          user: { select: { country: true } },
+          therapist: { select: { country: true } },
+        },
       });
 
       if (!appointmentRequest) {

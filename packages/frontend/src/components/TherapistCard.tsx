@@ -9,6 +9,7 @@ import type { VoucherState } from '../hooks/useVoucher';
 import { CategorySection } from './badges/CategorySection';
 import { formatAvailability } from '../utils/availability';
 import type { TherapistAvailability } from '../types';
+import { getCountryFlag, getCountryLabel } from '@therapist-scheduler/shared';
 
 interface TherapistCardProps {
   therapist: Therapist;
@@ -139,9 +140,19 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
 
       {/* Row 2: Card header */}
       <div className="px-6 pt-5">
-        <h3 className="text-lg font-bold text-spill-black leading-tight mb-1">
-          {therapist.name}
-        </h3>
+        <div className="flex items-start justify-between gap-2 mb-1">
+          <h3 className="text-lg font-bold text-spill-black leading-tight">
+            {therapist.name}
+          </h3>
+          <span
+            className="text-xl leading-none flex-shrink-0"
+            role="img"
+            aria-label={`Based in ${getCountryLabel(therapist.country)}`}
+            title={`Based in ${getCountryLabel(therapist.country)}`}
+          >
+            {getCountryFlag(therapist.country)}
+          </span>
+        </div>
         <p className={`text-sm text-spill-grey-400 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
           {therapist.bio}
         </p>

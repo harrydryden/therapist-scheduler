@@ -51,6 +51,10 @@ export interface SchedulingContext {
   therapistAvailability: Record<string, unknown> | null;
   /** How the booking was initiated: agent negotiation (default) or direct booking link */
   bookingMethod: BookingMethod;
+  /** Country code where the user is based (e.g. "UK", "US"). Defaults to "UK". */
+  userCountry: string;
+  /** Country code where the therapist is based. Defaults to "UK". */
+  therapistCountry: string;
 }
 
 export interface ConversationMessage {
@@ -64,6 +68,10 @@ export interface ConversationMessage {
  * This centralises the mapping so callers don't have to repeat it.
  * The record parameter accepts the shape returned by a typical
  * prisma.appointmentRequest.findUnique() call.
+ *
+ * `user` and `therapist` may be passed when callers have already loaded the
+ * related records — we use their `country` to drive timezone handling.
+ * Both default to 'UK' when missing.
  */
 export function buildSchedulingContext(
   appointmentRequest: {
@@ -74,6 +82,8 @@ export function buildSchedulingContext(
     therapistName: string;
     therapistAvailability: unknown;
     bookingMethod?: string;
+    user?: { country: string } | null;
+    therapist?: { country: string } | null;
   },
 ): SchedulingContext {
   return {
@@ -84,6 +94,8 @@ export function buildSchedulingContext(
     therapistName: appointmentRequest.therapistName,
     therapistAvailability: appointmentRequest.therapistAvailability as Record<string, unknown> | null,
     bookingMethod: (appointmentRequest.bookingMethod as BookingMethod) || 'agent_negotiated',
+    userCountry: appointmentRequest.user?.country || 'UK',
+    therapistCountry: appointmentRequest.therapist?.country || 'UK',
   };
 }
 
@@ -97,6 +109,10 @@ export async function fetchSchedulingContext(
 ): Promise<SchedulingContext | null> {
   const appointmentRequest = await prisma.appointmentRequest.findUnique({
     where: { id: appointmentRequestId },
+    include: {
+      user: { select: { country: true } },
+      therapist: { select: { country: true } },
+    },
   });
 
   if (!appointmentRequest) {

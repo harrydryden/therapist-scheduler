@@ -4,6 +4,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import { getSettings, updateSetting, resetSetting, getSlackStatus, sendSlackTest, resetSlackCircuit } from '../api/client';
 import type { SlackStatus } from '../api/client';
 import type { SystemSetting, SettingCategory } from '../types';
+import { COUNTRIES } from '@therapist-scheduler/shared';
 import { getAdminId } from '../utils/admin-id';
 
 // Category display info
@@ -482,6 +483,10 @@ export default function AdminSettingsPage() {
           </div>
         ) : (
           <div className="space-y-6">
+            {(activeCategory === 'all' || activeCategory === 'general') && (
+              <CountriesPanel />
+            )}
+
             {showSlackDiagnostics && (
               <SlackDiagnosticsPanel
                 status={slackStatus}
@@ -733,6 +738,61 @@ export default function AdminSettingsPage() {
           )}
         </ConfirmDialog>
       )}
+    </div>
+  );
+}
+
+function CountriesPanel() {
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-100">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-spill-blue-100 rounded-lg flex items-center justify-center">
+            <svg className="w-4 h-4 text-spill-blue-800" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">Countries</h2>
+            <p className="text-sm text-slate-500">
+              Countries available when ingesting therapists. Drives the flag on each
+              therapist card and the timezone the agent uses when communicating with users
+              and therapists. Appointment times in the database are always stored in UK time.
+            </p>
+          </div>
+        </div>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {COUNTRIES.map((country) => (
+          <div key={country.code} className="px-6 py-4 flex items-start justify-between gap-6">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-2xl leading-none flex-shrink-0" role="img" aria-label={country.label}>
+                {country.flag}
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-slate-900">{country.label}</h3>
+                <p className="text-xs text-slate-500 mt-0.5 font-mono">{country.code}</p>
+              </div>
+            </div>
+            <div className="flex-shrink-0 text-right">
+              {country.timezones.length === 1 ? (
+                <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-1 rounded">
+                  {country.timezones[0]}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-100 px-2 py-1 rounded">
+                  Multiple timezones ({country.timezones.length})
+                </span>
+              )}
+              {country.timezones.length > 1 && (
+                <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                  Agent will ask the person which region they are in.
+                </p>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

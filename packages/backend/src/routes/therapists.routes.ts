@@ -34,16 +34,19 @@ export async function therapistRoutes(fastify: FastifyInstance) {
         notionService.fetchTherapists(),
         therapistBookingStatusService.getUnavailableTherapistIds(),
         prisma.therapist.findMany({
-          select: { notionId: true, ingestedAt: true },
+          select: { notionId: true, ingestedAt: true, country: true },
         }),
       ]);
       const unavailableSet = new Set(unavailableIds);
 
-      // Build a map of notionId -> ingestedAt for sorting
+      // Build maps of notionId -> ingestedAt (for sorting) and notionId -> country
+      // (for displaying the country flag on the therapist card).
       const ingestedAtMap = new Map<string, Date>();
+      const countryMap = new Map<string, string>();
       const now = new Date();
       for (const record of therapistRecords) {
         ingestedAtMap.set(record.notionId, record.ingestedAt ?? now);
+        countryMap.set(record.notionId, record.country);
       }
 
       // Lazily create Prisma records for Notion therapists missing from the DB
@@ -55,6 +58,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
             try {
               const record = await getOrCreateTherapist(t.id, t.email, t.name);
               ingestedAtMap.set(t.id, record.ingestedAt ?? now);
+              countryMap.set(t.id, record.country);
             } catch (err) {
               logger.warn({ err, notionId: t.id }, 'Failed to backfill Prisma therapist record');
               ingestedAtMap.set(t.id, now);
@@ -87,6 +91,9 @@ export async function therapistRoutes(fastify: FastifyInstance) {
           profileImage: t.profileImage,
           bookingLink: t.bookingLink,
           acceptingBookings: true, // Only available therapists are in this list
+          // Country code drives flag emoji on the card and timezone handling.
+          // Defaults to 'UK' when no Prisma record yet exists.
+          country: countryMap.get(t.id) ?? 'UK',
         }))
         // Sort by ingestion date: longest on platform first (oldest date first)
         // Therapists without a Prisma record are treated as added today
@@ -120,10 +127,11 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       logger.info({ requestId, therapistId: id }, 'Fetching single therapist');
 
       try {
-        // Fetch therapist details and booking status in parallel (both use id from params)
-        const [therapist, availabilityStatus] = await Promise.all([
+        // Fetch therapist details, booking status, and the Prisma country in parallel
+        const [therapist, availabilityStatus, prismaRecord] = await Promise.all([
           notionService.getTherapist(id),
           therapistBookingStatusService.canAcceptNewRequest(id, ''),
+          prisma.therapist.findUnique({ where: { notionId: id }, select: { country: true } }),
         ]);
 
         if (!therapist) {
@@ -149,6 +157,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
           acceptingBookings,
           profileImage: therapist.profileImage,
           bookingLink: therapist.bookingLink,
+          country: prismaRecord?.country ?? 'UK',
         };
 
         return sendSuccess(reply, response);

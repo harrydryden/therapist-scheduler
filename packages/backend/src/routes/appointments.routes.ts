@@ -513,6 +513,8 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             therapistName,
             therapistAvailability: therapistAvailability,
             bookingMethod: bookingMethod || 'agent_negotiated',
+            userCountry: userEntity.country,
+            therapistCountry: therapistEntity.country,
           })
           .then(() => {
             logger.info(

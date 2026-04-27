@@ -40,6 +40,12 @@ export interface Therapist {
   active: boolean;
   /** External booking page URL (e.g. Calendly). When set, users can book directly. */
   bookingLink: string | null;
+  /**
+   * Country code where the therapist is based (e.g. "UK", "IE", "US").
+   * Used to display a flag emoji on the card and to drive timezone handling
+   * in agent communications. Defaults to "UK" for legacy records.
+   */
+  country: string;
 }
 
 export interface TherapistDetail extends Therapist {
@@ -364,6 +370,8 @@ export interface AdminNotes {
   overrideAreasOfFocus?: string[];
   overrideAvailability?: TherapistAvailability;
   notes?: string;
+  /** Country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA). */
+  country?: string;
 }
 
 // ============================================

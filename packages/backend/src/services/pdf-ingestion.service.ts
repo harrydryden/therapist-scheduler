@@ -454,8 +454,8 @@ class PDFIngestionService {
       // Step 5: Create Prisma Therapist record with ingestedAt timestamp
       //         and sync the generated odId back to Notion
       try {
-        const therapist = await getOrCreateTherapist(id, profile.email, profile.name);
-        logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Created Prisma therapist record with ingestion date');
+        const therapist = await getOrCreateTherapist(id, profile.email, profile.name, adminNotes?.country);
+        logger.info({ traceId, notionId: id, odId: therapist.odId, country: therapist.country }, 'Created Prisma therapist record with ingestion date');
 
         // Write the generated odId back to the Notion page so it appears in the ID column
         try {
