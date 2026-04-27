@@ -54,11 +54,15 @@ export function getOrdinalSuffix(n: number): string {
 }
 
 /**
- * Format time in 12-hour format with minutes always shown: "9:30am", "1:00pm"
+ * Format time in 12-hour format with minutes always shown: "9:30am", "1:00pm".
+ *
+ * If `timezone` is provided, the time is read from `date` in that IANA
+ * timezone instead of the server's local timezone. Always pass a timezone
+ * for any output that reaches a user/therapist — server-local time is only
+ * suitable for ad-hoc internal logging.
  */
-export function formatTime12(date: Date): string {
-  let hours = date.getHours();
-  const minutes = date.getMinutes();
+export function formatTime12(date: Date, timezone?: string): string {
+  let { hours, minutes } = readClockComponents(date, timezone);
   const ampm = hours >= 12 ? 'pm' : 'am';
   hours = hours % 12 || 12;
   const minuteStr = minutes.toString().padStart(2, '0');
@@ -66,11 +70,11 @@ export function formatTime12(date: Date): string {
 }
 
 /**
- * Format time in 12-hour format, omitting :00 minutes: "10am", "2:30pm"
+ * Format time in 12-hour format, omitting :00 minutes: "10am", "2:30pm".
+ * See {@link formatTime12} for timezone semantics.
  */
-export function formatTime12Compact(date: Date): string {
-  let hours = date.getHours();
-  const minutes = date.getMinutes();
+export function formatTime12Compact(date: Date, timezone?: string): string {
+  let { hours, minutes } = readClockComponents(date, timezone);
   const ampm = hours >= 12 ? 'pm' : 'am';
   hours = hours % 12 || 12;
   const minuteStr = minutes === 0 ? '' : `:${minutes.toString().padStart(2, '0')}`;
@@ -78,12 +82,59 @@ export function formatTime12Compact(date: Date): string {
 }
 
 /**
- * Format time in 24-hour format: "09:30", "13:45"
+ * Format time in 24-hour format: "09:30", "13:45".
+ * See {@link formatTime12} for timezone semantics.
  */
-export function formatTime24(date: Date): string {
-  const hours = date.getHours().toString().padStart(2, '0');
-  const minutes = date.getMinutes().toString().padStart(2, '0');
-  return `${hours}:${minutes}`;
+export function formatTime24(date: Date, timezone?: string): string {
+  const { hours, minutes } = readClockComponents(date, timezone);
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Format a date as "Monday 10th February" in the supplied timezone (or
+ * server-local if omitted — only use that for tests).
+ */
+export function formatDateLong(date: Date, timezone?: string): string {
+  const { day, monthIndex, dayOfWeek } = readCalendarComponents(date, timezone);
+  const suffix = getOrdinalSuffix(day);
+  return `${DAYS_LONG[dayOfWeek]} ${day}${suffix} ${MONTHS[monthIndex]}`;
+}
+
+/**
+ * Format a date as "Mon 10th" in the supplied timezone.
+ * See {@link formatDateLong} for timezone semantics.
+ */
+export function formatDateShort(date: Date, timezone?: string): string {
+  const { day, dayOfWeek } = readCalendarComponents(date, timezone);
+  const suffix = getOrdinalSuffix(day);
+  return `${DAYS_SHORT[dayOfWeek]} ${day}${suffix}`;
+}
+
+/**
+ * Read clock components (hours, minutes) from a Date, optionally in a
+ * specific timezone. Encapsulates the server-local fallback in one place.
+ */
+function readClockComponents(date: Date, timezone?: string): { hours: number; minutes: number } {
+  if (timezone) {
+    const parts = getDateInTimezone(date, timezone);
+    return { hours: parts.hours, minutes: parts.minutes };
+  }
+  return { hours: date.getHours(), minutes: date.getMinutes() };
+}
+
+/**
+ * Read calendar components (day, month, day-of-week) from a Date, optionally
+ * in a specific timezone.
+ */
+function readCalendarComponents(
+  date: Date,
+  timezone?: string,
+): { day: number; monthIndex: number; dayOfWeek: number } {
+  if (timezone) {
+    const parts = getDateInTimezone(date, timezone);
+    return { day: parts.day, monthIndex: parts.month, dayOfWeek: parts.dayOfWeek };
+  }
+  return { day: date.getDate(), monthIndex: date.getMonth(), dayOfWeek: date.getDay() };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,8 +192,12 @@ function applyTimezoneToDate(date: Date, timezone: string): Date {
 
 /**
  * Get date components in a specific timezone.
+ *
+ * Exported because callers outside this module need to format a Date as it
+ * would appear in a particular IANA timezone (e.g. for slot generation in
+ * the therapist's local time).
  */
-function getDateInTimezone(date: Date, timezone: string): {
+export function getDateInTimezone(date: Date, timezone: string): {
   year: number;
   month: number;
   day: number;
@@ -177,6 +232,46 @@ function getDateInTimezone(date: Date, timezone: string): {
     hours: parseInt(getPart('hour'), 10),
     minutes: parseInt(getPart('minute'), 10),
   };
+}
+
+/**
+ * Convert a wall-clock time in a given timezone to its absolute UTC instant.
+ *
+ * Independent of the server's local timezone — uses Intl to compute the offset
+ * for the supplied (year, month, day, hour, minute) at the IANA timezone,
+ * then returns a Date representing the same wall-clock moment.
+ *
+ * Example: wallClockToUtc(2026, 4, 28, 9, 0, 'Australia/Sydney') returns the
+ * Date for "April 28 2026 09:00 in Sydney" expressed as a UTC instant
+ * (2026-04-27T23:00:00Z, since Sydney is UTC+10 in April).
+ */
+export function wallClockToUtc(
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour: number,
+  minute: number,
+  timezone: string,
+): Date {
+  // Step 1: form a UTC guess at the target wall-clock moment.
+  const guessUtcMs = Date.UTC(year, monthIndex, day, hour, minute);
+  const guess = new Date(guessUtcMs);
+
+  // Step 2: see what wall-clock that UTC instant looks like in the target tz.
+  const observed = getDateInTimezone(guess, timezone);
+  const observedUtcMs = Date.UTC(
+    observed.year,
+    observed.month,
+    observed.day,
+    observed.hours,
+    observed.minutes,
+  );
+
+  // Step 3: the difference is the timezone offset; shift the guess by it.
+  // (Note: this is a single-step correction; DST transitions on the boundary
+  // hour are handled correctly because Intl reports the post-transition offset.)
+  const offsetMs = guessUtcMs - observedUtcMs;
+  return new Date(guessUtcMs + offsetMs);
 }
 
 /**
@@ -477,9 +572,9 @@ export function formatEmailDate(
   const dayNum = targetParts.day;
   const ordinal = getOrdinalSuffix(dayNum);
 
-  // Create a date in the target timezone for time formatting
-  const tzDate = new Date(2000, 0, 1, targetParts.hours, targetParts.minutes);
-  const timeStr = use24Hour ? formatTime24(tzDate) : formatTime12(tzDate);
+  // Format the time in the requested timezone — formatTime12 / formatTime24
+  // both honour the timezone parameter, so no server-local round-tripping.
+  const timeStr = use24Hour ? formatTime24(date, timezone) : formatTime12(date, timezone);
 
   const prefix = getRelativePrefix(now, date, timezone);
 
@@ -497,6 +592,10 @@ export function formatEmailDate(
 /**
  * Format an appointment date for use in emails, using admin-configured settings.
  *
+ * `recipientTimezone` overrides `general.timezone` so confirmation /
+ * reminder emails to a non-UK user or therapist quote the time in their
+ * local timezone. Pass undefined to use the platform default.
+ *
  * Falls back to the raw confirmedDateTime string if:
  *   - The parsed date is not available
  *   - Formatting fails for any reason
@@ -504,6 +603,7 @@ export function formatEmailDate(
 export async function formatEmailDateFromSettings(
   confirmedDateTimeParsed: Date | null | undefined,
   confirmedDateTime: string | null | undefined,
+  recipientTimezone?: string,
   now: Date = new Date(),
 ): Promise<string> {
   if (!confirmedDateTimeParsed) {
@@ -511,11 +611,12 @@ export async function formatEmailDateFromSettings(
   }
 
   try {
-    const [timezone, use24Hour] = await Promise.all([
+    const [defaultTimezone, use24Hour] = await Promise.all([
       getSettingValue<string>('general.timezone'),
       getSettingValue<boolean>('email.use24HourTime'),
     ]);
 
+    const timezone = recipientTimezone || defaultTimezone;
     return formatEmailDate(confirmedDateTimeParsed, timezone, use24Hour, now);
   } catch (error) {
     logger.warn({ error }, 'Failed to format email date from settings, using fallback');

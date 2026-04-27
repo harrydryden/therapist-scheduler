@@ -28,6 +28,7 @@ import {
 } from '../utils/date';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { getSettingValue } from './settings.service';
+import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { auditEventService } from './audit-event.service';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 
@@ -878,10 +879,12 @@ class PostBookingFollowupService extends PeriodicService {
   }): Promise<void> {
     const userName = appointment.userName || 'there';
 
-    // Format the date in human-friendly relative format
+    // Meeting-link-check goes to the user; format the time in their local zone.
+    const recipientTz = await resolveRecipientTimezone(appointment.userEmail);
     const formattedDateTime = await formatEmailDateFromSettings(
       appointment.confirmedDateTimeParsed,
       appointment.confirmedDateTime,
+      recipientTz ?? undefined,
     );
 
     const subject = await getEmailSubject('meetingLinkCheck', {
@@ -1195,10 +1198,13 @@ class PostBookingFollowupService extends PeriodicService {
       ? appointment.therapistName.split(' ')[0]
       : (appointment.userName ? appointment.userName.split(' ')[0] : 'your client');
 
-    // Format the date in human-friendly relative format
+    // Format the date in the recipient's local timezone (their country's
+    // default zone) — falls back to the platform timezone if unknown.
+    const recipientTz = await resolveRecipientTimezone(recipientEmail);
     const formattedDateTime = await formatEmailDateFromSettings(
       appointment.confirmedDateTimeParsed,
       appointment.confirmedDateTime,
+      recipientTz ?? undefined,
     );
 
     const subject = await getEmailSubject('sessionReminder', {

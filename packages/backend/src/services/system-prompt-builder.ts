@@ -127,8 +127,15 @@ export async function buildSystemPrompt(
   // Use a shared reference date for consistent slot calculation across formatters
   const referenceDate = new Date();
 
+  // Render slot strings in the therapist's own availability timezone (when
+  // recorded), not the platform default. This guarantees the wall-clock
+  // labels match the times the therapist sees in their calendar. Falls back
+  // to the platform timezone when an older record has no timezone stamped.
+  const therapistTimezone =
+    (context.therapistAvailability as any)?.timezone || timezone;
+
   const formattedAvailability = hasAvailability
-    ? formatAvailabilityForUser(context.therapistAvailability, timezone, referenceDate, {
+    ? formatAvailabilityForUser(context.therapistAvailability, therapistTimezone, referenceDate, {
         maxSlotsPerGroup,
         maxTotalSlots,
         sessionDurationMinutes: sessionDuration,
@@ -136,7 +143,7 @@ export async function buildSystemPrompt(
     : null;
 
   const availabilityText = formattedAvailability
-    ? formattedAvailability.summary
+    ? `${formattedAvailability.summary}\n\n*(All times above are in the therapist's local timezone: ${formattedAvailability.therapistTimezone}. Convert to the recipient's timezone when emailing them — see the Timezones section below.)*`
     : 'NOT AVAILABLE - must request from therapist first';
 
   const workflowInstructions = buildWorkflowInstructions({
