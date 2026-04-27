@@ -4,7 +4,7 @@ import { previewTherapistCV, createTherapistFromCV } from '../api/client';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { Toast } from '../components/Toast';
 import type { ExtractedTherapistProfile, AdminNotes, TherapistAvailability, CategoryWithEvidence } from '../types';
-import { COUNTRIES, DEFAULT_COUNTRY, type CountryCode } from '@therapist-scheduler/shared';
+import { COUNTRIES, DEFAULT_COUNTRY, getCountry, getDefaultTimezone, type CountryCode } from '@therapist-scheduler/shared';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
@@ -13,7 +13,6 @@ import {
   CATEGORY_COLORS,
   type CategoryOption,
 } from '../config/therapist-categories';
-import { APP } from '../config/constants';
 import { useFormPersistence, formatDraftAge } from '../hooks/useFormPersistence';
 
 // Days of the week for availability
@@ -33,6 +32,8 @@ interface IngestionFormState {
   therapistName: string;
   therapistEmail: string;
   therapistCountry: CountryCode;
+  /** IANA timezone the therapist works in. Defaults from country but can be overridden. */
+  therapistTimezone: string;
   additionalInfo: string;
   overrideEmail: string;
   overrideApproach: string[];
@@ -40,6 +41,16 @@ interface IngestionFormState {
   overrideAreasOfFocus: string[];
   overrideAvailability: AvailabilityByDay;
   internalNotes: string;
+}
+
+/**
+ * Pick the timezone to default to for a given country. Single-timezone
+ * countries return their one IANA zone; multi-timezone countries (US, CA, AU)
+ * return the first option in their list — the admin must pick the correct
+ * region from the dropdown.
+ */
+function defaultTimezoneFor(country: CountryCode): string {
+  return getDefaultTimezone(country) ?? getCountry(country).timezones[0];
 }
 
 // Evidence tooltip component
@@ -225,8 +236,13 @@ function createEmptyAvailability(): AvailabilityByDay {
   }, {} as AvailabilityByDay);
 }
 
-// Helper to convert availability state to TherapistAvailability format
-function convertToTherapistAvailability(availability: AvailabilityByDay): TherapistAvailability | undefined {
+// Helper to convert availability state to TherapistAvailability format.
+// `timezone` is the IANA timezone the therapist's slots are expressed in —
+// derived from their country, with override support for multi-timezone countries.
+function convertToTherapistAvailability(
+  availability: AvailabilityByDay,
+  timezone: string,
+): TherapistAvailability | undefined {
   const slots: TherapistAvailability['slots'] = [];
 
   for (const day of DAYS_OF_WEEK) {
@@ -249,7 +265,7 @@ function convertToTherapistAvailability(availability: AvailabilityByDay): Therap
   if (slots.length === 0) return undefined;
 
   return {
-    timezone: APP.DEFAULT_TIMEZONE,
+    timezone,
     slots,
   };
 }
@@ -258,8 +274,29 @@ export default function AdminIngestionPage() {
   const [therapistName, setTherapistName] = useState('');
   const [therapistEmail, setTherapistEmail] = useState('');
   const [therapistCountry, setTherapistCountry] = useState<CountryCode>(DEFAULT_COUNTRY);
+  const [therapistTimezone, setTherapistTimezone] = useState<string>(defaultTimezoneFor(DEFAULT_COUNTRY));
+  // Tracks whether the admin has explicitly chosen a timezone for the current
+  // country, so we can re-default the timezone when the country changes without
+  // overwriting an explicit override.
+  const [timezoneTouched, setTimezoneTouched] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [additionalInfo, setAdditionalInfo] = useState('');
+
+  // When the admin changes country, snap the timezone to that country's default
+  // unless they've already explicitly picked one for the current selection.
+  const handleCountryChange = useCallback((next: CountryCode) => {
+    setTherapistCountry(next);
+    setTherapistTimezone(defaultTimezoneFor(next));
+    setTimezoneTouched(false);
+  }, []);
+
+  const handleTimezoneChange = useCallback((next: string) => {
+    setTherapistTimezone(next);
+    setTimezoneTouched(true);
+  }, []);
+
+  // Used in the UI to label the timezone field as "(default)" vs "(overridden)".
+  const isTimezoneDefault = !timezoneTouched && therapistTimezone === defaultTimezoneFor(therapistCountry);
   const [previewData, setPreviewData] = useState<ExtractedTherapistProfile | null>(null);
 
   // Override fields
@@ -320,6 +357,7 @@ export default function AdminIngestionPage() {
         therapistName,
         therapistEmail,
         therapistCountry,
+        therapistTimezone,
         additionalInfo,
         overrideEmail,
         overrideApproach,
@@ -333,6 +371,7 @@ export default function AdminIngestionPage() {
     therapistName,
     therapistEmail,
     therapistCountry,
+    therapistTimezone,
     additionalInfo,
     overrideEmail,
     overrideApproach,
@@ -352,9 +391,13 @@ export default function AdminIngestionPage() {
   const handleRestoreDraft = () => {
     const draft = restoreDraft();
     if (draft) {
+      const restoredCountry = draft.therapistCountry ?? DEFAULT_COUNTRY;
       setTherapistName(draft.therapistName);
       setTherapistEmail(draft.therapistEmail);
-      setTherapistCountry(draft.therapistCountry ?? DEFAULT_COUNTRY);
+      setTherapistCountry(restoredCountry);
+      const restoredTz = draft.therapistTimezone || defaultTimezoneFor(restoredCountry);
+      setTherapistTimezone(restoredTz);
+      setTimezoneTouched(restoredTz !== defaultTimezoneFor(restoredCountry));
       setAdditionalInfo(draft.additionalInfo);
       setOverrideEmail(draft.overrideEmail);
       setOverrideApproach(draft.overrideApproach);
@@ -382,7 +425,12 @@ export default function AdminIngestionPage() {
       // Prepend the name and email to additional info so AI knows the correct details
       const emailInfo = therapistEmail.trim() ? `\nTherapist Email: ${therapistEmail.trim()}` : '';
       const fullAdditionalInfo = `Therapist Name: ${therapistName.trim()}${emailInfo}\n\n${additionalInfo}`;
-      return previewTherapistCV(file, fullAdditionalInfo);
+      // Country/timezone steer the AI to stamp extracted availability with
+      // the therapist's local timezone instead of falling back to UK time.
+      return previewTherapistCV(file, fullAdditionalInfo, {
+        country: therapistCountry,
+        timezone: therapistTimezone,
+      });
     },
     onSuccess: (data) => {
       setPreviewData(data.extractedProfile);
@@ -436,8 +484,10 @@ export default function AdminIngestionPage() {
         overrideApproach: overrideApproach.length > 0 ? overrideApproach : undefined,
         overrideStyle: overrideStyle.length > 0 ? overrideStyle : undefined,
         overrideAreasOfFocus: overrideAreasOfFocus.length > 0 ? overrideAreasOfFocus : undefined,
-        // Availability override
-        overrideAvailability: convertToTherapistAvailability(overrideAvailability),
+        // Availability override carries the admin-selected timezone so the
+        // slots are interpreted in the therapist's local time, not the
+        // platform default.
+        overrideAvailability: convertToTherapistAvailability(overrideAvailability, therapistTimezone),
         notes: internalNotes || undefined,
         country: therapistCountry,
       };
@@ -452,6 +502,8 @@ export default function AdminIngestionPage() {
       setTherapistName('');
       setTherapistEmail('');
       setTherapistCountry(DEFAULT_COUNTRY);
+      setTherapistTimezone(defaultTimezoneFor(DEFAULT_COUNTRY));
+      setTimezoneTouched(false);
       setFile(null);
       setAdditionalInfo('');
       setPreviewData(null);
@@ -516,6 +568,8 @@ export default function AdminIngestionPage() {
     setTherapistName('');
     setTherapistEmail('');
     setTherapistCountry(DEFAULT_COUNTRY);
+    setTherapistTimezone(defaultTimezoneFor(DEFAULT_COUNTRY));
+    setTimezoneTouched(false);
     setFile(null);
     setAdditionalInfo('');
     setPreviewData(null);
@@ -675,7 +729,7 @@ export default function AdminIngestionPage() {
               <select
                 id="therapistCountry"
                 value={therapistCountry}
-                onChange={(e) => setTherapistCountry(e.target.value as CountryCode)}
+                onChange={(e) => handleCountryChange(e.target.value as CountryCode)}
                 className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none bg-white"
                 required
               >
@@ -688,6 +742,35 @@ export default function AdminIngestionPage() {
               <p className="text-sm text-slate-500 mt-1">
                 Where the therapist is based. Drives the flag emoji on their card and
                 the timezone the agent uses when communicating with them.
+              </p>
+            </div>
+
+            {/* Therapist Timezone */}
+            <div>
+              <label htmlFor="therapistTimezone" className="block text-sm font-medium text-slate-700 mb-2">
+                Therapist Timezone <span className="text-red-500">*</span>
+                <span className="ml-2 text-xs font-normal text-slate-400">
+                  ({isTimezoneDefault ? 'default for selected country' : 'overridden'})
+                </span>
+              </label>
+              <select
+                id="therapistTimezone"
+                value={therapistTimezone}
+                onChange={(e) => handleTimezoneChange(e.target.value)}
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none bg-white"
+                required
+              >
+                {getCountry(therapistCountry).timezones.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tz}
+                  </option>
+                ))}
+              </select>
+              <p className="text-sm text-slate-500 mt-1">
+                IANA timezone the availability slots below are expressed in.
+                {getCountry(therapistCountry).timezones.length > 1
+                  ? ' This country spans multiple timezones — pick the one the therapist actually works in.'
+                  : ' Defaults from the country; only change this if the therapist works to a different timezone.'}
               </p>
             </div>
 
