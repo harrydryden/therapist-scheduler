@@ -34,10 +34,9 @@ import type { SchedulingContext, ToolExecutionResult } from './scheduling-contex
 import { availabilityResolver } from './availability-resolver.service';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { getSettingValue } from './settings.service';
-import { getDefaultTimezone } from '@therapist-scheduler/shared';
 import { Prisma } from '@prisma/client';
 import type { TherapistAvailability } from '@therapist-scheduler/shared';
-import { parseDayStringsToSlots } from './availability-day-parser';
+import { parseDayStringsToSlots, buildPersistedAvailability } from './availability-day-parser';
 import {
   sendEmailInputSchema,
   updateAvailabilityInputSchema,
@@ -516,20 +515,18 @@ export class AIToolExecutorService {
         return;
       }
 
-      // Preserve the therapist's existing timezone if set; otherwise derive
-      // from their country (single-timezone countries) and finally fall back
-      // to the platform default.
+      // Compose the new TherapistAvailability — preserves any existing
+      // timezone/exceptions and falls back through country → platform default
+      // when the therapist has no prior record. See buildPersistedAvailability
+      // for the precedence rules.
       const platformTimezone = (await getSettingValue<string>('general.timezone')) || 'Europe/London';
       const existing = (therapist.availability as unknown) as TherapistAvailability | null;
-      const timezone = existing?.timezone
-        || getDefaultTimezone(therapist.country)
-        || platformTimezone;
-
-      const newAvailability: TherapistAvailability = {
-        timezone,
+      const newAvailability = buildPersistedAvailability({
         slots,
-        ...(existing?.exceptions ? { exceptions: existing.exceptions } : {}),
-      };
+        existing,
+        country: therapist.country,
+        platformTimezone,
+      });
 
       await prisma.therapist.update({
         where: { id: therapist.id },
@@ -540,7 +537,7 @@ export class AIToolExecutorService {
         {
           traceId: this.traceId,
           therapistId: therapist.id,
-          timezone,
+          timezone: newAvailability.timezone,
           slotCount: slots.length,
         },
         'Therapist availability updated in Postgres',

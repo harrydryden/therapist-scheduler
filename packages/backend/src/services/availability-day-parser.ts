@@ -9,7 +9,8 @@
  * the full AI tool executor (which transitively pulls in Redis/config/etc).
  */
 
-import type { AvailabilitySlot } from '@therapist-scheduler/shared';
+import { getDefaultTimezone } from '@therapist-scheduler/shared';
+import type { AvailabilitySlot, TherapistAvailability } from '@therapist-scheduler/shared';
 
 const VALID_DAYS = new Set([
   'Monday',
@@ -44,3 +45,37 @@ export function parseDayStringsToSlots(input: { [day: string]: string } | null |
   }
   return slots;
 }
+
+/**
+ * Compose a TherapistAvailability record for persistence after the agent
+ * supplies new slots.
+ *
+ * Timezone selection precedence:
+ *   1. The therapist's existing availability.timezone (preserves any prior
+ *      admin override).
+ *   2. The country's default timezone for single-timezone countries.
+ *   3. The platform default (typically Europe/London).
+ *
+ * Existing exceptions (one-off blocked dates etc.) are preserved unchanged
+ * — the agent's update only replaces the recurring slots.
+ */
+export function buildPersistedAvailability(args: {
+  slots: AvailabilitySlot[];
+  existing: TherapistAvailability | null;
+  country: string;
+  platformTimezone: string;
+}): TherapistAvailability {
+  const timezone = args.existing?.timezone
+    || getDefaultTimezone(args.country)
+    || args.platformTimezone;
+
+  const result: TherapistAvailability = {
+    timezone,
+    slots: args.slots,
+  };
+  if (args.existing?.exceptions) {
+    result.exceptions = args.existing.exceptions;
+  }
+  return result;
+}
+
