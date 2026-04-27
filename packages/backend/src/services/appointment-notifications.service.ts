@@ -18,6 +18,7 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/date';
+import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { runBackgroundTask } from '../utils/background-task';
 import type { TransitionSource } from './appointment-lifecycle.service';
 
@@ -216,10 +217,13 @@ class AppointmentNotificationsService {
       if (settings.email.clientConfirmation) {
         runBackgroundTask(
           async () => {
-            // Format the date in human-friendly relative format
+            // Format the date in the client's local timezone (their country's
+            // default zone) — falls back to the platform timezone if unknown.
+            const recipientTz = await resolveRecipientTimezone(userEmail);
             const formattedDateTime = await formatEmailDateFromSettings(
               confirmedDateTimeParsed,
               confirmedDateTime,
+              recipientTz ?? undefined,
             );
 
             // Use allSettled to handle partial failures gracefully
@@ -269,10 +273,12 @@ class AppointmentNotificationsService {
       if (settings.email.therapistConfirmation && therapistEmail) {
         runBackgroundTask(
           async () => {
-            // Format the date in human-friendly relative format
+            // Format the date in the therapist's local timezone.
+            const recipientTz = await resolveRecipientTimezone(therapistEmail);
             const formattedDateTime = await formatEmailDateFromSettings(
               confirmedDateTimeParsed,
               confirmedDateTime,
+              recipientTz ?? undefined,
             );
 
             const results = await Promise.allSettled([
@@ -412,10 +418,12 @@ class AppointmentNotificationsService {
     if (settings.email.clientCancellation && userEmail) {
       runBackgroundTask(
         async () => {
-          // Format the date in human-friendly relative format
+          // Format the date in the client's local timezone.
+          const recipientTz = await resolveRecipientTimezone(userEmail);
           const formattedDateTime = await formatEmailDateFromSettings(
             confirmedDateTimeParsed,
             confirmedDateTime,
+            recipientTz ?? undefined,
           );
 
           const results = await Promise.allSettled([
@@ -466,10 +474,12 @@ class AppointmentNotificationsService {
     if (settings.email.therapistCancellation && therapistEmail && therapistGmailThreadId) {
       runBackgroundTask(
         async () => {
-          // Format the date in human-friendly relative format
+          // Format the date in the therapist's local timezone.
+          const recipientTz = await resolveRecipientTimezone(therapistEmail);
           const formattedDateTime = await formatEmailDateFromSettings(
             confirmedDateTimeParsed,
             confirmedDateTime,
+            recipientTz ?? undefined,
           );
 
           const results = await Promise.allSettled([

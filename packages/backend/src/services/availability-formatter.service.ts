@@ -12,11 +12,11 @@
 import { logger } from '../utils/logger';
 import {
   MIN_BOOKING_LEAD_HOURS,
-  DAYS_LONG,
-  DAYS_SHORT,
-  MONTHS,
-  getOrdinalSuffix,
   formatTime12Compact,
+  formatDateLong,
+  formatDateShort,
+  getDateInTimezone,
+  wallClockToUtc,
 } from '../utils/date';
 import type { AvailabilitySlot, TherapistAvailability } from '../types';
 
@@ -72,64 +72,45 @@ const DAY_INDEX: Record<string, number> = {
   saturday: 6,
 };
 
-/**
- * Format a date as "Monday 10th February"
- */
-function formatDateLong(date: Date): string {
-  const day = date.getDate();
-  const suffix = getOrdinalSuffix(day);
-  return `${DAYS_LONG[date.getDay()]} ${day}${suffix} ${MONTHS[date.getMonth()]}`;
-}
+// formatDateLong / formatDateShort / formatTime12Compact are imported from
+// utils/date and accept an explicit timezone — we always pass the therapist's
+// availability timezone so slots are presented in the time the therapist
+// actually works.
 
 /**
- * Format a date as "Mon 10th"
- */
-function formatDateShort(date: Date): string {
-  const day = date.getDate();
-  const suffix = getOrdinalSuffix(day);
-  return `${DAYS_SHORT[date.getDay()]} ${day}${suffix}`;
-}
-
-// Use shared formatTime12Compact for both formatTime and formatTimeShort
-// (they were identical: "10am" or "10:30am")
-const formatTime = formatTime12Compact;
-const formatTimeShort = formatTime12Compact;
-
-/**
- * Get the start of the current week (Sunday)
- */
-function getWeekStart(date: Date): Date {
-  const d = new Date(date);
-  const day = d.getDay();
-  d.setDate(d.getDate() - day);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-/**
- * Check if a date falls on an exception day
+ * Check if a date falls on an exception day, comparing the calendar date
+ * in the therapist's timezone (so a slot starting at 23:00 Sydney time on
+ * 2026-04-28 is matched against an exception entry for 2026-04-28, not for
+ * the UTC date 2026-04-27).
  */
 function isExceptionDay(
   date: Date,
-  exceptions: Array<{ date: string; available: boolean }> | undefined
+  exceptions: Array<{ date: string; available: boolean }> | undefined,
+  timezone: string,
 ): boolean | null {
   if (!exceptions || exceptions.length === 0) return null;
 
-  const dateStr = date.toISOString().split('T')[0]; // "YYYY-MM-DD"
+  const parts = getDateInTimezone(date, timezone);
+  const dateStr = `${parts.year.toString().padStart(4, '0')}-${(parts.month + 1)
+    .toString()
+    .padStart(2, '0')}-${parts.day.toString().padStart(2, '0')}`;
   const exception = exceptions.find(e => e.date === dateStr);
   return exception ? exception.available : null;
 }
 
 /**
- * Generate concrete datetime slots from availability pattern
+ * Generate concrete datetime slots from an availability pattern.
  *
- * Generates multiple slots within each availability window at hourly intervals.
- * For example, availability "12:00-16:00" generates slots at 12pm, 1pm, 2pm, 3pm.
+ * The (day, start, end) triples in `availability.slots` are interpreted as
+ * **wall-clock times in `availability.timezone`**, then converted to absolute
+ * UTC instants. So a Sydney therapist with `Monday 09:00-17:00` produces UTC
+ * Date objects representing 09:00 Sydney time on each upcoming Monday — not
+ * 09:00 UTC, and not 09:00 in whatever timezone the Node process runs in.
  *
  * @param availability - Therapist's availability configuration
  * @param referenceDate - Starting point for slot generation (defaults to now)
  * @param weeksAhead - How many weeks ahead to generate (default 3)
- * @returns Array of concrete datetime slots
+ * @returns Array of concrete UTC datetime slots, sorted ascending
  */
 function generateSlots(
   availability: TherapistAvailability,
@@ -140,13 +121,17 @@ function generateSlots(
 ): Date[] {
   const slots: Date[] = [];
   const now = new Date();
+  const timezone = availability.timezone || 'Europe/London';
 
   // Buffer: don't show slots starting within the minimum booking lead time
   const minStartTime = new Date(now.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
 
-  // Generate slots for the next N weeks
-  const endDate = new Date(referenceDate);
-  endDate.setDate(endDate.getDate() + weeksAhead * 7);
+  // Anchor week iteration on the reference date as it appears in the
+  // therapist's timezone — otherwise a referenceDate near UTC midnight could
+  // skew which calendar week we start on.
+  const refParts = getDateInTimezone(referenceDate, timezone);
+  const refDayOfWeek = refParts.dayOfWeek; // 0=Sun..6=Sat in the therapist's tz
+  const endTime = referenceDate.getTime() + weeksAhead * 7 * 24 * 60 * 60 * 1000;
 
   for (const slot of availability.slots) {
     const dayIndex = DAY_INDEX[slot.day.toLowerCase()];
@@ -163,41 +148,35 @@ function generateSlots(
     const windowEndMinutes = endHour * 60 + endMinute;
     const lastSlotStartMinutes = windowEndMinutes - durationMinutes;
 
-    // Find first occurrence of this day
-    let currentDay = new Date(referenceDate);
-    currentDay.setHours(0, 0, 0, 0);
-    const daysUntil = (dayIndex - currentDay.getDay() + 7) % 7;
-    currentDay.setDate(currentDay.getDate() + daysUntil);
+    // Walk forward day-by-day from the reference date. Using a wall-clock
+    // calendar (year, month, day in the therapist's tz) avoids any DST
+    // arithmetic on plain Date objects.
+    const daysUntilFirst = (dayIndex - refDayOfWeek + 7) % 7;
+    let cursorYear = refParts.year;
+    let cursorMonth = refParts.month;
+    let cursorDay = refParts.day + daysUntilFirst;
 
-    // Generate slots for each week
-    while (currentDay < endDate) {
-      // Check exceptions
-      const exceptionStatus = isExceptionDay(currentDay, availability.exceptions);
+    for (let week = 0; week < weeksAhead; week++) {
+      // Generate hourly slots within the window for this calendar day
+      let slotMinutes = startHour * 60 + startMinute;
+      while (slotMinutes <= lastSlotStartMinutes) {
+        const slotHour = Math.floor(slotMinutes / 60);
+        const slotMin = slotMinutes % 60;
+        const utcInstant = wallClockToUtc(cursorYear, cursorMonth, cursorDay, slotHour, slotMin, timezone);
 
-      if (exceptionStatus !== false) { // Not explicitly unavailable
-        // Generate multiple slots within the availability window
-        let slotTime = new Date(currentDay);
-        slotTime.setHours(startHour, startMinute, 0, 0);
-
-        // Loop through hourly slots within the window
-        while (true) {
-          const slotMinutes = slotTime.getHours() * 60 + slotTime.getMinutes();
-
-          // Stop if we've passed the last valid slot start time
-          if (slotMinutes > lastSlotStartMinutes) break;
-
-          // Only add if after minimum buffer time
-          if (slotTime > minStartTime) {
-            slots.push(new Date(slotTime));
+        if (utcInstant.getTime() <= endTime) {
+          // Honour the exceptions list (calendar date matched in tz)
+          const exceptionStatus = isExceptionDay(utcInstant, availability.exceptions, timezone);
+          // Honour minimum-booking-lead buffer
+          if (exceptionStatus !== false && utcInstant > minStartTime) {
+            slots.push(utcInstant);
           }
-
-          // Move to next hourly slot
-          slotTime = new Date(slotTime.getTime() + intervalMinutes * 60 * 1000);
         }
+
+        slotMinutes += intervalMinutes;
       }
 
-      // Move to next week
-      currentDay.setDate(currentDay.getDate() + 7);
+      cursorDay += 7;
     }
   }
 
@@ -208,15 +187,26 @@ function generateSlots(
 }
 
 /**
- * Format therapist availability into user-friendly grouped format
+ * Format therapist availability into a user-friendly grouped format.
+ *
+ * Slot display strings are rendered in the therapist's availability
+ * timezone — that is the timezone the therapist actually works in, and the
+ * slots' UTC instants represent wall-clock moments in that zone. The
+ * `displayTimezone` parameter is recorded on the result so callers (and the
+ * scheduling agent) know which zone the strings refer to; pass the
+ * recipient's local timezone if you intend to format differently for them
+ * (currently the agent does the cross-zone phrasing, so we always render
+ * the slots in the therapist's local time).
  *
  * @param availability - Raw availability data from Notion/database
- * @param userTimezone - User's timezone (optional, for future timezone support)
- * @returns Formatted availability with groupings and summaries
+ * @param displayTimezone - IANA timezone the slots are RENDERED in
+ *   (defaults to the availability's own timezone, then UK)
+ * @param referenceDate - Anchor date for slot generation
+ * @param slotConfig - Limits on how many slots to generate
  */
 export function formatAvailabilityForUser(
   availability: TherapistAvailability | Record<string, unknown> | null,
-  userTimezone: string = 'Europe/London',
+  displayTimezone?: string,
   referenceDate: Date = new Date(),
   slotConfig: SlotConfig = {}
 ): FormattedAvailability {
@@ -231,7 +221,7 @@ export function formatAvailabilityForUser(
     soonestSlot: null,
     totalSlots: 0,
     summary: '',
-    userTimezone,
+    userTimezone: displayTimezone || 'Europe/London',
     therapistTimezone: 'Europe/London',
   };
 
@@ -247,7 +237,13 @@ export function formatAvailabilityForUser(
     return result;
   }
 
-  result.therapistTimezone = normalizedAvailability.timezone || 'Europe/London';
+  const therapistTz = normalizedAvailability.timezone || 'Europe/London';
+  result.therapistTimezone = therapistTz;
+  // Render slot strings in the therapist's timezone unless the caller wants
+  // a specific display zone — keeps the wall-clock label consistent with how
+  // the therapist sees their own week.
+  const renderTz = displayTimezone || therapistTz;
+  result.userTimezone = renderTz;
 
   // Generate concrete slots using provided reference date for consistency
   const slots = generateSlots(normalizedAvailability, referenceDate, 3, sessionDurationMinutes, slotIntervalMinutes);
@@ -257,13 +253,19 @@ export function formatAvailabilityForUser(
     return result;
   }
 
-  // Group slots by week - use referenceDate for consistent grouping
-  const now = referenceDate;
-  const thisWeekStart = getWeekStart(now);
-  const nextWeekStart = new Date(thisWeekStart);
-  nextWeekStart.setDate(nextWeekStart.getDate() + 7);
-  const weekAfterStart = new Date(nextWeekStart);
-  weekAfterStart.setDate(weekAfterStart.getDate() + 7);
+  // Group slots by week — anchor the week boundary on the reference date as
+  // it appears in the render timezone, so a Sunday-evening reference doesn't
+  // accidentally roll a Monday-morning slot into "this week" (or vice versa).
+  const refParts = getDateInTimezone(referenceDate, renderTz);
+  const thisWeekStart = wallClockToUtc(
+    refParts.year,
+    refParts.month,
+    refParts.day - refParts.dayOfWeek,
+    0, 0,
+    renderTz,
+  );
+  const nextWeekStart = new Date(thisWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const weekAfterStart = new Date(nextWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
 
   let slotsAdded = 0;
 
@@ -272,8 +274,8 @@ export function formatAvailabilityForUser(
 
     const formatted: FormattedSlot = {
       datetime: slotDate,
-      display: `${formatDateLong(slotDate)} at ${formatTime(slotDate)}`,
-      shortDisplay: `${formatDateShort(slotDate)}, ${formatTimeShort(slotDate)}`,
+      display: `${formatDateLong(slotDate, renderTz)} at ${formatTime12Compact(slotDate, renderTz)}`,
+      shortDisplay: `${formatDateShort(slotDate, renderTz)}, ${formatTime12Compact(slotDate, renderTz)}`,
       isThisWeek: slotDate >= thisWeekStart && slotDate < nextWeekStart,
       isNextWeek: slotDate >= nextWeekStart && slotDate < weekAfterStart,
       isSoonest: slotsAdded === 0,
@@ -367,14 +369,11 @@ function normalizeAvailability(
 }
 
 /**
- * Collapse consecutive hourly times into ranges.
- * ["10am", "11am", "12pm", "1pm", "2pm", "3pm"] → ["10am – 3pm"]
- * ["10am", "11am", "2pm", "3pm"]                → ["10am – 11am", "2pm – 3pm"]
- * ["10am"]                                       → ["10am"]
+ * Collapse consecutive hourly times into ranges, formatted in `timezone`.
  */
-function collapseToRanges(datetimes: Date[]): string[] {
+function collapseToRanges(datetimes: Date[], timezone: string): string[] {
   if (datetimes.length === 0) return [];
-  if (datetimes.length === 1) return [formatTime(datetimes[0])];
+  if (datetimes.length === 1) return [formatTime12Compact(datetimes[0], timezone)];
 
   const ranges: string[] = [];
   let rangeStart = datetimes[0];
@@ -390,9 +389,11 @@ function collapseToRanges(datetimes: Date[]): string[] {
     } else {
       // Close the current range
       if (rangeStart.getTime() === rangePrev.getTime()) {
-        ranges.push(formatTime(rangeStart));
+        ranges.push(formatTime12Compact(rangeStart, timezone));
       } else {
-        ranges.push(`${formatTime(rangeStart)} – ${formatTime(rangePrev)}`);
+        ranges.push(
+          `${formatTime12Compact(rangeStart, timezone)} – ${formatTime12Compact(rangePrev, timezone)}`,
+        );
       }
       if (current) {
         rangeStart = current;
@@ -405,18 +406,20 @@ function collapseToRanges(datetimes: Date[]): string[] {
 }
 
 /**
- * Group slots by date and collapse consecutive times into ranges.
- * e.g. "Monday 30th March: 10am – 3pm"
+ * Group slots by calendar date (in `timezone`) and collapse consecutive times
+ * into ranges. e.g. "Monday 30th March: 10am – 3pm".
  */
-function formatSlotsByDate(slots: FormattedSlot[]): string {
-  // Group by calendar date, preserving datetime objects for range detection
+function formatSlotsByDate(slots: FormattedSlot[], timezone: string): string {
+  // Group by calendar date in the display timezone — using a server-local
+  // string would split or merge slots incorrectly across midnight UTC.
   const byDate = new Map<string, { dateLong: string; datetimes: Date[] }>();
 
   for (const slot of slots) {
-    const dateKey = slot.datetime.toDateString();
+    const parts = getDateInTimezone(slot.datetime, timezone);
+    const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
     if (!byDate.has(dateKey)) {
       byDate.set(dateKey, {
-        dateLong: formatDateLong(slot.datetime),
+        dateLong: formatDateLong(slot.datetime, timezone),
         datetimes: [],
       });
     }
@@ -425,7 +428,7 @@ function formatSlotsByDate(slots: FormattedSlot[]): string {
 
   return Array.from(byDate.values())
     .map(({ dateLong, datetimes }) => {
-      const ranges = collapseToRanges(datetimes);
+      const ranges = collapseToRanges(datetimes, timezone);
       return `- ${dateLong}: ${ranges.join(', ')}`;
     })
     .join('\n');
@@ -437,23 +440,24 @@ function formatSlotsByDate(slots: FormattedSlot[]): string {
  */
 function generateSummary(availability: FormattedAvailability): string {
   const parts: string[] = [];
+  const tz = availability.userTimezone;
 
   if (availability.soonestSlot) {
     parts.push(`**Soonest available:** ${availability.soonestSlot.display}`);
   }
 
   if (availability.thisWeek.length > 0) {
-    parts.push(`**This week:**\n${formatSlotsByDate(availability.thisWeek)}`);
+    parts.push(`**This week:**\n${formatSlotsByDate(availability.thisWeek, tz)}`);
   }
 
   if (availability.nextWeek.length > 0) {
-    parts.push(`**Next week:**\n${formatSlotsByDate(availability.nextWeek)}`);
+    parts.push(`**Next week:**\n${formatSlotsByDate(availability.nextWeek, tz)}`);
   }
 
   if (availability.later.length > 0) {
     const maxLaterSlots = 6;
     const slotsToShow = availability.later.slice(0, maxLaterSlots);
-    const formatted = formatSlotsByDate(slotsToShow);
+    const formatted = formatSlotsByDate(slotsToShow, tz);
     const remaining = availability.later.length - slotsToShow.length;
     const suffix = remaining > 0 ? `\n(+${remaining} more slots available)` : '';
     parts.push(`**Later:**\n${formatted}${suffix}`);

@@ -238,6 +238,7 @@ describe('formatEmailDateFromSettings', () => {
     const result = await formatEmailDateFromSettings(
       parsedDate,
       'Thursday 13th February at 1:45pm',
+      undefined, // recipient timezone — fall back to general.timezone
       new Date('2025-02-12T09:00:00Z'),
     );
 
@@ -255,10 +256,30 @@ describe('formatEmailDateFromSettings', () => {
     const result = await formatEmailDateFromSettings(
       parsedDate,
       'Thursday 13th February at 1:45pm',
+      undefined,
       new Date('2025-02-12T09:00:00Z'),
     );
 
     expect(result).toBe('tomorrow February 13th at 1:45pm');
+  });
+
+  it('uses the recipient timezone over the platform default when supplied', async () => {
+    mockGetSettingValue.mockImplementation(((key: string) => {
+      if (key === 'general.timezone') return Promise.resolve('Europe/London');
+      if (key === 'email.use24HourTime') return Promise.resolve(true);
+      return Promise.resolve('');
+    }) as typeof getSettingValue);
+
+    // 13:45 UTC is 08:45 in New York (EST/UTC-5 in February)
+    const parsedDate = new Date('2025-02-13T13:45:00Z');
+    const result = await formatEmailDateFromSettings(
+      parsedDate,
+      'Thursday 13th February at 8:45am',
+      'America/New_York',
+      new Date('2025-02-12T09:00:00Z'),
+    );
+
+    expect(result).toBe('tomorrow February 13th at 08:45');
   });
 
   it('falls back to raw string when parsed date is null', async () => {
