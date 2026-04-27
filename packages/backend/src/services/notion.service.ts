@@ -7,10 +7,8 @@ import { sleep } from '../utils/timeout';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
 // FIX #23: Import shared rate limiter for Notion API calls
 import { notionClientManager } from '../utils/notion-client';
-import type { TherapistAvailability } from '@therapist-scheduler/shared';
 
 // Re-export for consumers that import from notion.service
-export type { TherapistAvailability };
 
 /**
  * Minimal type for Notion page properties we access.
@@ -45,7 +43,6 @@ export interface InternalTherapist {
   style: string[];
   areasOfFocus: string[];
   email: string;
-  availability: TherapistAvailability | null;
   active: boolean;
   profileImage: string | null;
   frozen: boolean;
@@ -54,11 +51,11 @@ export interface InternalTherapist {
 }
 
 const CACHE_TTL = 300; // 5 minutes for general data
-// FIX M3: Shorter cache for availability-critical data to reduce staleness
-// NOTE: A therapist who removes availability in Notion could still receive bookings
-// for up to 60s. The booking route provides a secondary guard via
-// therapistBookingStatusService.checkAvailability() which is cache-independent.
-const CACHE_TTL_AVAILABILITY = 60; // 1 minute for therapist availability
+// Shorter TTL for booking-critical fields (active / frozen) so a therapist
+// being toggled inactive in Notion stops accepting new bookings within ~60s.
+// Availability is no longer cached here — it comes from Postgres directly,
+// so staleness on that front is moot.
+const CACHE_TTL_BOOKING = 60;
 const CACHE_KEY_ALL = 'therapists:all';
 const CACHE_KEY_SINGLE = 'therapists:single:';
 const NOTION_TIMEOUT_MS = 30000; // 30 seconds timeout for Notion API
@@ -111,11 +108,9 @@ class NotionService {
     const emailProperty = properties.Email;
     const email = emailProperty?.email || '';
 
-    // Availability is no longer read from Notion. Postgres is the source of
-    // truth (Therapist.availability column). Callers that need availability
-    // must look it up via Prisma. The day columns may still exist on legacy
-    // pages but are no longer authoritative.
-    const availability: TherapistAvailability | null = null;
+    // Availability is no longer read from Notion — Postgres
+    // (Therapist.availability column) is the source of truth. Callers that
+    // need availability look it up via Prisma.
 
     // Extract active status (checkbox)
     const activeProperty = properties.Active;
@@ -156,7 +151,6 @@ class NotionService {
       style,
       areasOfFocus,
       email,
-      availability,
       active,
       profileImage,
       frozen,
@@ -290,9 +284,10 @@ class NotionService {
       );
       const therapist = this.parseTherapistFromPage(page as NotionPage);
 
-      // FIX M3: Use shorter TTL for single therapist (used for booking)
-      // This reduces staleness for availability-critical operations
-      await this.setCache(cacheKey, therapist, CACHE_TTL_AVAILABILITY);
+      // Use the shorter booking-critical TTL for single-therapist reads:
+      // a therapist toggled inactive/frozen in Notion stops being eligible
+      // within ~60s.
+      await this.setCache(cacheKey, therapist, CACHE_TTL_BOOKING);
 
       return therapist;
     } catch (err: any) {
@@ -314,11 +309,6 @@ class NotionService {
     }
   }
 
-  /**
-   * Update therapist availability in Notion
-   * @param therapistId - Notion page ID
-   * @param availability - Availability slots by day
-   */
   /**
    * Update therapist frozen status in Notion
    * @param therapistId - Notion page ID
