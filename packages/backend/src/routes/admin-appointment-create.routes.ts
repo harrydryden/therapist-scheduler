@@ -88,8 +88,9 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
         // 3. Parse confirmed date/time
         const confirmedDateTimeParsed = parseConfirmedDateTime(confirmedDateTime);
 
-        // 4. Parse therapist availability
-        const parsedAvailability = parseTherapistAvailability(therapist.availability);
+        // 4. Parse therapist availability from Postgres (source of truth) —
+        // therapistEntity is already loaded above by getOrCreateTherapist.
+        const parsedAvailability = parseTherapistAvailability(therapistEntity.availability);
         const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
 
         // 5. Create appointment inside Serializable transaction

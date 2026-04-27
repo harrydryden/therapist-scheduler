@@ -111,37 +111,11 @@ class NotionService {
     const emailProperty = properties.Email;
     const email = emailProperty?.email || '';
 
-    // Extract availability from day-of-week columns
-    // Each day column contains time slots like "09:00-12:00, 14:00-17:00"
-    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const slots: Array<{ day: string; start: string; end: string }> = [];
-
-    for (const day of days) {
-      const dayProperty = properties[day];
-      const dayText = dayProperty?.rich_text?.[0]?.plain_text?.trim();
-      if (dayText) {
-        // Parse time slots like "09:00-12:00, 14:00-17:00"
-        const timeRanges = dayText.split(',').map((s: string) => s.trim());
-        for (const range of timeRanges) {
-          const match = range.match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
-          if (match) {
-            slots.push({
-              day,
-              start: match[1],
-              end: match[2],
-            });
-          }
-        }
-      }
-    }
-
-    let availability: TherapistAvailability | null = null;
-    if (slots.length > 0) {
-      availability = {
-        timezone: config.timezone,
-        slots,
-      };
-    }
+    // Availability is no longer read from Notion. Postgres is the source of
+    // truth (Therapist.availability column). Callers that need availability
+    // must look it up via Prisma. The day columns may still exist on legacy
+    // pages but are no longer authoritative.
+    const availability: TherapistAvailability | null = null;
 
     // Extract active status (checkbox)
     const activeProperty = properties.Active;
@@ -345,51 +319,6 @@ class NotionService {
    * @param therapistId - Notion page ID
    * @param availability - Availability slots by day
    */
-  async updateTherapistAvailability(
-    therapistId: string,
-    availability: { [day: string]: string } // e.g., { "Monday": "09:00-12:00, 14:00-17:00" }
-  ): Promise<void> {
-    logger.info({ therapistId, availability }, 'Updating therapist availability in Notion');
-
-    try {
-      const properties: Record<string, any> = {};
-
-      // Map availability to day columns
-      const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-      for (const day of days) {
-        if (availability[day]) {
-          properties[day] = {
-            rich_text: [
-              {
-                type: 'text',
-                text: { content: availability[day] },
-              },
-            ],
-          };
-        }
-      }
-
-      // FIX H5: Invalidate cache BEFORE update to prevent stale reads
-      await this.invalidateCache();
-
-      // FIX #23: Route through shared rate limiter
-      await notionClientManager.executeWithRateLimit(async () => {
-        await this.notion.pages.update({
-          page_id: therapistId,
-          properties,
-        });
-      });
-
-      // Double-invalidate after write to ensure any cached value during write is cleared
-      await this.invalidateCache();
-
-      logger.info({ therapistId }, 'Therapist availability updated in Notion');
-    } catch (err) {
-      logger.error({ err, therapistId }, 'Failed to update therapist availability in Notion');
-      throw err;
-    }
-  }
-
   /**
    * Update therapist frozen status in Notion
    * @param therapistId - Notion page ID

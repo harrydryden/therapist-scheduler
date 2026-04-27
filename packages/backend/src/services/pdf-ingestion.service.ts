@@ -1,5 +1,6 @@
 import pdf from 'pdf-parse';
 import { Client } from '@notionhq/client';
+import { Prisma } from '@prisma/client';
 import { config } from '../config';
 import {
   APPROACH_OPTIONS,
@@ -337,33 +338,10 @@ class PDFIngestionService {
         },
       };
 
-      // Add availability to individual day columns
-      if (profile.availability && profile.availability.slots) {
-        // Group slots by day
-        const slotsByDay: Record<string, string[]> = {};
-        for (const slot of profile.availability.slots) {
-          if (!slotsByDay[slot.day]) {
-            slotsByDay[slot.day] = [];
-          }
-          slotsByDay[slot.day].push(`${slot.start}-${slot.end}`);
-        }
-
-        // Add each day's availability as a rich_text property
-        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-        for (const day of days) {
-          if (slotsByDay[day]) {
-            properties[day] = {
-              rich_text: [
-                {
-                  text: {
-                    content: slotsByDay[day].join(', '),
-                  },
-                },
-              ],
-            };
-          }
-        }
-      }
+      // Availability is no longer written to Notion's per-day rich_text columns —
+      // Postgres is the source of truth (see Therapist.availability). The
+      // availability is persisted by the caller (ingestPDF below) via
+      // getOrCreateTherapist after the Notion page is created.
 
       const response = await notion.pages.create({
         parent: {
@@ -487,11 +465,35 @@ class PDFIngestionService {
       logger.info({ traceId, name: profile.name }, 'Creating therapist in Notion');
       const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
 
-      // Step 5: Create Prisma Therapist record with ingestedAt timestamp
-      //         and sync the generated odId back to Notion
+      // Step 5: Create Prisma Therapist record with ingestedAt timestamp,
+      // persist the therapist's availability (Postgres is now the source of
+      // truth — Notion is no longer read or written for availability), and
+      // sync the generated odId back to Notion.
       try {
-        const therapist = await getOrCreateTherapist(id, profile.email, profile.name, adminNotes?.country);
-        logger.info({ traceId, notionId: id, odId: therapist.odId, country: therapist.country }, 'Created Prisma therapist record with ingestion date');
+        // The availability shape stored on the Therapist row matches the
+        // TherapistAvailability type. Cast through unknown because Prisma
+        // uses its own JSON branding which doesn't quite line up with our
+        // shared interface.
+        const availabilityForDb = profile.availability
+          ? (profile.availability as unknown as Prisma.InputJsonValue)
+          : null;
+        const therapist = await getOrCreateTherapist(
+          id,
+          profile.email,
+          profile.name,
+          adminNotes?.country,
+          availabilityForDb,
+        );
+        logger.info(
+          {
+            traceId,
+            notionId: id,
+            odId: therapist.odId,
+            country: therapist.country,
+            hasAvailability: !!profile.availability,
+          },
+          'Created Prisma therapist record with ingestion date',
+        );
 
         // Write the generated odId back to the Notion page so it appears in the ID column
         try {

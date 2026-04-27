@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { notionService, InternalTherapist } from '../services/notion.service';
+import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { prisma } from '../utils/database';
 import { getOrCreateTherapist } from '../utils/unique-id';
@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { RATE_LIMITS } from '../constants';
 import { adminAuthHook } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
+import type { TherapistAvailability } from '@therapist-scheduler/shared';
 
 interface GetTherapistParams {
   id: string;
@@ -29,24 +30,27 @@ export async function therapistRoutes(fastify: FastifyInstance) {
     logger.info({ requestId }, 'Fetching all therapists');
 
     try {
-      // Fetch therapists, unavailability status, and ingestion dates in parallel
+      // Fetch Notion therapists (for static profile data), unavailability
+      // status, and the Postgres records (which carry availability/country/
+      // ingestion date — Postgres is the source of truth for these now).
       const [therapists, unavailableIds, therapistRecords] = await Promise.all([
         notionService.fetchTherapists(),
         therapistBookingStatusService.getUnavailableTherapistIds(),
         prisma.therapist.findMany({
-          select: { notionId: true, ingestedAt: true, country: true },
+          select: { notionId: true, ingestedAt: true, country: true, availability: true },
         }),
       ]);
       const unavailableSet = new Set(unavailableIds);
 
-      // Build maps of notionId -> ingestedAt (for sorting) and notionId -> country
-      // (for displaying the country flag on the therapist card).
+      // Build maps keyed on Notion ID for quick join
       const ingestedAtMap = new Map<string, Date>();
       const countryMap = new Map<string, string>();
+      const availabilityMap = new Map<string, TherapistAvailability | null>();
       const now = new Date();
       for (const record of therapistRecords) {
         ingestedAtMap.set(record.notionId, record.ingestedAt ?? now);
         countryMap.set(record.notionId, record.country);
+        availabilityMap.set(record.notionId, (record.availability as unknown) as TherapistAvailability | null);
       }
 
       // Lazily create Prisma records for Notion therapists missing from the DB
@@ -59,6 +63,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
               const record = await getOrCreateTherapist(t.id, t.email, t.name);
               ingestedAtMap.set(t.id, record.ingestedAt ?? now);
               countryMap.set(t.id, record.country);
+              availabilityMap.set(t.id, (record.availability as unknown) as TherapistAvailability | null);
             } catch (err) {
               logger.warn({ err, notionId: t.id }, 'Failed to backfill Prisma therapist record');
               ingestedAtMap.set(t.id, now);
@@ -76,25 +81,28 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       // NOTE: Email is intentionally NOT included in public API response for privacy
       const response = therapists
         .filter((t) => !unavailableSet.has(t.id))
-        .map((t) => ({
-          id: t.id,
-          name: t.name,
-          bio: t.bio,
-          // Category system
-          approach: t.approach,
-          style: t.style,
-          areasOfFocus: t.areasOfFocus,
-          // email intentionally omitted - not public information
-          availability: t.availability,
-          active: t.active,
-          availabilitySummary: formatAvailabilitySummary(t.availability),
-          profileImage: t.profileImage,
-          bookingLink: t.bookingLink,
-          acceptingBookings: true, // Only available therapists are in this list
-          // Country code drives flag emoji on the card and timezone handling.
-          // Defaults to 'UK' when no Prisma record yet exists.
-          country: countryMap.get(t.id) ?? 'UK',
-        }))
+        .map((t) => {
+          const availability = availabilityMap.get(t.id) ?? null;
+          return {
+            id: t.id,
+            name: t.name,
+            bio: t.bio,
+            // Category system
+            approach: t.approach,
+            style: t.style,
+            areasOfFocus: t.areasOfFocus,
+            // email intentionally omitted - not public information
+            availability,
+            active: t.active,
+            availabilitySummary: formatAvailabilitySummary(availability),
+            profileImage: t.profileImage,
+            bookingLink: t.bookingLink,
+            acceptingBookings: true, // Only available therapists are in this list
+            // Country code drives flag emoji on the card and timezone handling.
+            // Defaults to 'UK' when no Prisma record yet exists.
+            country: countryMap.get(t.id) ?? 'UK',
+          };
+        })
         // Sort by ingestion date: longest on platform first (oldest date first)
         // Therapists without a Prisma record are treated as added today
         .sort((a, b) => {
@@ -127,11 +135,15 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       logger.info({ requestId, therapistId: id }, 'Fetching single therapist');
 
       try {
-        // Fetch therapist details, booking status, and the Prisma country in parallel
+        // Fetch Notion profile, booking status, and the Postgres record
+        // (country + availability) in parallel.
         const [therapist, availabilityStatus, prismaRecord] = await Promise.all([
           notionService.getTherapist(id),
           therapistBookingStatusService.canAcceptNewRequest(id, ''),
-          prisma.therapist.findUnique({ where: { notionId: id }, select: { country: true } }),
+          prisma.therapist.findUnique({
+            where: { notionId: id },
+            select: { country: true, availability: true },
+          }),
         ]);
 
         if (!therapist) {
@@ -139,6 +151,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
         }
 
         const acceptingBookings = availabilityStatus.canAcceptNewRequests;
+        const availability = ((prismaRecord?.availability as unknown) as TherapistAvailability | null) ?? null;
 
         // Full response for detail view
         // NOTE: Email is intentionally NOT included in public API response for privacy
@@ -151,9 +164,9 @@ export async function therapistRoutes(fastify: FastifyInstance) {
           style: therapist.style,
           areasOfFocus: therapist.areasOfFocus,
           // email intentionally omitted - not public information
-          availability: therapist.availability,
+          availability,
           active: therapist.active,
-          availabilitySummary: formatAvailabilitySummary(therapist.availability),
+          availabilitySummary: formatAvailabilitySummary(availability),
           acceptingBookings,
           profileImage: therapist.profileImage,
           bookingLink: therapist.bookingLink,
@@ -187,7 +200,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
   );
 }
 
-function formatAvailabilitySummary(availability: InternalTherapist['availability']): string {
+function formatAvailabilitySummary(availability: TherapistAvailability | null): string {
   if (!availability || !availability.slots || availability.slots.length === 0) {
     return 'Contact for availability';
   }

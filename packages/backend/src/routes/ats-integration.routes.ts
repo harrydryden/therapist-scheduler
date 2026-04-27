@@ -472,15 +472,17 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           );
         }
 
-        // Parse availability
-        const parsedAvailability = parseTherapistAvailability(therapist.availability);
-        const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
-
-        // Get or create entities
+        // Get or create entities first — Postgres carries the authoritative
+        // availability now, so we read it from the therapist entity rather
+        // than the Notion-fetched profile.
         const [userEntity, therapistEntity] = await Promise.all([
           getOrCreateUser(userEmail, userName),
           getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName),
         ]);
+
+        // Parse availability from Postgres
+        const parsedAvailability = parseTherapistAvailability(therapistEntity.availability);
+        const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
 
         // Create appointment in serializable transaction
         const appointmentRequest = await prisma.$transaction(

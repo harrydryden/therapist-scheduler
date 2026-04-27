@@ -11,6 +11,7 @@
  */
 
 import { randomInt } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { logger } from './logger';
 
@@ -139,19 +140,24 @@ export async function getOrCreateUser(
 }
 
 /**
- * Get or create a Therapist record by Notion ID
- * Returns the therapist with their unique odId.
+ * Get or create a Therapist record by Notion ID.
  *
  * `country` is a country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA).
- * If omitted, the schema default ('UK') is used. When a record already exists
- * the country is only updated if a value is explicitly provided and differs.
+ * If omitted, the schema default ('UK') is used. When a record already
+ * exists, country and availability are only overwritten when an explicit
+ * non-empty value is supplied and differs from what's stored.
+ *
+ * `availability` is the therapist's recurring schedule, stamped with their
+ * IANA timezone. Postgres is the source of truth for this — Notion is no
+ * longer read or written for it.
  */
 export async function getOrCreateTherapist(
   notionId: string,
   email: string,
   name: string,
   country?: string,
-): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; country: string; ingestedAt: Date | null; lastNudgeAt: Date | null; lastNudgeThreadId: string | null; createdAt: Date; updatedAt: Date }> {
+  availability?: Prisma.InputJsonValue | null,
+): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; country: string; availability: Prisma.JsonValue | null; ingestedAt: Date | null; lastNudgeAt: Date | null; lastNudgeThreadId: string | null; createdAt: Date; updatedAt: Date }> {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if therapist already exists by Notion ID
@@ -160,10 +166,13 @@ export async function getOrCreateTherapist(
   });
 
   if (existing) {
-    const updates: { email?: string; name?: string; country?: string } = {};
+    const updates: { email?: string; name?: string; country?: string; availability?: Prisma.InputJsonValue } = {};
     if (normalizedEmail !== existing.email) updates.email = normalizedEmail;
     if (name !== existing.name) updates.name = name;
     if (country && country !== existing.country) updates.country = country;
+    if (availability !== undefined && availability !== null) {
+      updates.availability = availability;
+    }
     if (Object.keys(updates).length > 0) {
       const updated = await prisma.therapist.update({
         where: { notionId },
@@ -186,6 +195,7 @@ export async function getOrCreateTherapist(
         odId,
         ingestedAt: new Date(),
         ...(country ? { country } : {}),
+        ...(availability !== undefined && availability !== null ? { availability } : {}),
       },
     });
 
