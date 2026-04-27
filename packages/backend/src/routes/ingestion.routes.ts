@@ -227,6 +227,8 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         const parts = request.parts();
         let pdfBuffer: Buffer | null = null;
         let additionalInfo: string | null = null;
+        let country: string | null = null;
+        let timezone: string | null = null;
 
         for await (const part of parts) {
           if (part.type === 'file') {
@@ -235,6 +237,18 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
             const value = part.value as string;
             validateFieldLength('additionalInfo', value, MAX_FIELD_SIZES.additionalInfo);
             additionalInfo = value;
+          } else if (part.type === 'field' && part.fieldname === 'country') {
+            const value = part.value as string;
+            validateFieldLength('country', value, 8);
+            const normalized = value.trim().toUpperCase();
+            if (normalized && !isCountryCode(normalized)) {
+              throw new ValidationError(`Invalid country code: ${value.trim()}`);
+            }
+            country = normalized || null;
+          } else if (part.type === 'field' && part.fieldname === 'timezone') {
+            const value = part.value as string;
+            validateFieldLength('timezone', value, 64);
+            timezone = value.trim() || null;
           }
         }
 
@@ -246,8 +260,16 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
           pdfText = await pdfIngestionService.extractTextFromPDF(pdfBuffer);
         }
 
-        // Extract profile from PDF text and/or additional info
-        const profile = await pdfIngestionService.extractTherapistProfile(pdfText, requestId, additionalInfo || undefined);
+        // Extract profile from PDF text and/or additional info. Country and
+        // timezone (when supplied) drive how the AI stamps availability so it
+        // matches where the therapist works.
+        const profile = await pdfIngestionService.extractTherapistProfile(
+          pdfText,
+          requestId,
+          additionalInfo || undefined,
+          country || undefined,
+          timezone || undefined,
+        );
 
         return sendSuccess(reply, {
             extractedProfile: profile,

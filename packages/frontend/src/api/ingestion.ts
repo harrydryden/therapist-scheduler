@@ -42,13 +42,23 @@ async function postMultipart<T>(
   return data.data as T;
 }
 
-export async function previewTherapistCV(file: File | null, additionalInfo: string): Promise<IngestionPreviewResponse> {
+export async function previewTherapistCV(
+  file: File | null,
+  additionalInfo: string,
+  options?: { country?: string; timezone?: string },
+): Promise<IngestionPreviewResponse> {
   const formData = new FormData();
   if (file) {
     formData.append('file', file);
   }
   if (additionalInfo) {
     formData.append('additionalInfo', additionalInfo);
+  }
+  if (options?.country) {
+    formData.append('country', options.country);
+  }
+  if (options?.timezone) {
+    formData.append('timezone', options.timezone);
   }
 
   return postMultipart<IngestionPreviewResponse>(

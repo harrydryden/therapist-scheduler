@@ -12,6 +12,7 @@ import { aiService } from './ai.service';
 import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { parseJsonFromLLMResponse } from '../utils/json-parser';
+import { getDefaultTimezone, getCountryLabel } from '@therapist-scheduler/shared';
 import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
 
 // Re-export for consumers
@@ -27,16 +28,34 @@ interface IngestionResult {
   error?: string;
 }
 
+/**
+ * Resolve the IANA timezone the AI should stamp on extracted availability.
+ * Prefers an explicit override, then the country's single timezone (when
+ * unambiguous), then the system default. Multi-timezone countries (US, CA, AU)
+ * fall through to the system default — the admin must override the timezone
+ * manually since we can't infer the right region from a CV.
+ */
+function resolveExtractionTimezone(country?: string, override?: string): string {
+  if (override) return override;
+  const fromCountry = getDefaultTimezone(country);
+  if (fromCountry) return fromCountry;
+  return config.timezone;
+}
+
 // Build extraction prompt dynamically to include configured timezone and category options
-function buildExtractionPrompt(): string {
+function buildExtractionPrompt(timezone: string, country?: string): string {
   // Build detailed category descriptions with explainers
   const approachDescriptions = APPROACH_OPTIONS.map((o) => `"${o.type}" - ${o.explainer}`).join('\n  ');
   const styleDescriptions = STYLE_OPTIONS.map((o) => `"${o.type}" - ${o.explainer}`).join('\n  ');
   const areasOfFocusDescriptions = AREAS_OF_FOCUS_OPTIONS.map((o) => `"${o.type}" - ${o.explainer}`).join('\n  ');
 
+  const countryHint = country
+    ? `\n\nThe therapist is based in ${getCountryLabel(country)}. Treat any times you find as expressed in their LOCAL time and stamp the availability with the timezone above.`
+    : '';
+
   return `You are an expert at extracting structured information from therapist profiles, CVs, job applications, and descriptive text.
 
-Analyze the following text and extract the therapist's profile information. The text may be from a CV/PDF or from a free-text description provided by an admin.
+Analyze the following text and extract the therapist's profile information. The text may be from a CV/PDF or from a free-text description provided by an admin.${countryHint}
 
 Return a JSON object with these fields:
 {
@@ -53,7 +72,7 @@ Return a JSON object with these fields:
     {"type": "Category Name", "evidence": "quoted text from source...", "reasoning": "why this maps to category"}
   ],
   "availability": {
-    "timezone": "${config.timezone}",
+    "timezone": "${timezone}",
     "slots": [
       {"day": "Monday", "start": "09:00", "end": "17:00"}
     ]
@@ -126,10 +145,18 @@ class PDFIngestionService {
   async extractTherapistProfile(
     pdfText: string,
     traceId?: string,
-    additionalInfo?: string
+    additionalInfo?: string,
+    country?: string,
+    overrideTimezone?: string,
   ): Promise<ExtractedTherapistProfile> {
+    // The timezone stamped on extracted availability must reflect WHERE the
+    // therapist works, not the platform's home timezone. Prefer the admin's
+    // chosen timezone, then the country's unambiguous default, then the
+    // system fallback.
+    const timezone = resolveExtractionTimezone(country, overrideTimezone);
+
     // Build the prompt with document text and any additional info from admin
-    let prompt = buildExtractionPrompt() + '\n\nDocument text:\n' + pdfText;
+    let prompt = buildExtractionPrompt(timezone, country) + '\n\nDocument text:\n' + pdfText;
 
     if (additionalInfo) {
       prompt +=
@@ -429,10 +456,19 @@ class PDFIngestionService {
         logger.info({ traceId }, 'No PDF provided, using additional info only');
       }
 
-      // Step 2: Use AI to extract structured profile (with additional info if provided)
+      // Step 2: Use AI to extract structured profile (with additional info if provided).
+      // Pass the therapist's country and (if present) the admin's chosen timezone so
+      // the AI stamps extracted availability with the correct local timezone — not
+      // the platform default of UK time.
       const sourceText = pdfText || 'No PDF document provided.';
-      logger.info({ traceId, textLength: sourceText.length, hasAdditionalInfo: !!adminNotes?.additionalInfo }, 'Extracting therapist profile with AI');
-      let profile = await this.extractTherapistProfile(sourceText, traceId, adminNotes?.additionalInfo);
+      logger.info({ traceId, textLength: sourceText.length, hasAdditionalInfo: !!adminNotes?.additionalInfo, country: adminNotes?.country }, 'Extracting therapist profile with AI');
+      let profile = await this.extractTherapistProfile(
+        sourceText,
+        traceId,
+        adminNotes?.additionalInfo,
+        adminNotes?.country,
+        adminNotes?.overrideAvailability?.timezone,
+      );
 
       // Step 3: Apply any admin overrides
       if (adminNotes) {
