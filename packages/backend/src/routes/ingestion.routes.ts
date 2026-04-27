@@ -117,12 +117,13 @@ function parseAdminNoteField(fieldName: string, value: string, adminNotes: Admin
     validateFieldLength('notes', value, MAX_FIELD_SIZES.notes);
     adminNotes.notes = value;
   } else if (fieldName === 'country') {
-    const trimmed = value.trim();
-    if (trimmed && !isCountryCode(trimmed)) {
-      throw new ValidationError(`Invalid country code: ${trimmed}`);
+    validateFieldLength('country', value, 8);
+    const normalized = value.trim().toUpperCase();
+    if (normalized && !isCountryCode(normalized)) {
+      throw new ValidationError(`Invalid country code: ${value.trim()}`);
     }
-    if (trimmed) {
-      adminNotes.country = trimmed;
+    if (normalized) {
+      adminNotes.country = normalized;
     }
   }
 }

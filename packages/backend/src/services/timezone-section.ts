@@ -59,6 +59,7 @@ export function buildTimezoneSection(
 - When emailing the **client**, present times in their local timezone. If the client and therapist are in different timezones, also include the equivalent UK time in brackets so the client can match it to anything we send programmatically. Example: "Tuesday at 3pm your time (4pm UK)".
 - When emailing the **therapist**, present times in their local timezone. If different from UK, include the UK equivalent in brackets the same way.
 - If either party is based in a country with multiple timezones AND we don't yet know their specific region, you MUST ask them where they are based BEFORE proposing or confirming a specific time. Don't guess.
+- **Trust what people tell you over what's on file.** If a client or therapist mentions they are in a different country, region, or timezone than the one above (e.g. they sign off "writing from New York" or say "I'm currently in Berlin"), treat their statement as authoritative for the rest of the conversation and format times for that location. The country on file may be out of date or default. Only fall back to the on-file country when nothing more specific has been stated.
 - Be explicit about timezone abbreviations (e.g. "BST", "EST", "AEST") when daylight savings could create ambiguity.
 - Never silently convert a time from someone's email into UK time and write that converted value back to them — quote the original time and confirm the timezone.
 `;
