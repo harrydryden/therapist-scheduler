@@ -189,6 +189,48 @@ describe('appointmentLifecycleService.dismissClosureRecommendation', () => {
     expect(newCheckpoint.pendingAction).toBeNull();
   });
 
+  it('agent-recommended dismiss: falls back to lastEmailSentTo when lastSuccessfulAction is uninformative', async () => {
+    // recommend_cancel_match overwrites lastSuccessfulAction with
+    // 'recommended_cancel_match' (maps to closure_recommended → uninformative)
+    // and never sets chaseSentTo. The fallback must consult
+    // checkpoint.context.lastEmailSentTo, which updateCheckpoint preserves
+    // across action dispatches.
+    (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
+      closureRecommendedAt: new Date(),
+      closureRecommendationActioned: false,
+      checkpointStage: 'closure_recommended',
+      chaseSentTo: null,
+      humanControlTakenBy: null,
+    });
+
+    await appointmentLifecycleService.dismissClosureRecommendation({
+      appointmentId: 'apt-1',
+      source: 'admin',
+    });
+
+    const [, mutate] = mockApplyCheckpointUpdate.mock.calls[0];
+
+    // Agent-recommended: action='recommended_cancel_match', context says user
+    const newFromUserSide = mutate({
+      stage: 'closure_recommended',
+      lastSuccessfulAction: 'recommended_cancel_match',
+      pendingAction: null,
+      checkpoint_at: new Date().toISOString(),
+      context: { lastEmailSentTo: 'user' },
+    });
+    expect(newFromUserSide.stage).toBe('awaiting_user_slot_selection');
+
+    // Agent-recommended: action='recommended_cancel_match', context says therapist
+    const newFromTherapistSide = mutate({
+      stage: 'closure_recommended',
+      lastSuccessfulAction: 'recommended_cancel_match',
+      pendingAction: null,
+      checkpoint_at: new Date().toISOString(),
+      context: { lastEmailSentTo: 'therapist' },
+    });
+    expect(newFromTherapistSide.stage).toBe('awaiting_therapist_availability');
+  });
+
   it('mutation callback leaves stage alone when JSON is already non-closure', async () => {
     (prisma.appointmentRequest.findUnique as jest.Mock).mockResolvedValue({
       closureRecommendedAt: new Date(),
