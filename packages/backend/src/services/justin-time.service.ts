@@ -22,6 +22,7 @@ import { prisma } from '../utils/database';
 import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { InvalidTransitionError } from '../errors';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
 import { classifyEmail, needsSpecialHandling, formatClassificationForPrompt, type EmailClassification } from '../services/email-classifier.service';
@@ -164,19 +165,30 @@ export class JustinTimeService {
         }
       }
 
-      // Update appointment request status atomically — only advance to 'contacted'
-      // if still in 'pending'. An early email reply could have already advanced the
-      // status to 'negotiating', and we must not regress it.
-      await prisma.appointmentRequest.updateMany({
-        where: {
-          id: context.appointmentRequestId,
-          status: 'pending',
-        },
-        data: {
-          status: 'contacted',
-          updatedAt: new Date(),
-        },
-      });
+      // Advance to 'contacted' via the lifecycle service so the transition gets
+      // the standard audit message, SSE notification, and (for hasAvailability=true)
+      // any future side effects. The lifecycle service's atomic precondition
+      // matches the original updateMany guard: status must still be 'pending'.
+      //
+      // An early email reply could have already advanced the status to 'negotiating'
+      // — in that case the lifecycle service throws InvalidTransitionError, which we
+      // treat as the same silent no-op the previous direct updateMany produced.
+      try {
+        await appointmentLifecycleService.transitionToContacted({
+          appointmentId: context.appointmentRequestId,
+          source: 'agent',
+          hasAvailability: !!hasAvailability,
+        });
+      } catch (transitionErr) {
+        if (transitionErr instanceof InvalidTransitionError) {
+          logger.debug(
+            { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId },
+            'Skipping pending→contacted transition: status already advanced (likely early email reply)'
+          );
+        } else {
+          throw transitionErr;
+        }
+      }
 
       return {
         success: true,

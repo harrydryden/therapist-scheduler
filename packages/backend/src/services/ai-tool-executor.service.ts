@@ -1009,15 +1009,7 @@ export class AIToolExecutorService {
       return;
     }
 
-    // Audit log: status change to confirmed
-    auditEventService.logStatusChange(context.appointmentRequestId, 'agent', {
-      traceId: this.traceId,
-      previousStatus: result.previousStatus,
-      newStatus: 'confirmed',
-      reason: isReschedule
-        ? `Rescheduled to ${params.confirmed_datetime}`
-        : `Confirmed for ${params.confirmed_datetime}`,
-    });
+    // (status_change audit event is written by transitionToConfirmed)
 
     // Invalidate therapist cache so frontend sees updated availability
     try {
@@ -1128,13 +1120,7 @@ export class AIToolExecutorService {
       return;
     }
 
-    // Audit log: status change to cancelled
-    auditEventService.logStatusChange(context.appointmentRequestId, 'agent', {
-      traceId: this.traceId,
-      previousStatus: result.previousStatus,
-      newStatus: 'cancelled',
-      reason: `Cancelled by ${params.cancelled_by}: ${params.reason}`,
-    });
+    // (status_change audit event is written by transitionToCancelled inside its transaction)
 
     // Invalidate therapist cache so frontend sees updated availability
     try {

@@ -299,12 +299,14 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       // must not affect the client response.
       sendSuccess(reply, { submissionId: submission.id }, { statusCode: 201, message: 'Thank you for your feedback!' });
 
-      // Post-processing: build Slack data, transition appointment, notify.
-      // Wrapped in its own try/catch so errors here never affect the client
-      // and never prevent the Slack notification from firing.
+      // Post-processing: build Slack data, transition appointment.
+      // The lifecycle service fires the Slack notification (now persistently
+      // tracked via side-effect-tracker, so the retry runner picks up Slack
+      // failures across restarts). We only fire a fallback Slack here in the
+      // catch path where the lifecycle transition itself threw — in that case
+      // notifyCompleted never ran and the feedback would otherwise be silent.
+      let feedbackTransitioned = false;
       try {
-        // Build compact Slack notification data from form questions + responses.
-        // Full responses are always accessible via the admin forms dashboard.
         const feedbackData = buildFeedbackDataForSlack(
           parseFormQuestions(formConfig?.questions),
           responses,
@@ -319,17 +321,23 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
               feedbackSubmissionId: submission.id,
               feedbackData,
             });
-            logger.info({ appointmentId: appointment.id, skipped: lifecycleResult.skipped }, 'Appointment transitioned to completed after feedback');
+            feedbackTransitioned = true;
+            logger.info(
+              { appointmentId: appointment.id, skipped: lifecycleResult.skipped },
+              'Appointment transitioned to completed after feedback'
+            );
           } catch (lifecycleError) {
-            // Log but don't fail the feedback submission.
-            logger.error({ error: lifecycleError, appointmentId: appointment.id }, 'Failed to transition appointment to completed');
+            // Lifecycle transition failed; fire fallback Slack below so the
+            // feedback isn't silently lost. The feedback row itself is already
+            // committed by this point.
+            logger.error(
+              { error: lifecycleError, appointmentId: appointment.id },
+              'Failed to transition appointment to completed'
+            );
           }
+        }
 
-          // Always send Slack notification directly from the form route so feedback
-          // is never silently lost. Previously, the normal success path relied on the
-          // lifecycle service's un-awaited fire-and-forget notifyCompleted() call,
-          // which could silently fail. The notification dedup mechanism (120s window)
-          // prevents duplicates if the lifecycle service also sends one.
+        if (appointment && !feedbackTransitioned) {
           runBackgroundTask(
             () => slackNotificationService.notifyAppointmentCompleted(
               appointment!.id,
@@ -338,12 +346,18 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
               submission.id,
               feedbackData,
             ),
-            { name: 'slack-notify-feedback-received', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
+            {
+              name: 'slack-notify-feedback-fallback-transition-failed',
+              context: { appointmentId: appointment.id, submissionId: submission.id },
+              retry: true,
+              maxRetries: 2,
+            },
           );
         }
       } catch (postError) {
-        // Post-processing failed but feedback is already saved and response sent.
-        // Still attempt Slack notification without feedback data so it's not silently lost.
+        // Building feedbackData / parsing form config blew up — feedback is
+        // already saved and the client response is already sent. Fire a
+        // minimal Slack so the team knows feedback arrived.
         logger.error({ error: postError, submissionId: submission.id, appointmentId: appointment?.id }, 'Post-submission processing failed');
         if (appointment) {
           runBackgroundTask(

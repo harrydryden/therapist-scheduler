@@ -19,6 +19,7 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { createHash } from 'crypto';
+import { runBackgroundTask, type BackgroundTaskOptions } from '../utils/background-task';
 
 // Side effect types
 export type SideEffectType =
@@ -361,3 +362,89 @@ class SideEffectTrackerService {
 
 // Singleton instance
 export const sideEffectTrackerService = new SideEffectTrackerService();
+
+/**
+ * Fire-and-forget a side effect with persistent retry coverage.
+ *
+ * Registers the effect in `side_effect_logs` (idempotency key = hash of
+ * appointmentId+transition+effectType), runs it via `runBackgroundTask`
+ * for in-process retries, and marks the row completed/failed. If the
+ * in-process retries are exhausted, the row stays in `failed` status and
+ * the periodic `sideEffectRetryService` picks it up across restarts.
+ *
+ * If the effect was already completed (e.g. on a duplicate trigger or a
+ * post-restart re-trigger) the task is skipped — that's the idempotency
+ * the tracker exists to provide.
+ *
+ * Use this only for effects whose retry path in `side-effect-retry.service`
+ * is semantically equivalent to the original send. Email confirmations are
+ * NOT yet wired here because the retry executor uses hardcoded English
+ * templates that diverge from the lifecycle's settings-driven templates.
+ */
+export function runTrackedSideEffect(
+  appointmentId: string,
+  transition: TransitionType,
+  effectType: SideEffectType,
+  task: () => Promise<unknown>,
+  options: BackgroundTaskOptions
+): void {
+  runBackgroundTask(async () => {
+    let registered;
+    try {
+      const [reg] = await sideEffectTrackerService.registerSideEffects(
+        appointmentId,
+        transition,
+        [{ effectType }],
+      );
+      registered = reg;
+    } catch (regErr) {
+      // Registration failure (DB outage, etc.) — fall back to running the
+      // task untracked rather than dropping the side effect entirely.
+      logger.warn(
+        { err: regErr, appointmentId, transition, effectType },
+        'Side-effect registration failed; running untracked'
+      );
+      await task();
+      return;
+    }
+
+    // If a prior invocation already completed (e.g. process restart between
+    // mark-complete and runBackgroundTask exit), skip — that's idempotency.
+    if (registered.status === 'completed') {
+      logger.debug(
+        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Side effect already completed; skipping'
+      );
+      return;
+    }
+
+    if (registered.status === 'abandoned') {
+      logger.warn(
+        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Side effect previously abandoned; not retrying'
+      );
+      return;
+    }
+
+    try {
+      await task();
+      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
+    } catch (err) {
+      // Persist the failure so the periodic retry service picks it up.
+      // We then re-throw so runBackgroundTask still records the metric and
+      // can run its short in-process retry sequence.
+      await sideEffectTrackerService
+        .markFailed(
+          registered.idempotencyKey,
+          err instanceof Error ? err.message : String(err),
+        )
+        .catch((markErr) => {
+          logger.error(
+            { err: markErr, appointmentId, effectType },
+            'Failed to mark side effect as failed (will retry next run)'
+          );
+        });
+      throw err;
+    }
+  }, options);
+}
