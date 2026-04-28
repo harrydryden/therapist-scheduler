@@ -235,6 +235,27 @@ class AppointmentLifecycleService {
   }
 
   /**
+   * Fire an async side-effect/notification dispatch that the caller doesn't
+   * want to await. The returned promise has its rejection logged so a future
+   * change that introduces an uncaught throw doesn't surface as an
+   * unhandledRejection — every lifecycle dispatch goes through here.
+   *
+   * The dispatchers themselves (transition-side-effects, appointment-notifications)
+   * have their own internal try/catches around their work and use
+   * runBackgroundTask / runTrackedSideEffect for tracking individual outbound
+   * calls; this is a belt-and-braces wrapper at the lifecycle boundary.
+   */
+  private fireAndForget(
+    promise: Promise<unknown>,
+    appointmentId: string,
+    label: string,
+  ): void {
+    promise.catch((err) => {
+      logger.error({ err, appointmentId, label }, 'Lifecycle fire-and-forget dispatch failed');
+    });
+  }
+
+  /**
    * Emit a status_change row in `appointment_audit_events` so every transition
    * produces a queryable timeline entry.
    *
@@ -654,28 +675,36 @@ class AppointmentLifecycleService {
     }
 
     // Post-transition side effects (therapist booking status, Notion sync)
-    transitionSideEffectsService.onConfirmed({
+    this.fireAndForget(
+      transitionSideEffectsService.onConfirmed({
+        appointmentId,
+        source,
+        adminId,
+        therapistNotionId: appointment.therapistNotionId,
+        therapistName: appointment.therapistName,
+        userEmail: appointment.userEmail,
+      }),
       appointmentId,
-      source,
-      adminId,
-      therapistNotionId: appointment.therapistNotionId,
-      therapistName: appointment.therapistName,
-      userEmail: appointment.userEmail,
-    });
+      'onConfirmed',
+    );
 
     // Send Slack + email notifications (delegated to notifications service)
-    appointmentNotificationsService.notifyConfirmed({
+    this.fireAndForget(
+      appointmentNotificationsService.notifyConfirmed({
+        appointmentId,
+        source,
+        adminId,
+        userName: appointment.userName,
+        userEmail: appointment.userEmail,
+        therapistName: appointment.therapistName,
+        therapistEmail: appointment.therapistEmail,
+        confirmedDateTime,
+        confirmedDateTimeParsed,
+        sendEmails,
+      }),
       appointmentId,
-      source,
-      adminId,
-      userName: appointment.userName,
-      userEmail: appointment.userEmail,
-      therapistName: appointment.therapistName,
-      therapistEmail: appointment.therapistEmail,
-      confirmedDateTime,
-      confirmedDateTimeParsed,
-      sendEmails,
-    });
+      'notifyConfirmed',
+    );
 
     const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED };
     this.notifyTransition(transition, appointmentId, source);
@@ -734,12 +763,16 @@ class AppointmentLifecycleService {
     }
 
     // Post-transition side effects (Notion user sync)
-    transitionSideEffectsService.onSessionHeld({
+    this.fireAndForget(
+      transitionSideEffectsService.onSessionHeld({
+        appointmentId,
+        source,
+        adminId,
+        userEmail: appointment.userEmail,
+      }),
       appointmentId,
-      source,
-      adminId,
-      userEmail: appointment.userEmail,
-    });
+      'onSessionHeld',
+    );
 
     // Add audit trail (conversation-state JSON message + status_change audit event row).
     // Independent writes — run in parallel.
@@ -878,10 +911,14 @@ class AppointmentLifecycleService {
       APPOINTMENT_STATUS.CONFIRMED, // Edge case: complete without feedback
     ];
 
-    // Use serializable transaction with row-level lock for atomicity
+    // Use serializable transaction with row-level lock for atomicity.
+    // FOR UPDATE (no NOWAIT) — concurrent transitions on the same row
+    // serialize naturally: the second waiter eventually sees the new status
+    // and either idempotent-skips (already completed) or hits the
+    // validFromStatuses guard. Brief unrelated writes (e.g. ai-conversation
+    // saving conversation state) hold the row lock for tens of ms; bounded
+    // by the transaction's 10s timeout below.
     const result = await prisma.$transaction(async (tx) => {
-      // Lock the row with FOR UPDATE to prevent concurrent modifications
-      // NOWAIT throws immediately if row is locked (fast fail)
       type AppointmentRow = {
         id: string;
         status: string;
@@ -892,19 +929,13 @@ class AppointmentLifecycleService {
         notes: string | null;
       };
 
-      let appointment: AppointmentRow | null;
-      try {
-        const rows = await tx.$queryRaw<AppointmentRow[]>`
-          SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes
-          FROM "appointment_requests"
-          WHERE id = ${appointmentId}
-          FOR UPDATE NOWAIT
-        `;
-        appointment = rows[0] || null;
-      } catch (lockError) {
-        // NOWAIT throws if row is locked by another transaction
-        throw new ConcurrentModificationError(appointmentId);
-      }
+      const rows = await tx.$queryRaw<AppointmentRow[]>`
+        SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes
+        FROM "appointment_requests"
+        WHERE id = ${appointmentId}
+        FOR UPDATE
+      `;
+      const appointment: AppointmentRow | null = rows[0] || null;
 
       if (!appointment) {
         throw new AppointmentNotFoundError(appointmentId);
@@ -1021,27 +1052,35 @@ class AppointmentLifecycleService {
     }
 
     // Post-transition side effects (therapist booking status, Notion sync, deactivation)
-    transitionSideEffectsService.onCompleted({
+    this.fireAndForget(
+      transitionSideEffectsService.onCompleted({
+        appointmentId,
+        source,
+        adminId,
+        therapistNotionId: appointment.therapistNotionId,
+        therapistName: appointment.therapistName,
+        userEmail: appointment.userEmail,
+        userName: appointment.userName,
+        previousStatus,
+      }),
       appointmentId,
-      source,
-      adminId,
-      therapistNotionId: appointment.therapistNotionId,
-      therapistName: appointment.therapistName,
-      userEmail: appointment.userEmail,
-      userName: appointment.userName,
-      previousStatus,
-    });
+      'onCompleted',
+    );
 
     // Send Slack notification (delegated to notifications service)
-    appointmentNotificationsService.notifyCompleted({
+    this.fireAndForget(
+      appointmentNotificationsService.notifyCompleted({
+        appointmentId,
+        source,
+        adminId,
+        userName: appointment.userName,
+        therapistName: appointment.therapistName,
+        feedbackSubmissionId,
+        feedbackData,
+      }),
       appointmentId,
-      source,
-      adminId,
-      userName: appointment.userName,
-      therapistName: appointment.therapistName,
-      feedbackSubmissionId,
-      feedbackData,
-    });
+      'notifyCompleted',
+    );
 
     const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.COMPLETED };
     this.notifyTransition(transition, appointmentId, source);
@@ -1063,9 +1102,9 @@ class AppointmentLifecycleService {
     const { appointmentId, reason, cancelledBy, source, adminId, atomic, skipNotifications } = params;
     const logContext = { appointmentId, source, adminId, cancelledBy };
 
-    // Use serializable transaction with row-level lock for atomicity
+    // Use serializable transaction with row-level lock for atomicity.
+    // FOR UPDATE (no NOWAIT) — see transitionToCompleted's comment.
     const result = await prisma.$transaction(async (tx) => {
-      // Lock the row with FOR UPDATE to prevent concurrent modifications
       type AppointmentRow = {
         id: string;
         status: string;
@@ -1082,21 +1121,16 @@ class AppointmentLifecycleService {
         therapist_gmail_thread_id: string | null;
       };
 
-      let appointment: AppointmentRow | null;
-      try {
-        const rows = await tx.$queryRaw<AppointmentRow[]>`
-          SELECT id, status, user_name, user_email, therapist_name, therapist_email,
-                 therapist_notion_id, human_control_enabled, notes,
-                 confirmed_date_time, confirmed_date_time_parsed,
-                 gmail_thread_id, therapist_gmail_thread_id
-          FROM "appointment_requests"
-          WHERE id = ${appointmentId}
-          FOR UPDATE NOWAIT
-        `;
-        appointment = rows[0] || null;
-      } catch (lockError) {
-        throw new ConcurrentModificationError(appointmentId);
-      }
+      const rows = await tx.$queryRaw<AppointmentRow[]>`
+        SELECT id, status, user_name, user_email, therapist_name, therapist_email,
+               therapist_notion_id, human_control_enabled, notes,
+               confirmed_date_time, confirmed_date_time_parsed,
+               gmail_thread_id, therapist_gmail_thread_id
+        FROM "appointment_requests"
+        WHERE id = ${appointmentId}
+        FOR UPDATE
+      `;
+      const appointment: AppointmentRow | null = rows[0] || null;
 
       if (!appointment) {
         throw new AppointmentNotFoundError(appointmentId);
@@ -1261,34 +1295,42 @@ class AppointmentLifecycleService {
     );
 
     // Post-transition side effects (therapist booking status, Notion sync, deactivation)
-    transitionSideEffectsService.onCancelled({
+    this.fireAndForget(
+      transitionSideEffectsService.onCancelled({
+        appointmentId,
+        source,
+        adminId,
+        therapistNotionId: appointment.therapistNotionId,
+        wasConfirmed,
+        userEmail: appointment.userEmail,
+      }),
       appointmentId,
-      source,
-      adminId,
-      therapistNotionId: appointment.therapistNotionId,
-      wasConfirmed,
-      userEmail: appointment.userEmail,
-    });
+      'onCancelled',
+    );
 
     // Send Slack + email notifications (delegated to notifications service).
     // Skipped when the caller wants to fire its own specialized notification
     // (e.g. bounce handler) — data-consistency side effects above still run.
     if (!skipNotifications) {
-      appointmentNotificationsService.notifyCancelled({
+      this.fireAndForget(
+        appointmentNotificationsService.notifyCancelled({
+          appointmentId,
+          source,
+          adminId,
+          cancelledBy,
+          reason,
+          userName: appointment.userName,
+          userEmail: appointment.userEmail,
+          therapistName: appointment.therapistName,
+          therapistEmail: appointment.therapistEmail,
+          confirmedDateTime: appointment.confirmedDateTime,
+          confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+          gmailThreadId: appointment.gmailThreadId,
+          therapistGmailThreadId: appointment.therapistGmailThreadId,
+        }),
         appointmentId,
-        source,
-        adminId,
-        cancelledBy,
-        reason,
-        userName: appointment.userName,
-        userEmail: appointment.userEmail,
-        therapistName: appointment.therapistName,
-        therapistEmail: appointment.therapistEmail,
-        confirmedDateTime: appointment.confirmedDateTime,
-        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
-        gmailThreadId: appointment.gmailThreadId,
-        therapistGmailThreadId: appointment.therapistGmailThreadId,
-      });
+        'notifyCancelled',
+      );
     }
 
     const transitionResult: TransitionResult = { success: true, previousStatus: result.previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
@@ -1476,20 +1518,16 @@ class AppointmentLifecycleService {
     let sentinelFieldsReset = false;
 
     await prisma.$transaction(async (tx) => {
-      // Lock the row with FOR UPDATE NOWAIT to prevent concurrent modifications
-      let row: AdminForceUpdateRow | null;
-      try {
-        const rows = await tx.$queryRaw<AdminForceUpdateRow[]>`
-          SELECT id, status, confirmed_date_time, confirmed_at, user_name, user_email,
-                 therapist_name, therapist_email, therapist_notion_id
-          FROM "appointment_requests"
-          WHERE id = ${appointmentId}
-          FOR UPDATE NOWAIT
-        `;
-        row = rows[0] || null;
-      } catch (lockError) {
-        throw new ConcurrentModificationError(appointmentId);
-      }
+      // Lock the row with FOR UPDATE (no NOWAIT — see transitionToCompleted
+      // comment) to prevent concurrent modifications.
+      const rows = await tx.$queryRaw<AdminForceUpdateRow[]>`
+        SELECT id, status, confirmed_date_time, confirmed_at, user_name, user_email,
+               therapist_name, therapist_email, therapist_notion_id
+        FROM "appointment_requests"
+        WHERE id = ${appointmentId}
+        FOR UPDATE
+      `;
+      const row: AdminForceUpdateRow | null = rows[0] || null;
 
       if (!row) {
         throw new AppointmentNotFoundError(appointmentId);
@@ -1645,27 +1683,30 @@ class AppointmentLifecycleService {
       );
     }
 
-    // SSE notification
+    // Side effects + SSE in the same order other transitions use:
+    // queue side effects first, then emit SSE last so listeners see the
+    // status-change event after the data-consistency work has been kicked off.
     if (statusChanging) {
+      this.fireAndForget(
+        transitionSideEffectsService.onAdminForceUpdate({
+          appointmentId,
+          source: 'admin',
+          adminId,
+          appointment,
+          previousStatus,
+          newStatus: effectiveNewStatus as AppointmentStatus,
+          skipNotifications,
+          confirmedDateTime: confirmedDateTime ?? appointment.confirmedDateTime,
+        }),
+        appointmentId,
+        'onAdminForceUpdate',
+      );
+
       transitionSideEffectsService.notifyTransition(
         { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus },
         appointmentId,
         'admin'
       );
-    }
-
-    // --- Data-consistency side effects (always run when status changes) ---
-    if (statusChanging) {
-      transitionSideEffectsService.onAdminForceUpdate({
-        appointmentId,
-        source: 'admin',
-        adminId,
-        appointment,
-        previousStatus,
-        newStatus: effectiveNewStatus as AppointmentStatus,
-        skipNotifications,
-        confirmedDateTime: confirmedDateTime ?? appointment.confirmedDateTime,
-      });
     }
 
     logger.info(
