@@ -249,6 +249,17 @@ class AppointmentLifecycleService {
    * synchronously (awaited) so the caller can `await` the full transition and
    * be confident the audit row is committed before the status-change event is
    * propagated to listeners.
+   *
+   * Audit narrative accuracy note: `previousStatus` is captured from a read
+   * BEFORE the atomic updateMany. For transitions with multiple valid from-
+   * statuses (negotiating, confirmed, feedback_requested), a concurrent process
+   * could change the actual at-write from-status — the data is still consistent
+   * (the atomic guard ensures only valid-from rows are updated) but the audit
+   * narrative may report the read-time previous status instead of the actual
+   * at-update one. Eliminating this would require a CTE-based RETURNING update
+   * or a transactional row lock on every transition. Accepted as a known minor
+   * inaccuracy for forensic queries; the queryable status timeline still tells
+   * the right story up to a single jump-vs-skip discrepancy in the rare race.
    */
   private async recordStatusChangeEvent(
     appointmentId: string,
