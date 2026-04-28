@@ -16,7 +16,7 @@ import { logger } from '../utils/logger';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
-import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { loadEmailTemplate } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { runBackgroundTask } from '../utils/background-task';
@@ -231,34 +231,23 @@ class AppointmentNotificationsService {
               recipientTz ?? undefined,
             );
 
-            // Use allSettled to handle partial failures gracefully
-            const results = await Promise.allSettled([
-              getEmailSubject('clientConfirmation', {
+            const { subject, body } = await loadEmailTemplate(
+              'clientConfirmation',
+              {
                 therapistName: therapistName || 'your therapist',
                 confirmedDateTime: formattedDateTime,
-              }),
-              getEmailBody('clientConfirmation', {
+              },
+              {
                 userName: userName || 'there',
                 therapistName: therapistName || 'your therapist',
                 confirmedDateTime: formattedDateTime,
-              }),
-            ]);
-
-            // Check for failures in template loading
-            const subjectResult = results[0];
-            const bodyResult = results[1];
-
-            if (subjectResult.status === 'rejected' || bodyResult.status === 'rejected') {
-              const failures = results
-                .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-                .map(r => r.reason);
-              throw new Error(`Template loading failed: ${failures.join(', ')}`);
-            }
+              },
+            );
 
             await emailProcessingService.sendEmail({
               to: userEmail,
-              subject: subjectResult.value,
-              body: bodyResult.value,
+              subject,
+              body,
             });
             logger.info(
               { ...logContext, userEmail },
@@ -286,30 +275,21 @@ class AppointmentNotificationsService {
               recipientTz ?? undefined,
             );
 
-            const results = await Promise.allSettled([
-              getEmailSubject('therapistConfirmation', { confirmedDateTime: formattedDateTime }),
-              getEmailBody('therapistConfirmation', {
+            const { subject, body } = await loadEmailTemplate(
+              'therapistConfirmation',
+              { confirmedDateTime: formattedDateTime },
+              {
                 therapistFirstName,
                 clientFirstName,
                 userEmail,
                 confirmedDateTime: formattedDateTime,
-              }),
-            ]);
-
-            const subjectResult = results[0];
-            const bodyResult = results[1];
-
-            if (subjectResult.status === 'rejected' || bodyResult.status === 'rejected') {
-              const failures = results
-                .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-                .map(r => r.reason);
-              throw new Error(`Template loading failed: ${failures.join(', ')}`);
-            }
+              },
+            );
 
             await emailProcessingService.sendEmail({
               to: therapistEmail,
-              subject: subjectResult.value,
-              body: bodyResult.value,
+              subject,
+              body,
             });
             logger.info(
               { ...logContext, therapistEmail },
@@ -437,32 +417,21 @@ class AppointmentNotificationsService {
             recipientTz ?? undefined,
           );
 
-          const results = await Promise.allSettled([
-            getEmailSubject('clientCancellation', {
-              therapistName: therapistFirstName,
-            }),
-            getEmailBody('clientCancellation', {
+          const { subject, body } = await loadEmailTemplate(
+            'clientCancellation',
+            { therapistName: therapistFirstName },
+            {
               userName: userName || 'there',
               therapistName: therapistFirstName,
               confirmedDateTime: formattedDateTime,
               cancellationReason: cancellationReasonForClient,
-            }),
-          ]);
-
-          const subjectResult = results[0];
-          const bodyResult = results[1];
-
-          if (subjectResult.status === 'rejected' || bodyResult.status === 'rejected') {
-            const failures = results
-              .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-              .map(r => r.reason);
-            throw new Error(`Template loading failed: ${failures.join(', ')}`);
-          }
+            },
+          );
 
           await emailProcessingService.sendEmail({
             to: userEmail,
-            subject: subjectResult.value,
-            body: bodyResult.value,
+            subject,
+            body,
             threadId: gmailThreadId || undefined,
           });
           logger.info(
@@ -493,32 +462,21 @@ class AppointmentNotificationsService {
             recipientTz ?? undefined,
           );
 
-          const results = await Promise.allSettled([
-            getEmailSubject('therapistCancellation', {
-              clientFirstName,
-            }),
-            getEmailBody('therapistCancellation', {
+          const { subject, body } = await loadEmailTemplate(
+            'therapistCancellation',
+            { clientFirstName },
+            {
               therapistFirstName,
               clientFirstName,
               confirmedDateTime: formattedDateTime,
               cancellationReason: cancellationReasonForTherapist,
-            }),
-          ]);
-
-          const subjectResult = results[0];
-          const bodyResult = results[1];
-
-          if (subjectResult.status === 'rejected' || bodyResult.status === 'rejected') {
-            const failures = results
-              .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-              .map(r => r.reason);
-            throw new Error(`Template loading failed: ${failures.join(', ')}`);
-          }
+            },
+          );
 
           await emailProcessingService.sendEmail({
             to: therapistEmail,
-            subject: subjectResult.value,
-            body: bodyResult.value,
+            subject,
+            body,
             threadId: therapistGmailThreadId || undefined,
           });
           logger.info(

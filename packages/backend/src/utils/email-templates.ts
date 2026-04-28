@@ -85,3 +85,36 @@ export async function getEmailBody(
   const template = await getSettingValue<string>(settingKey);
   return renderTemplate(template, variables);
 }
+
+/**
+ * Load and render both subject and body for an email template in parallel,
+ * aggregating partial failures into a single thrown error.
+ *
+ * Without this helper the lifecycle's notification dispatch repeats the
+ * same Promise.allSettled + manual rejection-unpacking shape four times. The
+ * variable maps for subject and body often differ slightly (subject typically
+ * needs fewer fields), so accept them separately.
+ */
+export async function loadEmailTemplate(
+  templateKey: string,
+  subjectVariables: TemplateVariables,
+  bodyVariables: TemplateVariables = subjectVariables,
+): Promise<{ subject: string; body: string }> {
+  const results = await Promise.allSettled([
+    getEmailSubject(templateKey, subjectVariables),
+    getEmailBody(templateKey, bodyVariables),
+  ]);
+
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failures.length > 0) {
+    const reasons = failures.map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason)));
+    throw new Error(`Email template '${templateKey}' load failed: ${reasons.join('; ')}`);
+  }
+
+  // Both fulfilled at this point.
+  const [subjectResult, bodyResult] = results as [
+    PromiseFulfilledResult<string>,
+    PromiseFulfilledResult<string>,
+  ];
+  return { subject: subjectResult.value, body: bodyResult.value };
+}
