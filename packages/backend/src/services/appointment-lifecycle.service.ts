@@ -256,6 +256,115 @@ class AppointmentLifecycleService {
   }
 
   /**
+   * Shared shape for the lighter transitions (contacted, negotiating,
+   * session_held, feedback_requested). These all follow the same skeleton:
+   *
+   *   read current → idempotent skip → atomic updateMany with precondition
+   *   → optional post-update hook (for paths that re-fire side effects when
+   *     skipping a stage, e.g. confirmed → feedback_requested needs the
+   *     onSessionHeld effects) → audit message + status_change event in
+   *     parallel → notifyTransition (SSE).
+   *
+   * The complex transitions (confirmed, completed, cancelled, adminForceUpdate)
+   * have transactional row locks, reschedule logic, atomic options, or
+   * skipNotifications and intentionally do NOT use this helper — collapsing
+   * them in would force awkward branching.
+   *
+   * The read pulls `userEmail` alongside `id`/`status` so callers that need
+   * to dispatch user-sync side effects in their `onAfterUpdate` hook don't
+   * have to do a second round-trip. Methods that don't need it just ignore
+   * the field.
+   *
+   * @param onAfterUpdate Runs after the update succeeds and before the audit
+   *   writes. Use this for additional side effects that need to fire BEFORE
+   *   the audit/SSE event.
+   */
+  private async applyLightTransition(args: {
+    appointmentId: string;
+    source: TransitionSource;
+    adminId?: string;
+    targetStatus: AppointmentStatus;
+    validFromStatuses: readonly AppointmentStatus[];
+    /** Extra fields to write alongside status. */
+    extraData?: Prisma.AppointmentRequestUpdateInput;
+    buildAuditMessage: (previousStatus: AppointmentStatus) => string;
+    /** Optional reason to embed in the status_change audit event payload. */
+    auditReason?: string;
+    /** Runs after the atomic update succeeds, before the audit writes. */
+    onAfterUpdate?: (
+      previousStatus: AppointmentStatus,
+      appointment: { id: string; status: string; userEmail: string },
+    ) => Promise<void> | void;
+  }): Promise<TransitionResult> {
+    const {
+      appointmentId,
+      source,
+      adminId,
+      targetStatus,
+      validFromStatuses,
+      extraData,
+      buildAuditMessage,
+      auditReason,
+      onAfterUpdate,
+    } = args;
+    const logContext = { appointmentId, source, adminId };
+
+    const appointment = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { id: true, status: true, userEmail: true },
+    });
+
+    if (!appointment) {
+      logger.error(logContext, `Cannot transition to ${targetStatus} - appointment not found`);
+      throw new AppointmentNotFoundError(appointmentId);
+    }
+
+    const previousStatus = appointment.status as AppointmentStatus;
+
+    if (previousStatus === targetStatus) {
+      logger.debug(logContext, `Appointment already ${targetStatus} - skipping`);
+      return { success: true, previousStatus, newStatus: targetStatus, skipped: true };
+    }
+
+    const updateResult = await prisma.appointmentRequest.updateMany({
+      where: {
+        id: appointmentId,
+        status: { in: [...validFromStatuses] },
+      },
+      data: {
+        status: targetStatus,
+        lastActivityAt: new Date(),
+        updatedAt: new Date(),
+        ...extraData,
+      },
+    });
+
+    if (updateResult.count === 0) {
+      logger.warn(
+        { ...logContext, currentStatus: previousStatus },
+        `Invalid transition: ${previousStatus} → ${targetStatus}`,
+      );
+      throw new InvalidTransitionError(previousStatus, targetStatus);
+    }
+
+    if (onAfterUpdate) {
+      await onAfterUpdate(previousStatus, appointment);
+    }
+
+    // Audit writes — independent, run in parallel.
+    await Promise.all([
+      this.addAuditMessage(appointmentId, source, buildAuditMessage(previousStatus), adminId),
+      this.recordStatusChangeEvent(appointmentId, source, adminId, previousStatus, targetStatus, auditReason),
+    ]);
+
+    logger.info({ ...logContext, previousStatus }, `Appointment transitioned to ${targetStatus}`);
+
+    const transition: TransitionResult = { success: true, previousStatus, newStatus: targetStatus };
+    this.notifyTransition(transition, appointmentId, source);
+    return transition;
+  }
+
+  /**
    * Emit a status_change row in `appointment_audit_events` so every transition
    * produces a queryable timeline entry.
    *
@@ -311,71 +420,16 @@ class AppointmentLifecycleService {
    */
   async transitionToContacted(params: TransitionToContactedParams): Promise<TransitionResult> {
     const { appointmentId, source, adminId, hasAvailability } = params;
-    const logContext = { appointmentId, source, adminId };
-
-    const appointment = await prisma.appointmentRequest.findUnique({
-      where: { id: appointmentId },
-      select: { id: true, status: true },
+    return this.applyLightTransition({
+      appointmentId,
+      source,
+      adminId,
+      targetStatus: APPOINTMENT_STATUS.CONTACTED,
+      validFromStatuses: [APPOINTMENT_STATUS.PENDING],
+      buildAuditMessage: (prev) =>
+        `Status changed: ${prev} → contacted (availability ${hasAvailability ? 'known' : 'unknown'})`,
+      auditReason: `availability ${hasAvailability ? 'known' : 'unknown'}`,
     });
-
-    if (!appointment) {
-      logger.error(logContext, 'Cannot transition to contacted - appointment not found');
-      throw new AppointmentNotFoundError(appointmentId);
-    }
-
-    const previousStatus = appointment.status as AppointmentStatus;
-
-    // Idempotent check
-    if (previousStatus === APPOINTMENT_STATUS.CONTACTED) {
-      logger.debug(logContext, 'Appointment already contacted - skipping');
-      return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONTACTED, skipped: true };
-    }
-
-    // Atomic update with status precondition to prevent race conditions
-    const result = await prisma.appointmentRequest.updateMany({
-      where: {
-        id: appointmentId,
-        status: APPOINTMENT_STATUS.PENDING, // Only pending → contacted is valid
-      },
-      data: {
-        status: APPOINTMENT_STATUS.CONTACTED,
-        lastActivityAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
-
-    if (result.count === 0) {
-      logger.warn(
-        { ...logContext, currentStatus: previousStatus },
-        `Invalid transition: ${previousStatus} → contacted (only pending allowed)`
-      );
-      throw new InvalidTransitionError(previousStatus, 'contacted');
-    }
-
-    // Add audit trail (conversation-state JSON message + status_change audit event row).
-    // Independent writes — run in parallel to save a round-trip.
-    await Promise.all([
-      this.addAuditMessage(
-        appointmentId,
-        source,
-        `Status changed: ${previousStatus} → contacted (availability ${hasAvailability ? 'known' : 'unknown'})`,
-        adminId,
-      ),
-      this.recordStatusChangeEvent(
-        appointmentId,
-        source,
-        adminId,
-        previousStatus,
-        APPOINTMENT_STATUS.CONTACTED,
-        `availability ${hasAvailability ? 'known' : 'unknown'}`,
-      ),
-    ]);
-
-    logger.info({ ...logContext, previousStatus, hasAvailability }, 'Appointment transitioned to contacted');
-
-    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONTACTED };
-    this.notifyTransition(transition, appointmentId, source);
-    return transition;
   }
 
   /**
@@ -385,73 +439,16 @@ class AppointmentLifecycleService {
    */
   async transitionToNegotiating(params: TransitionToNegotiatingParams): Promise<TransitionResult> {
     const { appointmentId, source, adminId, notes } = params;
-    const logContext = { appointmentId, source, adminId };
-
-    const appointment = await prisma.appointmentRequest.findUnique({
-      where: { id: appointmentId },
-      select: { id: true, status: true },
+    return this.applyLightTransition({
+      appointmentId,
+      source,
+      adminId,
+      targetStatus: APPOINTMENT_STATUS.NEGOTIATING,
+      validFromStatuses: [APPOINTMENT_STATUS.CONTACTED, APPOINTMENT_STATUS.PENDING],
+      extraData: notes ? { notes } : undefined,
+      buildAuditMessage: (prev) => `Status changed: ${prev} → negotiating`,
+      auditReason: notes,
     });
-
-    if (!appointment) {
-      logger.error(logContext, 'Cannot transition to negotiating - appointment not found');
-      throw new AppointmentNotFoundError(appointmentId);
-    }
-
-    const previousStatus = appointment.status as AppointmentStatus;
-
-    // Idempotent check
-    if (previousStatus === APPOINTMENT_STATUS.NEGOTIATING) {
-      logger.debug(logContext, 'Appointment already negotiating - skipping');
-      return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.NEGOTIATING, skipped: true };
-    }
-
-    // Atomic update with status precondition
-    const validFromStatuses = [APPOINTMENT_STATUS.CONTACTED, APPOINTMENT_STATUS.PENDING];
-    const result = await prisma.appointmentRequest.updateMany({
-      where: {
-        id: appointmentId,
-        status: { in: validFromStatuses },
-      },
-      data: {
-        status: APPOINTMENT_STATUS.NEGOTIATING,
-        notes: notes || undefined,
-        lastActivityAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
-
-    if (result.count === 0) {
-      logger.warn(
-        { ...logContext, currentStatus: previousStatus },
-        `Invalid transition: ${previousStatus} → negotiating`
-      );
-      throw new InvalidTransitionError(previousStatus, 'negotiating');
-    }
-
-    // Add audit trail (conversation-state JSON message + status_change audit event row).
-    // Independent writes — run in parallel.
-    await Promise.all([
-      this.addAuditMessage(
-        appointmentId,
-        source,
-        `Status changed: ${previousStatus} → negotiating`,
-        adminId,
-      ),
-      this.recordStatusChangeEvent(
-        appointmentId,
-        source,
-        adminId,
-        previousStatus,
-        APPOINTMENT_STATUS.NEGOTIATING,
-        notes,
-      ),
-    ]);
-
-    logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to negotiating');
-
-    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.NEGOTIATING };
-    this.notifyTransition(transition, appointmentId, source);
-    return transition;
   }
 
   /**
@@ -718,85 +715,28 @@ class AppointmentLifecycleService {
    */
   async transitionToSessionHeld(params: TransitionToSessionHeldParams): Promise<TransitionResult> {
     const { appointmentId, source, adminId } = params;
-    const logContext = { appointmentId, source, adminId };
-
-    const appointment = await prisma.appointmentRequest.findUnique({
-      where: { id: appointmentId },
-      select: {
-        id: true,
-        status: true,
-        userEmail: true,
-      },
-    });
-
-    if (!appointment) {
-      logger.error(logContext, 'Cannot transition to session_held - appointment not found');
-      throw new AppointmentNotFoundError(appointmentId);
-    }
-
-    const previousStatus = appointment.status as AppointmentStatus;
-
-    // Idempotent check
-    if (appointment.status === APPOINTMENT_STATUS.SESSION_HELD) {
-      logger.debug(logContext, 'Appointment already session_held - skipping');
-      return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.SESSION_HELD, skipped: true };
-    }
-
-    // Atomic update with status precondition — only confirmed → session_held is valid
-    const result = await prisma.appointmentRequest.updateMany({
-      where: {
-        id: appointmentId,
-        status: APPOINTMENT_STATUS.CONFIRMED,
-      },
-      data: {
-        status: APPOINTMENT_STATUS.SESSION_HELD,
-        updatedAt: new Date(),
-      },
-    });
-
-    if (result.count === 0) {
-      logger.warn(
-        { ...logContext, currentStatus: previousStatus },
-        `Invalid transition: ${previousStatus} → session_held (only confirmed allowed)`
-      );
-      throw new InvalidTransitionError(previousStatus, 'session_held');
-    }
-
-    // Post-transition side effects (Notion user sync)
-    this.fireAndForget(
-      transitionSideEffectsService.onSessionHeld({
-        appointmentId,
-        source,
-        adminId,
-        userEmail: appointment.userEmail,
-      }),
+    return this.applyLightTransition({
       appointmentId,
-      'onSessionHeld',
-    );
-
-    // Add audit trail (conversation-state JSON message + status_change audit event row).
-    // Independent writes — run in parallel.
-    await Promise.all([
-      this.addAuditMessage(
-        appointmentId,
-        source,
-        `Status changed: ${previousStatus} → session_held`,
-        adminId,
-      ),
-      this.recordStatusChangeEvent(
-        appointmentId,
-        source,
-        adminId,
-        previousStatus,
-        APPOINTMENT_STATUS.SESSION_HELD,
-      ),
-    ]);
-
-    logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to session_held');
-
-    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.SESSION_HELD };
-    this.notifyTransition(transition, appointmentId, source);
-    return transition;
+      source,
+      adminId,
+      targetStatus: APPOINTMENT_STATUS.SESSION_HELD,
+      validFromStatuses: [APPOINTMENT_STATUS.CONFIRMED],
+      buildAuditMessage: (prev) => `Status changed: ${prev} → session_held`,
+      onAfterUpdate: (_prev, apt) => {
+        // Post-transition side effects (Notion user sync) — moves therapist
+        // from "Upcoming" to "Previous" on the user's Notion page.
+        this.fireAndForget(
+          transitionSideEffectsService.onSessionHeld({
+            appointmentId,
+            source,
+            adminId,
+            userEmail: apt.userEmail,
+          }),
+          appointmentId,
+          'onSessionHeld',
+        );
+      },
+    });
   }
 
   /**
@@ -808,86 +748,29 @@ class AppointmentLifecycleService {
    */
   async transitionToFeedbackRequested(params: TransitionToFeedbackRequestedParams): Promise<TransitionResult> {
     const { appointmentId, source, adminId } = params;
-    const logContext = { appointmentId, source, adminId };
-
-    const appointment = await prisma.appointmentRequest.findUnique({
-      where: { id: appointmentId },
-      select: {
-        id: true,
-        status: true,
-        userEmail: true,
+    return this.applyLightTransition({
+      appointmentId,
+      source,
+      adminId,
+      targetStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+      validFromStatuses: [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED],
+      extraData: { feedbackFormSentAt: new Date() },
+      buildAuditMessage: (prev) => `Status changed: ${prev} → feedback_requested`,
+      onAfterUpdate: async (prev, apt) => {
+        // If transitioning from confirmed (skipping session_held), fire the
+        // onSessionHeld side effects so the user's Notion record is synced.
+        // We await this rather than fire-and-forget so the user-sync row in
+        // the side-effect tracker is registered before audit/SSE fire.
+        if (prev === APPOINTMENT_STATUS.CONFIRMED) {
+          await transitionSideEffectsService.onSessionHeld({
+            appointmentId,
+            source,
+            adminId,
+            userEmail: apt.userEmail,
+          });
+        }
       },
     });
-
-    if (!appointment) {
-      logger.error(logContext, 'Cannot transition to feedback_requested - appointment not found');
-      throw new AppointmentNotFoundError(appointmentId);
-    }
-
-    const previousStatus = appointment.status as AppointmentStatus;
-
-    // Idempotent check
-    if (appointment.status === APPOINTMENT_STATUS.FEEDBACK_REQUESTED) {
-      logger.debug(logContext, 'Appointment already feedback_requested - skipping');
-      return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED, skipped: true };
-    }
-
-    // Atomic update with status precondition — session_held or confirmed → feedback_requested
-    const validFromStatuses = [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED];
-    const result = await prisma.appointmentRequest.updateMany({
-      where: {
-        id: appointmentId,
-        status: { in: validFromStatuses },
-      },
-      data: {
-        status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-        feedbackFormSentAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
-
-    if (result.count === 0) {
-      logger.warn(
-        { ...logContext, currentStatus: previousStatus },
-        `Invalid transition: ${previousStatus} → feedback_requested (only session_held or confirmed allowed)`
-      );
-      throw new InvalidTransitionError(previousStatus, 'feedback_requested');
-    }
-
-    // If transitioning from confirmed (skipping session_held), fire the
-    // onSessionHeld side effects so the user's Notion record is synced
-    if (previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
-      await transitionSideEffectsService.onSessionHeld({
-        appointmentId,
-        source,
-        adminId,
-        userEmail: appointment.userEmail,
-      });
-    }
-
-    // Add audit trail (conversation-state JSON message + status_change audit event row).
-    // Independent writes — run in parallel.
-    await Promise.all([
-      this.addAuditMessage(
-        appointmentId,
-        source,
-        `Status changed: ${previousStatus} → feedback_requested`,
-        adminId,
-      ),
-      this.recordStatusChangeEvent(
-        appointmentId,
-        source,
-        adminId,
-        previousStatus,
-        APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-      ),
-    ]);
-
-    logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to feedback_requested');
-
-    const transition: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED };
-    this.notifyTransition(transition, appointmentId, source);
-    return transition;
   }
 
   /**
