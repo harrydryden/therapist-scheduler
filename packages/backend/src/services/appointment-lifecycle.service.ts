@@ -32,6 +32,7 @@ import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { transitionSideEffectsService } from './transition-side-effects.service';
 import { recordAppointmentEvent } from './appointment-event.service';
+import { auditEventService, type AuditActor } from './audit-event.service';
 import { aiConversationService } from './ai-conversation.service';
 import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../services/conversation-checkpoint.service';
 
@@ -138,6 +139,16 @@ export interface TransitionToCancelledParams extends BaseTransitionParams {
   reason: string;
   cancelledBy: 'client' | 'therapist' | 'admin' | 'system';
   /**
+   * Skip the standard cancellation notifications (Slack + cancellation emails to
+   * client/therapist). Use when the caller is firing its own specialized notification
+   * (e.g. email-bounce service which sends a more detailed bounce-specific Slack alert
+   * and where emailing the bounced user is futile).
+   *
+   * Data-consistency side effects (therapist unfreeze, Notion sync, audit trail) still
+   * run regardless — this only suppresses the user-visible notifications.
+   */
+  skipNotifications?: boolean;
+  /**
    * Atomic cancellation options for preventing race conditions.
    * When provided, uses updateMany with status precondition.
    */
@@ -223,6 +234,40 @@ class AppointmentLifecycleService {
     transitionSideEffectsService.notifyTransition(result, appointmentId, source);
   }
 
+  /**
+   * Emit a status_change row in `appointment_audit_events` so every transition
+   * produces a queryable timeline entry.
+   *
+   * Used by the lighter transitions (contacted, negotiating, confirmed,
+   * session_held, feedback_requested) which update status via `updateMany`
+   * without a wrapping transaction. The terminal transitions (completed,
+   * cancelled) write the audit row INSIDE their transaction for stricter
+   * atomicity, so they don't go through this helper.
+   *
+   * Failures are swallowed (auditEventService.log already does this) — a missing
+   * audit row should never roll back a successful transition. The call is fired
+   * synchronously (awaited) so the caller can `await` the full transition and
+   * be confident the audit row is committed before the status-change event is
+   * propagated to listeners.
+   */
+  private async recordStatusChangeEvent(
+    appointmentId: string,
+    source: TransitionSource,
+    adminId: string | undefined,
+    previousStatus: AppointmentStatus,
+    newStatus: AppointmentStatus,
+    reason?: string,
+  ): Promise<void> {
+    const actor: AuditActor =
+      source === 'admin' || source === 'agent' || source === 'system' ? source : 'system';
+    await auditEventService.log(appointmentId, 'status_change', actor, {
+      previousStatus,
+      newStatus,
+      ...(reason ? { reason } : {}),
+      ...(adminId ? { adminId } : {}),
+    });
+  }
+
   // ============================================
   // Status Transitions
   // ============================================
@@ -275,13 +320,24 @@ class AppointmentLifecycleService {
       throw new InvalidTransitionError(previousStatus, 'contacted');
     }
 
-    // Add audit trail
-    await this.addAuditMessage(
-      appointmentId,
-      source,
-      `Status changed: ${previousStatus} → contacted (availability ${hasAvailability ? 'known' : 'unknown'})`,
-      adminId
-    );
+    // Add audit trail (conversation-state JSON message + status_change audit event row).
+    // Independent writes — run in parallel to save a round-trip.
+    await Promise.all([
+      this.addAuditMessage(
+        appointmentId,
+        source,
+        `Status changed: ${previousStatus} → contacted (availability ${hasAvailability ? 'known' : 'unknown'})`,
+        adminId,
+      ),
+      this.recordStatusChangeEvent(
+        appointmentId,
+        source,
+        adminId,
+        previousStatus,
+        APPOINTMENT_STATUS.CONTACTED,
+        `availability ${hasAvailability ? 'known' : 'unknown'}`,
+      ),
+    ]);
 
     logger.info({ ...logContext, previousStatus, hasAvailability }, 'Appointment transitioned to contacted');
 
@@ -340,13 +396,24 @@ class AppointmentLifecycleService {
       throw new InvalidTransitionError(previousStatus, 'negotiating');
     }
 
-    // Add audit trail
-    await this.addAuditMessage(
-      appointmentId,
-      source,
-      `Status changed: ${previousStatus} → negotiating`,
-      adminId
-    );
+    // Add audit trail (conversation-state JSON message + status_change audit event row).
+    // Independent writes — run in parallel.
+    await Promise.all([
+      this.addAuditMessage(
+        appointmentId,
+        source,
+        `Status changed: ${previousStatus} → negotiating`,
+        adminId,
+      ),
+      this.recordStatusChangeEvent(
+        appointmentId,
+        source,
+        adminId,
+        previousStatus,
+        APPOINTMENT_STATUS.NEGOTIATING,
+        notes,
+      ),
+    ]);
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to negotiating');
 
@@ -539,15 +606,28 @@ class AppointmentLifecycleService {
       }
     }
 
-    // Add audit trail
-    await this.addAuditMessage(
-      appointmentId,
-      source,
-      isReschedule
-        ? `Appointment rescheduled: ${appointment.confirmedDateTime} → ${confirmedDateTime}`
-        : `Status changed: ${previousStatus} → confirmed for ${confirmedDateTime}`,
-      adminId
-    );
+    // Add audit trail (conversation-state JSON message + status_change audit event row).
+    // Independent writes — run in parallel.
+    await Promise.all([
+      this.addAuditMessage(
+        appointmentId,
+        source,
+        isReschedule
+          ? `Appointment rescheduled: ${appointment.confirmedDateTime} → ${confirmedDateTime}`
+          : `Status changed: ${previousStatus} → confirmed for ${confirmedDateTime}`,
+        adminId,
+      ),
+      this.recordStatusChangeEvent(
+        appointmentId,
+        source,
+        adminId,
+        previousStatus,
+        APPOINTMENT_STATUS.CONFIRMED,
+        isReschedule
+          ? `Rescheduled to ${confirmedDateTime}`
+          : `Confirmed for ${confirmedDateTime}`,
+      ),
+    ]);
 
     logger.info(
       { ...logContext, isReschedule, confirmedDateTime },
@@ -650,13 +730,23 @@ class AppointmentLifecycleService {
       userEmail: appointment.userEmail,
     });
 
-    // Add audit trail
-    await this.addAuditMessage(
-      appointmentId,
-      source,
-      `Status changed: ${previousStatus} → session_held`,
-      adminId
-    );
+    // Add audit trail (conversation-state JSON message + status_change audit event row).
+    // Independent writes — run in parallel.
+    await Promise.all([
+      this.addAuditMessage(
+        appointmentId,
+        source,
+        `Status changed: ${previousStatus} → session_held`,
+        adminId,
+      ),
+      this.recordStatusChangeEvent(
+        appointmentId,
+        source,
+        adminId,
+        previousStatus,
+        APPOINTMENT_STATUS.SESSION_HELD,
+      ),
+    ]);
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to session_held');
 
@@ -731,13 +821,23 @@ class AppointmentLifecycleService {
       });
     }
 
-    // Add audit trail
-    await this.addAuditMessage(
-      appointmentId,
-      source,
-      `Status changed: ${previousStatus} → feedback_requested`,
-      adminId
-    );
+    // Add audit trail (conversation-state JSON message + status_change audit event row).
+    // Independent writes — run in parallel.
+    await Promise.all([
+      this.addAuditMessage(
+        appointmentId,
+        source,
+        `Status changed: ${previousStatus} → feedback_requested`,
+        adminId,
+      ),
+      this.recordStatusChangeEvent(
+        appointmentId,
+        source,
+        adminId,
+        previousStatus,
+        APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+      ),
+    ]);
 
     logger.info({ ...logContext, previousStatus }, 'Appointment transitioned to feedback_requested');
 
@@ -949,7 +1049,7 @@ class AppointmentLifecycleService {
    * - Sends cancellation emails to both client and therapist (if enabled)
    */
   async transitionToCancelled(params: TransitionToCancelledParams): Promise<TransitionResult> {
-    const { appointmentId, reason, cancelledBy, source, adminId, atomic } = params;
+    const { appointmentId, reason, cancelledBy, source, adminId, atomic, skipNotifications } = params;
     const logContext = { appointmentId, source, adminId, cancelledBy };
 
     // Use serializable transaction with row-level lock for atomicity
@@ -1159,22 +1259,26 @@ class AppointmentLifecycleService {
       userEmail: appointment.userEmail,
     });
 
-    // Send Slack + email notifications (delegated to notifications service)
-    appointmentNotificationsService.notifyCancelled({
-      appointmentId,
-      source,
-      adminId,
-      cancelledBy,
-      reason,
-      userName: appointment.userName,
-      userEmail: appointment.userEmail,
-      therapistName: appointment.therapistName,
-      therapistEmail: appointment.therapistEmail,
-      confirmedDateTime: appointment.confirmedDateTime,
-      confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
-      gmailThreadId: appointment.gmailThreadId,
-      therapistGmailThreadId: appointment.therapistGmailThreadId,
-    });
+    // Send Slack + email notifications (delegated to notifications service).
+    // Skipped when the caller wants to fire its own specialized notification
+    // (e.g. bounce handler) — data-consistency side effects above still run.
+    if (!skipNotifications) {
+      appointmentNotificationsService.notifyCancelled({
+        appointmentId,
+        source,
+        adminId,
+        cancelledBy,
+        reason,
+        userName: appointment.userName,
+        userEmail: appointment.userEmail,
+        therapistName: appointment.therapistName,
+        therapistEmail: appointment.therapistEmail,
+        confirmedDateTime: appointment.confirmedDateTime,
+        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+        gmailThreadId: appointment.gmailThreadId,
+        therapistGmailThreadId: appointment.therapistGmailThreadId,
+      });
+    }
 
     const transitionResult: TransitionResult = { success: true, previousStatus: result.previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
     this.notifyTransition(transitionResult, appointmentId, source);
@@ -1512,6 +1616,23 @@ class AppointmentLifecycleService {
       auditParts.push(`Reason: ${reason}`);
     }
     await this.addAuditMessage(appointmentId, 'admin', auditParts.join('. '), adminId);
+
+    // Emit a status_change row when status actually changes, so a query for
+    // "all status transitions for this appointment" picks up admin overrides
+    // alongside the normal lifecycle transitions. The dedicated
+    // `admin_force_update` checkpoint event below carries the bypass-specific
+    // metadata (Slack alert, bypassed-state-machine flag) — both are needed
+    // because they answer different questions.
+    if (statusChanging) {
+      await this.recordStatusChangeEvent(
+        appointmentId,
+        'admin',
+        adminId,
+        previousStatus,
+        effectiveNewStatus as AppointmentStatus,
+        reason,
+      );
+    }
 
     // SSE notification
     if (statusChanging) {

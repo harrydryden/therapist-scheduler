@@ -20,6 +20,7 @@ import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { runBackgroundTask } from '../utils/background-task';
+import { runTrackedSideEffect } from './side-effect-tracker.service';
 import type { TransitionSource } from './appointment-lifecycle.service';
 
 // ============================================
@@ -190,9 +191,13 @@ class AppointmentNotificationsService {
     // Get notification settings
     const settings = await this.getNotificationSettings();
 
-    // Send Slack notification (non-blocking, tracked)
+    // Send Slack notification (non-blocking, tracked persistently so transient
+    // Slack outages survive process restarts via side-effect-retry.service)
     if (settings.slack.confirmed) {
-      runBackgroundTask(
+      runTrackedSideEffect(
+        appointmentId,
+        'confirmed',
+        'slack_notify_confirmed',
         () => slackNotificationService.notifyAppointmentConfirmed(
           appointmentId,
           userName,
@@ -343,7 +348,10 @@ class AppointmentNotificationsService {
     // completions (e.g. admin-triggered), respect the admin setting.
     const settings = await this.getNotificationSettings();
     if (feedbackSubmissionId || settings.slack.completed) {
-      runBackgroundTask(
+      runTrackedSideEffect(
+        appointmentId,
+        'completed',
+        'slack_notify_completed',
         () => slackNotificationService.notifyAppointmentCompleted(
           appointmentId,
           userName,
@@ -388,9 +396,12 @@ class AppointmentNotificationsService {
     // Get notification settings
     const settings = await this.getNotificationSettings();
 
-    // Send Slack notification (non-blocking, tracked)
+    // Send Slack notification (non-blocking, tracked persistently)
     if (settings.slack.cancelled) {
-      runBackgroundTask(
+      runTrackedSideEffect(
+        appointmentId,
+        'cancelled',
+        'slack_notify_cancelled',
         () => slackNotificationService.notifyAppointmentCancelled(
           appointmentId,
           userName,

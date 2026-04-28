@@ -24,6 +24,7 @@ import { notionSyncManager } from './notion-sync-manager.service';
 import { notionService } from './notion.service';
 import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { runBackgroundTask } from '../utils/background-task';
+import { runTrackedSideEffect } from './side-effect-tracker.service';
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import type { TransitionSource, TransitionResult } from './appointment-lifecycle.service';
@@ -116,8 +117,11 @@ class TransitionSideEffectsService {
       }
     }
 
-    // Sync user to Notion (non-blocking, tracked)
-    runBackgroundTask(
+    // Sync user to Notion (non-blocking, persistently tracked)
+    runTrackedSideEffect(
+      appointmentId,
+      'confirmed',
+      'user_sync',
       () => notionSyncManager.syncSingleUser(userEmail),
       {
         name: 'user-sync-notion',
@@ -136,8 +140,12 @@ class TransitionSideEffectsService {
     const { appointmentId, source, adminId, userEmail } = params;
     const logContext = { appointmentId, source, adminId };
 
-    // Sync user to Notion - moves therapist from "Upcoming" to "Previous" (tracked)
-    runBackgroundTask(
+    // Sync user to Notion - moves therapist from "Upcoming" to "Previous"
+    // (persistently tracked so transient Notion failures survive restarts)
+    runTrackedSideEffect(
+      appointmentId,
+      'session_held',
+      'user_sync',
       () => notionSyncManager.syncSingleUser(userEmail),
       {
         name: 'user-sync-session-held',
@@ -228,8 +236,12 @@ class TransitionSideEffectsService {
         );
       }
 
-      // Step 3: Sync frozen status to Notion (independent of Steps 1-2)
-      runBackgroundTask(
+      // Step 3: Sync frozen status to Notion (independent of Steps 1-2,
+      // persistently tracked)
+      runTrackedSideEffect(
+        appointmentId,
+        'completed',
+        'therapist_freeze_sync',
         () => notionSyncManager.syncSingleTherapist(therapistNotionId),
         {
           name: 'therapist-freeze-sync-completion',
@@ -240,8 +252,11 @@ class TransitionSideEffectsService {
       );
     }
 
-    // Sync user to Notion (non-blocking, tracked)
-    runBackgroundTask(
+    // Sync user to Notion (non-blocking, persistently tracked)
+    runTrackedSideEffect(
+      appointmentId,
+      'completed',
+      'user_sync',
       () => notionSyncManager.syncSingleUser(userEmail),
       {
         name: 'user-sync-completion',
@@ -328,8 +343,12 @@ class TransitionSideEffectsService {
         );
       }
 
-      // Step 3: Sync frozen status to Notion (independent of Steps 1-2)
-      runBackgroundTask(
+      // Step 3: Sync frozen status to Notion (independent of Steps 1-2,
+      // persistently tracked)
+      runTrackedSideEffect(
+        appointmentId,
+        'cancelled',
+        'therapist_freeze_sync',
         () => notionSyncManager.syncSingleTherapist(therapistNotionId),
         {
           name: 'therapist-freeze-sync-cancellation',
@@ -340,11 +359,14 @@ class TransitionSideEffectsService {
       );
     }
 
-    // Sync user to Notion (non-blocking, tracked).
+    // Sync user to Notion (non-blocking, persistently tracked).
     // Previously missing from the cancellation path — every other transition
     // (confirmed, session_held, completed) synced the user.
     if (userEmail) {
-      runBackgroundTask(
+      runTrackedSideEffect(
+        appointmentId,
+        'cancelled',
+        'user_sync',
         () => notionSyncManager.syncSingleUser(userEmail),
         {
           name: 'user-sync-cancellation',

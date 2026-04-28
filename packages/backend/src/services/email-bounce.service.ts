@@ -12,8 +12,9 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
+import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { InvalidTransitionError } from '../errors';
 
 /**
  * Common bounce message patterns
@@ -211,42 +212,61 @@ export async function handleBounce(
 
     result.appointmentId = appointment.id;
 
-    // Update the appointment with bounce information
-    // Use updateMany with status precondition to prevent race condition where
-    // appointment gets confirmed between our read and this write
-    const updated = await prisma.appointmentRequest.updateMany({
-      where: {
-        id: appointment.id,
-        status: { notIn: ['cancelled', 'confirmed'] },
-      },
-      data: {
-        status: 'cancelled',
-        notes: `[BOUNCE] Email delivery failed: ${bounceInfo.reason || bounceInfo.bounceType}. ` +
-          `Original recipient: ${bounceInfo.originalRecipient || 'unknown'}. ` +
-          `Auto-cancelled at ${new Date().toISOString()}.`,
-        isStale: false, // Clear stale flag since we've handled it
-      },
-    });
+    // Cancel the appointment via the lifecycle service so all the standard
+    // side effects fire (therapist unfreeze, Notion sync, audit trail, SSE).
+    // We pass `skipNotifications=true` so the lifecycle's generic cancellation
+    // Slack/emails are suppressed — the bounce path fires its own more detailed
+    // bounce-specific Slack alert below, and emailing the user whose address
+    // just bounced is futile.
+    //
+    // The atomic guard prevents racing with a concurrent confirmation: if the
+    // appointment got confirmed between our read above and this write, the
+    // lifecycle service throws InvalidTransitionError (terminal CONFIRMED is
+    // valid for cancellation, but we explicitly want to short-circuit on
+    // confirmed/cancelled to preserve the legacy "skip if already confirmed"
+    // behaviour — admins should manually action a confirmed-then-bounced case).
+    const bounceReason =
+      `[BOUNCE] Email delivery failed: ${bounceInfo.reason || bounceInfo.bounceType}. ` +
+      `Original recipient: ${bounceInfo.originalRecipient || 'unknown'}.`;
 
-    if (updated.count === 0) {
-      logger.warn(
-        { traceId, appointmentId: appointment.id },
-        'Bounce detected but appointment already confirmed/cancelled - skipping cancellation'
-      );
-      result.error = 'Appointment status changed before bounce could be applied';
-      return result;
+    try {
+      const transitionResult = await appointmentLifecycleService.transitionToCancelled({
+        appointmentId: appointment.id,
+        reason: bounceReason,
+        cancelledBy: 'system',
+        source: 'system',
+        skipNotifications: true,
+        atomic: {
+          requireStatusNotIn: ['cancelled', 'confirmed'],
+        },
+      });
+
+      if (transitionResult.atomicSkipped || transitionResult.skipped) {
+        logger.warn(
+          { traceId, appointmentId: appointment.id, previousStatus: transitionResult.previousStatus },
+          'Bounce detected but appointment already confirmed/cancelled - skipping cancellation'
+        );
+        result.error = 'Appointment status changed before bounce could be applied';
+        return result;
+      }
+    } catch (transitionErr) {
+      if (transitionErr instanceof InvalidTransitionError) {
+        logger.warn(
+          { traceId, appointmentId: appointment.id, err: transitionErr },
+          'Bounce detected but appointment is in a state that cannot be cancelled - skipping'
+        );
+        result.error = 'Appointment cannot be cancelled in current state';
+        return result;
+      }
+      throw transitionErr;
     }
 
     logger.info(
       { traceId, appointmentId: appointment.id },
-      'Appointment marked as cancelled due to bounce'
+      'Appointment marked as cancelled due to bounce (via lifecycle service)'
     );
 
-    // Unfreeze the therapist
-    await therapistBookingStatusService.recalculateUniqueRequestCount(
-      appointment.therapistNotionId
-    );
-
+    // The lifecycle service's onCancelled side effect handles therapist unfreeze.
     result.therapistUnfrozen = true;
     result.handled = true;
 
