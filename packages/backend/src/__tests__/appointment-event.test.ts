@@ -30,7 +30,7 @@ describe('recordAppointmentEvent', () => {
     jest.clearAllMocks();
   });
 
-  it('always writes an audit event with the type as action', async () => {
+  it('writes an audit event whose eventType matches event.type', async () => {
     await recordAppointmentEvent({
       appointmentId: 'apt-1',
       type: 'chase_sent',
@@ -39,9 +39,12 @@ describe('recordAppointmentEvent', () => {
       payload: { target: 'therapist', inactiveHours: 72 },
     });
 
+    // The event type is now passed through directly as the audit row's
+    // eventType — previously every appointment event masqueraded as
+    // 'checkpoint_update' with payload.action carrying the real type.
     expect(auditEventService.log).toHaveBeenCalledWith(
       'apt-1',
-      'checkpoint_update',
+      'chase_sent',
       'system',
       expect.objectContaining({
         action: 'chase_sent',

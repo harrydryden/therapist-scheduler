@@ -57,6 +57,11 @@ jest.mock('../services/ai-conversation.service', () => ({
     applyCheckpointUpdate: jest.fn(),
   },
   AIConversationService: jest.fn(),
+  // inferRestoredStage was extracted to ai-conversation alongside the other
+  // checkpoint helpers (C8). Keep the real implementation in the mock — it's
+  // a pure function that the dismissal mutate callback delegates to, and the
+  // test asserts on the stage it returns for various checkpoint shapes.
+  inferRestoredStage: jest.requireActual('../services/ai-conversation.service').inferRestoredStage,
 }));
 
 // ============================================

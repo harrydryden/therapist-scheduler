@@ -18,18 +18,25 @@ import { logger } from '../utils/logger';
  * Event types for audit logging
  */
 export type AuditEventType =
-  | 'email_received'      // Incoming email from user or therapist
-  | 'email_sent'          // Outgoing email sent by agent
-  | 'tool_executed'       // Tool call completed (send_email, mark_complete, etc.)
-  | 'tool_failed'         // Tool execution failed
-  | 'claude_response'     // Claude API response received
-  | 'status_change'       // Appointment status changed
-  | 'human_control'       // Human control enabled/disabled
-  | 'checkpoint_update'   // Conversation stage changed
-  | 'facts_extracted'     // Conversation facts updated
-  | 'error'               // Error occurred during processing
-  | 'stale_flagged'       // Appointment flagged as stale
-  | 'follow_up_sent';     // Post-booking follow-up sent
+  | 'email_received'           // Incoming email from user or therapist
+  | 'email_sent'               // Outgoing email sent by agent
+  | 'tool_executed'            // Tool call completed (send_email, mark_complete, etc.)
+  | 'tool_failed'              // Tool execution failed
+  | 'claude_response'          // Claude API response received
+  | 'status_change'            // Appointment status changed
+  | 'human_control'            // Human control enabled/disabled
+  | 'checkpoint_update'        // Conversation stage changed
+  | 'facts_extracted'          // Conversation facts updated
+  | 'error'                    // Error occurred during processing
+  | 'stale_flagged'            // Appointment flagged as stale
+  | 'follow_up_sent'           // Post-booking follow-up sent
+  // Lifecycle events (non-status-change). These are emitted by
+  // recordAppointmentEvent and queried directly by event type.
+  | 'chase_sent'
+  | 'closure_recommended'
+  | 'closure_dismissed'
+  | 'closure_dismissed_auto'
+  | 'admin_force_update';
 
 /**
  * Actor types - who or what caused the event

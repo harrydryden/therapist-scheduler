@@ -19,7 +19,6 @@ import { prisma } from '../utils/database';
 import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
 import { notionSyncManager } from './notion-sync-manager.service';
-import { getSettingValue } from './settings.service';
 
 // Lock settings
 const LOCK_KEY = 'side-effect-retry:processing-lock';
@@ -207,6 +206,7 @@ class SideEffectRetryService {
     effectType: SideEffectType;
     idempotencyKey: string;
     attempts: number;
+    payload: unknown;
   }): Promise<void> {
     const appointment = await prisma.appointmentRequest.findUnique({
       where: { id: effect.appointmentId },
@@ -227,28 +227,35 @@ class SideEffectRetryService {
       throw new Error(`Appointment ${effect.appointmentId} not found - cannot retry side effect`);
     }
 
-    const agentFirstName = (await getSettingValue<string>('agent.fromName')).split(' ')[0];
-
     switch (effect.effectType) {
       case 'email_client_confirmation':
+      case 'email_therapist_confirmation':
+      case 'email_client_cancellation':
+      case 'email_therapist_cancellation': {
+        // Replay the email using the rendered payload captured at registration
+        // time. We never re-render the template on retry — settings could
+        // have changed between the original send and the retry, and a stale
+        // English-fallback was the original reason this retry path was unused
+        // for emails. If the payload is missing (effect was registered before
+        // payload support), abandon rather than send something wrong.
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string; threadId?: string | null }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload — registration predates payload support`,
+          );
+        }
         await emailQueueService.enqueue({
-          to: appointment.userEmail,
-          subject: `Your therapy session with ${appointment.therapistName} is confirmed`,
-          body: `Hi ${(appointment.userName || 'there').split(' ')[0]},\n\nYour session with ${appointment.therapistName} has been confirmed for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentFirstName}`,
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
           appointmentId: appointment.id,
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
         });
         break;
-
-      case 'email_therapist_confirmation':
-        if (appointment.therapistEmail) {
-          await emailQueueService.enqueue({
-            to: appointment.therapistEmail,
-            subject: `Session confirmed: ${appointment.confirmedDateTime}`,
-            body: `Hi ${(appointment.therapistName || 'there').split(' ')[0]},\n\nA session has been confirmed with ${(appointment.userName || 'the client').split(' ')[0]} (${appointment.userEmail}) for ${appointment.confirmedDateTime}.\n\nBest regards,\n${agentFirstName}`,
-            appointmentId: appointment.id,
-          });
-        }
-        break;
+      }
 
       case 'slack_notify_confirmed':
         await slackNotificationService.notifyAppointmentConfirmed(
