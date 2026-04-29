@@ -33,8 +33,7 @@ import { appointmentNotificationsService } from './appointment-notifications.ser
 import { transitionSideEffectsService } from './transition-side-effects.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { auditEventService, type AuditActor } from './audit-event.service';
-import { aiConversationService } from './ai-conversation.service';
-import { stageFromAction, ConversationStage, ConversationCheckpoint } from '../services/conversation-checkpoint.service';
+import { aiConversationService, inferRestoredStage } from './ai-conversation.service';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)
@@ -177,6 +176,171 @@ export interface TransitionResult {
   warning?: string;
 }
 
+// ============================================
+// Shared update fragments
+// ============================================
+
+/**
+ * Standard "clear any in-progress reschedule" partial. Spread into update
+ * data on every transition that supersedes an active reschedule:
+ * confirmed (with new datetime), completed, cancelled, and adminForceUpdate
+ * when moving to a terminal state or setting a new datetime.
+ */
+const CLEAR_RESCHEDULING_STATE = {
+  reschedulingInProgress: false,
+  reschedulingInitiatedBy: null,
+} as const;
+
+/**
+ * Reset all four post-booking follow-up sentinels. Used by transitionToConfirmed
+ * when rescheduling (the new session needs its own meeting-link check, reminder,
+ * feedback form, feedback reminder).
+ */
+const RESET_ALL_FOLLOWUP_SENTINELS = {
+  meetingLinkCheckSentAt: null,
+  reminderSentAt: null,
+  feedbackFormSentAt: null,
+  feedbackReminderSentAt: null,
+} as const;
+
+/**
+ * Compute the follow-up sentinel resets needed when an admin force-update
+ * moves an appointment BACKWARDS in the lifecycle. Without these, the
+ * automated post-booking services would skip re-sending emails because the
+ * sentinel is already set from the first pass through.
+ *
+ * Called only by adminForceUpdate; the normal forward-progress transitions
+ * never need to reset post-stage sentinels.
+ */
+function computeBackwardSentinelResets(
+  fromStatus: AppointmentStatus,
+  toStatus: AppointmentStatus,
+): { updates: Prisma.AppointmentRequestUpdateInput; reset: boolean } {
+  const fromIdx = LIFECYCLE_STATUS_ORDER.indexOf(fromStatus);
+  const toIdx = LIFECYCLE_STATUS_ORDER.indexOf(toStatus);
+  const movingBackwards = toIdx >= 0 && fromIdx >= 0 && toIdx < fromIdx;
+  if (!movingBackwards) return { updates: {}, reset: false };
+
+  const updates: Prisma.AppointmentRequestUpdateInput = {};
+  let reset = false;
+
+  // Moving back to confirmed-or-earlier from past-confirmed → reset
+  // post-confirmation follow-ups (meeting-link check, session reminder).
+  if (toIdx <= CONFIRMED_IDX && fromIdx > CONFIRMED_IDX) {
+    updates.meetingLinkCheckSentAt = null;
+    updates.reminderSentAt = null;
+    reset = true;
+  }
+
+  // Moving back to before feedback_requested from at-or-past it → reset
+  // feedback sentinels.
+  if (toIdx < FEEDBACK_IDX && fromIdx >= FEEDBACK_IDX) {
+    updates.feedbackFormSentAt = null;
+    updates.feedbackReminderSentAt = null;
+    reset = true;
+  }
+
+  return { updates, reset };
+}
+
+// ============================================
+// updateStatus dispatch table
+// ============================================
+
+interface UpdateStatusOptions {
+  source: TransitionSource;
+  adminId?: string;
+  reason?: string;
+  confirmedDateTime?: string;
+  confirmedDateTimeParsed?: Date | null;
+  sendEmails?: boolean;
+}
+
+type UpdateStatusDispatcher = (
+  service: AppointmentLifecycleService,
+  appointmentId: string,
+  options: UpdateStatusOptions,
+) => Promise<TransitionResult>;
+
+/**
+ * Routes a generic admin/system "set the status to X" request to the matching
+ * specialised transition method, with the param translation each transition
+ * needs (e.g. cancellation needs `cancelledBy` derived from `source`,
+ * confirmation needs the datetime, completion uses `reason` as a note).
+ *
+ * Defined as a const map at module scope so adding a new status forces the
+ * map to be updated — TypeScript flags missing keys when AppointmentStatus
+ * is extended. A switch had two pitfalls this fixes:
+ *   - the cancelled branch silently defaulted `cancelledBy='system'` when
+ *     `source` wasn't 'admin', which conflated agent + system cancellations;
+ *   - the missing 'pending' case fell through to the default, which threw
+ *     "Unknown status" instead of being explicitly rejected as a target.
+ */
+const UPDATE_STATUS_DISPATCH: Partial<Record<AppointmentStatus, UpdateStatusDispatcher>> = {
+  [APPOINTMENT_STATUS.CONTACTED]: (service, appointmentId, opts) =>
+    service.transitionToContacted({
+      appointmentId,
+      source: opts.source,
+      adminId: opts.adminId,
+      hasAvailability: false,
+    }),
+
+  [APPOINTMENT_STATUS.NEGOTIATING]: (service, appointmentId, opts) =>
+    service.transitionToNegotiating({
+      appointmentId,
+      source: opts.source,
+      adminId: opts.adminId,
+    }),
+
+  [APPOINTMENT_STATUS.CONFIRMED]: (service, appointmentId, opts) => {
+    if (!opts.confirmedDateTime) {
+      throw new Error('confirmedDateTime is required for confirmed status');
+    }
+    return service.transitionToConfirmed({
+      appointmentId,
+      confirmedDateTime: opts.confirmedDateTime,
+      confirmedDateTimeParsed: opts.confirmedDateTimeParsed,
+      source: opts.source,
+      adminId: opts.adminId,
+      sendEmails: opts.sendEmails,
+    });
+  },
+
+  [APPOINTMENT_STATUS.SESSION_HELD]: (service, appointmentId, opts) =>
+    service.transitionToSessionHeld({
+      appointmentId,
+      source: opts.source,
+      adminId: opts.adminId,
+    }),
+
+  [APPOINTMENT_STATUS.FEEDBACK_REQUESTED]: (service, appointmentId, opts) =>
+    service.transitionToFeedbackRequested({
+      appointmentId,
+      source: opts.source,
+      adminId: opts.adminId,
+    }),
+
+  [APPOINTMENT_STATUS.COMPLETED]: (service, appointmentId, opts) =>
+    service.transitionToCompleted({
+      appointmentId,
+      source: opts.source,
+      adminId: opts.adminId,
+      note: opts.reason,
+    }),
+
+  [APPOINTMENT_STATUS.CANCELLED]: (service, appointmentId, opts) =>
+    service.transitionToCancelled({
+      appointmentId,
+      reason: opts.reason || 'No reason provided',
+      // updateStatus() is currently only called from admin routes, so source
+      // is always 'admin' in practice. Preserve the original mapping for any
+      // hypothetical 'system' caller; agent-path cancellations call
+      // transitionToCancelled directly with an explicit cancelledBy.
+      cancelledBy: opts.source === 'admin' ? 'admin' : 'system',
+      source: opts.source,
+      adminId: opts.adminId,
+    }),
+};
 
 // ============================================
 // Service Implementation
@@ -541,9 +705,8 @@ class AppointmentLifecycleService {
       notes: notes || undefined,
       lastActivityAt: new Date(),
       updatedAt: new Date(),
-      // Always clear rescheduling flags when confirming
-      reschedulingInProgress: false,
-      reschedulingInitiatedBy: null,
+      // Always clear rescheduling flags when confirming.
+      ...CLEAR_RESCHEDULING_STATE,
       // Clear stale flag — stale only applies to pre-confirmation statuses
       isStale: false,
     };
@@ -554,10 +717,7 @@ class AppointmentLifecycleService {
         updateData.previousConfirmedDateTime = reschedule.previousConfirmedDateTime;
       }
       if (reschedule.resetFollowUpFlags) {
-        updateData.meetingLinkCheckSentAt = null;
-        updateData.reminderSentAt = null;
-        updateData.feedbackFormSentAt = null;
-        updateData.feedbackReminderSentAt = null;
+        Object.assign(updateData, RESET_ALL_FOLLOWUP_SENTINELS);
       }
     }
 
@@ -864,8 +1024,7 @@ class AppointmentLifecycleService {
           status: APPOINTMENT_STATUS.COMPLETED,
           notes: updatedNotes,
           updatedAt: new Date(),
-          reschedulingInProgress: false,
-          reschedulingInitiatedBy: null,
+          ...CLEAR_RESCHEDULING_STATE,
         },
         select: { id: true },
       });
@@ -985,6 +1144,29 @@ class AppointmentLifecycleService {
     const { appointmentId, reason, cancelledBy, source, adminId, atomic, skipNotifications } = params;
     const logContext = { appointmentId, source, adminId, cancelledBy };
 
+    // Cross-validate the cancelledBy ⇄ source pair so callers can't pass an
+    // incoherent combination (e.g. source='agent' with cancelledBy='admin' —
+    // the agent isn't an admin). Notifications and audit narrative both use
+    // cancelledBy, so a mismatch here propagates a misleading record. Allowed
+    // pairings reflect the actual call sites:
+    //   - 'admin'  source: cancelledBy must be 'admin'
+    //   - 'agent'  source: agent is acting on behalf of a party — cancelledBy
+    //              must be 'client' or 'therapist'
+    //   - 'system' source: cancelledBy is 'system' (cron / bounce / auto-flow)
+    //              or 'client' (e.g. forwarded auto-reply that's effectively
+    //              a client cancellation but wasn't admin-initiated)
+    //   - 'feedback_sync' source: cancelledBy must be 'system'
+    if (
+      (source === 'admin' && cancelledBy !== 'admin') ||
+      (source === 'agent' && cancelledBy !== 'client' && cancelledBy !== 'therapist') ||
+      (source === 'feedback_sync' && cancelledBy !== 'system')
+    ) {
+      throw new Error(
+        `Invalid cancelledBy '${cancelledBy}' for source '${source}'. ` +
+          `See transitionToCancelled validation table for allowed pairings.`,
+      );
+    }
+
     // Use serializable transaction with row-level lock for atomicity.
     // FOR UPDATE (no NOWAIT) — see transitionToCompleted's comment.
     const result = await prisma.$transaction(async (tx) => {
@@ -1044,38 +1226,18 @@ class AppointmentLifecycleService {
         };
       }
 
-      // Check atomic conditions if provided
+      // Check atomic conditions if provided. The post-transaction code returns
+      // early on atomicSkipped without touching the appointment fields, so we
+      // don't carry an `appointment` payload here — keeping it would force
+      // every consumer of the success branch's appointment fields to defensively
+      // narrow on a discriminator.
       if (atomic) {
         if (atomic.requireStatusNotIn && atomic.requireStatusNotIn.includes(appointment.status as AppointmentStatus)) {
-          return {
-            success: false,
-            previousStatus,
-            newStatus: previousStatus,
-            atomicSkipped: true,
-            wasConfirmed: false,
-            appointment: {
-              id: appointment.id,
-              userName: appointment.user_name,
-              therapistName: appointment.therapist_name,
-              therapistNotionId: appointment.therapist_notion_id,
-            }
-          };
+          return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true } as const;
         }
 
         if (atomic.requireHumanControlDisabled && appointment.human_control_enabled) {
-          return {
-            success: false,
-            previousStatus,
-            newStatus: previousStatus,
-            atomicSkipped: true,
-            wasConfirmed: false,
-            appointment: {
-              id: appointment.id,
-              userName: appointment.user_name,
-              therapistName: appointment.therapist_name,
-              therapistNotionId: appointment.therapist_notion_id,
-            }
-          };
+          return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true } as const;
         }
       }
 
@@ -1102,8 +1264,7 @@ class AppointmentLifecycleService {
           notes: updatedNotes,
           updatedAt: new Date(),
           // Clear rescheduling state — cancellation supersedes any in-progress reschedule
-          reschedulingInProgress: false,
-          reschedulingInitiatedBy: null,
+          ...CLEAR_RESCHEDULING_STATE,
         },
         select: { id: true },
       });
@@ -1241,82 +1402,11 @@ class AppointmentLifecycleService {
       sendEmails?: boolean;
     }
   ): Promise<TransitionResult> {
-    const { source, adminId, reason, confirmedDateTime, confirmedDateTimeParsed, sendEmails } = options;
-
-    let result: TransitionResult;
-
-    switch (newStatus) {
-      case APPOINTMENT_STATUS.CONTACTED:
-        result = await this.transitionToContacted({
-          appointmentId,
-          source,
-          adminId,
-          hasAvailability: false,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.NEGOTIATING:
-        result = await this.transitionToNegotiating({
-          appointmentId,
-          source,
-          adminId,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.CONFIRMED:
-        if (!confirmedDateTime) {
-          throw new Error('confirmedDateTime is required for confirmed status');
-        }
-        result = await this.transitionToConfirmed({
-          appointmentId,
-          confirmedDateTime,
-          confirmedDateTimeParsed,
-          source,
-          adminId,
-          sendEmails,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.SESSION_HELD:
-        result = await this.transitionToSessionHeld({
-          appointmentId,
-          source,
-          adminId,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.FEEDBACK_REQUESTED:
-        result = await this.transitionToFeedbackRequested({
-          appointmentId,
-          source,
-          adminId,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.COMPLETED:
-        result = await this.transitionToCompleted({
-          appointmentId,
-          source,
-          adminId,
-          note: reason,
-        });
-        break;
-
-      case APPOINTMENT_STATUS.CANCELLED:
-        result = await this.transitionToCancelled({
-          appointmentId,
-          reason: reason || 'No reason provided',
-          cancelledBy: source === 'admin' ? 'admin' : 'system',
-          source,
-          adminId,
-        });
-        break;
-
-      default:
-        throw new Error(`Unknown status: ${newStatus}`);
+    const dispatch = UPDATE_STATUS_DISPATCH[newStatus];
+    if (!dispatch) {
+      throw new Error(`Unknown status: ${newStatus}`);
     }
-
-    return result;
+    return dispatch(this, appointmentId, options);
   }
 
   /**
@@ -1364,6 +1454,13 @@ class AppointmentLifecycleService {
     if (!reason || reason.trim().length === 0) {
       throw new Error('adminForceUpdate requires a non-empty reason');
     }
+    // adminId carries through to the audit message ("[Admin: <id>]"), the
+    // status_change event payload, and the Slack alert "additionalFields".
+    // An empty string would render as "Admin: " — validate to keep the bypass
+    // record traceable.
+    if (!adminId || adminId.trim().length === 0) {
+      throw new Error('adminForceUpdate requires a non-empty adminId');
+    }
 
     // Loud warning so any bypass shows up in logs at WARN level (not just info).
     logger.warn(
@@ -1371,7 +1468,7 @@ class AppointmentLifecycleService {
       'STATE MACHINE BYPASS: adminForceUpdate called'
     );
 
-    // Use transaction with FOR UPDATE NOWAIT row lock to prevent TOCTOU races.
+    // Use transaction with FOR UPDATE row lock to prevent TOCTOU races.
     // Without this, another process could change the status between our read and write,
     // causing side effects to fire based on a stale previousStatus.
     type AdminForceUpdateRow = {
@@ -1449,35 +1546,20 @@ class AppointmentLifecycleService {
           updateData.confirmedAt = new Date();
         }
 
-        // Reset follow-up sentinel fields when moving backwards past the stage they guard.
-        // Without this, automated services (post-booking follow-up) would skip re-sending
-        // emails because the sentinel is already set from the first pass through the lifecycle.
-        const prevIdx = LIFECYCLE_STATUS_ORDER.indexOf(previousStatus);
-        const newIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
-        const movingBackwards = newIdx >= 0 && prevIdx >= 0 && newIdx < prevIdx;
-
-        if (movingBackwards) {
-          // Moving back to confirmed or earlier, from past confirmed → reset post-confirmation emails
-          if (newIdx <= CONFIRMED_IDX && prevIdx > CONFIRMED_IDX) {
-            updateData.meetingLinkCheckSentAt = null;
-            updateData.reminderSentAt = null;
-            sentinelFieldsReset = true;
-          }
-
-          // Moving back before feedback_requested, from at-or-past it → reset feedback emails
-          if (newIdx < FEEDBACK_IDX && prevIdx >= FEEDBACK_IDX) {
-            updateData.feedbackFormSentAt = null;
-            updateData.feedbackReminderSentAt = null;
-            sentinelFieldsReset = true;
-          }
+        // Reset follow-up sentinel fields when moving backwards past the stage
+        // they guard. Without this, automated services (post-booking follow-up)
+        // would skip re-sending emails because the sentinel is already set
+        // from the first pass through the lifecycle.
+        const backwardResets = computeBackwardSentinelResets(previousStatus, newStatus);
+        Object.assign(updateData, backwardResets.updates);
+        if (backwardResets.reset) {
+          sentinelFieldsReset = true;
         }
 
         // Terminal statuses (completed/cancelled) supersede any in-progress reschedule.
-        // Clear rescheduling state so the record is clean. Note: cancelled is not in
-        // LIFECYCLE_STATUS_ORDER so the movingBackwards logic above doesn't cover it.
+        // Clear rescheduling state so the record is clean.
         if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
-          updateData.reschedulingInProgress = false;
-          updateData.reschedulingInitiatedBy = null;
+          Object.assign(updateData, CLEAR_RESCHEDULING_STATE);
         }
 
         // Clear stale flag on any transition to confirmed or beyond —
@@ -1505,8 +1587,7 @@ class AppointmentLifecycleService {
 
         // When setting a new date, clear the rescheduling flag
         if (confirmedDateTime) {
-          updateData.reschedulingInProgress = false;
-          updateData.reschedulingInitiatedBy = null;
+          Object.assign(updateData, CLEAR_RESCHEDULING_STATE);
         }
       }
 
@@ -1753,55 +1834,6 @@ class AppointmentLifecycleService {
     // Returning previousStage so the caller has it for the audit payload.
     return { dismissed: true, previousStage, restoredStage: result.stage };
   }
-}
-
-/**
- * Choose the stage to fall back to when dismissing a closure recommendation
- * whose JSON checkpoint is wedged at `closure_recommended`.
- *
- * Two paths can wedge the JSON at this stage and both lose direct access to
- * the actual prior stage:
- *
- *   1. Chase-recommended (chase-email): prior action was 'sent_chase_followup'
- *      which gets overwritten by 'closure_recommended_to_admin' →
- *      lastSuccessfulAction maps to 'closure_recommended' (uninformative).
- *      The chase path DOES set `chaseSentTo`, so that's the strongest signal.
- *
- *   2. Agent-recommended (recommend_cancel_match): the agent overwrites
- *      lastSuccessfulAction with 'recommended_cancel_match' (also maps to
- *      'closure_recommended', uninformative) and never sets `chaseSentTo`.
- *      Without consulting other state we'd always fall back to
- *      'awaiting_therapist_availability', which is wrong whenever the agent
- *      was actually waiting on the user.
- *
- * Inference order:
- *   a. `lastSuccessfulAction` — works when the prior action wasn't itself a
- *      closure-recommendation action.
- *   b. `checkpoint.context.lastEmailSentTo` — preserved across checkpoint
- *      updates (updateCheckpoint spreads context), so it reflects whoever the
- *      agent was last waiting on regardless of which closure path fired.
- *   c. `chaseSentTo` — only meaningful for the chase-recommended path.
- *   d. Final default — 'awaiting_therapist_availability'.
- */
-function inferRestoredStage(
-  checkpoint: ConversationCheckpoint | null | undefined,
-  chaseSentTo: string | null,
-): ConversationStage {
-  if (checkpoint?.lastSuccessfulAction) {
-    const inferred = stageFromAction(checkpoint.lastSuccessfulAction);
-    if (inferred !== 'closure_recommended' && inferred !== 'chased') {
-      return inferred;
-    }
-  }
-
-  const lastEmailTo = checkpoint?.context?.lastEmailSentTo;
-  if (lastEmailTo === 'user') return 'awaiting_user_slot_selection';
-  if (lastEmailTo === 'therapist') return 'awaiting_therapist_availability';
-
-  if (chaseSentTo === 'user') return 'awaiting_user_slot_selection';
-  if (chaseSentTo === 'therapist') return 'awaiting_therapist_availability';
-
-  return 'awaiting_therapist_availability';
 }
 
 export const appointmentLifecycleService = new AppointmentLifecycleService();

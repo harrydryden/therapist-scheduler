@@ -48,8 +48,9 @@ export interface AppointmentEvent {
  * optionally fires a Slack alert (fire-and-forget — the caller never blocks
  * on Slack delivery).
  *
- * The audit entry uses `checkpoint_update` as the event type with `action`
- * set to the AppointmentEventType.
+ * The audit row's `eventType` matches `event.type` directly so a query like
+ * "show me all closure recommendations for this appointment" hits the right
+ * rows without unwrapping a generic `checkpoint_update` payload.
  */
 export async function recordAppointmentEvent(event: AppointmentEvent): Promise<void> {
   // Audit log is the durable record. auditEventService.log catches and logs
@@ -62,7 +63,7 @@ export async function recordAppointmentEvent(event: AppointmentEvent): Promise<v
   };
   await auditEventService.log(
     event.appointmentId,
-    'checkpoint_update',
+    event.type,
     event.actor,
     payload,
   );

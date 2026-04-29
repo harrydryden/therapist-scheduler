@@ -27,9 +27,11 @@ import { ConcurrentModificationError } from '../errors';
 import type { ConversationState } from '../types';
 import type { Prisma } from '@prisma/client';
 import {
+  stageFromAction,
   updateCheckpoint,
   type ConversationAction,
   type ConversationCheckpoint,
+  type ConversationStage,
 } from '../services/conversation-checkpoint.service';
 
 import type { ConversationMessage } from './scheduling-context.service';
@@ -766,3 +768,55 @@ Example unsubscribe response:
 // lifecycle transitions, etc). The traceId is only used for logging inside
 // the instance, so a default is fine here.
 export const aiConversationService = new AIConversationService('shared');
+
+/**
+ * Choose the stage to fall back to when dismissing a closure recommendation
+ * whose JSON checkpoint is wedged at `closure_recommended`.
+ *
+ * Two paths can wedge the JSON at this stage and both lose direct access to
+ * the actual prior stage:
+ *
+ *   1. Chase-recommended (chase-email): prior action was 'sent_chase_followup'
+ *      which gets overwritten by 'closure_recommended_to_admin' →
+ *      lastSuccessfulAction maps to 'closure_recommended' (uninformative).
+ *      The chase path DOES set `chaseSentTo`, so that's the strongest signal.
+ *
+ *   2. Agent-recommended (recommend_cancel_match): the agent overwrites
+ *      lastSuccessfulAction with 'recommended_cancel_match' (also maps to
+ *      'closure_recommended', uninformative) and never sets `chaseSentTo`.
+ *      Without consulting other state we'd always fall back to
+ *      'awaiting_therapist_availability', which is wrong whenever the agent
+ *      was actually waiting on the user.
+ *
+ * Inference order:
+ *   a. `lastSuccessfulAction` — works when the prior action wasn't itself a
+ *      closure-recommendation action.
+ *   b. `checkpoint.context.lastEmailSentTo` — preserved across checkpoint
+ *      updates (updateCheckpoint spreads context), so it reflects whoever the
+ *      agent was last waiting on regardless of which closure path fired.
+ *   c. `chaseSentTo` — only meaningful for the chase-recommended path.
+ *   d. Final default — 'awaiting_therapist_availability'.
+ *
+ * Lives here rather than in the lifecycle service because it's purely
+ * about checkpoint state and consumes types from conversation-checkpoint.
+ */
+export function inferRestoredStage(
+  checkpoint: ConversationCheckpoint | null | undefined,
+  chaseSentTo: string | null,
+): ConversationStage {
+  if (checkpoint?.lastSuccessfulAction) {
+    const inferred = stageFromAction(checkpoint.lastSuccessfulAction);
+    if (inferred !== 'closure_recommended' && inferred !== 'chased') {
+      return inferred;
+    }
+  }
+
+  const lastEmailTo = checkpoint?.context?.lastEmailSentTo;
+  if (lastEmailTo === 'user') return 'awaiting_user_slot_selection';
+  if (lastEmailTo === 'therapist') return 'awaiting_therapist_availability';
+
+  if (chaseSentTo === 'user') return 'awaiting_user_slot_selection';
+  if (chaseSentTo === 'therapist') return 'awaiting_therapist_availability';
+
+  return 'awaiting_therapist_availability';
+}
