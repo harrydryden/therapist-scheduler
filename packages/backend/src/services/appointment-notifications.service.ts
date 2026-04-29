@@ -20,7 +20,7 @@ import { loadEmailTemplate } from '../utils/email-templates';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { runBackgroundTask } from '../utils/background-task';
-import { runTrackedSideEffect } from './side-effect-tracker.service';
+import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-tracker.service';
 import type { TransitionSource } from './appointment-lifecycle.service';
 
 // ============================================
@@ -218,90 +218,87 @@ class AppointmentNotificationsService {
       const therapistFirstName = (therapistName || 'there').split(' ')[0];
       const clientFirstName = (userName || 'the client').split(' ')[0];
 
-      // Send client confirmation email
+      // Send client confirmation email — replayable: payload rendered once
+      // at registration time so the periodic retry runner replays the exact
+      // localised subject/body if the original send fails.
       if (settings.email.clientConfirmation) {
-        runBackgroundTask(
-          async () => {
-            // Format the date in the client's local timezone (their country's
-            // default zone) — falls back to the platform timezone if unknown.
-            const recipientTz = await resolveRecipientTimezone(userEmail);
-            const formattedDateTime = await formatEmailDateFromSettings(
-              confirmedDateTimeParsed,
-              confirmedDateTime,
-              recipientTz ?? undefined,
-            );
-
-            const { subject, body } = await loadEmailTemplate(
-              'clientConfirmation',
-              {
-                therapistName: therapistName || 'your therapist',
-                confirmedDateTime: formattedDateTime,
-              },
-              {
-                userName: userName || 'there',
-                therapistName: therapistName || 'your therapist',
-                confirmedDateTime: formattedDateTime,
-              },
-            );
-
-            await emailProcessingService.sendEmail({
-              to: userEmail,
-              subject,
-              body,
-            });
-            logger.info(
-              { ...logContext, userEmail },
-              'Sent confirmation email to client'
-            );
+        runReplayableTrackedSideEffect(
+          appointmentId,
+          'confirmed',
+          'email_client_confirmation',
+          {
+            renderPayload: async () => {
+              const recipientTz = await resolveRecipientTimezone(userEmail);
+              const formattedDateTime = await formatEmailDateFromSettings(
+                confirmedDateTimeParsed,
+                confirmedDateTime,
+                recipientTz ?? undefined,
+              );
+              const { subject, body } = await loadEmailTemplate(
+                'clientConfirmation',
+                {
+                  therapistName: therapistName || 'your therapist',
+                  confirmedDateTime: formattedDateTime,
+                },
+                {
+                  userName: userName || 'there',
+                  therapistName: therapistName || 'your therapist',
+                  confirmedDateTime: formattedDateTime,
+                },
+              );
+              return { to: userEmail, subject, body };
+            },
+            execute: async (payload) => {
+              await emailProcessingService.sendEmail(payload);
+              logger.info({ ...logContext, userEmail }, 'Sent confirmation email to client');
+            },
           },
           {
             name: 'email-client-confirmation',
             context: { ...logContext, userEmail },
             retry: true,
             maxRetries: 2,
-          }
+          },
         );
       }
 
-      // Send therapist confirmation email
+      // Send therapist confirmation email — replayable.
       if (settings.email.therapistConfirmation && therapistEmail) {
-        runBackgroundTask(
-          async () => {
-            // Format the date in the therapist's local timezone.
-            const recipientTz = await resolveRecipientTimezone(therapistEmail);
-            const formattedDateTime = await formatEmailDateFromSettings(
-              confirmedDateTimeParsed,
-              confirmedDateTime,
-              recipientTz ?? undefined,
-            );
-
-            const { subject, body } = await loadEmailTemplate(
-              'therapistConfirmation',
-              { confirmedDateTime: formattedDateTime },
-              {
-                therapistFirstName,
-                clientFirstName,
-                userEmail,
-                confirmedDateTime: formattedDateTime,
-              },
-            );
-
-            await emailProcessingService.sendEmail({
-              to: therapistEmail,
-              subject,
-              body,
-            });
-            logger.info(
-              { ...logContext, therapistEmail },
-              'Sent confirmation email to therapist'
-            );
+        runReplayableTrackedSideEffect(
+          appointmentId,
+          'confirmed',
+          'email_therapist_confirmation',
+          {
+            renderPayload: async () => {
+              const recipientTz = await resolveRecipientTimezone(therapistEmail);
+              const formattedDateTime = await formatEmailDateFromSettings(
+                confirmedDateTimeParsed,
+                confirmedDateTime,
+                recipientTz ?? undefined,
+              );
+              const { subject, body } = await loadEmailTemplate(
+                'therapistConfirmation',
+                { confirmedDateTime: formattedDateTime },
+                {
+                  therapistFirstName,
+                  clientFirstName,
+                  userEmail,
+                  confirmedDateTime: formattedDateTime,
+                },
+              );
+              return { to: therapistEmail, subject, body };
+            },
+            execute: async (payload) => {
+              await emailProcessingService.sendEmail(payload);
+              logger.info({ ...logContext, therapistEmail }, 'Sent confirmation email to therapist');
+            },
           },
           {
             name: 'email-therapist-confirmation',
             context: { ...logContext, therapistEmail },
             retry: true,
             maxRetries: 2,
-          }
+          },
         );
       }
     }
@@ -405,46 +402,48 @@ class AppointmentNotificationsService {
     const cancellationReasonForClient = cancelledBy === 'therapist' ? `\nReason: ${reason}` : '';
     const cancellationReasonForTherapist = cancelledBy === 'client' ? `\nReason: ${reason}` : '';
 
-    // Send client cancellation email
+    // Send client cancellation email — replayable.
     if (settings.email.clientCancellation && userEmail) {
-      runBackgroundTask(
-        async () => {
-          // Format the date in the client's local timezone.
-          const recipientTz = await resolveRecipientTimezone(userEmail);
-          const formattedDateTime = await formatEmailDateFromSettings(
-            confirmedDateTimeParsed,
-            confirmedDateTime,
-            recipientTz ?? undefined,
-          );
-
-          const { subject, body } = await loadEmailTemplate(
-            'clientCancellation',
-            { therapistName: therapistFirstName },
-            {
-              userName: userName || 'there',
-              therapistName: therapistFirstName,
-              confirmedDateTime: formattedDateTime,
-              cancellationReason: cancellationReasonForClient,
-            },
-          );
-
-          await emailProcessingService.sendEmail({
-            to: userEmail,
-            subject,
-            body,
-            threadId: gmailThreadId || undefined,
-          });
-          logger.info(
-            { ...logContext, userEmail },
-            'Sent cancellation email to client'
-          );
+      runReplayableTrackedSideEffect(
+        appointmentId,
+        'cancelled',
+        'email_client_cancellation',
+        {
+          renderPayload: async () => {
+            const recipientTz = await resolveRecipientTimezone(userEmail);
+            const formattedDateTime = await formatEmailDateFromSettings(
+              confirmedDateTimeParsed,
+              confirmedDateTime,
+              recipientTz ?? undefined,
+            );
+            const { subject, body } = await loadEmailTemplate(
+              'clientCancellation',
+              { therapistName: therapistFirstName },
+              {
+                userName: userName || 'there',
+                therapistName: therapistFirstName,
+                confirmedDateTime: formattedDateTime,
+                cancellationReason: cancellationReasonForClient,
+              },
+            );
+            return { to: userEmail, subject, body, threadId: gmailThreadId || null };
+          },
+          execute: async (payload) => {
+            await emailProcessingService.sendEmail({
+              to: payload.to,
+              subject: payload.subject,
+              body: payload.body,
+              threadId: payload.threadId || undefined,
+            });
+            logger.info({ ...logContext, userEmail }, 'Sent cancellation email to client');
+          },
         },
         {
           name: 'email-client-cancellation',
           context: { ...logContext, userEmail },
           retry: true,
           maxRetries: 2,
-        }
+        },
       );
     }
 
@@ -452,44 +451,46 @@ class AppointmentNotificationsService {
     // (i.e. an email thread exists with them, meaning the user's name was shared).
     // If we never emailed the therapist, there is nothing to notify them about.
     if (settings.email.therapistCancellation && therapistEmail && therapistGmailThreadId) {
-      runBackgroundTask(
-        async () => {
-          // Format the date in the therapist's local timezone.
-          const recipientTz = await resolveRecipientTimezone(therapistEmail);
-          const formattedDateTime = await formatEmailDateFromSettings(
-            confirmedDateTimeParsed,
-            confirmedDateTime,
-            recipientTz ?? undefined,
-          );
-
-          const { subject, body } = await loadEmailTemplate(
-            'therapistCancellation',
-            { clientFirstName },
-            {
-              therapistFirstName,
-              clientFirstName,
-              confirmedDateTime: formattedDateTime,
-              cancellationReason: cancellationReasonForTherapist,
-            },
-          );
-
-          await emailProcessingService.sendEmail({
-            to: therapistEmail,
-            subject,
-            body,
-            threadId: therapistGmailThreadId || undefined,
-          });
-          logger.info(
-            { ...logContext, therapistEmail },
-            'Sent cancellation email to therapist'
-          );
+      runReplayableTrackedSideEffect(
+        appointmentId,
+        'cancelled',
+        'email_therapist_cancellation',
+        {
+          renderPayload: async () => {
+            const recipientTz = await resolveRecipientTimezone(therapistEmail);
+            const formattedDateTime = await formatEmailDateFromSettings(
+              confirmedDateTimeParsed,
+              confirmedDateTime,
+              recipientTz ?? undefined,
+            );
+            const { subject, body } = await loadEmailTemplate(
+              'therapistCancellation',
+              { clientFirstName },
+              {
+                therapistFirstName,
+                clientFirstName,
+                confirmedDateTime: formattedDateTime,
+                cancellationReason: cancellationReasonForTherapist,
+              },
+            );
+            return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
+          },
+          execute: async (payload) => {
+            await emailProcessingService.sendEmail({
+              to: payload.to,
+              subject: payload.subject,
+              body: payload.body,
+              threadId: payload.threadId || undefined,
+            });
+            logger.info({ ...logContext, therapistEmail }, 'Sent cancellation email to therapist');
+          },
         },
         {
           name: 'email-therapist-cancellation',
           context: { ...logContext, therapistEmail },
           retry: true,
           maxRetries: 2,
-        }
+        },
       );
     }
   }

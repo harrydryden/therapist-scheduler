@@ -16,6 +16,7 @@
  * 3. A background job can retry failed effects via retryPendingEffects()
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { createHash } from 'crypto';
@@ -28,6 +29,8 @@ export type SideEffectType =
   | 'slack_notify_completed'
   | 'email_client_confirmation'
   | 'email_therapist_confirmation'
+  | 'email_client_cancellation'
+  | 'email_therapist_cancellation'
   | 'user_sync'
   | 'therapist_freeze_sync'
   | 'therapist_unfreeze_sync';
@@ -38,6 +41,14 @@ export interface SideEffectDefinition {
   effectType: SideEffectType;
   /** Unique key for idempotency (automatically generated if not provided) */
   idempotencyKey?: string;
+  /**
+   * Optional payload captured at registration time. The retry executor
+   * replays this verbatim so retries don't drift from the original outbound
+   * (e.g. localised email subject/body, slack args). For effects whose
+   * retry executor re-derives state from the DB (slack notifications,
+   * Notion syncs), payload can be omitted.
+   */
+  payload?: unknown;
 }
 
 export interface RegisteredSideEffect {
@@ -117,6 +128,9 @@ class SideEffectTrackerService {
             transition,
             status: 'pending',
             idempotencyKey,
+            payload: effect.payload === undefined
+              ? undefined
+              : (effect.payload as Prisma.InputJsonValue),
           },
         });
 
@@ -262,6 +276,7 @@ class SideEffectTrackerService {
     effectType: SideEffectType;
     idempotencyKey: string;
     attempts: number;
+    payload: unknown;
   }>> {
     const cutoffTime = new Date(Date.now() - retryAfterMs);
 
@@ -281,6 +296,7 @@ class SideEffectTrackerService {
       effectType: e.effectType as SideEffectType,
       idempotencyKey: e.idempotencyKey,
       attempts: e.attempts,
+      payload: e.payload as unknown,
     }));
   }
 
@@ -376,10 +392,11 @@ export const sideEffectTrackerService = new SideEffectTrackerService();
  * post-restart re-trigger) the task is skipped — that's the idempotency
  * the tracker exists to provide.
  *
- * Use this only for effects whose retry path in `side-effect-retry.service`
- * is semantically equivalent to the original send. Email confirmations are
- * NOT yet wired here because the retry executor uses hardcoded English
- * templates that diverge from the lifecycle's settings-driven templates.
+ * Use this for effects whose retry executor in `side-effect-retry.service`
+ * can re-derive state from the appointment row (Slack notifications,
+ * Notion syncs). For replay-sensitive effects like settings-driven emails,
+ * use `runReplayableTrackedSideEffect` so the rendered payload is captured
+ * at registration time and the retry replays it verbatim.
  */
 export function runTrackedSideEffect(
   appointmentId: string,
@@ -442,6 +459,85 @@ export function runTrackedSideEffect(
           logger.error(
             { err: markErr, appointmentId, effectType },
             'Failed to mark side effect as failed (will retry next run)'
+          );
+        });
+      throw err;
+    }
+  }, options);
+}
+
+/**
+ * Variant of `runTrackedSideEffect` for replay-sensitive effects (e.g. emails
+ * whose templates are settings-driven). The renderer runs first and produces
+ * the rendered payload, which is persisted on the registration row. The
+ * retry executor uses the persisted payload verbatim, so retries can't drift
+ * from the original send even if templates or settings change between runs.
+ *
+ * Sequencing on a fresh process:
+ *   render → register (with payload) → execute (uses same payload).
+ * If render throws: nothing registers (matches the previous untracked
+ * behaviour where a template-load failure dropped the email).
+ * If execute throws: row is marked failed and the periodic retry runner
+ * picks it up using the stored payload.
+ */
+export function runReplayableTrackedSideEffect<P>(
+  appointmentId: string,
+  transition: TransitionType,
+  effectType: SideEffectType,
+  spec: {
+    /** Render the payload once at original send time. Failure aborts. */
+    renderPayload: () => Promise<P>;
+    /** Execute the side effect using the rendered payload. */
+    execute: (payload: P) => Promise<unknown>;
+  },
+  options: BackgroundTaskOptions,
+): void {
+  runBackgroundTask(async () => {
+    const payload = await spec.renderPayload();
+
+    let registered;
+    try {
+      const [reg] = await sideEffectTrackerService.registerSideEffects(
+        appointmentId,
+        transition,
+        [{ effectType, payload }],
+      );
+      registered = reg;
+    } catch (regErr) {
+      logger.warn(
+        { err: regErr, appointmentId, transition, effectType },
+        'Side-effect registration failed; running untracked',
+      );
+      await spec.execute(payload);
+      return;
+    }
+
+    if (registered.status === 'completed') {
+      logger.debug(
+        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Side effect already completed; skipping',
+      );
+      return;
+    }
+
+    if (registered.status === 'abandoned') {
+      logger.warn(
+        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Side effect previously abandoned; not retrying',
+      );
+      return;
+    }
+
+    try {
+      await spec.execute(payload);
+      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
+    } catch (err) {
+      await sideEffectTrackerService
+        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
+        .catch((markErr) => {
+          logger.error(
+            { err: markErr, appointmentId, effectType },
+            'Failed to mark side effect as failed (will retry next run)',
           );
         });
       throw err;

@@ -495,6 +495,12 @@ model SideEffectLog {
   attempts  Int       @default(0)
   errorLog  String?   @map("error_log") @db.Text
 
+  // Rendered payload captured at registration time so retries can replay the
+  // exact original outbound (e.g. localised email subject/body, slack args).
+  // Optional — slack/notion-sync effects don't need a payload because their
+  // retry path re-fetches state from the DB.
+  payload   Json?     @map("payload")
+
   // Timing
   createdAt   DateTime  @default(now()) @map("created_at")
   completedAt DateTime? @map("completed_at")
