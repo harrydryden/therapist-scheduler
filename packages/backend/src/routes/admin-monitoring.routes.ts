@@ -28,9 +28,7 @@ import { therapistBookingStatusService } from '../services/therapist-booking-sta
 import { sseService } from '../services/sse.service';
 import { messageQueueHealthService } from '../services/message-queue-health.service';
 import { sideEffectRetryService } from '../services/side-effect-retry.service';
-import { notionSyncManager } from '../services/notion-sync-manager.service';
-import { notionService } from '../services/notion.service';
-import { notionUsersService } from '../services/notion-users.service';
+import { appointmentLifecycleTickService } from '../services/appointment-lifecycle-tick.service';
 import {
   backfillMissingTrackingCodes,
   fixDuplicateTrackingCodes,
@@ -40,8 +38,6 @@ import {
   backfillUsers,
   backfillTherapists,
   linkAppointmentsToEntities,
-  getOrCreateTherapist,
-  getOrCreateUser,
 } from '../utils/unique-id';
 
 export async function adminMonitoringRoutes(fastify: FastifyInstance) {
@@ -220,17 +216,19 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
         try {
           logger.info({ requestId }, 'Manual feedback sync triggered');
 
-          const result = await notionSyncManager.triggerAppointmentLifecycleTick();
+          const result = await appointmentLifecycleTickService.trigger();
 
           logger.info(
-            { requestId, synced: result.synced, errors: result.errors },
+            { requestId, transitioned: result.transitioned, skipped: result.skipped },
             'Manual feedback sync completed'
           );
 
           return sendSuccess(reply, {
-            transitioned: result.synced,
-            errors: result.errors,
-            message: `Sync completed: ${result.synced} appointments transitioned`,
+            transitioned: result.transitioned,
+            errors: 0,
+            message: result.skipped
+              ? 'Tick skipped — another instance is already running it'
+              : `Sync completed: ${result.transitioned} appointments transitioned`,
           });
         } catch (err) {
           logger.error({ err, requestId }, 'Failed to trigger feedback sync');
@@ -316,24 +314,8 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
         try {
           const userResult = await backfillUsers();
           const therapistResult = await backfillTherapists();
-
-          // Sync newly created therapist odIds to Notion
-          let therapistIdsSynced = 0;
-          for (const { notionId, odId } of therapistResult.createdRecords) {
-            try {
-              await notionService.updateTherapistId(notionId, odId);
-              therapistIdsSynced++;
-            } catch (err) {
-              logger.warn(
-                { err, notionId, odId },
-                'Failed to sync backfilled therapist odId to Notion (non-critical)'
-              );
-            }
-          }
-          if (therapistIdsSynced > 0) {
-            logger.info({ therapistIdsSynced }, 'Synced backfilled therapist odIds to Notion');
-          }
-
+          // The previous odId sync to Notion has been retired — Postgres is
+          // authoritative for the unique IDs now.
           const linkResult = await linkAppointmentsToEntities();
 
           logger.info(
@@ -372,167 +354,9 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
       }
     );
 
-    /**
-     * POST /api/admin/dashboard/sync-notion-ids
-     * Sync unique IDs (odId) to Notion databases
-     */
-    authed.post(
-      '/api/admin/dashboard/sync-notion-ids',
-      {
-        config: {
-          rateLimit: { max: 2, timeWindow: 60000 },
-        },
-      },
-      async (request: FastifyRequest, reply: FastifyReply) => {
-        const requestId = request.id;
-
-        logger.info({ requestId }, 'Syncing unique IDs to Notion databases');
-
-        try {
-          // Step 1: Fetch ALL users from Notion database
-          const allNotionUsers = await notionUsersService.fetchAllUsers();
-
-          let usersCreated = 0;
-          let usersSynced = 0;
-          let usersSkipped = 0;
-          const userErrors: string[] = [];
-
-          // OPTIMIZATION: Prefetch all existing users by email to avoid N+1 queries
-          const notionUserEmails = allNotionUsers
-            .filter((u) => u.email)
-            .map((u) => u.email!.toLowerCase());
-
-          const existingUsers = await prisma.user.findMany({
-            where: { email: { in: notionUserEmails } },
-          });
-          const usersByEmail = new Map(existingUsers.map((u) => [u.email.toLowerCase(), u]));
-
-          for (const notionUser of allNotionUsers) {
-            try {
-              if (!notionUser.email) {
-                userErrors.push(`User ${notionUser.name} has no email - skipping`);
-                continue;
-              }
-
-              let dbUser = usersByEmail.get(notionUser.email.toLowerCase());
-
-              if (!dbUser) {
-                dbUser = await getOrCreateUser(notionUser.email, notionUser.name);
-                usersByEmail.set(notionUser.email.toLowerCase(), dbUser);
-                usersCreated++;
-                logger.info(
-                  { email: notionUser.email, odId: dbUser.odId, name: notionUser.name },
-                  'Created user in PostgreSQL'
-                );
-              }
-
-              if (!notionUser.odId && dbUser.odId) {
-                await notionUsersService.updateUser(notionUser.pageId, { odId: dbUser.odId });
-                usersSynced++;
-                logger.info(
-                  { email: notionUser.email, odId: dbUser.odId },
-                  'Synced user ID to Notion'
-                );
-              } else {
-                usersSkipped++;
-              }
-            } catch (err) {
-              const errorMsg = `Failed to sync user ${notionUser.email}: ${err instanceof Error ? err.message : 'Unknown error'}`;
-              userErrors.push(errorMsg);
-              logger.error({ err, email: notionUser.email }, 'Failed to sync user ID to Notion');
-            }
-          }
-
-          // Step 2: Sync all therapist IDs to Notion
-          const allNotionTherapists = await notionService.fetchTherapists();
-
-          let therapistsSynced = 0;
-          let therapistsCreated = 0;
-          let therapistsSkipped = 0;
-          const therapistErrors: string[] = [];
-
-          const notionTherapistIds = allNotionTherapists.map((t) => t.id);
-          const existingTherapists = await prisma.therapist.findMany({
-            where: { notionId: { in: notionTherapistIds } },
-          });
-          const therapistsByNotionId = new Map(existingTherapists.map((t) => [t.notionId, t]));
-
-          for (const notionTherapist of allNotionTherapists) {
-            try {
-              let dbTherapist = therapistsByNotionId.get(notionTherapist.id);
-
-              if (!dbTherapist) {
-                dbTherapist = await getOrCreateTherapist(
-                  notionTherapist.id,
-                  notionTherapist.email,
-                  notionTherapist.name
-                );
-                therapistsByNotionId.set(notionTherapist.id, dbTherapist);
-                therapistsCreated++;
-                logger.info(
-                  { notionId: notionTherapist.id, odId: dbTherapist.odId, name: notionTherapist.name },
-                  'Created therapist in PostgreSQL'
-                );
-              }
-
-              if (!notionTherapist.odId && dbTherapist.odId) {
-                await notionService.updateTherapistId(notionTherapist.id, dbTherapist.odId);
-                therapistsSynced++;
-                logger.info(
-                  { notionId: notionTherapist.id, odId: dbTherapist.odId },
-                  'Synced therapist ID to Notion'
-                );
-              } else {
-                therapistsSkipped++;
-              }
-            } catch (err) {
-              const errorMsg = `Failed to sync therapist ${notionTherapist.name}: ${err instanceof Error ? err.message : 'Unknown error'}`;
-              therapistErrors.push(errorMsg);
-              logger.error(
-                { err, notionId: notionTherapist.id },
-                'Failed to sync therapist ID to Notion'
-              );
-            }
-          }
-
-          logger.info(
-            {
-              requestId,
-              usersTotal: allNotionUsers.length,
-              usersCreated,
-              usersSynced,
-              therapistsTotal: allNotionTherapists.length,
-              therapistsCreated,
-              therapistsSynced,
-            },
-            'Notion ID sync complete'
-          );
-
-          const totalUsersSynced = usersCreated + usersSynced;
-
-          return sendSuccess(reply, {
-            users: {
-              total: allNotionUsers.length,
-              created: usersCreated,
-              synced: usersSynced,
-              skipped: usersSkipped,
-              errors: userErrors,
-            },
-            therapists: {
-              total: allNotionTherapists.length,
-              created: therapistsCreated,
-              synced: therapistsSynced,
-              skipped: therapistsSkipped,
-              errors: therapistErrors,
-            },
-            message: `Synced ${totalUsersSynced} users and ${therapistsSynced + therapistsCreated} therapists to Notion`,
-          });
-        } catch (err) {
-          logger.error({ err, requestId }, 'Failed to sync IDs to Notion');
-          return Errors.internal(reply, 'Failed to sync IDs to Notion');
-        }
-      }
-    );
+    // The previous /api/admin/dashboard/sync-notion-ids endpoint was retired
+    // alongside the Notion deprecation (PR 2). Postgres is the source of
+    // truth now, so there's nothing to sync. Callers that hit it will 404.
 
     // ------------------------------------------------------------------------
     // Message queue health & review (formerly admin-queue-review.routes.ts)

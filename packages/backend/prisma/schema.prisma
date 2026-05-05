@@ -59,7 +59,13 @@ model User {
 model Therapist {
   id         String    @id @default(uuid())
   odId       String    @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
-  notionId   String    @unique @map("notion_id") // Links to Notion database
+  // Public-facing identifier used by the frontend, booking endpoints, and the
+  // ATS integration as the therapist's stable handle. Originally seeded with
+  // the Notion page ID for therapists ingested while Notion was authoritative;
+  // for new ingestions a uuid is generated. Nullable to permit therapists
+  // whose Notion record has been deleted; rows without a notionId are matched
+  // by their Postgres `id` instead.
+  notionId   String?   @unique @map("notion_id")
   email      String    @unique
   name       String
   // Country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA). Drives timezone

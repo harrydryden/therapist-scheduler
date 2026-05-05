@@ -1,16 +1,15 @@
 import pdf from 'pdf-parse';
-import { Client } from '@notionhq/client';
 import { Prisma } from '@prisma/client';
 import { config } from '../config';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
   AREAS_OF_FOCUS_OPTIONS,
-  NOTION_CATEGORY_PROPERTIES,
   type TherapistCategories,
 } from '../config/therapist-categories';
 import { aiService } from './ai.service';
-import { getOrCreateTherapist } from '../utils/unique-id';
+import { prisma } from '../utils/database';
+import { generateUniqueTherapistId } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { parseJsonFromLLMResponse } from '../utils/json-parser';
 import { getDefaultTimezone, getCountryLabel } from '@therapist-scheduler/shared';
@@ -19,11 +18,10 @@ import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from
 // Re-export for consumers
 export type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes };
 
-const notion = new Client({ auth: config.notionApiKey });
-
 interface IngestionResult {
   success: boolean;
   therapistId?: string;
+  /** Legacy field — was the URL of the created Notion page. Always undefined post-Notion-deprecation. */
   notionUrl?: string;
   extractedData?: ExtractedTherapistProfile;
   error?: string;
@@ -292,117 +290,6 @@ class PDFIngestionService {
     return updated;
   }
 
-  async createTherapistInNotion(
-    profile: ExtractedTherapistProfile,
-    adminNotes?: string
-  ): Promise<{ id: string; url: string }> {
-    try {
-      // Build bio with admin notes appended if present (internal only)
-      let bioContent = profile.bio.slice(0, 2000);
-
-      // Build properties object
-      const properties: Record<string, any> = {
-        Name: {
-          title: [
-            {
-              text: {
-                content: profile.name,
-              },
-            },
-          ],
-        },
-        Email: {
-          email: profile.email,
-        },
-        Bio: {
-          rich_text: [
-            {
-              text: {
-                content: bioContent,
-              },
-            },
-          ],
-        },
-        // Category system - extract type strings from CategoryWithEvidence objects
-        [NOTION_CATEGORY_PROPERTIES.APPROACH]: {
-          multi_select: profile.approach.slice(0, 5).map((c) => ({ name: c.type })),
-        },
-        [NOTION_CATEGORY_PROPERTIES.STYLE]: {
-          multi_select: profile.style.slice(0, 5).map((c) => ({ name: c.type })),
-        },
-        [NOTION_CATEGORY_PROPERTIES.AREAS_OF_FOCUS]: {
-          multi_select: profile.areasOfFocus.slice(0, 10).map((c) => ({ name: c.type })),
-        },
-        Active: {
-          checkbox: true, // Add directly as active
-        },
-      };
-
-      // Availability is no longer written to Notion's per-day rich_text columns —
-      // Postgres is the source of truth (see Therapist.availability). The
-      // availability is persisted by the caller (ingestPDF below) via
-      // getOrCreateTherapist after the Notion page is created.
-
-      const response = await notion.pages.create({
-        parent: {
-          database_id: config.notionDatabaseId,
-        },
-        properties,
-      });
-
-      const notionUrl = `https://www.notion.so/${response.id.replace(/-/g, '')}`;
-
-      logger.info(
-        {
-          therapistId: response.id,
-          name: profile.name,
-          email: profile.email,
-          hasAdminNotes: !!adminNotes,
-        },
-        'Created therapist in Notion'
-      );
-
-      // If there are admin notes, add them as a comment/block in the page body
-      if (adminNotes) {
-        try {
-          await notion.blocks.children.append({
-            block_id: response.id,
-            children: [
-              {
-                type: 'callout',
-                callout: {
-                  rich_text: [
-                    {
-                      type: 'text',
-                      text: {
-                        content: `Admin Notes: ${adminNotes}`,
-                      },
-                    },
-                  ],
-                  icon: {
-                    emoji: '📝',
-                  },
-                  color: 'gray_background',
-                },
-              },
-            ],
-          });
-        } catch (blockErr) {
-          // Non-critical, just log the error
-          logger.warn({ blockErr, therapistId: response.id }, 'Failed to add admin notes block');
-        }
-      }
-
-      return {
-        id: response.id,
-        url: notionUrl,
-      };
-    } catch (err) {
-      logger.error({ err, profile }, 'Failed to create therapist in Notion');
-      throw new Error('Failed to create therapist record in Notion');
-    }
-  }
-
   async ingestPDF(pdfBuffer: Buffer | null, traceId?: string, adminNotes?: AdminNotes): Promise<IngestionResult> {
     try {
       let pdfText = '';
@@ -461,64 +348,60 @@ class PDFIngestionService {
         };
       }
 
-      // Step 5: Create therapist in Notion (with internal admin notes if provided)
-      logger.info({ traceId, name: profile.name }, 'Creating therapist in Notion');
-      const { id, url } = await this.createTherapistInNotion(profile, adminNotes?.notes);
+      // Step 5: Create the Postgres Therapist row directly. Notion is no
+      // longer authoritative; the public-facing handle for new ingestions
+      // is the Postgres uuid (notionId stays null). All profile fields are
+      // written here in a single insert.
+      logger.info({ traceId, name: profile.name }, 'Creating therapist in Postgres');
 
-      // Step 5: Create Prisma Therapist record with ingestedAt timestamp,
-      // persist the therapist's availability (Postgres is now the source of
-      // truth — Notion is no longer read or written for availability), and
-      // sync the generated odId back to Notion.
-      try {
-        // The availability shape stored on the Therapist row matches the
-        // TherapistAvailability type. Cast through unknown because Prisma
-        // uses its own JSON branding which doesn't quite line up with our
-        // shared interface.
-        const availabilityForDb = profile.availability
-          ? (profile.availability as unknown as Prisma.InputJsonValue)
-          : null;
-        const therapist = await getOrCreateTherapist(
-          id,
-          profile.email,
-          profile.name,
-          adminNotes?.country,
-          availabilityForDb,
-        );
+      // Cast through unknown because Prisma's JSON branding doesn't quite
+      // line up with our shared TherapistAvailability interface.
+      const availabilityForDb = profile.availability
+        ? (profile.availability as unknown as Prisma.InputJsonValue)
+        : Prisma.DbNull;
+
+      const odId = await generateUniqueTherapistId();
+      const therapist = await prisma.therapist.create({
+        data: {
+          odId,
+          notionId: null,
+          email: profile.email.toLowerCase().trim(),
+          name: profile.name,
+          country: adminNotes?.country ?? 'UK',
+          bio: profile.bio || null,
+          approach: profile.approach.slice(0, 5).map((c) => c.type),
+          style: profile.style.slice(0, 5).map((c) => c.type),
+          areasOfFocus: profile.areasOfFocus.slice(0, 10).map((c) => c.type),
+          active: true,
+          availability: availabilityForDb,
+          ingestedAt: new Date(),
+        },
+      });
+
+      logger.info(
+        {
+          traceId,
+          therapistId: therapist.id,
+          odId: therapist.odId,
+          country: therapist.country,
+          hasAvailability: !!profile.availability,
+        },
+        'Created Postgres therapist record',
+      );
+
+      // Admin notes used to be appended as a Notion callout block. Post-cutover
+      // we don't have anywhere to put them yet — log so they aren't silently
+      // dropped, and the admin can paste them into the bio if needed.
+      if (adminNotes?.notes) {
         logger.info(
-          {
-            traceId,
-            notionId: id,
-            odId: therapist.odId,
-            country: therapist.country,
-            hasAvailability: !!profile.availability,
-          },
-          'Created Prisma therapist record with ingestion date',
+          { traceId, therapistId: therapist.id, notes: adminNotes.notes },
+          'Admin notes captured during ingestion (review and add to bio if needed)',
         );
-
-        // Write the generated odId back to the Notion page so it appears in the ID column
-        try {
-          await notion.pages.update({
-            page_id: id,
-            properties: {
-              ID: {
-                rich_text: [{ type: 'text', text: { content: therapist.odId } }],
-              },
-            },
-          });
-          logger.info({ traceId, notionId: id, odId: therapist.odId }, 'Synced therapist odId to Notion');
-        } catch (notionErr) {
-          // Non-critical - the ID can be synced later via the admin sync endpoint
-          logger.warn({ notionErr, traceId, notionId: id, odId: therapist.odId }, 'Failed to sync therapist odId to Notion');
-        }
-      } catch (err) {
-        // Non-critical - log but don't fail the ingestion
-        logger.warn({ err, traceId, notionId: id }, 'Failed to create Prisma therapist record during ingestion');
       }
 
       return {
         success: true,
-        therapistId: id,
-        notionUrl: url,
+        therapistId: therapist.id,
         extractedData: profile,
       };
     } catch (err) {

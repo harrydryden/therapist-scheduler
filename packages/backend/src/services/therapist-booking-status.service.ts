@@ -4,7 +4,6 @@ import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
 import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES, ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
-import { notionService } from './notion.service';
 
 // Type for transaction client
 type TransactionClient = Prisma.TransactionClient;
@@ -299,44 +298,18 @@ class TherapistBookingStatusService {
   }
 
   /**
-   * Get all therapists that should be hidden from the frontend
+   * Get all therapists that should be hidden from the frontend.
    *
-   * Uses BOTH Postgres (therapistBookingStatus) and Notion (Frozen checkbox).
-   * Postgres is the authoritative source — it's updated atomically with appointment
-   * creation. Notion is updated asynchronously and may lag behind.
-   *
-   * A therapist is hidden if EITHER source says it should be frozen. This means:
-   * - Postgres freeze (from recordNewRequest) takes effect immediately, even if
-   *   the async Notion sync hasn't completed yet.
-   * - Admin can still override by unchecking Frozen in Notion AND clearing the
-   *   booking status via the admin dashboard (both must agree to unfreeze).
-   *
-   * Visibility logic (Active takes precedence over Frozen):
-   * - Active + Not Frozen = VISIBLE
-   * - Active + Frozen = HIDDEN (frozen)
-   * - Inactive + Not Frozen = HIDDEN (inactive)
-   * - Inactive + Frozen = HIDDEN (inactive)
+   * Postgres `therapistBookingStatus` is the single source of truth: rows
+   * are written inside the appointment-creation transaction, so freezes
+   * take effect immediately. The previous Notion-Frozen-checkbox check has
+   * been retired with PR 2 of the Notion deprecation.
    */
   async getUnavailableTherapistIds(): Promise<string[]> {
     try {
-      // Fetch from both sources in parallel
-      const [notionFrozenIds, postgresFreeze] = await Promise.all([
-        notionService.getFrozenTherapistIds().catch((err) => {
-          logger.error({ err, operation: 'getUnavailableTherapistIds' }, 'Failed to get frozen IDs from Notion - using Postgres only');
-          return [] as string[];
-        }),
-        this.getFrozenTherapistIdsFromPostgres(),
-      ]);
-
-      // Union both sets — frozen in either source means hidden
-      const allFrozenIds = new Set([...notionFrozenIds, ...postgresFreeze]);
-
-      logger.debug(
-        { notionCount: notionFrozenIds.length, postgresCount: postgresFreeze.length, totalCount: allFrozenIds.size },
-        'Retrieved frozen therapist IDs from Notion + Postgres'
-      );
-
-      return Array.from(allFrozenIds);
+      const frozen = await this.getFrozenTherapistIdsFromPostgres();
+      logger.debug({ count: frozen.length }, 'Retrieved frozen therapist IDs from Postgres');
+      return frozen;
     } catch (error) {
       logger.error({ error, operation: 'getUnavailableTherapistIds' }, 'Failed to get unavailable therapist IDs');
       return [];

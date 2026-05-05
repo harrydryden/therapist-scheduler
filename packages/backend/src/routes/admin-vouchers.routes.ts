@@ -15,7 +15,6 @@ import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-to
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderTemplate } from '../utils/email-templates';
 import { emailProcessingService } from '../services/email-processing.service';
-import { notionUsersService } from '../services/notion-users.service';
 import { config } from '../config';
 
 // Zod schemas
@@ -319,16 +318,17 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
       },
     });
 
-    // If user was unsubscribed, re-subscribe in Notion so they get future weekly emails
+    // If user was unsubscribed, re-subscribe in Postgres (the source of truth
+    // post-Notion-deprecation) so they get future weekly emails.
     if (wasUnsubscribed) {
       try {
-        const notionUser = await notionUsersService.findUserByEmail(emailLower);
-        if (notionUser) {
-          await notionUsersService.updateSubscription(notionUser.pageId, true);
-          logger.info({ email: emailLower }, 'Re-subscribed user in Notion via voucher issuance');
-        }
+        await prisma.user.updateMany({
+          where: { email: emailLower },
+          data: { subscribed: true },
+        });
+        logger.info({ email: emailLower }, 'Re-subscribed user via voucher issuance');
       } catch (error) {
-        logger.error({ error, email: emailLower }, 'Failed to re-subscribe in Notion (voucher still created)');
+        logger.error({ error, email: emailLower }, 'Failed to re-subscribe (voucher still created)');
       }
     }
 
@@ -413,16 +413,18 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         },
       });
 
-      // Re-subscribe in Notion
+      // Re-subscribe in Postgres (the source of truth post-Notion-deprecation).
+      // The legacy `notionUpdated` flag is kept in the response shape for
+      // backwards compatibility — repurposed to indicate the Postgres write.
       let notionUpdated = false;
       try {
-        const notionUser = await notionUsersService.findUserByEmail(emailLower);
-        if (notionUser) {
-          await notionUsersService.updateSubscription(notionUser.pageId, true);
-          notionUpdated = true;
-        }
+        const result = await prisma.user.updateMany({
+          where: { email: emailLower },
+          data: { subscribed: true },
+        });
+        notionUpdated = result.count > 0;
       } catch (error) {
-        logger.error({ error, email: emailLower }, 'Failed to update Notion subscription (voucher tracking updated)');
+        logger.error({ error, email: emailLower }, 'Failed to update subscription (voucher tracking updated)');
       }
 
       // Send welcome-back email with fresh voucher code

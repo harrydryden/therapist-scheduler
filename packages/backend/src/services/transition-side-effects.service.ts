@@ -7,7 +7,6 @@
  * This service handles non-transactional operations that run AFTER a status
  * transition has been committed:
  * - Therapist booking status updates (freeze/unfreeze)
- * - Notion sync for therapists and users
  * - Therapist deactivation when no active appointments remain
  * - SSE broadcast of status changes
  *
@@ -20,26 +19,22 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { notionSyncManager } from './notion-sync-manager.service';
-import { notionService } from './notion.service';
 import { APPOINTMENT_STATUS, AppointmentStatus, ACTIVE_STATUSES } from '../constants';
-import { runBackgroundTask } from '../utils/background-task';
-import { runTrackedSideEffect } from './side-effect-tracker.service';
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import type { TransitionSource, TransitionResult } from './appointment-lifecycle.service';
 
 /**
  * Count this therapist's OTHER active appointments and, if there are none,
- * mark the therapist inactive in Notion.
+ * mark the therapist inactive in Postgres.
  *
  * Used by completion / cancellation / admin-force paths so the same "last
  * appointment closed → take therapist off the booking page" semantics apply
- * regardless of how the appointment terminated. Each path can pass a
- * `taskName` so the runBackgroundTask metric/log lines stay distinguishable.
+ * regardless of how the appointment terminated. The Postgres write is the
+ * source of truth now that Notion has been retired (PR 2 of the deprecation).
  *
- * Failures (count query or background-task scheduling) are logged but never
- * thrown — matches the existing "non-fatal side effect" contract.
+ * Failures are logged but never thrown — matches the existing "non-fatal
+ * side effect" contract.
  */
 async function deactivateTherapistIfLastAppointment(args: {
   appointmentId: string;
@@ -60,16 +55,17 @@ async function deactivateTherapistIfLastAppointment(args: {
     });
 
     if (otherActiveAppointments === 0) {
-      runBackgroundTask(
-        () => notionService.updateTherapistActive(therapistNotionId, false),
-        {
-          name: taskName,
-          context: { ...logContext, therapistNotionId },
-          retry: true,
-          maxRetries: 2,
-        },
+      // therapistNotionId is the public handle: legacy notionId or
+      // post-Notion Postgres uuid. Match by either — updateMany returns
+      // count=0 if no row matches, which is fine for missing therapists.
+      const result = await prisma.therapist.updateMany({
+        where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        data: { active: false },
+      });
+      logger.info(
+        { ...logContext, therapistNotionId, taskName, updated: result.count },
+        successLogMessage,
       );
-      logger.info({ ...logContext, therapistNotionId }, successLogMessage);
     } else {
       logger.info(
         { ...logContext, therapistNotionId, otherActiveAppointments },
@@ -156,14 +152,16 @@ class TransitionSideEffectsService {
     const { appointmentId, source, adminId, therapistNotionId, therapistName, userEmail } = params;
     const logContext = { appointmentId, source, adminId };
 
-    // Mark therapist as confirmed (freezes for other bookings)
+    // Mark therapist as confirmed (freezes for other bookings).
+    // The previous Notion freeze-mirror has been retired (PR 2 of the
+    // Notion deprecation): the Postgres TherapistBookingStatus row is
+    // authoritative and is read directly by the public listing.
     if (therapistNotionId) {
       try {
         await therapistBookingStatusService.markConfirmed(
           therapistNotionId,
           therapistName
         );
-        await notionSyncManager.syncSingleTherapist(therapistNotionId);
       } catch (err) {
         logger.error(
           { ...logContext, err },
@@ -171,44 +169,23 @@ class TransitionSideEffectsService {
         );
       }
     }
-
-    // Sync user to Notion (non-blocking, persistently tracked)
-    runTrackedSideEffect(
-      appointmentId,
-      'confirmed',
-      'user_sync',
-      () => notionSyncManager.syncSingleUser(userEmail),
-      {
-        name: 'user-sync-notion',
-        context: { ...logContext, userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    // userEmail intentionally unused — the Notion user sync that consumed it
+    // was retired with the Notion deprecation.
+    void userEmail;
   }
 
   /**
-   * Side effects after a successful session_held transition:
-   * - Sync user to Notion (moves therapist from "Upcoming" to "Previous")
+   * Side effects after a successful session_held transition.
+   *
+   * Previously synced the user record to Notion (moving the therapist
+   * from "Upcoming" to "Previous" on their Notion page). With Notion
+   * retired, this transition has no Postgres-side action — the
+   * appointment status itself is the canonical signal.
    */
   async onSessionHeld(params: OnSessionHeldParams): Promise<void> {
     const { appointmentId, source, adminId, userEmail } = params;
-    const logContext = { appointmentId, source, adminId };
-
-    // Sync user to Notion - moves therapist from "Upcoming" to "Previous"
-    // (persistently tracked so transient Notion failures survive restarts)
-    runTrackedSideEffect(
-      appointmentId,
-      'session_held',
-      'user_sync',
-      () => notionSyncManager.syncSingleUser(userEmail),
-      {
-        name: 'user-sync-session-held',
-        context: { ...logContext, userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    const logContext = { appointmentId, source, adminId, userEmail };
+    logger.debug(logContext, 'session_held: no remaining side effects');
   }
 
   /**
@@ -241,10 +218,8 @@ class TransitionSideEffectsService {
         );
       }
 
-      // Step 2: Conditionally deactivate therapist in Notion (independent of Step 1).
-      // Only deactivate if they have NO other active appointments. The
-      // background task uses retry so a transient Notion API failure doesn't
-      // leave the therapist permanently visible on the booking page.
+      // Step 2: Conditionally deactivate therapist in Postgres (independent
+      // of Step 1). Only deactivate if they have NO other active appointments.
       await deactivateTherapistIfLastAppointment({
         appointmentId,
         therapistNotionId,
@@ -252,36 +227,11 @@ class TransitionSideEffectsService {
         logContext,
         successLogMessage: 'Marked therapist as inactive after last appointment completed',
       });
-
-      // Step 3: Sync frozen status to Notion (independent of Steps 1-2,
-      // persistently tracked)
-      runTrackedSideEffect(
-        appointmentId,
-        'completed',
-        'therapist_freeze_sync',
-        () => notionSyncManager.syncSingleTherapist(therapistNotionId),
-        {
-          name: 'therapist-freeze-sync-completion',
-          context: { ...logContext, therapistNotionId },
-          retry: true,
-          maxRetries: 2,
-        }
-      );
     }
 
-    // Sync user to Notion (non-blocking, persistently tracked)
-    runTrackedSideEffect(
-      appointmentId,
-      'completed',
-      'user_sync',
-      () => notionSyncManager.syncSingleUser(userEmail),
-      {
-        name: 'user-sync-completion',
-        context: { ...logContext, userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
+    // userEmail intentionally unused — the Notion user sync that consumed it
+    // was retired with the Notion deprecation.
+    void userEmail;
   }
 
   /**
@@ -314,7 +264,7 @@ class TransitionSideEffectsService {
         );
       }
 
-      // Step 2: Conditionally deactivate therapist in Notion (independent of Step 1).
+      // Step 2: Conditionally deactivate therapist (independent of Step 1).
       await deactivateTherapistIfLastAppointment({
         appointmentId,
         therapistNotionId,
@@ -322,40 +272,10 @@ class TransitionSideEffectsService {
         logContext,
         successLogMessage: 'Marked therapist as inactive after last appointment cancelled',
       });
-
-      // Step 3: Sync frozen status to Notion (independent of Steps 1-2,
-      // persistently tracked)
-      runTrackedSideEffect(
-        appointmentId,
-        'cancelled',
-        'therapist_freeze_sync',
-        () => notionSyncManager.syncSingleTherapist(therapistNotionId),
-        {
-          name: 'therapist-freeze-sync-cancellation',
-          context: { ...logContext, therapistNotionId },
-          retry: true,
-          maxRetries: 2,
-        }
-      );
     }
-
-    // Sync user to Notion (non-blocking, persistently tracked).
-    // Previously missing from the cancellation path — every other transition
-    // (confirmed, session_held, completed) synced the user.
-    if (userEmail) {
-      runTrackedSideEffect(
-        appointmentId,
-        'cancelled',
-        'user_sync',
-        () => notionSyncManager.syncSingleUser(userEmail),
-        {
-          name: 'user-sync-cancellation',
-          context: { ...logContext, userEmail },
-          retry: true,
-          maxRetries: 2,
-        }
-      );
-    }
+    // userEmail intentionally unused — the Notion user sync that consumed it
+    // was retired with the Notion deprecation.
+    void userEmail;
   }
 
   /**
@@ -417,29 +337,7 @@ class TransitionSideEffectsService {
           successLogMessage: `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`,
         });
       }
-
-      // Step 3: Sync therapist freeze status to Notion (independent of Steps 1-2)
-      runBackgroundTask(
-        () => notionSyncManager.syncSingleTherapist(appointment.therapistNotionId!),
-        {
-          name: 'therapist-freeze-sync-admin-force',
-          context: { ...logContext, therapistNotionId: appointment.therapistNotionId },
-          retry: true,
-          maxRetries: 2,
-        }
-      );
     }
-
-    // --- Notion user sync (non-blocking) ---
-    runBackgroundTask(
-      () => notionSyncManager.syncSingleUser(appointment.userEmail),
-      {
-        name: 'user-sync-admin-force-update',
-        context: { ...logContext, userEmail: appointment.userEmail },
-        retry: true,
-        maxRetries: 2,
-      }
-    );
 
     // --- Optional notifications (Slack only — delegated to notifications service) ---
     if (!skipNotifications) {

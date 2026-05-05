@@ -1,6 +1,7 @@
 /**
- * Re-export shared therapist category data from @therapist-scheduler/shared,
- * plus backend-specific validation helpers and Notion property names.
+ * Re-export shared therapist category data from @therapist-scheduler/shared
+ * plus backend-specific validation helpers. The previous NOTION_CATEGORY_PROPERTIES
+ * export has been retired alongside the Notion deprecation (PR 2).
  */
 export {
   type CategoryOption,
@@ -22,10 +23,3 @@ import {
 export const VALID_APPROACH_TYPES = APPROACH_OPTIONS.map((o) => o.type);
 export const VALID_STYLE_TYPES = STYLE_OPTIONS.map((o) => o.type);
 export const VALID_AREAS_OF_FOCUS_TYPES = AREAS_OF_FOCUS_OPTIONS.map((o) => o.type);
-
-// Backend-specific: Notion property names
-export const NOTION_CATEGORY_PROPERTIES = {
-  APPROACH: 'Approach',
-  STYLE: 'Style',
-  AREAS_OF_FOCUS: 'Areas of Focus',
-} as const;

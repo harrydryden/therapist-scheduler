@@ -11,7 +11,6 @@
  */
 
 import { prisma } from '../utils/database';
-import { notionService } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { logger } from '../utils/logger';
 import { parseConfirmedDateTime } from '../utils/date';
@@ -28,7 +27,11 @@ export interface ValidateBookingParams {
   userEmail: string;
   /** Optional: check if specific time slot is available */
   confirmedDateTime?: string;
-  /** Skip cache and hit Notion directly for freshest data */
+  /**
+   * Legacy parameter from when therapist data lived in Notion's cache. Kept
+   * for callsite compatibility but no longer has any effect — Postgres reads
+   * are always fresh.
+   */
   bypassCache?: boolean;
 }
 
@@ -38,12 +41,17 @@ class BookingValidatorService {
    * This is the primary validation called before creating an appointment
    */
   async validateTherapistAvailability(params: ValidateBookingParams): Promise<ValidationResult> {
-    const { therapistNotionId, userEmail, confirmedDateTime, bypassCache = false } = params;
+    const { therapistNotionId, userEmail, confirmedDateTime } = params;
     const logContext = { therapistNotionId, userEmail };
 
     try {
-      // 1. Check if therapist exists and is active
-      const therapist = await notionService.getTherapist(therapistNotionId, bypassCache);
+      // 1. Check if therapist exists. The public-facing identifier is either
+      // the legacy notionId or the Postgres uuid for post-Notion ingestions —
+      // accept either.
+      const therapist = await prisma.therapist.findFirst({
+        where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        select: { active: true, email: true },
+      });
 
       if (!therapist) {
         logger.warn(logContext, 'Booking validation failed: therapist not found');
@@ -64,17 +72,7 @@ class BookingValidatorService {
         };
       }
 
-      // 3. Check if therapist is frozen
-      if (therapist.frozen) {
-        logger.info(logContext, 'Booking validation failed: therapist frozen');
-        return {
-          valid: false,
-          reason: 'Therapist has reached maximum pending requests',
-          code: 'FROZEN',
-        };
-      }
-
-      // 4. Check if therapist has email (required for communication)
+      // 3. Check if therapist has email (required for communication)
       if (!therapist.email || therapist.email.trim() === '') {
         logger.warn(logContext, 'Booking validation failed: no therapist email');
         return {

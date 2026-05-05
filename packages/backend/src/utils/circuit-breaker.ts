@@ -358,11 +358,5 @@ export const CIRCUIT_BREAKER_CONFIGS = {
     successThreshold: 1,
     failureWindow: 120000, // 2 minutes
   },
-  NOTION_API: {
-    name: 'notion-api',
-    failureThreshold: 5,
-    resetTimeout: 30000,
-    successThreshold: 2,
-    failureWindow: 60000,
-  },
+  // NOTION_API config retired alongside the Notion deprecation (PR 2).
 } as const;

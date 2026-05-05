@@ -629,21 +629,26 @@ Please answer their question helpfully and direct them to the booking URL to sch
           );
 
           try {
-            // Find the user in the Notion database and mark as unsubscribed
-            const { notionUsersService } = await import('./notion-users.service');
-            const user = await notionUsersService.findUserByEmail(input.email.toLowerCase());
+            // Postgres is the source of truth for the subscribed flag now
+            // that Notion has been retired. updateMany returns count=0 if
+            // the user doesn't exist, which we treat as already-unsubscribed.
+            const result = await prisma.user.updateMany({
+              where: {
+                email: input.email.toLowerCase(),
+                subscribed: true,
+              },
+              data: { subscribed: false },
+            });
 
-            if (user) {
-              await notionUsersService.updateSubscription(user.pageId, false);
+            if (result.count > 0) {
               logger.info(
-                { traceId: this.traceId, email: input.email, pageId: user.pageId },
+                { traceId: this.traceId, email: input.email },
                 'User unsubscribed from weekly mailing list'
               );
             } else {
-              // User not found in database, log but continue
               logger.warn(
                 { traceId: this.traceId, email: input.email },
-                'User not found in Notion database for unsubscribe, may already be unsubscribed'
+                'User not found or already unsubscribed'
               );
             }
 
