@@ -12,6 +12,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "migrate:conversation-state": "tsx src/scripts/migrate-conversation-state.ts",
+    "cleanup:misrouted-conversation": "tsx src/scripts/cleanup-misrouted-conversation.ts",
     "typecheck": "prisma generate && tsc --noEmit",
     "lint": "eslint src/**/*.ts",
     "test": "jest --testPathIgnorePatterns=/integration/",
