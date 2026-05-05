@@ -19,7 +19,6 @@ import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { emailProcessingService } from './email-processing.service';
-import { notionService } from './notion.service';
 import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
@@ -1010,20 +1009,8 @@ export class AIToolExecutorService {
     }
 
     // (status_change audit event is written by transitionToConfirmed)
-
-    // Invalidate therapist cache so frontend sees updated availability
-    try {
-      await notionService.invalidateCache();
-      logger.info(
-        { traceId: this.traceId },
-        'Therapist cache invalidated after booking confirmation'
-      );
-    } catch (err) {
-      logger.error(
-        { traceId: this.traceId, err },
-        'Failed to invalidate therapist cache (non-critical)'
-      );
-    }
+    // The previous Notion therapist-cache invalidation has been retired —
+    // Postgres reads are direct, so no cache needs busting.
 
     logger.info(
       { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, isReschedule },
@@ -1121,20 +1108,8 @@ export class AIToolExecutorService {
     }
 
     // (status_change audit event is written by transitionToCancelled inside its transaction)
-
-    // Invalidate therapist cache so frontend sees updated availability
-    try {
-      await notionService.invalidateCache();
-      logger.info(
-        { traceId: this.traceId },
-        'Therapist cache invalidated after cancellation'
-      );
-    } catch (err) {
-      logger.error(
-        { traceId: this.traceId, err },
-        'Failed to invalidate therapist cache (non-critical)'
-      );
-    }
+    // The previous Notion therapist-cache invalidation has been retired —
+    // Postgres reads are direct, so no cache needs busting.
 
     logger.info(
       {

@@ -35,14 +35,6 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
-jest.mock('../services/notion-users.service', () => ({
-  notionUsersService: {
-    isConfigured: jest.fn().mockReturnValue(true),
-    findUserByEmail: jest.fn(),
-    updateSubscription: jest.fn(),
-  },
-}));
-
 jest.mock('../utils/redis', () => ({
   cacheManager: {
     getString: jest.fn().mockResolvedValue(null),
@@ -58,7 +50,6 @@ jest.mock('../utils/redis', () => ({
 
 import Fastify, { FastifyInstance } from 'fastify';
 import { prisma } from '../utils/database';
-import { notionUsersService } from '../services/notion-users.service';
 import { adminUserRoutes } from '../routes/admin-users.routes';
 
 // ============================================
@@ -119,7 +110,6 @@ describe('admin user routes', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    (notionUsersService.isConfigured as jest.Mock).mockReturnValue(true);
     app = buildApp();
   });
 
@@ -296,17 +286,11 @@ describe('admin user routes', () => {
         where: { id: 'user-1' },
         data: { name: 'New Name', country: 'IE' },
       });
-      // No subscription change → no Notion call.
-      expect(notionUsersService.findUserByEmail).not.toHaveBeenCalled();
     });
 
-    it('dual-writes to Notion when subscribed flips', async () => {
+    it('writes subscribed=false to Postgres when subscription is toggled off', async () => {
       (prisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser({ subscribed: true }));
       (prisma.user.update as jest.Mock).mockResolvedValue(makeUser({ subscribed: false }));
-      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue({
-        pageId: 'notion-page-id',
-        subscribed: true,
-      });
 
       const res = await app.inject({
         method: 'PATCH',
@@ -316,52 +300,10 @@ describe('admin user routes', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(notionUsersService.findUserByEmail).toHaveBeenCalledWith('jamie@example.com');
-      expect(notionUsersService.updateSubscription).toHaveBeenCalledWith('notion-page-id', false);
-    });
-
-    it('does not call Notion if subscribed is unchanged', async () => {
-      (prisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser({ subscribed: true }));
-      (prisma.user.update as jest.Mock).mockResolvedValue(makeUser({ subscribed: true }));
-
-      await app.inject({
-        method: 'PATCH',
-        url: '/api/admin/users/user-1',
-        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
-        payload: { subscribed: true },
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { subscribed: false },
       });
-
-      expect(notionUsersService.findUserByEmail).not.toHaveBeenCalled();
-    });
-
-    it('Notion failure does not fail the request', async () => {
-      (prisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser({ subscribed: true }));
-      (prisma.user.update as jest.Mock).mockResolvedValue(makeUser({ subscribed: false }));
-      (notionUsersService.findUserByEmail as jest.Mock).mockRejectedValue(new Error('Notion 503'));
-
-      const res = await app.inject({
-        method: 'PATCH',
-        url: '/api/admin/users/user-1',
-        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
-        payload: { subscribed: false },
-      });
-
-      expect(res.statusCode).toBe(200);
-    });
-
-    it('skips Notion mirror when notionUsersService is not configured', async () => {
-      (notionUsersService.isConfigured as jest.Mock).mockReturnValue(false);
-      (prisma.user.findUnique as jest.Mock).mockResolvedValue(makeUser({ subscribed: true }));
-      (prisma.user.update as jest.Mock).mockResolvedValue(makeUser({ subscribed: false }));
-
-      await app.inject({
-        method: 'PATCH',
-        url: '/api/admin/users/user-1',
-        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
-        payload: { subscribed: false },
-      });
-
-      expect(notionUsersService.findUserByEmail).not.toHaveBeenCalled();
     });
 
     it('returns 400 with no fields to update', async () => {

@@ -6,11 +6,8 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { Errors, sendError } from '../utils/response';
 import { JustinTimeService } from '../services/justin-time.service';
-import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { notionUsersService } from '../services/notion-users.service';
 import { slackNotificationService } from '../services/slack-notification.service';
-import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
 import { emailQueueService } from '../services/email-queue.service';
@@ -18,7 +15,7 @@ import { validateEmail } from '../utils/email-validator';
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
-import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
+import { getOrCreateUser } from '../utils/unique-id';
 import { validateVoucherToken, getDisplayCodeFromToken } from '../utils/voucher-token';
 
 // Idempotency window: 5 minutes
@@ -217,34 +214,35 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        // Fetch therapist profile from Notion (source of truth for email/name)
-        // and the Postgres record (source of truth for availability) in parallel.
-        const [therapist, prismaTherapist] = await Promise.all([
-          notionService.getTherapist(therapistNotionId),
-          prisma.therapist.findUnique({
-            where: { notionId: therapistNotionId },
-            select: { availability: true },
-          }),
-        ]);
+        // Postgres is now the source of truth for therapist data. The
+        // public-facing handle is either the legacy notionId or the
+        // Postgres uuid for post-Notion ingestions — accept either.
+        const therapist = await prisma.therapist.findFirst({
+          where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        });
 
-        if (!therapist) {
-          logger.warn({ requestId, therapistNotionId }, 'Therapist not found in Notion');
+        if (!therapist || !therapist.active) {
+          logger.warn({ requestId, therapistNotionId }, 'Therapist not found or inactive');
           return reply.status(404).send({
             success: false,
             error: 'Therapist not found',
           });
         }
 
-        // Use therapist email and name from Notion (trusted source)
         const therapistEmail = therapist.email;
         const therapistName = therapist.name;
+        // Existing rows store the freeze status keyed on `notionId`; the
+        // booking flow downstream still uses that key. For post-Notion
+        // therapists we fall back to the Postgres id as the same handle.
+        const therapistLookupKey = therapist.notionId ?? therapist.id;
+        const prismaTherapist = { availability: therapist.availability };
 
         // Validate therapist has an email address configured
         // Without this, the agent cannot contact the therapist and may hallucinate an email
         if (!therapistEmail || therapistEmail.trim() === '') {
           logger.error(
             { requestId, therapistNotionId, therapistName },
-            'Therapist has no email address configured in Notion'
+            'Therapist has no email address configured'
           );
           return reply.status(400).send({
             success: false,
@@ -252,21 +250,23 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           });
         }
 
-        // Availability comes from Postgres now — Notion's day columns are no
-        // longer authoritative. parseTherapistAvailability still runs to
-        // validate the JSON shape and reject malformed records.
+        // parseTherapistAvailability validates the JSON shape and rejects
+        // malformed records.
         const parsedAvailability = parseTherapistAvailability(prismaTherapist?.availability);
         const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
         const hasAvailability = parsedAvailability && parsedAvailability.slots && parsedAvailability.slots.length > 0;
 
         logger.info(
           { requestId, therapistNotionId, therapistName, hasAvailability },
-          'Fetched therapist from Notion'
+          'Resolved therapist for booking'
         );
 
-        // Check if therapist can accept new requests (not confirmed or frozen)
+        // Check if therapist can accept new requests (not confirmed or frozen).
+        // therapistLookupKey is the public handle (legacy notionId or
+        // post-Notion Postgres id) — the booking-status row is keyed on the
+        // same value the public listing returned.
         const availabilityStatus = await therapistBookingStatusService.canAcceptNewRequest(
-          therapistNotionId,
+          therapistLookupKey,
           userEmail
         );
 
@@ -297,7 +297,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         const quickDuplicateCheck = await prisma.appointmentRequest.findFirst({
           where: {
             userEmail,
-            therapistNotionId,
+            therapistNotionId: therapistLookupKey,
             status: { in: [...PRE_BOOKING_STATUSES] },
           },
           select: { id: true },
@@ -314,16 +314,10 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           });
         }
 
-        logger.info(
-          { requestId, therapistNotionId, hasAvailability },
-          'Fetched therapist availability from Notion'
-        );
-
-        // Get or create User and Therapist entities with unique 10-digit IDs
-        const [userEntity, therapistEntity] = await Promise.all([
-          getOrCreateUser(userEmail, userName),
-          getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName),
-        ]);
+        // We already have the resolved Therapist row from Postgres above;
+        // only the user side needs get-or-create.
+        const userEntity = await getOrCreateUser(userEmail, userName);
+        const therapistEntity = therapist;
 
         // FIX B2: Use Serializable transaction to atomically:
         // 1. Re-check for duplicates (prevents race condition)
@@ -344,7 +338,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             const existingRequest = await tx.appointmentRequest.findFirst({
               where: {
                 userEmail,
-                therapistNotionId,
+                therapistNotionId: therapistLookupKey,
                 status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true, status: true },
@@ -380,7 +374,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             // Re-check availability inside transaction (another request may have frozen)
             // IMPORTANT: Pass tx to ensure we read the same transaction's snapshot
             const recheck = await therapistBookingStatusService.canAcceptNewRequest(
-              therapistNotionId,
+              therapistLookupKey,
               userEmail,
               tx // Pass transaction client for isolation
             );
@@ -399,7 +393,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                 id: uuidv4(),
                 userName,
                 userEmail,
-                therapistNotionId,
+                therapistNotionId: therapistLookupKey,
                 therapistEmail,
                 therapistName,
                 therapistAvailability: therapistAvailability,
@@ -416,7 +410,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             // Record this request for freeze tracking INSIDE transaction
             // This ensures atomicity - freeze status is updated with the appointment creation
             await therapistBookingStatusService.recordNewRequest(
-              therapistNotionId,
+              therapistLookupKey,
               therapistName,
               userEmail,
               tx // Pass transaction client
@@ -443,18 +437,6 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           },
           'Appointment request created'
         );
-
-        // Sync therapist frozen status to Notion immediately (non-blocking)
-        // Without this, the Notion profile only updates on the 5-minute background sync
-        notionSyncManager.syncSingleTherapist(therapistNotionId).catch((err) => {
-          logger.error({ err, requestId, therapistNotionId }, 'Failed to sync therapist freeze to Notion (non-critical)');
-        });
-
-        // Ensure user exists in Notion users database (non-blocking)
-        // This adds the user on their first booking request, not just after confirmation
-        notionUsersService.ensureUserExists({ email: userEmail, name: userName }).catch((err) => {
-          logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
-        });
 
         // Update voucher tracking: mark voucher as used and reset strike count.
         // Uses upsert to handle edge cases where no tracking record exists yet

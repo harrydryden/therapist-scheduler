@@ -24,7 +24,6 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
-import { notionService } from '../services/notion.service';
 import {
   VALID_APPROACH_TYPES,
   VALID_STYLE_TYPES,
@@ -333,20 +332,8 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
 
         const updated = await prisma.therapist.update({ where: { id }, data });
 
-        // Dual-write active state to Notion. Failures are non-fatal — the
-        // periodic sync reconciles, and Postgres is the source of truth post-
-        // cutover.
-        if (updates.active !== undefined && updates.active !== before.active) {
-          try {
-            await notionService.updateTherapistActive(updated.notionId, updates.active);
-            await notionService.invalidateCache();
-          } catch (err) {
-            logger.warn(
-              { err, therapistId: id, notionId: updated.notionId },
-              'Failed to mirror active flag to Notion (non-fatal)',
-            );
-          }
-        }
+        // The PR 1 dual-write to Notion has been removed: Postgres is the
+        // single source of truth for the active flag post-Notion-deprecation.
 
         logger.info(
           { therapistId: id, fields: Object.keys(updates) },
@@ -404,13 +391,8 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           data: { frozenAt: null, frozenUntil: null },
         });
 
-        // Side effect: invalidate the Notion therapist cache so the public
-        // listing reflects the change without waiting for the sync.
-        try {
-          await notionService.invalidateCache();
-        } catch (err) {
-          logger.warn({ err, therapistId: id }, 'Failed to invalidate Notion cache after unfreeze');
-        }
+        // The previous Notion cache invalidation has been retired —
+        // Postgres reads are direct, no cache to bust.
 
         logger.info(
           { therapistId: id, notionId: therapist.notionId, name: therapist.name, cleared: result.count },

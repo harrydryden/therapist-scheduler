@@ -30,6 +30,9 @@ jest.mock('../utils/database', () => ({
       upsert: jest.fn(),
       update: jest.fn(),
     },
+    user: {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
     $queryRaw: jest.fn(),
   },
 }));
@@ -41,13 +44,6 @@ jest.mock('../services/settings.service', () => ({
 jest.mock('../services/email-processing.service', () => ({
   emailProcessingService: {
     sendEmail: jest.fn(),
-  },
-}));
-
-jest.mock('../services/notion-users.service', () => ({
-  notionUsersService: {
-    findUserByEmail: jest.fn(),
-    updateSubscription: jest.fn(),
   },
 }));
 
@@ -72,7 +68,6 @@ import Fastify from 'fastify';
 import { prisma } from '../utils/database';
 import { getSettingValue } from '../services/settings.service';
 import { emailProcessingService } from '../services/email-processing.service';
-import { notionUsersService } from '../services/notion-users.service';
 import { adminVoucherRoutes } from '../routes/admin-vouchers.routes';
 import { generateVoucherToken } from '../utils/voucher-token';
 
@@ -431,15 +426,12 @@ describe('Admin Voucher Routes', () => {
       expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
     });
 
-    it('re-subscribes in Notion when issuing to previously unsubscribed user', async () => {
+    it('re-subscribes in Postgres when issuing to previously unsubscribed user', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue({
         unsubscribedAt: new Date(),
       });
       (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
-      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue({
-        pageId: 'notion-page-123',
-        email: 'unsub@example.com',
-      });
+      (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
 
       const res = await app.inject({
         method: 'POST',
@@ -452,14 +444,18 @@ describe('Admin Voucher Routes', () => {
       });
 
       expect(res.statusCode).toBe(201);
-      expect(notionUsersService.updateSubscription).toHaveBeenCalledWith('notion-page-123', true);
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({
+        where: { email: 'unsub@example.com' },
+        data: { subscribed: true },
+      });
     });
 
-    it('does not call Notion when user was not previously unsubscribed', async () => {
+    it('does not write subscription when user was not previously unsubscribed', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue({
         unsubscribedAt: null,
       });
       (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
+      (prisma.user.updateMany as jest.Mock).mockClear();
 
       await app.inject({
         method: 'POST',
@@ -471,7 +467,7 @@ describe('Admin Voucher Routes', () => {
         payload: { email: 'user@example.com', sendEmail: false },
       });
 
-      expect(notionUsersService.findUserByEmail).not.toHaveBeenCalled();
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
     });
 
     it('resets strikeCount on upsert update path', async () => {
@@ -534,15 +530,12 @@ describe('Admin Voucher Routes', () => {
   // ---- POST /api/admin/vouchers/:email/resubscribe ----
 
   describe('POST /api/admin/vouchers/:email/resubscribe', () => {
-    it('resubscribes user, resets strikes, issues voucher, and syncs Notion', async () => {
+    it('resubscribes user in Postgres, resets strikes, and issues voucher', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
         makeRecord({ unsubscribedAt: new Date(), strikeCount: 3 })
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
-      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue({
-        pageId: 'notion-page-456',
-        email: 'user@example.com',
-      });
+      (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
 
       const res = await app.inject({
         method: 'POST',
@@ -553,6 +546,8 @@ describe('Admin Voucher Routes', () => {
       expect(res.statusCode).toBe(200);
       const data = res.json().data;
       expect(data.displayCode).toMatch(/^\w+-\w+-\w+$/);
+      // notionUpdated is preserved in the response shape but now reflects
+      // the Postgres write (count > 0).
       expect(data.notionUpdated).toBe(true);
 
       // Check DB update clears unsubscribedAt and resets strikes
@@ -561,7 +556,10 @@ describe('Admin Voucher Routes', () => {
       expect(updateCall.data.unsubscribedAt).toBeNull();
       expect(updateCall.data.lastVoucherToken).toBeTruthy();
 
-      expect(notionUsersService.updateSubscription).toHaveBeenCalledWith('notion-page-456', true);
+      expect(prisma.user.updateMany).toHaveBeenCalledWith({
+        where: { email: 'user@example.com' },
+        data: { subscribed: true },
+      });
     });
 
     it('returns 400 when user is not unsubscribed', async () => {
@@ -579,12 +577,12 @@ describe('Admin Voucher Routes', () => {
       expect(res.json().error).toMatch(/not unsubscribed/i);
     });
 
-    it('still succeeds when Notion update fails', async () => {
+    it('still succeeds when subscription update fails', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
         makeRecord({ unsubscribedAt: new Date() })
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
-      (notionUsersService.findUserByEmail as jest.Mock).mockRejectedValue(new Error('Notion API error'));
+      (prisma.user.updateMany as jest.Mock).mockRejectedValue(new Error('DB error'));
 
       const res = await app.inject({
         method: 'POST',
@@ -601,7 +599,7 @@ describe('Admin Voucher Routes', () => {
         makeRecord({ unsubscribedAt: new Date(), strikeCount: 3 })
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
-      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue(null);
+      (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
       (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
 
       const res = await app.inject({
@@ -622,7 +620,7 @@ describe('Admin Voucher Routes', () => {
         makeRecord({ unsubscribedAt: new Date() })
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
-      (notionUsersService.findUserByEmail as jest.Mock).mockResolvedValue(null);
+      (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
       (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
 
       const res = await app.inject({

@@ -21,8 +21,6 @@ import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { prisma } from '../utils/database';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
-import { notionUsersService, NotionUser } from './notion-users.service';
-import { notionService, InternalTherapist } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue, getSettingValues } from './settings.service';
@@ -30,7 +28,29 @@ import { renderTemplate, TemplateVariables } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { safeJsonParse } from '../utils/json-parser';
-import { WEEKLY_MAILING } from '../constants';
+import { WEEKLY_MAILING, APPOINTMENT_STATUS } from '../constants';
+
+/**
+ * Postgres-backed projection of a mailing-list user. Replaces the
+ * NotionUser type the service used to consume.
+ */
+interface MailingListUser {
+  /** Postgres user uuid — used for the unsubscribe write. */
+  id: string;
+  email: string;
+  name: string;
+}
+
+/**
+ * Postgres-backed projection of a therapist. Replaces the InternalTherapist
+ * type the service used to consume from notion.service.
+ */
+interface MailingListTherapist {
+  /** Public handle: notionId for legacy rows, Postgres uuid for newer rows. */
+  id: string;
+  name: string;
+  areasOfFocus: string[];
+}
 
 // Check interval: every hour
 const CHECK_INTERVAL_MS = WEEKLY_MAILING.CHECK_INTERVAL_MS;
@@ -390,16 +410,26 @@ class WeeklyMailingListService {
   }
 
   /**
-   * Get all currently available therapists (active and not frozen/booked)
+   * Get all currently available therapists (active and not frozen/booked).
+   * Reads from Postgres now that Notion is no longer authoritative.
    */
-  private async getAvailableTherapists(): Promise<InternalTherapist[]> {
-    const therapists = await notionService.fetchTherapists();
-    if (therapists.length === 0) return [];
-
-    const unavailableIds = await therapistBookingStatusService.getUnavailableTherapistIds();
+  private async getAvailableTherapists(): Promise<MailingListTherapist[]> {
+    const [rows, unavailableIds] = await Promise.all([
+      prisma.therapist.findMany({
+        where: { active: true },
+        select: { id: true, notionId: true, name: true, areasOfFocus: true },
+      }),
+      therapistBookingStatusService.getUnavailableTherapistIds(),
+    ]);
     const unavailableSet = new Set(unavailableIds);
 
-    return therapists.filter(t => !unavailableSet.has(t.id));
+    return rows
+      .map((t) => ({
+        id: t.notionId ?? t.id,
+        name: t.name,
+        areasOfFocus: t.areasOfFocus,
+      }))
+      .filter((t) => !unavailableSet.has(t.id));
   }
 
   /**
@@ -408,7 +438,7 @@ class WeeklyMailingListService {
    * call recordKnownTherapists() after a successful send so a failing batch
    * doesn't silently mark new therapists as "known".
    */
-  private async getNewTherapists(availableTherapists: InternalTherapist[]): Promise<InternalTherapist[]> {
+  private async getNewTherapists(availableTherapists: MailingListTherapist[]): Promise<MailingListTherapist[]> {
     try {
       const storedJson = await redis.get(WEEKLY_MAILING.KNOWN_THERAPISTS_KEY);
       const knownIdsArray = safeJsonParse<string[]>(storedJson, [], { context: 'known-therapists' });
@@ -424,7 +454,7 @@ class WeeklyMailingListService {
    * Persist the current available therapist IDs as the new "known" set.
    * Called after a send batch so the next run only flags genuinely new arrivals.
    */
-  private async recordKnownTherapists(availableTherapists: InternalTherapist[]): Promise<void> {
+  private async recordKnownTherapists(availableTherapists: MailingListTherapist[]): Promise<void> {
     try {
       const currentIds = availableTherapists.map(t => t.id);
       await redis.set(
@@ -442,7 +472,7 @@ class WeeklyMailingListService {
    * Build the "new therapists" section for the weekly email.
    * Returns empty string if no new therapists.
    */
-  private buildNewTherapistsSection(newTherapists: InternalTherapist[]): string {
+  private buildNewTherapistsSection(newTherapists: MailingListTherapist[]): string {
     if (newTherapists.length === 0) return '';
 
     const therapistLines = newTherapists.map(t => {
@@ -472,11 +502,42 @@ class WeeklyMailingListService {
   }
 
   /**
-   * Get users eligible for weekly mailing
+   * Get users eligible for the weekly mailing: subscribed and with no
+   * confirmed upcoming appointment. Reads from Postgres now that the
+   * Notion users database has been retired.
    */
-  private async getEligibleUsers(): Promise<NotionUser[]> {
+  private async getEligibleUsers(): Promise<MailingListUser[]> {
     try {
-      return await notionUsersService.getEligibleMailingListUsers();
+      const now = new Date();
+
+      // Users with at least one upcoming confirmed appointment (we exclude
+      // these from the mailing list — they don't need a voucher).
+      const usersWithUpcoming = await prisma.appointmentRequest.findMany({
+        where: {
+          status: APPOINTMENT_STATUS.CONFIRMED,
+          confirmedDateTimeParsed: { gt: now },
+          userId: { not: null },
+        },
+        select: { userId: true },
+        distinct: ['userId'],
+      });
+      const excludedIds = usersWithUpcoming
+        .map((a) => a.userId)
+        .filter((id): id is string => id !== null);
+
+      const rows = await prisma.user.findMany({
+        where: {
+          subscribed: true,
+          ...(excludedIds.length > 0 ? { id: { notIn: excludedIds } } : {}),
+        },
+        select: { id: true, email: true, name: true },
+      });
+
+      return rows.map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.name ?? 'there',
+      }));
     } catch (error) {
       logger.error({ error }, 'Failed to get eligible mailing list users');
       return [];
@@ -525,7 +586,7 @@ class WeeklyMailingListService {
    * - After N consecutive expired codes: auto-unsubscribe with final notice
    */
   private async sendWeeklyEmail(
-    user: NotionUser,
+    user: MailingListUser,
     emailSettings: EmailSettings,
     newTherapistsSection: string,
   ): Promise<void> {
@@ -602,7 +663,7 @@ class WeeklyMailingListService {
    * strike increment/reset is atomic with the new-voucher persist.
    */
   private async sendNewVoucherEmail(
-    user: NotionUser,
+    user: MailingListUser,
     emailSettings: EmailSettings,
     unsubscribeUrl: string,
     newTherapistsSection: string,
@@ -643,7 +704,7 @@ class WeeklyMailingListService {
    * shared by the no-voucher, reminder, and new-voucher flows.
    */
   private async renderAndSend(
-    user: NotionUser,
+    user: MailingListUser,
     emailSettings: EmailSettings,
     sections: {
       webAppUrl: string;
@@ -666,7 +727,7 @@ class WeeklyMailingListService {
    * Send final notice email and auto-unsubscribe the user
    */
   private async sendFinalNoticeAndUnsubscribe(
-    user: NotionUser,
+    user: MailingListUser,
     emailSettings: EmailSettings,
     unsubscribeUrl: string,
     tracking: { id: string; strikeCount: number },
@@ -694,20 +755,22 @@ class WeeklyMailingListService {
       },
     });
 
-    // Unsubscribe from mailing list in Notion
-    if (user.pageId) {
-      try {
-        await notionUsersService.updateSubscription(user.pageId, false);
-        logger.info(
-          { email: emailLower, strikeCount: newStrikeCount },
-          'Auto-unsubscribed user after consecutive expired vouchers'
-        );
-      } catch (error) {
-        logger.error(
-          { error, email: emailLower },
-          'Failed to auto-unsubscribe user in Notion (voucher tracking updated)'
-        );
-      }
+    // Unsubscribe from the mailing list. Postgres is now the source of
+    // truth — the previous Notion mirror has been retired.
+    try {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { subscribed: false },
+      });
+      logger.info(
+        { email: emailLower, strikeCount: newStrikeCount },
+        'Auto-unsubscribed user after consecutive expired vouchers'
+      );
+    } catch (error) {
+      logger.error(
+        { error, email: emailLower },
+        'Failed to auto-unsubscribe user (voucher tracking updated)'
+      );
     }
   }
 }

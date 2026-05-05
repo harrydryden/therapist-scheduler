@@ -7,7 +7,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { logger } from '../utils/logger';
 import { Errors } from '../utils/response';
-import { notionUsersService } from '../services/notion-users.service';
 import { extractEmailFromToken } from '../utils/unsubscribe-token';
 import { prisma } from '../utils/database';
 
@@ -59,27 +58,33 @@ export async function unsubscribeRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        // Find user in Notion
-        const user = await notionUsersService.findUserByEmail(email);
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // Find user in Postgres (the source of truth post-Notion-deprecation).
+        const user = await prisma.user.findUnique({
+          where: { email: normalizedEmail },
+          select: { id: true, subscribed: true },
+        });
 
         if (!user) {
-          // User doesn't exist in Notion - still return success (idempotent)
+          // User doesn't exist - still return success (idempotent)
           logger.warn({ requestId, email }, 'Unsubscribe for non-existent user');
           return returnSuccessPage(reply);
         }
 
-        // Check if already unsubscribed
         if (!user.subscribed) {
           logger.info({ requestId, email }, 'User already unsubscribed');
           return returnSuccessPage(reply);
         }
 
-        // Update subscription status
-        await notionUsersService.updateSubscription(user.pageId, false);
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { subscribed: false },
+        });
 
         // Sync voucher tracking state (non-blocking)
         prisma.voucherTracking.update({
-          where: { id: email.toLowerCase() },
+          where: { id: normalizedEmail },
           data: { unsubscribedAt: new Date() },
         }).catch((err) => {
           // Record may not exist if user never received a voucher

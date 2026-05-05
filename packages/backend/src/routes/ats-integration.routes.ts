@@ -20,7 +20,6 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
-import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
@@ -430,22 +429,19 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        // Resolve therapist — try Notion ID first, then internal DB ID, then email
-        let therapist = await notionService.getTherapist(therapistId);
+        // Resolve therapist by any of the four supported identifiers:
+        // notionId (legacy public handle), Postgres uuid, odId, or email.
+        // All look-ups happen against Postgres now that Notion is no
+        // longer authoritative.
+        const therapist =
+          (await prisma.therapist.findFirst({ where: { notionId: therapistId } })) ??
+          (await prisma.therapist.findUnique({ where: { id: therapistId } })) ??
+          (await prisma.therapist.findFirst({ where: { odId: therapistId } })) ??
+          (await prisma.therapist.findFirst({
+            where: { email: { equals: therapistId, mode: 'insensitive' } },
+          }));
 
-        if (!therapist) {
-          // Try looking up by internal therapist entity — sequential for index efficiency
-          const dbTherapist =
-            await prisma.therapist.findUnique({ where: { id: therapistId } }) ??
-            await prisma.therapist.findFirst({ where: { odId: therapistId } }) ??
-            await prisma.therapist.findFirst({ where: { email: { equals: therapistId, mode: 'insensitive' } } });
-
-          if (dbTherapist) {
-            therapist = await notionService.getTherapist(dbTherapist.notionId);
-          }
-        }
-
-        if (!therapist) {
+        if (!therapist || !therapist.active) {
           return Errors.notFound(reply, 'Therapist');
         }
 
@@ -455,7 +451,10 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
 
         const therapistEmail = therapist.email;
         const therapistName = therapist.name;
-        const therapistNotionId = therapist.id;
+        // Public handle for the booking-status row and the AppointmentRequest
+        // therapistNotionId column. Legacy rows have a notionId; post-Notion
+        // rows fall back to the Postgres uuid.
+        const therapistNotionId = therapist.notionId ?? therapist.id;
 
         // Check therapist availability
         const availabilityStatus = await therapistBookingStatusService.canAcceptNewRequest(
@@ -472,13 +471,10 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           );
         }
 
-        // Get or create entities first — Postgres carries the authoritative
-        // availability now, so we read it from the therapist entity rather
-        // than the Notion-fetched profile.
-        const [userEntity, therapistEntity] = await Promise.all([
-          getOrCreateUser(userEmail, userName),
-          getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName),
-        ]);
+        // We already have the resolved Therapist row above; only the user
+        // side needs get-or-create.
+        const userEntity = await getOrCreateUser(userEmail, userName);
+        const therapistEntity = therapist;
 
         // Parse availability from Postgres
         const parsedAvailability = parseTherapistAvailability(therapistEntity.availability);

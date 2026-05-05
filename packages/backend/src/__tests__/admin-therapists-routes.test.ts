@@ -37,13 +37,6 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
-jest.mock('../services/notion.service', () => ({
-  notionService: {
-    updateTherapistActive: jest.fn(),
-    invalidateCache: jest.fn(),
-  },
-}));
-
 jest.mock('../utils/redis', () => ({
   cacheManager: {
     getString: jest.fn().mockResolvedValue(null),
@@ -59,7 +52,6 @@ jest.mock('../utils/redis', () => ({
 
 import Fastify, { FastifyInstance } from 'fastify';
 import { prisma } from '../utils/database';
-import { notionService } from '../services/notion.service';
 import { adminTherapistRoutes } from '../routes/admin-therapists.routes';
 
 // ============================================
@@ -319,10 +311,9 @@ describe('admin therapist routes', () => {
         bio: 'New bio',
         approach: ['Mindfulness', 'Person-Centred'],
       });
-      expect(notionService.updateTherapistActive).not.toHaveBeenCalled();
     });
 
-    it('dual-writes active flag to Notion when it changes', async () => {
+    it('updates active flag in Postgres', async () => {
       (prisma.therapist.findUnique as jest.Mock).mockResolvedValue(makeTherapist({ active: true }));
       (prisma.therapist.update as jest.Mock).mockResolvedValue(makeTherapist({ active: false }));
 
@@ -333,14 +324,13 @@ describe('admin therapist routes', () => {
         payload: { active: false },
       });
 
-      expect(notionService.updateTherapistActive).toHaveBeenCalledWith('notion-page-1', false);
-      expect(notionService.invalidateCache).toHaveBeenCalled();
+      const updateCall = (prisma.therapist.update as jest.Mock).mock.calls[0][0];
+      expect(updateCall.data.active).toBe(false);
     });
 
-    it('Notion failure does not fail the request', async () => {
+    it('returns 200 even when prisma update succeeds with empty result', async () => {
       (prisma.therapist.findUnique as jest.Mock).mockResolvedValue(makeTherapist({ active: true }));
       (prisma.therapist.update as jest.Mock).mockResolvedValue(makeTherapist({ active: false }));
-      (notionService.updateTherapistActive as jest.Mock).mockRejectedValue(new Error('Notion 503'));
 
       const res = await app.inject({
         method: 'PATCH',

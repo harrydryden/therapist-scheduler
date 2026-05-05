@@ -1,11 +1,8 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { prisma } from '../utils/database';
-import { getOrCreateTherapist } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { RATE_LIMITS } from '../constants';
-import { adminAuthHook } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import type { TherapistAvailability } from '@therapist-scheduler/shared';
 
@@ -13,6 +10,13 @@ interface GetTherapistParams {
   id: string;
 }
 
+/**
+ * Public therapist routes. Reads come exclusively from Postgres now that
+ * Notion is no longer authoritative (see Notion deprecation PR 2). The
+ * `id` returned to the frontend is the therapist's `notionId` for legacy
+ * rows and the Postgres uuid for newer rows that never had a Notion page;
+ * the booking flow accepts either.
+ */
 export async function therapistRoutes(fastify: FastifyInstance) {
   // GET /api/therapists - List all active therapists available for booking
   fastify.get(
@@ -30,87 +34,53 @@ export async function therapistRoutes(fastify: FastifyInstance) {
     logger.info({ requestId }, 'Fetching all therapists');
 
     try {
-      // Fetch Notion therapists (for static profile data), unavailability
-      // status, and the Postgres records (which carry availability/country/
-      // ingestion date — Postgres is the source of truth for these now).
-      const [therapists, unavailableIds, therapistRecords] = await Promise.all([
-        notionService.fetchTherapists(),
-        therapistBookingStatusService.getUnavailableTherapistIds(),
+      // Postgres is now the single source of truth. Fetch active therapists
+      // and compute the unavailable set in parallel; we filter out any
+      // therapist whose booking status flags them as frozen/confirmed.
+      const [therapists, unavailableNotionIds] = await Promise.all([
         prisma.therapist.findMany({
-          select: { notionId: true, ingestedAt: true, country: true, availability: true },
+          where: { active: true },
+          orderBy: { ingestedAt: 'asc' }, // longest on platform first
         }),
+        therapistBookingStatusService.getUnavailableTherapistIds(),
       ]);
-      const unavailableSet = new Set(unavailableIds);
+      const unavailableSet = new Set(unavailableNotionIds);
 
-      // Build maps keyed on Notion ID for quick join
-      const ingestedAtMap = new Map<string, Date>();
-      const countryMap = new Map<string, string>();
-      const availabilityMap = new Map<string, TherapistAvailability | null>();
       const now = new Date();
-      for (const record of therapistRecords) {
-        ingestedAtMap.set(record.notionId, record.ingestedAt ?? now);
-        countryMap.set(record.notionId, record.country);
-        availabilityMap.set(record.notionId, (record.availability as unknown) as TherapistAvailability | null);
-      }
 
-      // Lazily create Prisma records for Notion therapists missing from the DB
-      // (e.g. therapists added to Notion before ingestion tracking was introduced)
-      const missingTherapists = therapists.filter((t) => !ingestedAtMap.has(t.id));
-      if (missingTherapists.length > 0) {
-        await Promise.allSettled(
-          missingTherapists.map(async (t) => {
-            try {
-              const record = await getOrCreateTherapist(t.id, t.email, t.name);
-              ingestedAtMap.set(t.id, record.ingestedAt ?? now);
-              countryMap.set(t.id, record.country);
-              availabilityMap.set(t.id, (record.availability as unknown) as TherapistAvailability | null);
-            } catch (err) {
-              logger.warn({ err, notionId: t.id }, 'Failed to backfill Prisma therapist record');
-              ingestedAtMap.set(t.id, now);
-            }
-          })
-        );
-      }
-
-      logger.info(
-        { requestId, unavailableCount: unavailableIds.length },
-        'Filtering out unavailable therapists'
-      );
-
-      // Filter out unavailable therapists and transform for API response
       // NOTE: Email is intentionally NOT included in public API response for privacy
       const response = therapists
-        .filter((t) => !unavailableSet.has(t.id))
+        .filter((t) => {
+          // therapistBookingStatus is keyed on the legacy notionId. Rows
+          // without a notionId (post-Notion ingestions) are never in the
+          // unavailable set, so they pass through unconditionally.
+          if (t.notionId && unavailableSet.has(t.notionId)) return false;
+          return true;
+        })
         .map((t) => {
-          const availability = availabilityMap.get(t.id) ?? null;
+          const availability = (t.availability as unknown) as TherapistAvailability | null;
           return {
-            id: t.id,
+            id: t.notionId ?? t.id,
             name: t.name,
             bio: t.bio,
-            // Category system
             approach: t.approach,
             style: t.style,
             areasOfFocus: t.areasOfFocus,
-            // email intentionally omitted - not public information
             availability,
             active: t.active,
             availabilitySummary: formatAvailabilitySummary(availability),
             profileImage: t.profileImage,
             bookingLink: t.bookingLink,
-            acceptingBookings: true, // Only available therapists are in this list
-            // Country code drives flag emoji on the card and timezone handling.
-            // Defaults to 'UK' when no Prisma record yet exists.
-            country: countryMap.get(t.id) ?? 'UK',
+            acceptingBookings: true,
+            country: t.country,
+            ingestedAt: (t.ingestedAt ?? now).toISOString(),
           };
-        })
-        // Sort by ingestion date: longest on platform first (oldest date first)
-        // Therapists without a Prisma record are treated as added today
-        .sort((a, b) => {
-          const dateA = ingestedAtMap.get(a.id) ?? now;
-          const dateB = ingestedAtMap.get(b.id) ?? now;
-          return dateA.getTime() - dateB.getTime();
         });
 
+      logger.info(
+        { requestId, count: response.length, unavailableCount: unavailableNotionIds.length },
+        'Returned therapists',
+      );
       return sendSuccess(reply, response, { count: response.length });
     } catch (err) {
       logger.error({ err, requestId }, 'Failed to fetch therapists');
@@ -119,6 +89,8 @@ export async function therapistRoutes(fastify: FastifyInstance) {
   });
 
   // GET /api/therapists/:id - Get single therapist details
+  // `id` is whatever the public list returned: notionId for legacy rows,
+  // Postgres uuid for post-Notion rows.
   fastify.get<{ Params: GetTherapistParams }>(
     '/api/therapists/:id',
     {
@@ -135,66 +107,48 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       logger.info({ requestId, therapistId: id }, 'Fetching single therapist');
 
       try {
-        // Fetch Notion profile, booking status, and the Postgres record
-        // (country + availability) in parallel.
-        const [therapist, availabilityStatus, prismaRecord] = await Promise.all([
-          notionService.getTherapist(id),
-          therapistBookingStatusService.canAcceptNewRequest(id, ''),
-          prisma.therapist.findUnique({
-            where: { notionId: id },
-            select: { country: true, availability: true },
-          }),
-        ]);
+        // Match by either notionId (legacy) or Postgres id (post-Notion).
+        const therapist = await prisma.therapist.findFirst({
+          where: { OR: [{ notionId: id }, { id }] },
+        });
 
-        if (!therapist) {
+        if (!therapist || !therapist.active) {
           return Errors.notFound(reply, 'Therapist');
         }
 
-        const acceptingBookings = availabilityStatus.canAcceptNewRequests;
-        const availability = ((prismaRecord?.availability as unknown) as TherapistAvailability | null) ?? null;
+        // Use the legacy notionId for the booking-status lookup when present;
+        // post-Notion therapists fall back to Postgres id (booking-status
+        // rows for new therapists are keyed on the same value the public
+        // list returned).
+        const lookupKey = therapist.notionId ?? therapist.id;
+        const availabilityStatus = await therapistBookingStatusService.canAcceptNewRequest(
+          lookupKey,
+          '',
+        );
 
-        // Full response for detail view
-        // NOTE: Email is intentionally NOT included in public API response for privacy
+        const acceptingBookings = availabilityStatus.canAcceptNewRequests;
+        const availability = (therapist.availability as unknown) as TherapistAvailability | null;
+
         const response = {
-          id: therapist.id,
+          id: therapist.notionId ?? therapist.id,
           name: therapist.name,
           bio: therapist.bio,
-          // Category system
           approach: therapist.approach,
           style: therapist.style,
           areasOfFocus: therapist.areasOfFocus,
-          // email intentionally omitted - not public information
           availability,
           active: therapist.active,
           availabilitySummary: formatAvailabilitySummary(availability),
           acceptingBookings,
           profileImage: therapist.profileImage,
           bookingLink: therapist.bookingLink,
-          country: prismaRecord?.country ?? 'UK',
+          country: therapist.country,
         };
 
         return sendSuccess(reply, response);
       } catch (err) {
         logger.error({ err, requestId, therapistId: id }, 'Failed to fetch therapist');
         return Errors.internal(reply, 'Failed to fetch therapist');
-      }
-    }
-  );
-
-  // POST /api/therapists/invalidate-cache - Force cache refresh (admin endpoint)
-  fastify.post(
-    '/api/therapists/invalidate-cache',
-    { ...adminAuthHook },
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      const requestId = request.id;
-      logger.info({ requestId }, 'Invalidating therapist cache');
-
-      try {
-        await notionService.invalidateCache();
-        return sendSuccess(reply, null, { message: 'Cache invalidated' });
-      } catch (err) {
-        logger.error({ err, requestId }, 'Failed to invalidate cache');
-        return Errors.internal(reply, 'Failed to invalidate cache');
       }
     }
   );

@@ -13,14 +13,11 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { parseConfirmedDateTime } from '../utils/date';
 import { AppointmentStatus, APPOINTMENT_STATUS, RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
-import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { notionSyncManager } from '../services/notion-sync-manager.service';
-import { notionUsersService } from '../services/notion-users.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
-import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
+import { getOrCreateUser } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { JustinTimeService } from '../services/justin-time.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -66,30 +63,29 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
       const { userEmail, userName, therapistNotionId, stage, confirmedDateTime, adminId, notes } = validation.data;
 
       try {
-        // 1. Fetch therapist from Notion (trusted source for email and name)
-        const therapist = await notionService.getTherapist(therapistNotionId);
-        if (!therapist) {
+        // 1. Resolve therapist from Postgres (the source of truth post-Notion-deprecation).
+        // therapistNotionId is the public handle: legacy notionId or post-Notion uuid.
+        const therapistEntity = await prisma.therapist.findFirst({
+          where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        });
+        if (!therapistEntity || !therapistEntity.active) {
           return Errors.notFound(reply, 'Therapist');
         }
 
-        const therapistEmail = therapist.email;
-        const therapistName = therapist.name;
+        const therapistEmail = therapistEntity.email;
+        const therapistName = therapistEntity.name;
 
         if (!therapistEmail || therapistEmail.trim() === '') {
-          return Errors.badRequest(reply, 'Therapist has no email configured in Notion');
+          return Errors.badRequest(reply, 'Therapist has no email configured');
         }
 
-        // 2. Get or create User and Therapist entities with unique IDs
-        const [userEntity, therapistEntity] = await Promise.all([
-          getOrCreateUser(userEmail, userName),
-          getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName),
-        ]);
+        // 2. Get or create the user; the therapist is already resolved above.
+        const userEntity = await getOrCreateUser(userEmail, userName);
 
         // 3. Parse confirmed date/time
         const confirmedDateTimeParsed = parseConfirmedDateTime(confirmedDateTime);
 
-        // 4. Parse therapist availability from Postgres (source of truth) —
-        // therapistEntity is already loaded above by getOrCreateTherapist.
+        // 4. Parse therapist availability from Postgres
         const parsedAvailability = parseTherapistAvailability(therapistEntity.availability);
         const therapistAvailability = parsedAvailability ? JSON.parse(JSON.stringify(parsedAvailability)) : null;
 
@@ -162,16 +158,6 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
           },
           'Admin appointment created, walking through lifecycle transitions'
         );
-
-        // Sync therapist frozen status to Notion immediately (non-blocking)
-        notionSyncManager.syncSingleTherapist(therapistNotionId).catch((err) => {
-          logger.error({ err, requestId, therapistNotionId }, 'Failed to sync therapist freeze to Notion (non-critical)');
-        });
-
-        // Ensure user exists in Notion users database (non-blocking)
-        notionUsersService.ensureUserExists({ email: userEmail, name: userName }).catch((err) => {
-          logger.error({ err, requestId, userEmail }, 'Failed to ensure user exists in Notion (non-critical)');
-        });
 
         // Send Slack notification for new appointment request (non-blocking, respects settings)
         getSettingValue<boolean>('notifications.slack.requested')

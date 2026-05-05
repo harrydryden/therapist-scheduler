@@ -36,7 +36,6 @@ import { atsIntegrationRoutes } from './routes/ats-integration.routes';
 import { emailWebhookRoutes } from './routes/email-webhook.routes';
 
 // --- Services ---
-import { notionService } from './services/notion.service';
 import { staleCheckService } from './services/stale-check.service';
 import { emailPollingService } from './services/email-polling.service';
 import { gmailWatchService } from './services/gmail-watch.service';
@@ -45,7 +44,7 @@ import { postBookingFollowupService } from './services/post-booking-followup.ser
 import { weeklyMailingListService } from './services/weekly-mailing-list.service';
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { workReportService } from './services/work-report.service';
-import { notionSyncManager } from './services/notion-sync-manager.service';
+import { appointmentLifecycleTickService } from './services/appointment-lifecycle-tick.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
@@ -441,7 +440,7 @@ async function start() {
       slackWeeklySummaryService.stop();
       workReportService.stop();
       therapistNudgeService.stop();
-      notionSyncManager.stop();
+      appointmentLifecycleTickService.stop();
 
       // Stop side-effect retries and pending email processing
       sideEffectRetryService.stop();
@@ -563,7 +562,7 @@ async function start() {
       { name: 'sideEffectRetryService', service: sideEffectRetryService, critical: false, async: false },
       { name: 'postBookingFollowupService', service: postBookingFollowupService, critical: false, async: false },
       { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
-      { name: 'notionSyncManager', service: notionSyncManager, critical: false, async: false },
+      { name: 'appointmentLifecycleTickService', service: appointmentLifecycleTickService, critical: false, async: false },
       { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
       { name: 'workReportService', service: workReportService, critical: false, async: false },
       { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },

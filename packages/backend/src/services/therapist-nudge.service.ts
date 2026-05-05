@@ -5,7 +5,6 @@ import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
 import { renderTemplate } from '../utils/email-templates';
 import { ACTIVE_STATUSES } from '../constants';
-import { notionService } from './notion.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 
 // Check every 6 hours whether any therapists are due a nudge
@@ -111,8 +110,14 @@ class TherapistNudgeService {
         select: { therapistNotionId: true },
         distinct: ['therapistNotionId'],
       }),
-      notionService.fetchTherapists().catch((err) => {
-        logger.error({ err }, 'Failed to fetch active therapists from Notion for nudge filtering — aborting nudge run');
+      // Active therapist set (post-Notion-deprecation: read from Postgres).
+      // Returns null on error so the run aborts cleanly rather than nudging
+      // therapists who may have been deactivated.
+      prisma.therapist.findMany({
+        where: { active: true },
+        select: { id: true, notionId: true },
+      }).catch((err) => {
+        logger.error({ err }, 'Failed to fetch active therapists for nudge filtering — aborting nudge run');
         return null;
       }),
       therapistBookingStatusService.getUnavailableTherapistIds(),
@@ -128,7 +133,14 @@ class TherapistNudgeService {
     const agentFirstName = agentName.split(' ')[0];
 
     const excludedNotionIds = new Set(therapistsWithAppointments.map(a => a.therapistNotionId));
-    const activeNotionIds = new Set(activeTherapists.map(t => t.id));
+    // The public handle is notionId for legacy rows and the Postgres uuid
+    // for post-Notion ingestions. Compose the active-set from both fields
+    // so the filter below still excludes inactive therapists either way.
+    const activeNotionIds = new Set<string>();
+    for (const t of activeTherapists) {
+      if (t.notionId) activeNotionIds.add(t.notionId);
+      activeNotionIds.add(t.id);
+    }
     const unavailableNotionIds = new Set(unavailableIds);
 
     // Find eligible therapists:
@@ -158,13 +170,19 @@ class TherapistNudgeService {
 
     // Filter out:
     //  - therapists with active/completed appointments (already have a thread)
-    //  - therapists not active in Notion (inactive therapists)
+    //  - therapists not active (deactivated)
     //  - therapists that are frozen/unavailable (have active booking threads)
-    const eligible = candidates.filter(t =>
-      !excludedNotionIds.has(t.notionId) &&
-      activeNotionIds.has(t.notionId) &&
-      !unavailableNotionIds.has(t.notionId)
-    );
+    //
+    // The public handle is notionId for legacy rows and the Postgres uuid
+    // for post-Notion ingestions; check both against each set.
+    const eligible = candidates.filter(t => {
+      const handle = t.notionId ?? t.id;
+      return (
+        !excludedNotionIds.has(handle) &&
+        activeNotionIds.has(handle) &&
+        !unavailableNotionIds.has(handle)
+      );
+    });
 
     if (eligible.length === 0) {
       logger.debug('No therapists due for nudge email');

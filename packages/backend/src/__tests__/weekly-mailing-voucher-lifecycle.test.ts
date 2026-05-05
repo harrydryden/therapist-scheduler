@@ -39,6 +39,16 @@ jest.mock('../utils/database', () => ({
       upsert: jest.fn(),
       update: jest.fn(),
     },
+    user: {
+      findMany: jest.fn(),
+      update: jest.fn(),
+    },
+    therapist: {
+      findMany: jest.fn(),
+    },
+    appointmentRequest: {
+      findMany: jest.fn(),
+    },
   },
 }));
 
@@ -60,20 +70,6 @@ jest.mock('../utils/redis', () => {
 jest.mock('../services/settings.service', () => ({
   getSettingValue: jest.fn(),
   getSettingValues: jest.fn(),
-}));
-
-jest.mock('../services/notion-users.service', () => ({
-  notionUsersService: {
-    getEligibleMailingListUsers: jest.fn(),
-    findUserByEmail: jest.fn(),
-    updateSubscription: jest.fn(),
-  },
-}));
-
-jest.mock('../services/notion.service', () => ({
-  notionService: {
-    fetchTherapists: jest.fn(),
-  },
 }));
 
 jest.mock('../services/therapist-booking-status.service', () => ({
@@ -105,8 +101,6 @@ jest.mock('../utils/locked-task-runner', () => ({
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
 import { getSettingValue, getSettingValues } from '../services/settings.service';
-import { notionUsersService } from '../services/notion-users.service';
-import { notionService } from '../services/notion.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { emailProcessingService } from '../services/email-processing.service';
 
@@ -119,11 +113,15 @@ import { weeklyMailingListService } from '../services/weekly-mailing-list.servic
 
 const testRedis = redis as unknown as { __store: Map<string, string> };
 
-const testUser = { email: 'alice@example.com', name: 'Alice', pageId: 'notion-page-1' };
+// MailingListUser shape (id is the Postgres user uuid post-Notion-deprecation).
+const testUser = { id: 'user-1', email: 'alice@example.com', name: 'Alice' };
 
+// Postgres Therapist rows as returned by prisma.therapist.findMany. The
+// service maps these into MailingListTherapist instances internally; we only
+// need the columns the service selects: id, notionId, name, areasOfFocus.
 const testTherapists = [
-  { id: 'therapist-1', name: 'Dr Smith', areasOfFocus: ['anxiety', 'stress'], active: true, frozen: false, email: 'smith@test.com', bio: '', approach: [], style: [], odId: null, availability: null, profileImage: null, bookingLink: null },
-  { id: 'therapist-2', name: 'Dr Jones', areasOfFocus: ['relationships'], active: true, frozen: false, email: 'jones@test.com', bio: '', approach: [], style: [], odId: null, availability: null, profileImage: null, bookingLink: null },
+  { id: 'therapist-1', notionId: 'therapist-1', name: 'Dr Smith', areasOfFocus: ['anxiety', 'stress'] },
+  { id: 'therapist-2', notionId: 'therapist-2', name: 'Dr Jones', areasOfFocus: ['relationships'] },
 ];
 
 function setupSettings(overrides: Record<string, unknown> = {}) {
@@ -187,9 +185,14 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     testRedis.__store.clear();
     setupSettings();
 
-    // Default: one eligible user, service enabled, therapists available
-    (notionUsersService.getEligibleMailingListUsers as jest.Mock).mockResolvedValue([testUser]);
-    (notionService.fetchTherapists as jest.Mock).mockResolvedValue(testTherapists);
+    // Default: one eligible user, service enabled, therapists available.
+    // Postgres-backed wiring: user.findMany returns subscribed users (after
+    // appointmentRequest.findMany filters out anyone with a pending booking),
+    // therapist.findMany returns active therapists.
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([testUser]);
+    (prisma.user.update as jest.Mock).mockResolvedValue({});
+    (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.therapist.findMany as jest.Mock).mockResolvedValue(testTherapists);
     (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
     (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
     (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
@@ -320,7 +323,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
         strikeCount: 2, // maxStrikes is 3, so incrementing to 3 triggers unsub
       })
     );
-    (notionUsersService.updateSubscription as jest.Mock).mockResolvedValue(undefined);
+    (prisma.user.update as jest.Mock).mockResolvedValue({});
 
     await weeklyMailingListService.forceSend(true);
 
@@ -340,8 +343,12 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     // Should NOT issue a new voucher
     expect(prisma.voucherTracking.upsert).not.toHaveBeenCalled();
 
-    // Should unsubscribe in Notion
-    expect(notionUsersService.updateSubscription).toHaveBeenCalledWith('notion-page-1', false);
+    // Should unsubscribe by writing subscribed=false in Postgres
+    // (the Notion mirror was retired in PR 2 of the deprecation).
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: testUser.id },
+      data: { subscribed: false },
+    });
   });
 
   // ---- Non-voucher mode ----
@@ -369,8 +376,8 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
   // ---- Multiple users ----
 
   it('processes multiple users independently', async () => {
-    const user2 = { email: 'bob@example.com', name: 'Bob', pageId: 'notion-page-2' };
-    (notionUsersService.getEligibleMailingListUsers as jest.Mock).mockResolvedValue([testUser, user2]);
+    const user2 = { id: 'user-2', email: 'bob@example.com', name: 'Bob' };
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([testUser, user2]);
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
 
     const result = await weeklyMailingListService.forceSend(true);
@@ -384,8 +391,8 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
   // ---- Partial failure ----
 
   it('continues sending to other users when one fails', async () => {
-    const user2 = { email: 'bob@example.com', name: 'Bob', pageId: 'notion-page-2' };
-    (notionUsersService.getEligibleMailingListUsers as jest.Mock).mockResolvedValue([testUser, user2]);
+    const user2 = { id: 'user-2', email: 'bob@example.com', name: 'Bob' };
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([testUser, user2]);
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
     (emailProcessingService.sendEmail as jest.Mock)
       .mockRejectedValueOnce(new Error('SMTP error'))

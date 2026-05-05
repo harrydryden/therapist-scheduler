@@ -19,7 +19,6 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, APPOINTMENT_STATUS } from '../constants';
-import { notionUsersService } from '../services/notion-users.service';
 
 const listUsersSchema = z.object({
   search: z.string().trim().max(255).optional(),
@@ -268,27 +267,8 @@ export async function adminUserRoutes(fastify: FastifyInstance) {
           data: updates,
         });
 
-        // Dual-write subscribed to Notion if it changed and Notion is wired
-        // up. Failures here are non-fatal — the next periodic sync will
-        // reconcile, and the Postgres write is the source of truth going
-        // forward.
-        if (
-          updates.subscribed !== undefined &&
-          updates.subscribed !== before.subscribed &&
-          notionUsersService.isConfigured()
-        ) {
-          try {
-            const notionUser = await notionUsersService.findUserByEmail(updated.email);
-            if (notionUser) {
-              await notionUsersService.updateSubscription(notionUser.pageId, updates.subscribed);
-            }
-          } catch (err) {
-            logger.warn(
-              { err, userId: id, email: updated.email },
-              'Failed to mirror subscription change to Notion (non-fatal)',
-            );
-          }
-        }
+        // The PR 1 dual-write to Notion has been removed: Postgres is the
+        // single source of truth for `subscribed` post-Notion-deprecation.
 
         logger.info(
           { userId: id, fields: Object.keys(updates) },

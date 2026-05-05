@@ -18,7 +18,6 @@ import {
 import { prisma } from '../utils/database';
 import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
-import { notionSyncManager } from './notion-sync-manager.service';
 
 // Lock settings
 const LOCK_KEY = 'side-effect-retry:processing-lock';
@@ -283,20 +282,18 @@ class SideEffectRetryService {
         );
         break;
 
+      // Legacy effect types from when Notion was authoritative. They no
+      // longer have any work to do — Postgres is the source of truth, and
+      // the data they used to mirror is written inline by the transition
+      // path. Treat as no-ops so that pre-existing rows in side_effect_logs
+      // drain cleanly without throwing.
       case 'user_sync':
-        await notionSyncManager.syncSingleUser(appointment.userEmail);
-        break;
-
       case 'therapist_freeze_sync':
-        if (appointment.therapistNotionId) {
-          await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-        }
-        break;
-
       case 'therapist_unfreeze_sync':
-        if (appointment.therapistNotionId) {
-          await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
-        }
+        logger.debug(
+          { effectType: effect.effectType, appointmentId: appointment.id },
+          'Skipping legacy Notion-mirror side effect (no-op post-cutover)',
+        );
         break;
 
       default:

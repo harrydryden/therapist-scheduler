@@ -18,11 +18,6 @@ const configSchema = z.object({
   // AI Services
   anthropicApiKey: z.string(),
 
-  // Notion
-  notionApiKey: z.string(),
-  notionDatabaseId: z.string(),
-  notionUsersDatabaseId: z.string().optional(), // Users database for tracking client appointments
-
   // Webhooks
   webhookSecret: z.string(),
 
@@ -109,9 +104,6 @@ function loadConfig() {
     jwtSecret: process.env.JWT_SECRET,
     jwtExpiresIn: process.env.JWT_EXPIRES_IN,
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
-    notionApiKey: process.env.NOTION_API_KEY,
-    notionDatabaseId: process.env.NOTION_DATABASE_ID,
-    notionUsersDatabaseId: process.env.NOTION_USERS_DATABASE_ID,
     webhookSecret: process.env.WEBHOOK_SECRET,
     googlePubsubTopic: process.env.GOOGLE_PUBSUB_TOPIC,
     googlePubsubAudience: process.env.GOOGLE_PUBSUB_AUDIENCE,

@@ -11,7 +11,6 @@ import { emailProcessingService } from '../services/email-processing.service';
 import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../services/appointment-lifecycle.service';
 import { recordAppointmentEvent } from '../services/appointment-event.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { notionSyncManager } from '../services/notion-sync-manager.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { getSettingValue } from '../services/settings.service';
 import { verifyWebhookSecret } from '../middleware/auth';
@@ -546,13 +545,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         // Recalculate therapist booking status
         if (appointment.therapistNotionId) {
           if (wasConfirmed) {
-            // Recalculate and unmark in parallel (independent status operations)
+            // Recalculate and unmark in parallel (independent status operations).
+            // The previous Notion freeze-mirror has been retired — the
+            // Postgres TherapistBookingStatus row is authoritative.
             await Promise.all([
               therapistBookingStatusService.recalculateUniqueRequestCount(appointment.therapistNotionId),
               therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId),
             ]);
-            // Sync the unfrozen status to Notion (depends on above completing)
-            await notionSyncManager.syncSingleTherapist(appointment.therapistNotionId);
           } else {
             await therapistBookingStatusService.recalculateUniqueRequestCount(
               appointment.therapistNotionId
