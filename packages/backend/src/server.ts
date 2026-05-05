@@ -15,6 +15,7 @@ import { therapistRoutes } from './routes/therapists.routes';
 import { appointmentsRoutes } from './routes/appointments.routes';
 import { feedbackFormRoutes } from './routes/feedback-form.routes';
 import { unsubscribeRoutes } from './routes/unsubscribe.routes';
+import { signupRoutes } from './routes/signup.routes';
 import { publicSettingsRoutes } from './routes/admin-settings.routes';
 
 // Admin routes (webhook secret auth required)
@@ -24,6 +25,8 @@ import { adminContentRoutes } from './routes/admin-content.routes';
 import { adminSettingsRoutes } from './routes/admin-settings.routes';
 import { adminWorkReportRoutes } from './routes/admin-work-reports.routes';
 import { adminVoucherRoutes } from './routes/admin-vouchers.routes';
+import { adminUserRoutes } from './routes/admin-users.routes';
+import { adminTherapistRoutes } from './routes/admin-therapists.routes';
 import { ingestionRoutes } from './routes/ingestion.routes';
 
 // ATS Integration routes (versioned, webhook secret auth required)
@@ -324,6 +327,7 @@ async function buildServer() {
   await fastify.register(appointmentsRoutes);       // POST /api/appointments/request, GET /api/appointments/:id/status
   await fastify.register(feedbackFormRoutes);        // GET /api/feedback/form, POST /api/feedback/submit
   await fastify.register(unsubscribeRoutes);         // POST /api/unsubscribe/:token
+  await fastify.register(signupRoutes);              // POST /api/signup
   await fastify.register(publicSettingsRoutes);      // GET /api/settings/frontend
 
   // --- Admin routes (webhook secret authentication) ---
@@ -333,6 +337,8 @@ async function buildServer() {
   await fastify.register(adminSettingsRoutes);      // System settings CRUD, alerts, health
   await fastify.register(adminWorkReportRoutes);   // Daily work reports
   await fastify.register(adminVoucherRoutes);      // Voucher management
+  await fastify.register(adminUserRoutes);         // Postgres-backed user list/detail/edit
+  await fastify.register(adminTherapistRoutes);    // Postgres-backed therapist list/detail/edit/unfreeze
   await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion
 
   // --- ATS Integration routes (versioned API for external ATS system) ---

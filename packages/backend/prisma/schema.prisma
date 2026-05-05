@@ -23,6 +23,25 @@ model User {
   // Used to determine timezone for agent communications. Database appointment
   // times remain in UK time; this controls how times are presented to the user.
   country   String   @default("UK")
+
+  // Mailing list opt-in. Mirrors the Notion `Subscribed` checkbox while the
+  // Notion users database is still authoritative; reads switch to this column
+  // in PR 2 of the Notion deprecation.
+  subscribed Boolean @default(true)
+
+  // Signup consent fields. Captured by the public /signup form. Legacy rows
+  // (pre-signup-form) get consentGivenAt backfilled to createdAt — the
+  // deployment owner has confirmed those users gave consent at the time.
+  // Nullable on the booking flow (booking doesn't yet require these), so a
+  // null value means the user has only ever booked, never signed up.
+  priorTherapy           Boolean?  @map("prior_therapy")
+  acknowledgedRealSession Boolean? @map("acknowledged_real_session")
+  agreedToFeedback       Boolean?  @map("agreed_to_feedback")
+  consentGivenAt         DateTime? @map("consent_given_at")
+  // 'signup_form' | 'booking' | 'admin' | 'legacy'. Helps distinguish data
+  // provenance once the booking and signup paths both write here.
+  signupSource           String?   @map("signup_source")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -31,6 +50,7 @@ model User {
 
   @@index([odId])
   @@index([email])
+  @@index([subscribed])
   @@map("users")
 }
 
@@ -50,6 +70,24 @@ model Therapist {
   // [{day, start, end}], exceptions?: [{date, available}] }. May be null until
   // the therapist provides availability (or the agent records what they share).
   availability Json?   @map("availability")
+
+  // Profile fields mirroring the Notion therapists database. Populated by
+  // the one-shot Notion→Postgres backfill script and then kept in sync by
+  // notionSyncManager while Notion remains authoritative. Reads cut over to
+  // these columns in PR 2.
+  bio           String?  @db.Text
+  // Multi-select category tags. Postgres String[] arrays so we can index/query
+  // without JSON unwrapping. Empty array on rows that haven't been backfilled.
+  approach      String[] @default([])
+  style         String[] @default([])
+  areasOfFocus  String[] @default([]) @map("areas_of_focus")
+  profileImage  String?  @map("profile_image")
+  bookingLink   String?  @map("booking_link")
+  // Whether the therapist is accepting bookings at all. Mirrors the Notion
+  // Active checkbox; default true so unbackfilled rows don't disappear from
+  // any future Postgres-backed read.
+  active        Boolean  @default(true)
+
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
   lastNudgeAt DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
   lastNudgeThreadId String? @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)
@@ -61,6 +99,7 @@ model Therapist {
 
   @@index([odId])
   @@index([notionId])
+  @@index([active])
   @@map("therapists")
 }
 

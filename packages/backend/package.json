@@ -13,6 +13,7 @@
     "db:studio": "prisma studio",
     "migrate:conversation-state": "tsx src/scripts/migrate-conversation-state.ts",
     "backfill:therapist-availability": "tsx src/scripts/backfill-therapist-availability.ts",
+    "backfill:notion-to-postgres": "tsx src/scripts/backfill-notion-to-postgres.ts",
     "typecheck": "prisma generate && tsc --noEmit",
     "lint": "eslint src/**/*.ts",
     "test": "jest --testPathIgnorePatterns=/integration/",

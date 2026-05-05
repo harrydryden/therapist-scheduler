@@ -563,13 +563,18 @@ class NotionUsersService {
   /**
    * Sync users FROM Notion TO PostgreSQL.
    *
-   * Detects users that were added directly in the Notion database (i.e. they
-   * have an email but no odId) and ensures they exist in Postgres. The
-   * generated odId is written back to the Notion page so both systems stay
-   * in sync.
+   * Two responsibilities, run together because they share the Notion fetch:
    *
-   * Users that already exist in Postgres (matched by email) will simply have
-   * their odId back-filled into Notion if it's missing there.
+   * 1. ID linkage — users in Notion with an email but no odId get a
+   *    Postgres row created and the generated odId written back to Notion.
+   *
+   * 2. Subscription mirror (PR 1 of Notion deprecation) — for every user
+   *    with both an email and an existing Postgres row, mirror the
+   *    `Subscribed` checkbox into Postgres `users.subscribed`. This keeps
+   *    the Postgres column up to date so admin reads see the truth, and
+   *    sets up the read-path cutover in PR 2.
+   *
+   * Idempotent and safe to re-run.
    */
   async syncNotionUsersToPostgres(): Promise<{ synced: number; skipped: number; failed: number }> {
     if (!this.databaseId) {
@@ -580,36 +585,47 @@ class NotionUsersService {
     let synced = 0;
     let skipped = 0;
     let failed = 0;
+    let idsBackfilled = 0;
+    let subscriptionsMirrored = 0;
 
     try {
-      // 1. Fetch every user from the Notion database
       const notionUsers = await this.fetchAllUsers();
 
-      // 2. Identify users that need syncing (have email but missing odId)
-      const usersNeedingSync = notionUsers.filter(u => u.email && !u.odId);
+      for (const notionUser of notionUsers) {
+        if (!notionUser.email) {
+          // Notion rows without an email can't be matched to Postgres.
+          skipped++;
+          continue;
+        }
 
-      if (usersNeedingSync.length === 0) {
-        logger.debug('All Notion users already have IDs – nothing to sync');
-        return { synced: 0, skipped: notionUsers.length, failed: 0 };
-      }
-
-      // 3. Process each user that needs an ID
-      for (const notionUser of usersNeedingSync) {
         try {
           const normalizedEmail = notionUser.email.toLowerCase().trim();
 
-          // getOrCreateUser handles both the "already exists" and "create
-          // with new odId" cases atomically in Postgres.
+          // ID linkage — getOrCreateUser is idempotent and creates a
+          // Postgres row with a generated odId if missing.
           const pgUser = await getOrCreateUser(normalizedEmail, notionUser.name || null);
 
-          // 5. Write the odId back to the Notion page
-          await this.updateUser(notionUser.pageId, { odId: pgUser.odId });
+          // If Notion didn't have the odId, back-fill it now.
+          if (!notionUser.odId) {
+            await this.updateUser(notionUser.pageId, { odId: pgUser.odId });
+            idsBackfilled++;
+            logger.info(
+              { email: normalizedEmail, odId: pgUser.odId, pageId: notionUser.pageId },
+              'Synced Notion user to Postgres and back-filled odId'
+            );
+          }
+
+          // Subscription mirror — only writes if the value differs, so this
+          // doesn't churn the updated_at column on every cycle.
+          if (notionUser.subscribed !== pgUser.subscribed) {
+            await prisma.user.update({
+              where: { id: pgUser.id },
+              data: { subscribed: notionUser.subscribed },
+            });
+            subscriptionsMirrored++;
+          }
 
           synced++;
-          logger.info(
-            { email: normalizedEmail, odId: pgUser.odId, pageId: notionUser.pageId },
-            'Synced Notion user to Postgres and back-filled odId'
-          );
         } catch (error) {
           failed++;
           logger.error(
@@ -619,9 +635,8 @@ class NotionUsersService {
         }
       }
 
-      skipped = notionUsers.length - usersNeedingSync.length;
       logger.info(
-        { synced, skipped, failed, total: notionUsers.length },
+        { synced, skipped, failed, idsBackfilled, subscriptionsMirrored, total: notionUsers.length },
         'Notion→Postgres user sync complete'
       );
     } catch (error) {
