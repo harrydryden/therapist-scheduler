@@ -21,8 +21,6 @@ export type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes };
 interface IngestionResult {
   success: boolean;
   therapistId?: string;
-  /** Legacy field — was the URL of the created Notion page. Always undefined post-Notion-deprecation. */
-  notionUrl?: string;
   extractedData?: ExtractedTherapistProfile;
   error?: string;
 }
@@ -361,22 +359,44 @@ class PDFIngestionService {
         : Prisma.DbNull;
 
       const odId = await generateUniqueTherapistId();
-      const therapist = await prisma.therapist.create({
-        data: {
-          odId,
-          notionId: null,
-          email: profile.email.toLowerCase().trim(),
-          name: profile.name,
-          country: adminNotes?.country ?? 'UK',
-          bio: profile.bio || null,
-          approach: profile.approach.slice(0, 5).map((c) => c.type),
-          style: profile.style.slice(0, 5).map((c) => c.type),
-          areasOfFocus: profile.areasOfFocus.slice(0, 10).map((c) => c.type),
-          active: true,
-          availability: availabilityForDb,
-          ingestedAt: new Date(),
-        },
-      });
+      const normalizedEmail = profile.email.toLowerCase().trim();
+      let therapist;
+      try {
+        therapist = await prisma.therapist.create({
+          data: {
+            odId,
+            notionId: null,
+            email: normalizedEmail,
+            name: profile.name,
+            country: adminNotes?.country ?? 'UK',
+            bio: profile.bio || null,
+            approach: profile.approach.slice(0, 5).map((c) => c.type),
+            style: profile.style.slice(0, 5).map((c) => c.type),
+            areasOfFocus: profile.areasOfFocus.slice(0, 10).map((c) => c.type),
+            active: true,
+            availability: availabilityForDb,
+            ingestedAt: new Date(),
+          },
+        });
+      } catch (err: unknown) {
+        // P2002 = unique constraint violation. The Therapist table has unique
+        // constraints on email and odId; the odId is freshly generated so the
+        // realistic culprit is a duplicate email from a previous ingestion.
+        if (
+          typeof err === 'object' && err !== null && 'code' in err &&
+          (err as { code: string }).code === 'P2002'
+        ) {
+          logger.info(
+            { traceId, email: normalizedEmail },
+            'Ingestion rejected: therapist with this email already exists',
+          );
+          return {
+            success: false,
+            error: `A therapist with email ${normalizedEmail} already exists. Edit the existing record from the Therapists admin page rather than re-ingesting.`,
+          };
+        }
+        throw err;
+      }
 
       logger.info(
         {

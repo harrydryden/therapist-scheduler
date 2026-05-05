@@ -194,7 +194,7 @@ async function buildServer() {
   });
 
   // /health/circuits - Circuit breaker status for monitoring (auth required)
-  // Shows the state of all circuit breakers (Slack, Notion, Gmail, Claude)
+  // Shows the state of all circuit breakers (Slack, Gmail, Claude)
   fastify.get('/health/circuits', { ...adminAuthHook }, async () => {
     const stats = circuitBreakerRegistry.getAllStats();
     const circuits: Record<string, {

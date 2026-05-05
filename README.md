@@ -14,7 +14,7 @@ AI-powered scheduling platform that coordinates therapy appointments between cli
 
 Monorepo with three packages:
 
-- **`packages/backend`** — Fastify + TypeScript API server with Prisma ORM, Redis caching, Gmail API (email), Claude AI (scheduling agent), Notion (therapist database), Slack (notifications), and BullMQ (job queue)
+- **`packages/backend`** — Fastify + TypeScript API server with Prisma ORM, Redis caching, Gmail API (email), Claude AI (scheduling agent), Slack (notifications), and BullMQ (job queue)
 - **`packages/frontend`** — React + Vite + TailwindCSS admin dashboard and public booking UI
 - **`packages/shared`** — Shared TypeScript types, constants, and config used by both packages
 
@@ -22,11 +22,10 @@ Monorepo with three packages:
 
 | Service | Role |
 |---------|------|
-| **PostgreSQL** | Primary data store (appointments, users, audit logs) |
+| **PostgreSQL** | Primary data store (appointments, users, therapists, audit logs) |
 | **Redis** | Caching, distributed locking, rate limiting, email dedup |
 | **Claude (Anthropic)** | AI agent that conducts email conversations |
 | **Gmail API** | Sends/receives emails via Pub/Sub push + polling fallback |
-| **Notion** | Read-only therapist database (availability, profiles) |
 | **Slack** | Admin notifications and weekly summaries |
 | **BullMQ** | Email send queue with retry and backoff |
 
@@ -37,7 +36,6 @@ Monorepo with three packages:
 - Redis 7+
 - Anthropic API key
 - Google OAuth credentials (Gmail API)
-- Notion integration token
 
 ## Quick Start
 
@@ -135,9 +133,9 @@ Ten background services run on configurable intervals, coordinated via Redis dis
 | PendingEmailService | Retries failed email sends | 2 min |
 | StaleCheckService | Flags 48h+ inactive conversations | 30 min |
 | PostBookingFollowupService | Meeting link checks, feedback forms | 15 min |
-| SideEffectRetryService | Retries failed Slack/Notion side effects | 5 min |
+| SideEffectRetryService | Retries failed Slack side effects | 5 min |
 | WeeklyMailingListService | Sends weekly promotional mailing | Hourly |
-| NotionSyncManager | Syncs therapist data, freezing, feedback to Notion | 5 min |
+| AppointmentLifecycleTickService | Transitions confirmed → session_held after the session time | 30 min |
 | SlackWeeklySummaryService | Monday 9am weekly summary to Slack | Hourly |
 
 ## Health Checks
@@ -146,7 +144,7 @@ Ten background services run on configurable intervals, coordinated via Redis dis
 |----------|------|---------|
 | `GET /health` | None | Liveness probe — is the process running? |
 | `GET /health/ready` | None | Readiness probe — database and Redis connectivity |
-| `GET /health/circuits` | Admin | Circuit breaker states (Gmail, Slack, Notion, Claude) |
+| `GET /health/circuits` | Admin | Circuit breaker states (Gmail, Slack, Claude) |
 | `GET /health/tasks` | Admin | Background task success rates and errors |
 | `GET /health/full` | Admin | Comprehensive diagnostic combining all checks |
 

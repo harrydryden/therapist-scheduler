@@ -75,7 +75,7 @@ class TherapistNudgeService {
    *  2. They have NO appointments in an active status (pending → feedback_requested)
    *  3. They have NO completed appointments (they've never been matched)
    *  4. Enough time has passed since ingestedAt or lastNudgeAt (whichever is later)
-   *  5. They are active in Notion (Active checkbox = true)
+   *  5. They are active in Postgres (active = true)
    *  6. They are not frozen/unavailable (no active booking threads)
    */
   private async sendNudges(isLockValid: () => boolean): Promise<void> {
@@ -88,7 +88,7 @@ class TherapistNudgeService {
     // Fetch all independent data in parallel:
     //  - settings (intervalWeeks, agentName, email templates)
     //  - appointment exclusions
-    //  - Notion active therapists
+    //  - active therapists from Postgres
     //  - frozen/unavailable therapist IDs
     const [
       intervalWeeks,

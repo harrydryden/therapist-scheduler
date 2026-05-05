@@ -325,7 +325,7 @@ export default function AdminUsersPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Users</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Postgres-backed user database. Reads come from Postgres; subscription edits dual-write to Notion until PR 2 cuts that path over.
+          User database. Reads and edits are Postgres-backed.
         </p>
       </div>
 

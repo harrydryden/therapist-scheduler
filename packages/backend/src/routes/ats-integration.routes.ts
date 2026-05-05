@@ -812,10 +812,11 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             'ATS: Updated existing therapist'
           );
         } else {
-          // Create via Notion ingestion if available, otherwise create DB-only record
-          // For now, create in the local database — Notion sync will pick it up
+          // Create the Therapist row in Postgres. The ATS-supplied externalId
+          // is stored in the notion_id column, which has been repurposed as
+          // a generic public-handle column post-Notion-deprecation.
           therapistEntity = await getOrCreateTherapist(
-            data.externalId,  // Use external ID as notion ID placeholder
+            data.externalId,
             data.email,
             data.name
           );

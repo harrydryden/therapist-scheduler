@@ -93,9 +93,9 @@ export async function resetStrikes(email: string): Promise<{ email: string; stri
   );
 }
 
-export async function resubscribeUser(email: string): Promise<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }> {
+export async function resubscribeUser(email: string): Promise<{ email: string; displayCode: string; expiresAt: string; subscriptionUpdated: boolean }> {
   return unwrap(
-    await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; notionUpdated: boolean }>(
+    await fetchAdminApi<{ email: string; displayCode: string; expiresAt: string; subscriptionUpdated: boolean }>(
       `/admin/vouchers/${encodeURIComponent(email)}/resubscribe`,
       { method: 'POST', body: JSON.stringify({}) }
     ),

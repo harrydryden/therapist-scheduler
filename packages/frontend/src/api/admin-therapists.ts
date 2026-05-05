@@ -3,7 +3,8 @@ import { fetchAdminApi, unwrap } from './core';
 export interface TherapistListItem {
   id: string;
   odId: string;
-  notionId: string;
+  /** Legacy Notion page id; null for therapists ingested after the Notion deprecation. */
+  notionId: string | null;
   email: string;
   name: string;
   country: string;

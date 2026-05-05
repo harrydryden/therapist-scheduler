@@ -198,7 +198,7 @@ function generateSlots(
  * (currently the agent does the cross-zone phrasing, so we always render
  * the slots in the therapist's local time).
  *
- * @param availability - Raw availability data from Notion/database
+ * @param availability - Raw availability data from the Therapist row
  * @param displayTimezone - IANA timezone the slots are RENDERED in
  *   (defaults to the availability's own timezone, then UK)
  * @param referenceDate - Anchor date for slot generation

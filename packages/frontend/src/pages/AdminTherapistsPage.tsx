@@ -228,7 +228,7 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
           <h3 className="text-xl font-semibold text-slate-900">{data.name}</h3>
           <p className="text-sm text-slate-500">{data.email}</p>
           <p className="text-xs text-slate-400 mt-1 font-mono">
-            ID: {data.odId} · Notion: {data.notionId.slice(0, 8)}…
+            ID: {data.odId}
           </p>
         </div>
         <div className="flex flex-col gap-1 items-end">
@@ -480,7 +480,7 @@ export default function AdminTherapistsPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Therapists</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Postgres-backed therapist database. Profile fields are mirrored from Notion every 10 minutes; edits here save to Postgres immediately and dual-write the active flag to Notion.
+          Therapist database. Edits save to Postgres directly &mdash; this is the single source of truth for the public site.
         </p>
       </div>
 

@@ -467,8 +467,7 @@ export class AIToolExecutorService {
    * Converts the agent's day-string shape (e.g. {Monday: "09:00-12:00, 14:00-17:00"})
    * into the structured TherapistAvailability format, stamps the therapist's
    * timezone (preferring an existing record's timezone, then their country's
-   * default), and writes it to Therapist.availability. Notion is no longer
-   * touched for availability — Postgres is the source of truth.
+   * default), and writes it to Therapist.availability.
    */
   private async updateTherapistAvailability(
     context: SchedulingContext,
@@ -488,12 +487,19 @@ export class AIToolExecutorService {
       });
 
       if (!appointmentRequest?.therapistNotionId) {
-        logger.error({ traceId: this.traceId }, 'No therapist Notion ID found');
+        logger.error({ traceId: this.traceId }, 'No therapist handle found on appointment');
         return;
       }
 
-      const therapist = await prisma.therapist.findUnique({
-        where: { notionId: appointmentRequest.therapistNotionId },
+      // therapistNotionId is the public handle: legacy Notion page id for
+      // older rows, Postgres uuid for post-Notion ingestions. Match by either.
+      const therapist = await prisma.therapist.findFirst({
+        where: {
+          OR: [
+            { notionId: appointmentRequest.therapistNotionId },
+            { id: appointmentRequest.therapistNotionId },
+          ],
+        },
         select: { id: true, country: true, availability: true },
       });
 
@@ -886,7 +892,6 @@ export class AIToolExecutorService {
    * - Confirmation emails to client and therapist
    * - Slack notification
    * - Therapist status update
-   * - User sync to Notion
    */
   private async markComplete(
     context: SchedulingContext,
