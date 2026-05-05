@@ -85,12 +85,14 @@ export async function generateUniqueTherapistId(): Promise<string> {
 
 /**
  * Get or create a User record by email
- * Returns the user with their unique odId
+ * Returns the user with their unique odId. Return type is inferred from
+ * Prisma so that new columns added to the User model are automatically
+ * carried through to callers.
  */
 export async function getOrCreateUser(
   email: string,
   name?: string | null
-): Promise<{ id: string; odId: string; email: string; name: string | null; country: string; createdAt: Date; updatedAt: Date }> {
+) {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if user already exists
@@ -157,7 +159,7 @@ export async function getOrCreateTherapist(
   name: string,
   country?: string,
   availability?: Prisma.InputJsonValue | null,
-): Promise<{ id: string; odId: string; notionId: string; email: string; name: string; country: string; availability: Prisma.JsonValue | null; ingestedAt: Date | null; lastNudgeAt: Date | null; lastNudgeThreadId: string | null; createdAt: Date; updatedAt: Date }> {
+) {
   const normalizedEmail = email.toLowerCase().trim();
 
   // Check if therapist already exists by Notion ID

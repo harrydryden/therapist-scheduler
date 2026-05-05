@@ -3,6 +3,7 @@ import { Routes, Route, Link, Outlet } from 'react-router-dom';
 import TherapistsPage from './pages/TherapistsPage';
 import TherapistDetailPage from './pages/TherapistDetailPage';
 import FeedbackFormPage from './pages/FeedbackFormPage';
+import SignupPage from './pages/SignupPage';
 import Layout from './components/Layout';
 import AdminLayout from './components/AdminLayout';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -19,6 +20,8 @@ const AdminFormsPage = lazy(() => import('./pages/AdminFormsPage'));
 const AdminAppointmentsPage = lazy(() => import('./pages/AdminAppointmentsPage'));
 const AdminWorkReportsPage = lazy(() => import('./pages/AdminWorkReportsPage'));
 const AdminVouchersPage = lazy(() => import('./pages/AdminVouchersPage'));
+const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage'));
+const AdminTherapistsPage = lazy(() => import('./pages/AdminTherapistsPage'));
 
 function AdminLoadingFallback() {
   return (
@@ -53,6 +56,16 @@ function App() {
         <Route path="/feedback" element={<FeedbackFormPage />} />
         <Route path="/feedback/:splCode" element={<FeedbackFormPage />} />
 
+        {/* Signup intake form — populates the user database with consent fields */}
+        <Route
+          path="/signup"
+          element={
+            <Layout>
+              <SignupPage />
+            </Layout>
+          }
+        />
+
         {/* Admin routes with sidebar layout - lazy loaded.
             A single Suspense boundary wraps all admin children so we
             don't repeat the fallback wiring for every route. */}
@@ -76,6 +89,8 @@ function App() {
             <Route index element={<AdminHomePage />} />
             <Route path="dashboard" element={<AdminDashboardPage />} />
             <Route path="appointments" element={<AdminAppointmentsPage />} />
+            <Route path="users" element={<AdminUsersPage />} />
+            <Route path="therapists" element={<AdminTherapistsPage />} />
             <Route path="vouchers" element={<AdminVouchersPage />} />
             <Route path="ingestion" element={<AdminIngestionPage />} />
             <Route path="knowledge" element={<AdminKnowledgePage />} />

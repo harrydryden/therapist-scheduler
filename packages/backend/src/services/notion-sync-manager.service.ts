@@ -379,55 +379,84 @@ class NotionSyncManager {
   }
 
   /**
-   * Sync therapist IDs FROM Notion TO PostgreSQL and back.
-   * Detects active therapists in Notion without an odId, creates them in Postgres,
-   * and writes the generated odId back to the Notion page.
+   * Sync therapist IDs and profile fields FROM Notion TO PostgreSQL.
+   *
+   * Two responsibilities, run together because they share the Notion fetch:
+   *
+   * 1. ID linkage — therapists in Notion without an odId get a Postgres row
+   *    created and the generated odId written back to Notion.
+   *
+   * 2. Profile mirror (PR 1 of Notion deprecation) — bio, approach, style,
+   *    areasOfFocus, profileImage, bookingLink, and active are written from
+   *    the Notion record into the Postgres mirror columns for every active
+   *    therapist on every cycle. Idempotent: if the Postgres row already
+   *    matches, the update is a no-op write but Postgres handles that fine.
+   *    Reads cut over to these columns in PR 2.
    */
   private async syncTherapistIds(): Promise<SyncResult> {
     const syncId = Date.now().toString(36);
-    logger.info({ syncId }, 'Running therapist ID sync');
+    logger.info({ syncId }, 'Running therapist ID + profile mirror sync');
 
     let synced = 0;
     let errors = 0;
+    let idsBackfilled = 0;
 
     try {
       // fetchTherapists returns active therapists with their odId (or null if missing)
       const therapists = await notionService.fetchTherapists();
-      const needingSync = therapists.filter(t => !t.odId);
 
-      if (needingSync.length === 0) {
-        logger.debug({ syncId }, 'All active therapists already have IDs');
-        return { synced: 0, errors: 0 };
-      }
-
-      logger.info({ syncId, count: needingSync.length }, 'Therapists needing ID sync');
-
-      for (const therapist of needingSync) {
+      for (const therapist of therapists) {
         try {
-          // Create or retrieve the therapist record in Postgres
+          // Step 1: ensure a Postgres row exists with an odId.
           const dbTherapist = await getOrCreateTherapist(
             therapist.id,
             therapist.email,
             therapist.name
           );
 
-          // Write the odId back to Notion
-          await notionService.updateTherapistId(therapist.id, dbTherapist.odId);
-          synced++;
+          // Step 2: mirror profile fields. We use updateMany filtered by
+          // notionId (rather than `update` by id) so this never throws if
+          // the row was just created in step 1 and the in-memory dbTherapist
+          // is stale relative to the now-written-back state.
+          await prisma.therapist.updateMany({
+            where: { notionId: therapist.id },
+            data: {
+              bio: therapist.bio || null,
+              approach: therapist.approach,
+              style: therapist.style,
+              areasOfFocus: therapist.areasOfFocus,
+              profileImage: therapist.profileImage,
+              bookingLink: therapist.bookingLink,
+              active: therapist.active,
+            },
+          });
 
-          logger.info(
-            { syncId, notionId: therapist.id, odId: dbTherapist.odId, name: therapist.name },
-            'Synced therapist ID to Notion'
-          );
+          // Step 3: if Notion didn't yet have the odId, write it back.
+          if (!therapist.odId) {
+            await notionService.updateTherapistId(therapist.id, dbTherapist.odId);
+            idsBackfilled++;
+            logger.info(
+              { syncId, notionId: therapist.id, odId: dbTherapist.odId, name: therapist.name },
+              'Synced therapist ID to Notion'
+            );
+          }
+
+          synced++;
         } catch (err) {
           errors++;
-          logger.error({ err, syncId, notionId: therapist.id, name: therapist.name }, 'Failed to sync therapist ID');
+          logger.error(
+            { err, syncId, notionId: therapist.id, name: therapist.name },
+            'Failed to sync therapist'
+          );
         }
       }
 
-      logger.info({ syncId, synced, errors }, 'Therapist ID sync completed');
+      logger.info(
+        { syncId, synced, errors, idsBackfilled, total: therapists.length },
+        'Therapist ID + profile mirror sync completed'
+      );
     } catch (error) {
-      logger.error({ syncId, error }, 'Therapist ID sync failed');
+      logger.error({ syncId, error }, 'Therapist ID + profile mirror sync failed');
       errors++;
     }
 
