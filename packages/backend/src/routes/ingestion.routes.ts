@@ -185,7 +185,6 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
 
         return sendSuccess(reply, {
             therapistId: result.therapistId,
-            notionUrl: result.notionUrl,
             extractedProfile: {
               name: result.extractedData?.name,
               email: result.extractedData?.email,

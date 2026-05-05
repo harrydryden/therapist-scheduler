@@ -546,9 +546,7 @@ describe('Admin Voucher Routes', () => {
       expect(res.statusCode).toBe(200);
       const data = res.json().data;
       expect(data.displayCode).toMatch(/^\w+-\w+-\w+$/);
-      // notionUpdated is preserved in the response shape but now reflects
-      // the Postgres write (count > 0).
-      expect(data.notionUpdated).toBe(true);
+      expect(data.subscriptionUpdated).toBe(true);
 
       // Check DB update clears unsubscribedAt and resets strikes
       const updateCall = (prisma.voucherTracking.update as jest.Mock).mock.calls[0][0];
@@ -591,7 +589,7 @@ describe('Admin Voucher Routes', () => {
       });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json().data.notionUpdated).toBe(false);
+      expect(res.json().data.subscriptionUpdated).toBe(false);
     });
 
     it('sends welcome-back email with voucher code', async () => {

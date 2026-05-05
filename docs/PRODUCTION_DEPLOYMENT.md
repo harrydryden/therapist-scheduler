@@ -36,10 +36,6 @@ ANTHROPIC_API_KEY=sk-ant-your-key
 GOOGLE_PUBSUB_TOPIC=projects/your-project/topics/gmail-notifications
 GOOGLE_PUBSUB_AUDIENCE=your-audience-url
 
-# Notion (therapist database)
-NOTION_API_KEY=secret_your-notion-integration-token
-NOTION_DATABASE_ID=your-notion-database-id
-
 # Webhooks
 WEBHOOK_SECRET=your-webhook-secret
 ```
@@ -141,7 +137,7 @@ docker-compose exec app npx prisma db push --schema=packages/backend/prisma/sche
 |----------|---------------|---------|
 | `GET /health` | No | Liveness probe — returns `{ status: "ok" }` if process is running |
 | `GET /health/ready` | No | Readiness probe — checks PostgreSQL and Redis connectivity |
-| `GET /health/circuits` | Yes (Admin) | Circuit breaker states for Gmail, Slack, Notion, Claude APIs |
+| `GET /health/circuits` | Yes (Admin) | Circuit breaker states for Gmail, Slack, Claude APIs |
 | `GET /health/tasks` | Yes (Admin) | Background task success rates, recent errors, timeout stats |
 | `GET /health/full` | Yes (Admin) | Comprehensive diagnostic combining all checks above |
 
@@ -164,7 +160,7 @@ curl -H "Authorization: Bearer <jwt-token>" http://localhost:3000/health/full
 |--------|---------|---------|--------|
 | Database latency | < 50ms | > 200ms | Check connection pool, query optimization |
 | Redis connectivity | Connected | Disconnected | Services degrade to PostgreSQL fallback |
-| Circuit breakers | All CLOSED | Any OPEN | Check external API status (Gmail/Slack/Notion/Claude) |
+| Circuit breakers | All CLOSED | Any OPEN | Check external API status (Gmail/Slack/Claude) |
 | Background tasks | All healthy | Error rate > 10% | Check service logs for failures |
 | AI response time | < 10s | > 30s | Check Anthropic API status, review prompt size |
 

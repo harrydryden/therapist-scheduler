@@ -343,7 +343,6 @@ export interface IngestionPreviewResponse {
 
 export interface IngestionCreateResponse {
   therapistId: string;
-  notionUrl: string;
   extractedProfile: {
     name: string;
     email: string;

@@ -2,8 +2,8 @@
  * Side Effect Retry Service
  *
  * Background service that periodically retries failed side effects
- * (email notifications, Slack messages, Notion syncs, etc.) that were
- * registered via the SideEffectTrackerService.
+ * (email notifications, Slack messages, etc.) that were registered via
+ * the SideEffectTrackerService.
  *
  * Refactored to use LockedTaskRunner instead of duplicating the
  * lock-acquire/renew/release pattern that was copy-pasted across 5+ services.

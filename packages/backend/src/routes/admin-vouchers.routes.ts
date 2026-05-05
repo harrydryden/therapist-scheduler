@@ -413,16 +413,14 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
         },
       });
 
-      // Re-subscribe in Postgres (the source of truth post-Notion-deprecation).
-      // The legacy `notionUpdated` flag is kept in the response shape for
-      // backwards compatibility — repurposed to indicate the Postgres write.
-      let notionUpdated = false;
+      // Re-subscribe in Postgres.
+      let subscriptionUpdated = false;
       try {
         const result = await prisma.user.updateMany({
           where: { email: emailLower },
           data: { subscribed: true },
         });
-        notionUpdated = result.count > 0;
+        subscriptionUpdated = result.count > 0;
       } catch (error) {
         logger.error({ error, email: emailLower }, 'Failed to update subscription (voucher tracking updated)');
       }
@@ -430,7 +428,7 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
       // Send welcome-back email with fresh voucher code
       const emailSent = await sendVoucherEmail(emailLower, voucherResult);
 
-      logger.info({ email: emailLower, notionUpdated, emailSent }, 'Admin resubscribed user');
+      logger.info({ email: emailLower, subscriptionUpdated, emailSent }, 'Admin resubscribed user');
 
       return reply.send({
         success: true,
@@ -439,7 +437,7 @@ export async function adminVoucherRoutes(fastify: FastifyInstance) {
           displayCode: voucherResult.displayCode,
           expiresAt: voucherResult.expiresAt.toISOString(),
           voucherUrl: voucherResult.url,
-          notionUpdated,
+          subscriptionUpdated,
           emailSent,
         },
       });

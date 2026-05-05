@@ -318,7 +318,7 @@ export default function AdminIngestionPage() {
   const [internalNotes, setInternalNotes] = useState('');
 
   // Success state
-  const [createdTherapist, setCreatedTherapist] = useState<{ id: string; url: string } | null>(null);
+  const [createdTherapist, setCreatedTherapist] = useState<{ id: string } | null>(null);
 
   // UI state for modals/toasts
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -495,7 +495,7 @@ export default function AdminIngestionPage() {
       return createTherapistFromCV(file, adminNotes);
     },
     onSuccess: (data) => {
-      setCreatedTherapist({ id: data.therapistId, url: data.notionUrl });
+      setCreatedTherapist({ id: data.therapistId });
       // Clear the persisted draft on successful creation
       clearDraft();
       // Reset form
@@ -609,15 +609,8 @@ export default function AdminIngestionPage() {
               </div>
               <div className="flex-1">
                 <h3 className="font-semibold text-green-800">Therapist Created Successfully!</h3>
-                <p className="text-sm text-green-700 mt-1">
-                  <a
-                    href={createdTherapist.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline hover:no-underline"
-                  >
-                    View in Notion
-                  </a>
+                <p className="text-sm text-green-700 mt-1 font-mono">
+                  ID: {createdTherapist.id}
                 </p>
               </div>
               <button
@@ -1023,7 +1016,7 @@ export default function AdminIngestionPage() {
                 type="button"
                 onClick={handleCreate}
                 disabled={createMutation.isPending}
-                aria-label="Create therapist profile in Notion"
+                aria-label="Create therapist profile"
                 aria-busy={createMutation.isPending}
                 className="flex-1 py-3 px-4 bg-spill-blue-800 text-white font-semibold rounded-full hover:bg-spill-blue-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
@@ -1087,7 +1080,7 @@ export default function AdminIngestionPage() {
           onConfirm={handleConfirmCreate}
           onCancel={() => setShowConfirmModal(false)}
         >
-          <p className="text-slate-600">This will add the therapist to the Notion database. Are you sure you want to proceed?</p>
+          <p className="text-slate-600">This will add the therapist to the database. Are you sure you want to proceed?</p>
         </ConfirmDialog>
       )}
     </div>
