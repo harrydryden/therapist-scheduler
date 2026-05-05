@@ -149,8 +149,14 @@ export async function findMatchingAppointmentRequest(
 }
 
 /**
- * Sort comparator: most recently updated first, with ID as deterministic tiebreaker.
+ * Lookback window for the cross-pollination guard. Within this many days,
+ * a sender's terminal (completed/cancelled) appointment is "recent enough"
+ * that an unstructured email from them is genuinely ambiguous between the
+ * old closed thread and any new active one. Rather than guess, we surface
+ * to admin review. 60 days covers the typical lag for therapists who
+ * reply weeks after a session.
  */
+const AMBIGUOUS_TERMINAL_LOOKBACK_DAYS = 60;
 function byMostRecent(
   a: { updatedAt: Date; id: string },
   b: { updatedAt: Date; id: string },
@@ -200,6 +206,45 @@ async function findByLegacyMatch(
   });
 
   if (matchingRequests.length === 0) {
+    return null;
+  }
+
+  // Cross-pollination guard: if the sender ALSO has a recent terminal
+  // (completed/cancelled) appointment, an unstructured email from them is
+  // genuinely ambiguous between the closed thread and any new active one.
+  // Without this guard, a late therapist message about an old session was
+  // silently attributed to a different client's new pending appointment
+  // (the only non-terminal one for that therapist) — see PR fixing the
+  // SPL-8449 / SPL-1185 misroute.
+  //
+  // The deterministic match priorities (thread ID, In-Reply-To, tracking
+  // code) above don't filter by status, so well-formed replies still resolve
+  // to the right appointment even if it's terminal. Only emails that fall
+  // ALL the way through to legacy fallback hit this guard.
+  const cutoff = new Date(Date.now() - AMBIGUOUS_TERMINAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const recentTerminal = await prisma.appointmentRequest.findFirst({
+    where: {
+      OR: [
+        { userEmail: email.from },
+        { therapistEmail: email.from },
+      ],
+      status: { in: [...TERMINAL_STATUSES] },
+      updatedAt: { gte: cutoff },
+    },
+    select: { id: true },
+  });
+
+  if (recentTerminal) {
+    logger.warn(
+      {
+        from: email.from,
+        subject: email.subject,
+        activeCount: matchingRequests.length,
+        recentTerminalId: recentTerminal.id,
+      },
+      'AMBIGUOUS MATCH: sender has both active and recent terminal appointments. ' +
+      'Skipping legacy match to prevent cross-pollination — manual review needed.'
+    );
     return null;
   }
 
