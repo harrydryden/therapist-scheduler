@@ -1,19 +1,15 @@
 /**
  * Admin Therapist Management Routes
  *
- * Reads exclusively from the Postgres `therapists` table — the new home for
- * therapist profile data that previously lived only in Notion. The
- * 20260505_add_postgres_profile_mirror migration plus the
- * backfill-notion-to-postgres script populate these rows; the existing
- * NotionSyncManager is extended in PR 1 to keep them mirrored from Notion
- * on a 5-minute cadence while Notion remains authoritative.
+ * Reads and writes the Postgres `therapists` table. Postgres is the
+ * single source of truth for therapist profile data; every consumer
+ * (public listing, admin UI, booking flow, weekly mailing, ATS
+ * integration) reads from here.
  *
- * Mutations dual-write where Notion still owns the canonical value:
- *   - active toggle      → Postgres + Notion (Notion pdf-ingestion / public
- *                          listing still reads `active` from Notion)
- *   - profile fields     → Postgres only (PR 2 cuts reads over; until then
- *                          changes here are visible in admin only)
- *   - force unfreeze     → clears TherapistBookingStatus.frozenAt
+ * Mutations:
+ *   - active toggle     → Postgres
+ *   - profile fields    → Postgres
+ *   - force unfreeze    → clears TherapistBookingStatus.frozenAt
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';

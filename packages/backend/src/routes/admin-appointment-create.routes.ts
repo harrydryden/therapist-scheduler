@@ -1,7 +1,7 @@
 /**
  * Admin Appointment Create Route
  * Isolated from admin-appointments.routes.ts to prevent heavy imports
- * (Notion, JustinTime, etc.) from breaking existing routes if they fail to load.
+ * (JustinTime, etc.) from breaking existing routes if they fail to load.
  */
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';

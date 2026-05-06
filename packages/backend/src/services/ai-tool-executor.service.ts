@@ -1014,9 +1014,6 @@ export class AIToolExecutorService {
     }
 
     // (status_change audit event is written by transitionToConfirmed)
-    // The previous Notion therapist-cache invalidation has been retired —
-    // Postgres reads are direct, so no cache needs busting.
-
     logger.info(
       { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, isReschedule },
       'Appointment confirmed via lifecycle service'
@@ -1113,9 +1110,6 @@ export class AIToolExecutorService {
     }
 
     // (status_change audit event is written by transitionToCancelled inside its transaction)
-    // The previous Notion therapist-cache invalidation has been retired —
-    // Postgres reads are direct, so no cache needs busting.
-
     logger.info(
       {
         traceId: this.traceId,

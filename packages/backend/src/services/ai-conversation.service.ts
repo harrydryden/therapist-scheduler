@@ -629,9 +629,8 @@ Please answer their question helpfully and direct them to the booking URL to sch
           );
 
           try {
-            // Postgres is the source of truth for the subscribed flag now
-            // that Notion has been retired. updateMany returns count=0 if
-            // the user doesn't exist, which we treat as already-unsubscribed.
+            // updateMany returns count=0 if the user doesn't exist, which we
+            // treat as already-unsubscribed.
             const result = await prisma.user.updateMany({
               where: {
                 email: input.email.toLowerCase(),

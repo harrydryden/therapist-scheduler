@@ -29,7 +29,7 @@ The therapist-scheduler is a well-featured application with strong foundations (
 | `email-processing.service.ts` | 2,751 | OAuth management, Gmail API, push notifications, email polling fallback, message locking, MIME parsing, bounce delegation, thread divergence, weekly mailing routing, cleanup Lua scripts — all in one file |
 | `justin-time.service.ts` | 2,362 | AI conversation management, email reply orchestration, availability checking, slot formatting, confirmation parsing, tool execution, side effects, conversation trimming, error recovery, escalation logic |
 | `stale-check.service.ts` | 1,345 | Therapist booking monitoring, chase email decisions, data retention cleanup, stale detection, auto-unfreeze, email sending, inactivity thresholds, admin flagging |
-| `appointment-lifecycle.service.ts` | 1,963 | 7-state machine, 4-5 email notification types, Slack orchestration, therapist booking updates, Notion sync triggers, audit trail, conversation state updates |
+| `appointment-lifecycle.service.ts` | 1,963 | 7-state machine, 4-5 email notification types, Slack orchestration, therapist booking updates, audit trail, conversation state updates |
 
 **Recommended decomposition:**
 
@@ -222,7 +222,7 @@ unsubscribe.routes.ts
 | `AvailabilitySlot` | `shared/types/index.ts:12-16` | `availability-formatter.ts:22-26` | Remove backend duplicate, import from shared |
 | `KnowledgeEntry` | `shared/types/index.ts:238-247` | `backend/types/index.ts:146-155` | Acceptable — backend uses `Date` objects internally vs `string` in API contract |
 
-Additionally, `notion.service.ts:39-50` defines an internal `Therapist` type that includes `email`, `odId`, and `frozen` fields not in the shared public API type. This should be renamed to `InternalTherapist` to avoid confusion.
+_(Resolved: the internal `Therapist` type lived in `notion.service.ts`, which was deleted with PR 2 of the Notion deprecation.)_
 
 ### 4.2 Unused Exports
 

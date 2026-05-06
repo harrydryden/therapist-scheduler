@@ -42,8 +42,7 @@ interface MailingListUser {
 }
 
 /**
- * Postgres-backed projection of a therapist. Replaces the InternalTherapist
- * type the service used to consume from notion.service.
+ * Postgres-backed projection of a therapist used by the weekly mailing.
  */
 interface MailingListTherapist {
   /** Public handle: notionId for legacy rows, Postgres uuid for newer rows. */

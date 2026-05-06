@@ -30,8 +30,7 @@ import type { TransitionSource, TransitionResult } from './appointment-lifecycle
  *
  * Used by completion / cancellation / admin-force paths so the same "last
  * appointment closed → take therapist off the booking page" semantics apply
- * regardless of how the appointment terminated. The Postgres write is the
- * source of truth now that Notion has been retired (PR 2 of the deprecation).
+ * regardless of how the appointment terminated.
  *
  * Failures are logged but never thrown — matches the existing "non-fatal
  * side effect" contract.
@@ -145,8 +144,6 @@ class TransitionSideEffectsService {
   /**
    * Side effects after a successful confirmation:
    * - Mark therapist as confirmed (freeze for other bookings)
-   * - Sync therapist freeze status to Notion
-   * - Sync user to Notion
    */
   async onConfirmed(params: OnConfirmedParams): Promise<void> {
     const { appointmentId, source, adminId, therapistNotionId, therapistName, userEmail } = params;

@@ -22,7 +22,8 @@ import { validateVoucherToken, getDisplayCodeFromToken } from '../utils/voucher-
 const IDEMPOTENCY_WINDOW_MS = 5 * 60 * 1000;
 
 // Validation schema for appointment request from public frontend
-// NOTE: therapistEmail and therapistName are optional - we fetch from Notion for security
+// NOTE: therapistEmail and therapistName are optional - we re-fetch them
+// from Postgres by therapistNotionId for security (clients can't spoof them).
 const appointmentRequestSchema = z.object({
   userName: z.string().min(1, 'Name is required').max(100),
   userEmail: z.string().email('Invalid email address').max(255),

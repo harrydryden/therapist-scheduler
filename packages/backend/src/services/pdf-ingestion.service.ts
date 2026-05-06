@@ -346,10 +346,10 @@ class PDFIngestionService {
         };
       }
 
-      // Step 5: Create the Postgres Therapist row directly. Notion is no
-      // longer authoritative; the public-facing handle for new ingestions
-      // is the Postgres uuid (notionId stays null). All profile fields are
-      // written here in a single insert.
+      // Step 5: Create the Postgres Therapist row. The public-facing handle
+      // for new ingestions is the Postgres uuid (notionId stays null — only
+      // legacy rows have one). All profile fields are written here in a
+      // single insert.
       logger.info({ traceId, name: profile.name }, 'Creating therapist in Postgres');
 
       // Cast through unknown because Prisma's JSON branding doesn't quite
@@ -409,9 +409,8 @@ class PDFIngestionService {
         'Created Postgres therapist record',
       );
 
-      // Admin notes used to be appended as a Notion callout block. Post-cutover
-      // we don't have anywhere to put them yet — log so they aren't silently
-      // dropped, and the admin can paste them into the bio if needed.
+      // Admin notes have no structured destination yet — log so they aren't
+      // silently dropped, and the admin can paste them into the bio if needed.
       if (adminNotes?.notes) {
         logger.info(
           { traceId, therapistId: therapist.id, notes: adminNotes.notes },

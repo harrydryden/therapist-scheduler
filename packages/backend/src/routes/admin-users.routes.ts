@@ -1,14 +1,10 @@
 /**
  * Admin User Management Routes
  *
- * Reads and lightly edits the Postgres `users` table — the new home for what
- * the Notion users database used to hold. Reads come exclusively from
- * Postgres so the admin UI can be used to verify Notion → Postgres parity
- * during PR 1 of the Notion deprecation.
- *
- * Writes that have a Notion equivalent (subscribed toggle) dual-write so the
- * existing weekly-mailing eligibility query — which still reads from Notion
- * — stays consistent until PR 2 cuts that read path over.
+ * Reads and lightly edits the Postgres `users` table. Postgres is the
+ * single source of truth for user state — the weekly-mailing eligibility
+ * query, the subscribed toggle, and every other consumer all read from
+ * here.
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -231,8 +227,6 @@ export async function adminUserRoutes(fastify: FastifyInstance) {
 
   /**
    * PATCH /api/admin/users/:id — edit subset of user fields.
-   * Subscribed toggles dual-write to Notion so the weekly mailing query
-   * (still Notion-backed in PR 1) reflects the change immediately.
    */
   fastify.patch<{ Params: { id: string }; Body: z.infer<typeof updateUserSchema> }>(
     '/api/admin/users/:id',
@@ -266,9 +260,6 @@ export async function adminUserRoutes(fastify: FastifyInstance) {
           where: { id },
           data: updates,
         });
-
-        // The PR 1 dual-write to Notion has been removed: Postgres is the
-        // single source of truth for `subscribed` post-Notion-deprecation.
 
         logger.info(
           { userId: id, fields: Object.keys(updates) },

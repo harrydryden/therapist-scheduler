@@ -5,11 +5,6 @@
  * `session_held` once the scheduled session time has passed (with a one-hour
  * buffer to allow for sessions that run long).
  *
- * Previously lived inside notion-sync-manager.service.ts because it shared
- * the manager's distributed-lock plumbing, but the work itself has nothing
- * to do with Notion. Extracted here as part of PR 2 of the Notion
- * deprecation so the sync manager can be deleted.
- *
  * Runs every 30 minutes; each transition uses atomic preconditions, so
  * multiple instances racing on the same appointment is safe.
  */

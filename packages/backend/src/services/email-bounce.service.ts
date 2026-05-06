@@ -213,7 +213,7 @@ export async function handleBounce(
     result.appointmentId = appointment.id;
 
     // Cancel the appointment via the lifecycle service so all the standard
-    // side effects fire (therapist unfreeze, Notion sync, audit trail, SSE).
+    // side effects fire (therapist unfreeze, audit trail, SSE).
     // We pass `skipNotifications=true` so the lifecycle's generic cancellation
     // Slack/emails are suppressed — the bounce path fires its own more detailed
     // bounce-specific Slack alert below, and emailing the user whose address
