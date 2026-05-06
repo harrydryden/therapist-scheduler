@@ -216,19 +216,29 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
         try {
           logger.info({ requestId }, 'Manual feedback sync triggered');
 
-          const result = await appointmentLifecycleTickService.trigger();
+          const tickResult = await appointmentLifecycleTickService.trigger();
+          const skipped = !tickResult.acquired;
+          const transitioned = tickResult.result?.transitioned ?? 0;
+
+          if (tickResult.error) {
+            logger.error(
+              { err: tickResult.error, requestId },
+              'Manual feedback sync errored',
+            );
+            return Errors.internal(reply, 'Failed to trigger feedback sync');
+          }
 
           logger.info(
-            { requestId, transitioned: result.transitioned, skipped: result.skipped },
+            { requestId, transitioned, skipped },
             'Manual feedback sync completed'
           );
 
           return sendSuccess(reply, {
-            transitioned: result.transitioned,
+            transitioned,
             errors: 0,
-            message: result.skipped
+            message: skipped
               ? 'Tick skipped — another instance is already running it'
-              : `Sync completed: ${result.transitioned} appointments transitioned`,
+              : `Sync completed: ${transitioned} appointments transitioned`,
           });
         } catch (err) {
           logger.error({ err, requestId }, 'Failed to trigger feedback sync');

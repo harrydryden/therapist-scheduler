@@ -20,7 +20,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { prisma } from '../utils/database';
-import { LockedTaskRunner } from '../utils/locked-task-runner';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue, getSettingValues } from './settings.service';
@@ -52,7 +52,6 @@ interface MailingListTherapist {
   areasOfFocus: string[];
 }
 
-// Check interval: every hour
 const CHECK_INTERVAL_MS = WEEKLY_MAILING.CHECK_INTERVAL_MS;
 
 // FIX L2: Retry configuration for failed checks
@@ -62,104 +61,48 @@ const RETRY_CONFIG = {
   MAX_DELAY_MS: 30000, // 30 seconds
 };
 
-class WeeklyMailingListService {
-  private intervalId: NodeJS.Timeout | null = null;
-  private instanceId: string;
-  private lockedRunner: LockedTaskRunner;
+class WeeklyMailingListService extends LockedPeriodicService {
   private consecutiveFailures = 0;
 
   constructor() {
-    this.instanceId = `${process.pid}-${Date.now().toString(36)}-weekly`;
-
-    this.lockedRunner = new LockedTaskRunner({
+    super({
+      name: 'weekly-mailing',
+      intervalMs: CHECK_INTERVAL_MS,
       lockKey: WEEKLY_MAILING.LOCK_KEY,
       lockTtlSeconds: WEEKLY_MAILING.LOCK_TTL_SECONDS,
       renewalIntervalMs: WEEKLY_MAILING.RENEWAL_INTERVAL_MS,
-      instanceId: this.instanceId,
-      context: 'weekly-mailing',
     });
   }
 
-  /**
-   * Start the periodic weekly mailing check
-   */
-  start(): void {
-    if (this.intervalId) {
-      logger.warn('Weekly mailing list service already running');
-      return;
-    }
-
-    logger.info('Starting weekly mailing list service (checks every hour)');
-
-    // Run immediately on startup
-    this.runSafeCheck();
-
-    // Then run every hour
-    this.intervalId = setInterval(() => {
-      this.runSafeCheck();
-    }, CHECK_INTERVAL_MS);
-  }
-
-  /**
-   * Stop the periodic check
-   */
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-      logger.info('Weekly mailing list service stopped');
-    }
-  }
-
-  /**
-   * Get service status for health checks
-   */
-  getStatus(): { running: boolean; intervalMs: number } {
-    return {
-      running: this.intervalId !== null,
-      intervalMs: CHECK_INTERVAL_MS,
-    };
-  }
-
-  /**
-   * Safe wrapper that catches errors without crashing the interval.
-   * Uses LockedTaskRunner for distributed lock management.
-   */
-  private async runSafeCheck(): Promise<void> {
-    const taskResult = await this.lockedRunner.run(async (ctx) => {
-      await this.checkAndSendWeeklyEmail(ctx.isLockValid);
-    });
-
-    if (!taskResult.acquired) {
-      logger.debug('Another instance is handling weekly mailing, skipping');
-      return;
-    }
-
-    if (taskResult.error) {
-      // FIX L2: Implement retry with exponential backoff
-      this.consecutiveFailures++;
-      const shouldRetry = this.consecutiveFailures <= RETRY_CONFIG.MAX_RETRIES;
-      const backoffDelay = Math.min(
-        RETRY_CONFIG.BASE_DELAY_MS * Math.pow(2, this.consecutiveFailures - 1),
-        RETRY_CONFIG.MAX_DELAY_MS
-      );
-
-      logger.error(
-        { error: taskResult.error, consecutiveFailures: this.consecutiveFailures, willRetry: shouldRetry, backoffMs: backoffDelay },
-        'Error in weekly mailing check'
-      );
-
-      if (shouldRetry) {
-        setTimeout(() => {
-          logger.info({ attempt: this.consecutiveFailures + 1 }, 'Retrying weekly mailing check');
-          this.runSafeCheck();
-        }, backoffDelay);
-      }
-      return;
-    }
-
+  protected async tick(ctx: { isLockValid: () => boolean }): Promise<void> {
+    await this.checkAndSendWeeklyEmail(ctx.isLockValid);
     // FIX L2: Reset failure counter on success
     this.consecutiveFailures = 0;
+  }
+
+  /**
+   * On error, schedule a retry with exponential backoff up to MAX_RETRIES.
+   * The base class already logged the failure; we just decide whether to retry.
+   */
+  protected onError(err: Error): void {
+    this.consecutiveFailures++;
+    const shouldRetry = this.consecutiveFailures <= RETRY_CONFIG.MAX_RETRIES;
+    const backoffDelay = Math.min(
+      RETRY_CONFIG.BASE_DELAY_MS * Math.pow(2, this.consecutiveFailures - 1),
+      RETRY_CONFIG.MAX_DELAY_MS
+    );
+
+    logger.error(
+      { error: err, consecutiveFailures: this.consecutiveFailures, willRetry: shouldRetry, backoffMs: backoffDelay },
+      'Error in weekly mailing check'
+    );
+
+    if (shouldRetry) {
+      setTimeout(() => {
+        logger.info({ attempt: this.consecutiveFailures + 1 }, 'Retrying weekly mailing check');
+        void this.trigger();
+      }, backoffDelay);
+    }
   }
 
   /**

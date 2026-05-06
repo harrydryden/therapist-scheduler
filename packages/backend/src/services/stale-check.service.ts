@@ -1,5 +1,6 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
@@ -11,25 +12,28 @@ import { auditEventService } from './audit-event.service';
 
 const { CHECK_INTERVAL_MS, RETENTION_CHECK_INTERVAL_MS } = STALE_CHECK_INTERVALS;
 
-class StaleCheckService {
-  private intervalId: NodeJS.Timeout | null = null;
+/**
+ * The retention sweep runs on its own (slower, daily) cadence with its own
+ * lock, so it can't share the LockedPeriodicService primary tick. We keep
+ * a separate LockedTaskRunner + setInterval pair for that, started/stopped
+ * alongside the primary tick via the start/stop overrides below.
+ */
+class StaleCheckService extends LockedPeriodicService {
   private retentionIntervalId: NodeJS.Timeout | null = null;
-  private startupTimeoutId: NodeJS.Timeout | null = null;
-  private instanceId: string;
-  private staleCheckRunner: LockedTaskRunner;
+  private retentionStartupTimeoutId: NodeJS.Timeout | null = null;
   private retentionRunner: LockedTaskRunner;
 
   constructor() {
-    this.instanceId = `${process.pid}-${Date.now().toString(36)}-stale`;
-
-    this.staleCheckRunner = new LockedTaskRunner({
+    super({
+      name: 'stale-check',
+      intervalMs: CHECK_INTERVAL_MS,
       lockKey: STALE_CHECK_LOCK.KEY,
       lockTtlSeconds: STALE_CHECK_LOCK.TTL_SECONDS,
       renewalIntervalMs: STALE_CHECK_LOCK.RENEWAL_INTERVAL_MS,
-      instanceId: this.instanceId,
-      context: 'stale-check',
     });
 
+    // Retention cleanup uses its own lock and its own (slower) cadence,
+    // so it gets its own runner. Reuses our instanceId for ownership.
     this.retentionRunner = new LockedTaskRunner({
       lockKey: RETENTION_CLEANUP_LOCK.KEY,
       lockTtlSeconds: RETENTION_CLEANUP_LOCK.TTL_SECONDS,
@@ -39,31 +43,26 @@ class StaleCheckService {
     });
   }
 
+  protected async tick(): Promise<void> {
+    const startTime = Date.now();
+    await this.checkAndMarkStale();
+    const durationMs = Date.now() - startTime;
+    if (durationMs > 60000) {
+      logger.warn({ durationMs }, 'Stale check took longer than expected');
+    }
+  }
+
   /**
-   * Start the periodic stale check job and data retention cleanup
+   * Start: spin up the primary tick (via base class) and the slower
+   * retention sweep on its own cadence.
    */
   start(): void {
-    if (this.intervalId) {
-      logger.warn('Stale check service already running');
-      return;
-    }
+    super.start();
 
-    logger.info('Starting stale check service (runs every hour)');
-
-    // Run immediately on startup
-    this.runSafeCheck();
-
-    // Then run every hour
-    this.intervalId = setInterval(() => {
-      this.runSafeCheck();
-    }, CHECK_INTERVAL_MS);
-
-    // Start data retention cleanup (runs daily)
     logger.info('Starting data retention cleanup (runs every 24 hours)');
 
-    // Run retention cleanup after 5 minutes (don't run immediately on startup)
-    this.startupTimeoutId = setTimeout(() => {
-      this.startupTimeoutId = null;
+    this.retentionStartupTimeoutId = setTimeout(() => {
+      this.retentionStartupTimeoutId = null;
       this.runSafeRetentionCleanup();
     }, 5 * 60 * 1000);
 
@@ -73,58 +72,18 @@ class StaleCheckService {
   }
 
   /**
-   * Safe wrapper for checkAndMarkStale using LockedTaskRunner.
-   */
-  private async runSafeCheck(): Promise<void> {
-    const startTime = Date.now();
-
-    const taskResult = await this.staleCheckRunner.run(async () => {
-      await this.checkAndMarkStale();
-    });
-
-    if (!taskResult.acquired) {
-      logger.debug('Stale check lock held by another instance - skipping');
-      return;
-    }
-
-    if (taskResult.error) {
-      logger.error({ error: taskResult.error }, 'Unhandled error in stale check - will retry next interval');
-    }
-
-    const durationMs = Date.now() - startTime;
-    if (durationMs > 60000) {
-      logger.warn({ durationMs }, 'Stale check took longer than expected');
-    }
-  }
-
-  /**
-   * Stop the periodic stale check job and retention cleanup
+   * Stop both timers — primary tick via super, retention sweep here.
    */
   stop(): void {
-    if (this.startupTimeoutId) {
-      clearTimeout(this.startupTimeoutId);
-      this.startupTimeoutId = null;
-    }
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
+    if (this.retentionStartupTimeoutId) {
+      clearTimeout(this.retentionStartupTimeoutId);
+      this.retentionStartupTimeoutId = null;
     }
     if (this.retentionIntervalId) {
       clearInterval(this.retentionIntervalId);
       this.retentionIntervalId = null;
     }
-    logger.info('Stale check service stopped');
-  }
-
-  /**
-   * Get service status (for health checks)
-   */
-  getStatus(): {
-    running: boolean;
-  } {
-    return {
-      running: this.intervalId !== null,
-    };
+    super.stop();
   }
 
   /**
