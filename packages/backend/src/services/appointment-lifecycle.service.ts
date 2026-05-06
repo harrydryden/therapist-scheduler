@@ -265,6 +265,102 @@ function computeBackwardSentinelResets(
 }
 
 // ============================================
+// Terminal transition helper (completed, cancelled)
+// ============================================
+
+export type TerminalTxOutcome<TRow> =
+  | { kind: 'idempotent'; row: TRow; previousStatus: AppointmentStatus }
+  | { kind: 'atomicSkipped'; row: TRow; previousStatus: AppointmentStatus }
+  | { kind: 'success'; row: TRow; previousStatus: AppointmentStatus };
+
+export interface RunTerminalTransitionTxArgs<TRow extends { id: string; status: string }> {
+  appointmentId: string;
+  source: TransitionSource;
+  adminId?: string;
+  fetchAndLock: (tx: Prisma.TransactionClient) => Promise<TRow | null>;
+  classify: (row: TRow) => 'idempotent' | 'atomicSkipped' | 'proceed';
+  buildUpdateData: (row: TRow) => Prisma.AppointmentRequestUpdateInput;
+  buildAuditPayload: (row: TRow) => Prisma.InputJsonObject;
+}
+
+/**
+ * Shared transactional skeleton for the terminal transitions (completed,
+ * cancelled). Both follow the same pattern:
+ *
+ *   $transaction(serializable, 10s timeout):
+ *     SELECT … FROM appointment_requests WHERE id = $id FOR UPDATE
+ *     classify(row): idempotent | atomicSkipped | proceed | (throw to abort)
+ *     UPDATE appointment_requests SET …
+ *     INSERT INTO appointment_audit_events (status_change, …)
+ *
+ * Centralising it gives:
+ *   - one place to tune isolation level / timeout / row-lock semantics;
+ *   - guaranteed atomicity between the row update and the status_change
+ *     audit event (both committed together or neither);
+ *   - a single classify() callback that subsumes idempotent skip,
+ *     atomic-precondition skip, and invalid-source-status throw.
+ *
+ * The caller controls the SELECT field list via `fetchAndLock` so each
+ * transition only pulls the columns it actually dispatches on. The
+ * returned outcome carries the same row, eliminating a second post-tx
+ * round-trip.
+ *
+ * Throwing from `classify` rolls the transaction back — the audit event
+ * row is never written for invalid transitions, so a forensic query for
+ * "all status_change events" only reflects actual successful changes.
+ *
+ * Exported (module-scope) so unit tests can drive each branch with a
+ * mocked $transaction without touching the service singleton.
+ */
+export async function runTerminalTransitionTx<TRow extends { id: string; status: string }>(
+  args: RunTerminalTransitionTxArgs<TRow>,
+): Promise<TerminalTxOutcome<TRow>> {
+  return prisma.$transaction(
+    async (tx) => {
+      const row = await args.fetchAndLock(tx);
+      if (!row) {
+        throw new AppointmentNotFoundError(args.appointmentId);
+      }
+      const previousStatus = row.status as AppointmentStatus;
+      const decision = args.classify(row);
+      if (decision === 'idempotent') {
+        return { kind: 'idempotent' as const, row, previousStatus };
+      }
+      if (decision === 'atomicSkipped') {
+        return { kind: 'atomicSkipped' as const, row, previousStatus };
+      }
+
+      await tx.appointmentRequest.update({
+        where: { id: args.appointmentId },
+        data: args.buildUpdateData(row),
+        select: { id: true },
+      });
+
+      await tx.appointmentAuditEvent.create({
+        data: {
+          appointmentRequestId: args.appointmentId,
+          eventType: 'status_change',
+          actor: args.source === 'admin' ? `admin:${args.adminId || 'unknown'}` : args.source,
+          payload: args.buildAuditPayload(row),
+        },
+      });
+
+      return { kind: 'success' as const, row, previousStatus };
+    },
+    {
+      // Serializable + FOR UPDATE — concurrent terminal transitions on
+      // the same row serialize naturally; the second waiter sees the
+      // committed state and either idempotent-skips or hits the
+      // classify() guard. Brief unrelated writes (e.g. ai-conversation
+      // state saves) hold the row lock for tens of ms; bounded by the
+      // transaction timeout.
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: 10000,
+    },
+  );
+}
+
+// ============================================
 // updateStatus dispatch table
 // ============================================
 
@@ -456,92 +552,6 @@ class AppointmentLifecycleService {
   ): Promise<void> {
     if (previousStatus !== APPOINTMENT_STATUS.CONFIRMED) return;
     await transitionSideEffectsService.onSessionHeld(args);
-  }
-
-  /**
-   * Shared transactional skeleton for the terminal transitions (completed,
-   * cancelled). Both follow the same pattern:
-   *
-   *   $transaction(serializable, 10s timeout):
-   *     SELECT … FROM appointment_requests WHERE id = $id FOR UPDATE
-   *     classify(row): idempotent | atomicSkipped | proceed | (throw to abort)
-   *     UPDATE appointment_requests SET …
-   *     INSERT INTO appointment_audit_events (status_change, …)
-   *
-   * Centralising it gives:
-   *   - one place to tune isolation level / timeout / row-lock semantics;
-   *   - guaranteed atomicity between the row update and the status_change
-   *     audit event (both committed together or neither);
-   *   - a single classify() callback that subsumes idempotent skip,
-   *     atomic-precondition skip, and invalid-source-status throw — which
-   *     used to be three sprawling branches in each terminal method.
-   *
-   * The caller controls the SELECT field list via `fetchAndLock` so each
-   * transition only pulls the columns it actually dispatches on (the cancel
-   * path needs more fields than complete because it powers more outbound
-   * notifications). The returned outcome carries the same row, eliminating
-   * a second post-tx SELECT round-trip.
-   *
-   * Throwing from `classify` rolls the transaction back — the audit event
-   * row is never written for invalid transitions, so a forensic query for
-   * "all status_change events" only reflects actual successful changes.
-   */
-  private async runTerminalTransitionTx<TRow extends { id: string; status: string }>(args: {
-    appointmentId: string;
-    source: TransitionSource;
-    adminId?: string;
-    fetchAndLock: (tx: Prisma.TransactionClient) => Promise<TRow | null>;
-    classify: (row: TRow) => 'idempotent' | 'atomicSkipped' | 'proceed';
-    buildUpdateData: (row: TRow) => Prisma.AppointmentRequestUpdateInput;
-    buildAuditPayload: (row: TRow) => Prisma.InputJsonObject;
-  }): Promise<
-    | { kind: 'idempotent'; row: TRow; previousStatus: AppointmentStatus }
-    | { kind: 'atomicSkipped'; row: TRow; previousStatus: AppointmentStatus }
-    | { kind: 'success'; row: TRow; previousStatus: AppointmentStatus }
-  > {
-    return prisma.$transaction(
-      async (tx) => {
-        const row = await args.fetchAndLock(tx);
-        if (!row) {
-          throw new AppointmentNotFoundError(args.appointmentId);
-        }
-        const previousStatus = row.status as AppointmentStatus;
-        const decision = args.classify(row);
-        if (decision === 'idempotent') {
-          return { kind: 'idempotent' as const, row, previousStatus };
-        }
-        if (decision === 'atomicSkipped') {
-          return { kind: 'atomicSkipped' as const, row, previousStatus };
-        }
-
-        await tx.appointmentRequest.update({
-          where: { id: args.appointmentId },
-          data: args.buildUpdateData(row),
-          select: { id: true },
-        });
-
-        await tx.appointmentAuditEvent.create({
-          data: {
-            appointmentRequestId: args.appointmentId,
-            eventType: 'status_change',
-            actor: args.source === 'admin' ? `admin:${args.adminId || 'unknown'}` : args.source,
-            payload: args.buildAuditPayload(row),
-          },
-        });
-
-        return { kind: 'success' as const, row, previousStatus };
-      },
-      {
-        // Serializable + FOR UPDATE — concurrent terminal transitions on
-        // the same row serialize naturally; the second waiter sees the
-        // committed state and either idempotent-skips or hits the
-        // classify() guard. Brief unrelated writes (e.g. ai-conversation
-        // state saves) hold the row lock for tens of ms; bounded by the
-        // transaction timeout.
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        timeout: 10000,
-      },
-    );
   }
 
   /**
@@ -846,6 +856,21 @@ class AppointmentLifecycleService {
       }
     }
 
+    // The "already at the target state" precondition. Spread into both
+    // updateMany where clauses below. Without it, two concurrent calls
+    // that both read CONFIRMED@T0 and target T1 would both pass the
+    // read-time idempotent skip (T0 ≠ T1) and both succeed at the
+    // updateMany — double-firing audit + side effects. The NOT clause
+    // means only the first write lands; the second sees count=0 and
+    // the post-write re-fetch detects "already at target" and returns
+    // an idempotent skip instead of re-firing.
+    const notAlreadyAtTarget = {
+      NOT: {
+        status: APPOINTMENT_STATUS.CONFIRMED,
+        confirmedDateTime,
+      },
+    } as const;
+
     // Use atomic update (updateMany) when atomic options provided
     // This prevents race conditions where two processes try to confirm simultaneously
     if (atomic) {
@@ -853,6 +878,7 @@ class AppointmentLifecycleService {
       const whereClause: any = {
         id: appointmentId,
         status: { in: atomic.requireStatuses },
+        ...notAlreadyAtTarget,
       };
 
       if (atomic.requireHumanControlDisabled) {
@@ -880,6 +906,26 @@ class AppointmentLifecycleService {
           return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true };
         }
 
+        // "Already at the same target" — a concurrent caller won the race
+        // with the SAME datetime. Functionally equivalent to our intent;
+        // return an idempotent skip rather than atomicSkipped so callers
+        // don't retry/log this as a failure.
+        if (
+          current?.status === APPOINTMENT_STATUS.CONFIRMED &&
+          current.confirmedDateTime === confirmedDateTime
+        ) {
+          logger.info(
+            { ...logContext, confirmedDateTime },
+            'Concurrent confirmation already wrote target datetime — treating as idempotent skip',
+          );
+          return {
+            success: true,
+            previousStatus,
+            newStatus: APPOINTMENT_STATUS.CONFIRMED,
+            skipped: true,
+          };
+        }
+
         if (current?.status === APPOINTMENT_STATUS.CONFIRMED) {
           logger.info(
             { ...logContext, existingDateTime: current.confirmedDateTime, attemptedDateTime: confirmedDateTime },
@@ -902,16 +948,37 @@ class AppointmentLifecycleService {
         where: {
           id: appointmentId,
           status: { in: validFromStatuses },
+          ...notAlreadyAtTarget,
         },
         data: updateData,
       });
 
       if (updateResult.count === 0) {
-        // Status changed between our read and write — re-read to provide accurate error
+        // count=0 means either (a) the row drifted to an invalid source
+        // status between our read and write, or (b) a concurrent caller
+        // already wrote the same target datetime (the notAlreadyAtTarget
+        // guard tripped). Re-read to distinguish.
         const current = await prisma.appointmentRequest.findUnique({
           where: { id: appointmentId },
-          select: { status: true },
+          select: { status: true, confirmedDateTime: true },
         });
+
+        if (
+          current?.status === APPOINTMENT_STATUS.CONFIRMED &&
+          current.confirmedDateTime === confirmedDateTime
+        ) {
+          logger.info(
+            { ...logContext, confirmedDateTime },
+            'Concurrent confirmation already wrote target datetime — treating as idempotent skip',
+          );
+          return {
+            success: true,
+            previousStatus,
+            newStatus: APPOINTMENT_STATUS.CONFIRMED,
+            skipped: true,
+          };
+        }
+
         logger.warn(
           { ...logContext, currentStatus: current?.status, readStatus: previousStatus },
           'Confirmation failed - status changed between read and write'
@@ -1082,7 +1149,7 @@ class AppointmentLifecycleService {
       notes: string | null;
     };
 
-    const outcome = await this.runTerminalTransitionTx<CompletedRow>({
+    const outcome = await runTerminalTransitionTx<CompletedRow>({
       appointmentId,
       source,
       adminId,
@@ -1250,7 +1317,7 @@ class AppointmentLifecycleService {
       therapist_gmail_thread_id: string | null;
     };
 
-    const outcome = await this.runTerminalTransitionTx<CancelledRow>({
+    const outcome = await runTerminalTransitionTx<CancelledRow>({
       appointmentId,
       source,
       adminId,
