@@ -22,6 +22,14 @@ export interface EmailMessage {
   date: Date;
   inReplyTo?: string;
   references?: string[];
+  /**
+   * Value of the RFC 3834 `Auto-Submitted` header when present (lowercased).
+   * Out-of-office, mailer-daemon, and vacation responders set this to a
+   * non-`no` value so receivers can avoid mail loops. Auto-replying
+   * services (e.g. invitation-reply) MUST skip messages where this is
+   * anything other than `no` or absent.
+   */
+  autoSubmitted?: string;
 }
 
 /**
@@ -159,6 +167,8 @@ export function parseEmailMessage(
   const subject = getHeader('subject');
   const inReplyTo = getHeader('in-reply-to');
   const references = getHeader('references')?.split(/\s+/).filter(Boolean);
+  const autoSubmittedRaw = getHeader('auto-submitted').trim().toLowerCase();
+  const autoSubmitted = autoSubmittedRaw || undefined;
 
   // Parse date safely
   let date: Date;
@@ -228,5 +238,6 @@ export function parseEmailMessage(
     date,
     inReplyTo,
     references,
+    autoSubmitted,
   };
 }

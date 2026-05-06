@@ -24,11 +24,26 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { redis } from '../utils/redis';
 import { getSettingValue } from './settings.service';
 import { knowledgeService } from './knowledge.service';
 import { AIService } from './ai.service';
 import { emailProcessingService } from './email-processing.service';
+import { slackNotificationService } from './slack-notification.service';
 import type { EmailMessage } from '../utils/email-mime-parser';
+
+/**
+ * Cooldown window per invitation. Once an auto-reply fires, further inbound
+ * messages from the same recipient are routed to admins (via Slack) instead
+ * of triggering another LLM-composed reply. Prevents both reply loops with
+ * misbehaving auto-responders and bad UX from someone who's unhappy with
+ * the first reply and keeps writing back.
+ */
+const COOLDOWN_SECONDS = 60 * 60; // 1 hour
+const COOLDOWN_KEY_PREFIX = 'invitation-reply:cooldown:';
+
+/** Max length of message bodies we surface to Slack (defence against very long inbounds). */
+const SLACK_BODY_PREVIEW = 600;
 
 /**
  * If the sender has a pending or recently-accepted invitation, compose and
@@ -47,6 +62,18 @@ export async function tryHandleInvitationReply(
 ): Promise<boolean> {
   const fromEmail = extractEmailAddress(email.from);
   if (!fromEmail) return false;
+
+  // RFC 3834: skip out-of-office, vacation responders, mailer-daemons, and
+  // anything else that flags itself as auto-submitted. Replying to those
+  // would create a mail loop (their auto-responder bounces our auto-reply,
+  // we re-respond, etc.). Header is "no" for human replies.
+  if (email.autoSubmitted && email.autoSubmitted !== 'no') {
+    logger.info(
+      { traceId, messageId: email.id, fromEmail, autoSubmitted: email.autoSubmitted },
+      'Skipping invitation auto-reply: inbound is auto-submitted (RFC 3834)',
+    );
+    return false;
+  }
 
   const invitation = await prisma.signupInvitation.findFirst({
     where: {
@@ -68,6 +95,27 @@ export async function tryHandleInvitationReply(
   });
 
   if (!invitation) return false;
+
+  // Cooldown: if we already auto-replied to this invitation within the
+  // last hour, don't run another LLM call. Surface the message to admins
+  // via Slack so a human can follow up with appropriate context, and
+  // return true so the caller marks the inbound processed (we did handle
+  // it — the handling was "escalate").
+  const cooldownKey = `${COOLDOWN_KEY_PREFIX}${invitation.id}`;
+  const cooldownActive = await safeRedisGet(cooldownKey, traceId);
+  if (cooldownActive) {
+    logger.info(
+      { traceId, messageId: email.id, invitationId: invitation.id, fromEmail },
+      'Invitation auto-reply suppressed by cooldown — escalating to admins',
+    );
+    void notifyAdminsOfFollowupReply({ email, fromEmail, invitation }).catch((err) => {
+      logger.warn(
+        { err, traceId, messageId: email.id, invitationId: invitation.id },
+        'Failed to send Slack alert for cooldown-suppressed invitation reply',
+      );
+    });
+    return true;
+  }
 
   logger.info(
     { traceId, messageId: email.id, invitationId: invitation.id, fromEmail },
@@ -94,10 +142,31 @@ export async function tryHandleInvitationReply(
       threadId: email.threadId,
     });
 
+    // Set cooldown AFTER successful send. Best-effort: a Redis outage
+    // means the cooldown won't apply but we've already replied this turn,
+    // so the worst case is a duplicate reply on a fast follow-up.
+    await safeRedisSet(cooldownKey, '1', COOLDOWN_SECONDS, traceId);
+
     logger.info(
       { traceId, messageId: email.id, invitationId: invitation.id },
       'Sent invitation auto-reply',
     );
+
+    // Visibility: notify admins of every auto-reply during early rollout
+    // so we can spot bad LLM responses before recipients do. Fire-and-
+    // forget — Slack failure must not block returning true.
+    void notifyAdminsOfAutoReply({
+      email,
+      fromEmail,
+      invitation,
+      replyBody,
+    }).catch((err) => {
+      logger.warn(
+        { err, traceId, messageId: email.id, invitationId: invitation.id },
+        'Failed to send Slack alert for invitation auto-reply',
+      );
+    });
+
     return true;
   } catch (err) {
     // Swallow + log: if the auto-reply fails we'd rather have the message
@@ -109,6 +178,73 @@ export async function tryHandleInvitationReply(
       'Failed to compose/send invitation auto-reply — falling through to unmatched handler',
     );
     return false;
+  }
+}
+
+/**
+ * Slack notification shapes. Both use sendAlert with severity 'low' so
+ * they don't page anyone and don't drown out real alerts.
+ */
+async function notifyAdminsOfAutoReply(params: {
+  email: EmailMessage;
+  fromEmail: string;
+  invitation: { id: string; name: string | null };
+  replyBody: string;
+}): Promise<void> {
+  await slackNotificationService.sendAlert({
+    title: 'Invitation auto-reply sent',
+    severity: 'low',
+    details:
+      `Auto-replied to *${params.invitation.name || params.fromEmail}* (\`${params.fromEmail}\`).\n\n` +
+      `*Their question:*\n${truncate(params.email.body, SLACK_BODY_PREVIEW)}\n\n` +
+      `*Our reply:*\n${truncate(params.replyBody, SLACK_BODY_PREVIEW)}`,
+    additionalFields: {
+      'Invitation ID': params.invitation.id,
+      'Subject': truncate(params.email.subject, 100),
+    },
+  });
+}
+
+async function notifyAdminsOfFollowupReply(params: {
+  email: EmailMessage;
+  fromEmail: string;
+  invitation: { id: string; name: string | null };
+}): Promise<void> {
+  await slackNotificationService.sendAlert({
+    title: 'Invitee replied again — needs human follow-up',
+    severity: 'medium',
+    details:
+      `*${params.invitation.name || params.fromEmail}* (\`${params.fromEmail}\`) ` +
+      `replied to their invitation thread within the auto-reply cooldown window. ` +
+      `The previous auto-reply may not have answered them.\n\n` +
+      `*Their message:*\n${truncate(params.email.body, SLACK_BODY_PREVIEW)}`,
+    additionalFields: {
+      'Invitation ID': params.invitation.id,
+      'Subject': truncate(params.email.subject, 100),
+    },
+  });
+}
+
+function truncate(text: string, max: number): string {
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return text.slice(0, max) + '…';
+}
+
+async function safeRedisGet(key: string, traceId: string): Promise<string | null> {
+  try {
+    return await redis.get(key);
+  } catch (err) {
+    logger.warn({ err, traceId, key }, 'Redis GET failed for invitation-reply cooldown — proceeding without cooldown');
+    return null;
+  }
+}
+
+async function safeRedisSet(key: string, value: string, ttlSeconds: number, traceId: string): Promise<void> {
+  try {
+    await redis.set(key, value, 'EX', ttlSeconds);
+  } catch (err) {
+    logger.warn({ err, traceId, key }, 'Redis SET failed for invitation-reply cooldown — next message may double-reply');
   }
 }
 

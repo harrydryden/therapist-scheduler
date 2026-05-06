@@ -36,6 +36,15 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
+const redisGetMock = jest.fn();
+const redisSetMock = jest.fn();
+jest.mock('../utils/redis', () => ({
+  redis: {
+    get: (...args: unknown[]) => redisGetMock(...args),
+    set: (...args: unknown[]) => redisSetMock(...args),
+  },
+}));
+
 const getSettingValueMock = jest.fn();
 jest.mock('../services/settings.service', () => ({
   getSettingValue: (...args: unknown[]) => getSettingValueMock(...args),
@@ -59,6 +68,13 @@ const sendEmailMock = jest.fn();
 jest.mock('../services/email-processing.service', () => ({
   emailProcessingService: {
     sendEmail: (...args: unknown[]) => sendEmailMock(...args),
+  },
+}));
+
+const sendAlertMock = jest.fn();
+jest.mock('../services/slack-notification.service', () => ({
+  slackNotificationService: {
+    sendAlert: (...args: unknown[]) => sendAlertMock(...args),
   },
 }));
 
@@ -89,6 +105,9 @@ describe('tryHandleInvitationReply', () => {
       latency: 250,
     });
     sendEmailMock.mockResolvedValue({ ok: true });
+    redisGetMock.mockResolvedValue(null); // no cooldown by default
+    redisSetMock.mockResolvedValue('OK');
+    sendAlertMock.mockResolvedValue(true);
   });
 
   it('returns false when no invitation matches the sender', async () => {
@@ -220,5 +239,128 @@ describe('tryHandleInvitationReply', () => {
     expect(generateResponseMock).toHaveBeenCalledTimes(1);
     const userPrompt = generateResponseMock.mock.calls[0][0] as string;
     expect(userPrompt).toContain('"there"');
+  });
+
+  it('skips when the inbound has Auto-Submitted set (RFC 3834 mail-loop guard)', async () => {
+    const result = await tryHandleInvitationReply(
+      { ...baseEmail, autoSubmitted: 'auto-replied' },
+      'trace-1',
+    );
+
+    expect(result).toBe(false);
+    // Crucial: must not even hit the database when the header says
+    // auto-submitted. Returning false routes the message to the
+    // unmatched-tracker, which is the right path for vacation
+    // responders / mailer-daemons.
+    expect(findFirstMock).not.toHaveBeenCalled();
+    expect(generateResponseMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+  });
+
+  it('does NOT skip when Auto-Submitted is explicitly "no" (some mail clients set this on human replies)', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 'invite-1',
+      email: 'invitee@example.com',
+      name: 'Alice',
+      acceptedAt: null,
+    });
+
+    const result = await tryHandleInvitationReply(
+      { ...baseEmail, autoSubmitted: 'no' },
+      'trace-1',
+    );
+
+    expect(result).toBe(true);
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses the auto-reply when cooldown is active and Slack-alerts admins instead', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 'invite-1',
+      email: 'invitee@example.com',
+      name: 'Alice',
+      acceptedAt: null,
+    });
+    // Simulate cooldown already set from a previous reply.
+    redisGetMock.mockResolvedValue('1');
+
+    const result = await tryHandleInvitationReply(baseEmail, 'trace-1');
+
+    // Returning true means "we handled it" — the caller will mark the
+    // message processed rather than letting it loop through the
+    // unmatched-tracker.
+    expect(result).toBe(true);
+    expect(generateResponseMock).not.toHaveBeenCalled();
+    expect(sendEmailMock).not.toHaveBeenCalled();
+
+    // The follow-up alert must fire so admins know to respond manually.
+    // sendAlert is invoked via void/.catch, so we await a microtask.
+    await new Promise((r) => setImmediate(r));
+    expect(sendAlertMock).toHaveBeenCalledTimes(1);
+    expect(sendAlertMock.mock.calls[0][0]).toMatchObject({
+      title: 'Invitee replied again — needs human follow-up',
+      severity: 'medium',
+    });
+  });
+
+  it('sets the cooldown key after a successful auto-reply', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 'invite-1',
+      email: 'invitee@example.com',
+      name: 'Alice',
+      acceptedAt: null,
+    });
+
+    await tryHandleInvitationReply(baseEmail, 'trace-1');
+
+    expect(redisSetMock).toHaveBeenCalledTimes(1);
+    const [key, value, mode, ttl] = redisSetMock.mock.calls[0];
+    expect(key).toBe('invitation-reply:cooldown:invite-1');
+    expect(value).toBe('1');
+    expect(mode).toBe('EX');
+    expect(ttl).toBe(3600); // 1 hour
+  });
+
+  it('Slack-alerts admins on every successful auto-reply (low severity)', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 'invite-1',
+      email: 'invitee@example.com',
+      name: 'Alice',
+      acceptedAt: null,
+    });
+
+    await tryHandleInvitationReply(baseEmail, 'trace-1');
+
+    // sendAlert is fired via void/.catch — flush the microtask queue.
+    await new Promise((r) => setImmediate(r));
+    expect(sendAlertMock).toHaveBeenCalledTimes(1);
+    expect(sendAlertMock.mock.calls[0][0]).toMatchObject({
+      title: 'Invitation auto-reply sent',
+      severity: 'low',
+    });
+    // Both the original question and the reply are surfaced to admins
+    // so they can spot bad LLM responses early.
+    const details = sendAlertMock.mock.calls[0][0].details as string;
+    expect(details).toContain('Their question');
+    expect(details).toContain('Our reply');
+  });
+
+  it('still sends the auto-reply when Redis is unreachable (graceful degradation)', async () => {
+    findFirstMock.mockResolvedValue({
+      id: 'invite-1',
+      email: 'invitee@example.com',
+      name: 'Alice',
+      acceptedAt: null,
+    });
+    redisGetMock.mockRejectedValue(new Error('Redis down'));
+    redisSetMock.mockRejectedValue(new Error('Redis down'));
+
+    const result = await tryHandleInvitationReply(baseEmail, 'trace-1');
+
+    // Cooldown lookup failure is treated as "no cooldown" — better to
+    // risk a duplicate reply than to silently swallow during a Redis
+    // outage. The cooldown SET also fails harmlessly (logged).
+    expect(result).toBe(true);
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
   });
 });
