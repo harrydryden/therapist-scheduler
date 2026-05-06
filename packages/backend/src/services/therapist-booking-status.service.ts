@@ -340,27 +340,6 @@ class TherapistBookingStatusService {
   }
 
   /**
-   * Determine if a therapist should be frozen based on booking status.
-   * Called by the sync service to update Notion.
-   * Delegates to batchComputeFreezeStatus to avoid duplicating freeze logic.
-   *
-   * Freeze rules (single source of truth in batchComputeFreezeStatus):
-   * - Confirmed booking = frozen
-   * - Confirmed+ appointment exists (defense-in-depth) = frozen
-   * - frozenAt set AND active pre-booking conversation = frozen
-   * - Otherwise = not frozen
-   */
-  async shouldTherapistBeFrozen(therapistNotionId: string): Promise<boolean> {
-    try {
-      const freezeMap = await this.batchComputeFreezeStatus([therapistNotionId]);
-      return freezeMap.get(therapistNotionId) ?? false;
-    } catch (error) {
-      logger.error({ error, therapistNotionId }, 'Failed to check if therapist should be frozen');
-      return false;
-    }
-  }
-
-  /**
    * Batch compute freeze status for multiple therapists
    * Optimized: Uses 2 queries total instead of N+1
    *

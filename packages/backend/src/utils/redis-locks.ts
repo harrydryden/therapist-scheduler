@@ -4,7 +4,7 @@
  * These scripts run atomically on the Redis server to prevent race conditions
  * in lock operations. Previously duplicated across 5+ services.
  *
- * Used by: stale-check, pending-email, notion-sync-manager, weekly-mailing-list,
+ * Used by: stale-check, pending-email, weekly-mailing-list,
  *          slack-weekly-summary, email-processing
  */
 

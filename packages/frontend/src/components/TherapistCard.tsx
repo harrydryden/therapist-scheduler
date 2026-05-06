@@ -154,9 +154,9 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
           </span>
         </div>
         <p className={`text-sm text-spill-grey-400 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
-          {therapist.bio}
+          {therapist.bio ?? ''}
         </p>
-        {therapist.bio.length > UI.BIO_TRUNCATE_LENGTH && (
+        {therapist.bio !== null && therapist.bio.length > UI.BIO_TRUNCATE_LENGTH && (
           <button
             onClick={() => toggleSection('bio')}
             aria-expanded={isExpanded('bio')}

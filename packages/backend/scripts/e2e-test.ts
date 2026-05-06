@@ -8,7 +8,7 @@
  * 4. Feedback form submission (filling out all questions)
  * 5. Appointment completion / cancellation
  *
- * IMPORTANT: Uses dedicated TEST accounts in Notion:
+ * IMPORTANT: Uses dedicated TEST accounts (must exist in Postgres):
  * - Test User: "Test User E2E" (scheduling+testuser@spill.chat)
  * - Test Therapist: "Test Therapist (E2E)" (scheduling+therapist@spill.chat)
  *
@@ -22,15 +22,14 @@
  *   all           - Run all scenarios (default)
  */
 
-// Test configuration - uses dedicated TEST accounts in Notion
+// Test configuration — uses dedicated TEST accounts seeded in Postgres.
 const TEST_CONFIG = {
   apiBase: process.env.TEST_API_BASE || 'https://backend-production-fe25.up.railway.app',
   webhookSecret: process.env.WEBHOOK_SECRET || '',
-  // Test user - dedicated test account in Notion
   testUserEmail: 'scheduling+testuser@spill.chat',
   testUserName: 'Test User E2E',
-  // Test therapist - dedicated test account in Notion with known ID
-  // We use the ID directly since the therapist may be frozen between tests
+  // Test therapist — handle is the legacy notionId for backwards compatibility
+  // with the booking endpoint, which accepts either notionId or Postgres uuid.
   testTherapist: {
     notionId: '30749f92-fc6b-81b4-bc19-f5851d35e9fd',
     name: 'Test Therapist (E2E)',
@@ -465,11 +464,10 @@ async function runCompletionScenario(): Promise<TestResult[]> {
   if (await testVerifyStatus(created.appointmentId, 'completed')) {
     results.push({ name: 'Verify Completed Status', passed: true });
 
-    // Note: Using TEST therapist account - verify in Notion
     notificationChecks.push({
-      type: 'Notion: TEST Therapist Inactive',
+      type: 'TEST Therapist Inactive',
       expected: true,
-      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is marked Active=false in Notion`,
+      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is marked active=false in Postgres (admin therapists list)`,
     });
   } else {
     results.push({ name: 'Verify Completed Status', passed: false });
@@ -520,11 +518,10 @@ async function runCancellationScenario(): Promise<TestResult[]> {
   if (await testCancelAppointment(created.appointmentId)) {
     results.push({ name: 'Cancel Appointment', passed: true });
 
-    // Note: Using TEST therapist account - verify in Notion
     notificationChecks.push({
-      type: 'Notion: TEST Therapist Unfrozen',
+      type: 'TEST Therapist Unfrozen',
       expected: true,
-      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is unfrozen in Notion`,
+      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is unfrozen in Postgres (TherapistBookingStatus.frozenAt is null)`,
     });
   } else {
     results.push({ name: 'Cancel Appointment', passed: false });

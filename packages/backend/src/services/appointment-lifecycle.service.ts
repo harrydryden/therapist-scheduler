@@ -18,7 +18,7 @@
  * - Atomic database updates with preconditions (prevents TOCTOU races)
  * - Audit trail (conversation state updates)
  * - Orchestrating post-transition side effects via extracted services:
- *   - transition-side-effects.service.ts: Notion sync, therapist booking status, SSE
+ *   - transition-side-effects.service.ts: therapist booking status, SSE
  *   - appointment-notifications.service.ts: Slack + email notifications
  *
  * All code paths that change appointment status MUST go through this service.
@@ -143,7 +143,7 @@ export interface TransitionToCancelledParams extends BaseTransitionParams {
    * (e.g. email-bounce service which sends a more detailed bounce-specific Slack alert
    * and where emailing the bounced user is futile).
    *
-   * Data-consistency side effects (therapist unfreeze, Notion sync, audit trail) still
+   * Data-consistency side effects (therapist unfreeze, audit trail) still
    * run regardless — this only suppresses the user-visible notifications.
    */
   skipNotifications?: boolean;
@@ -537,14 +537,11 @@ class AppointmentLifecycleService {
   }
 
   /**
-   * Fire the onSessionHeld side effects (Notion user sync — moves therapist
-   * from "Upcoming" to "Previous" on the user's Notion page) when a transition
-   * advances PAST `confirmed` directly to `feedback_requested` or `completed`,
-   * skipping the `session_held` intermediate.
-   *
-   * Awaited (not fire-and-forget) so the side-effect-tracker row is registered
-   * before the caller's audit/SSE event is emitted — guarantees a downstream
-   * crash leaves a retryable record rather than a silently-lost sync.
+   * Fire the onSessionHeld side effects when a transition advances PAST
+   * `confirmed` directly to `feedback_requested` or `completed`, skipping
+   * the `session_held` intermediate. Currently a no-op (onSessionHeld has
+   * no side effects post-Notion-retirement) but kept as the dispatch site
+   * so adding future session-held effects only requires touching one place.
    */
   private async catchUpSessionHeldEffects(
     previousStatus: AppointmentStatus,
@@ -756,8 +753,6 @@ class AppointmentLifecycleService {
    * Handles all side effects:
    * - Updates appointment record
    * - Marks therapist as confirmed (freezes for other bookings)
-   * - Syncs therapist freeze status to Notion
-   * - Syncs user to Notion
    * - Sends confirmation emails to client and therapist
    * - Sends Slack notification
    */
@@ -1023,7 +1018,7 @@ class AppointmentLifecycleService {
       );
     }
 
-    // Post-transition side effects (therapist booking status, Notion sync)
+    // Post-transition side effects (therapist booking status)
     this.fireAndForget(
       transitionSideEffectsService.onConfirmed({
         appointmentId,
@@ -1075,8 +1070,6 @@ class AppointmentLifecycleService {
       validFromStatuses: [APPOINTMENT_STATUS.CONFIRMED],
       buildAuditMessage: (prev) => `Status changed: ${prev} → session_held`,
       onAfterUpdate: (_prev, apt) => {
-        // Post-transition side effects (Notion user sync) — moves therapist
-        // from "Upcoming" to "Previous" on the user's Notion page.
         this.fireAndForget(
           transitionSideEffectsService.onSessionHeld({
             appointmentId,

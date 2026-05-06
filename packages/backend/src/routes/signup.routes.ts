@@ -156,7 +156,7 @@ export async function signupRoutes(fastify: FastifyInstance) {
             // attribution (a self-service signup vs. a prospect we invited).
             signupSource: invitationToken ? 'invitation' : 'signup_form',
             // Auto-subscribe to weekly mailing list, matching the booking
-            // flow's behaviour (Notion users are auto-subscribed on create).
+            // flow's behaviour for newly-created users.
             subscribed: true,
           },
           select: {

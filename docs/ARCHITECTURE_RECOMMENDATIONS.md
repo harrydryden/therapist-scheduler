@@ -3,6 +3,12 @@
 **Date:** 2026-02-16 (updated 2026-03-08)
 **Purpose:** Scale infrastructure for ATS system processing hundreds of applications/month
 
+> **Status note (2026-05):** Section 2.1 ("Migrate Therapist Data from Notion to
+> PostgreSQL") and the related Notion-removal items have been carried out. Notion
+> is no longer authoritative or read by any service; Postgres is the single source
+> of truth. The recommendations in those sections remain in this document for
+> historical context only.
+
 ---
 
 ## Executive Summary

@@ -407,7 +407,7 @@ export class EmailMessageProcessorService {
     }
 
     // Start lock renewal to prevent expiry during long processing
-    // (thread fetch, Notion API, Claude API can each take 30+ seconds)
+    // (thread fetch and Claude API can each take 30+ seconds)
     // Skip lock renewal when using database fallback (no Redis lock to renew)
     const lockRenewal = usingDatabaseFallback ? null : createLockRenewal(lockKey, traceId, () => {
       logger.error(

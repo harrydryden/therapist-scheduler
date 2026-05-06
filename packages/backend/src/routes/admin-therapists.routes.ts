@@ -1,19 +1,15 @@
 /**
  * Admin Therapist Management Routes
  *
- * Reads exclusively from the Postgres `therapists` table — the new home for
- * therapist profile data that previously lived only in Notion. The
- * 20260505_add_postgres_profile_mirror migration plus the
- * backfill-notion-to-postgres script populate these rows; the existing
- * NotionSyncManager is extended in PR 1 to keep them mirrored from Notion
- * on a 5-minute cadence while Notion remains authoritative.
+ * Reads and writes the Postgres `therapists` table. Postgres is the
+ * single source of truth for therapist profile data; every consumer
+ * (public listing, admin UI, booking flow, weekly mailing, ATS
+ * integration) reads from here.
  *
- * Mutations dual-write where Notion still owns the canonical value:
- *   - active toggle      → Postgres + Notion (Notion pdf-ingestion / public
- *                          listing still reads `active` from Notion)
- *   - profile fields     → Postgres only (PR 2 cuts reads over; until then
- *                          changes here are visible in admin only)
- *   - force unfreeze     → clears TherapistBookingStatus.frozenAt
+ * Mutations:
+ *   - active toggle     → Postgres
+ *   - profile fields    → Postgres
+ *   - force unfreeze    → clears TherapistBookingStatus.frozenAt
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -123,17 +119,23 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         ]);
 
         // Pull frozen state for the page in a single query rather than per row.
-        const notionIds = therapists.map((t) => t.notionId);
-        const statuses = notionIds.length
+        // Filter out null notionIds — post-Notion-deprecation therapists have
+        // notionId=null, and Prisma 5 throws on null entries inside `in:`.
+        // Their booking-status rows (when they exist) are keyed on the
+        // Postgres uuid instead, so we union both lookup keys.
+        const lookupKeys = therapists
+          .map((t) => t.notionId ?? t.id)
+          .filter((k): k is string => !!k);
+        const statuses = lookupKeys.length
           ? await prisma.therapistBookingStatus.findMany({
-              where: { id: { in: notionIds } },
+              where: { id: { in: lookupKeys } },
               select: { id: true, frozenAt: true, hasConfirmedBooking: true, uniqueRequestCount: true },
             })
           : [];
-        const statusByNotionId = new Map(statuses.map((s) => [s.id, s]));
+        const statusByLookupKey = new Map(statuses.map((s) => [s.id, s]));
 
         const items = therapists.map((t) => {
-          const status = statusByNotionId.get(t.notionId);
+          const status = statusByLookupKey.get(t.notionId ?? t.id);
           return {
             id: t.id,
             odId: t.odId,
