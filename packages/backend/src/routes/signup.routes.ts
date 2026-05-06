@@ -139,72 +139,91 @@ export async function signupRoutes(fastify: FastifyInstance) {
         // Ensure the row exists with an odId. getOrCreateUser is idempotent —
         // re-signing-up with the same email updates the name and refreshes
         // the consent timestamps below. That's the desired UX: a second
-        // signup form submission overwrites stale consent state.
+        // signup form submission overwrites stale consent state. This runs
+        // outside the consent+accept tx below: a fresh User row with no
+        // consent flags is a normal pre-signup state, so committing it
+        // independently is safe.
         const user = await getOrCreateUser(email, name);
 
-        const updated = await prisma.user.update({
-          where: { id: user.id },
-          data: {
-            // Refresh name in case it changed since first booking
-            name,
-            priorTherapy,
-            acknowledgedRealSession,
-            agreedToFeedback,
-            consentGivenAt: new Date(),
-            // Distinguish organic /signup-form completions from invitation
-            // acceptances so the admin user filter can split conversion
-            // attribution (a self-service signup vs. a prospect we invited).
-            signupSource: invitationToken ? 'invitation' : 'signup_form',
-            // Auto-subscribe to weekly mailing list, matching the booking
-            // flow's behaviour for newly-created users.
-            subscribed: true,
-          },
-          select: {
-            id: true,
-            odId: true,
-            email: true,
-            name: true,
-            consentGivenAt: true,
-          },
-        });
+        // Atomically commit the consent update AND (if invitation-bound)
+        // the invitation acceptance. Previously these ran as two separate
+        // writes — a crash between them left a fully-consented User row
+        // alongside a `pending` invitation, which is hard to reconcile
+        // after the fact. Serializable isn't needed here (the writes don't
+        // depend on phantom-read-sensitive queries); the default isolation
+        // plus markAccepted's atomic precondition is sufficient.
+        const { updated, acceptResult } = await prisma.$transaction(
+          async (tx) => {
+            const updated = await tx.user.update({
+              where: { id: user.id },
+              data: {
+                // Refresh name in case it changed since first booking
+                name,
+                priorTherapy,
+                acknowledgedRealSession,
+                agreedToFeedback,
+                consentGivenAt: new Date(),
+                // Distinguish organic /signup-form completions from invitation
+                // acceptances so the admin user filter can split conversion
+                // attribution (a self-service signup vs. a prospect we invited).
+                signupSource: invitationToken ? 'invitation' : 'signup_form',
+                // Auto-subscribe to weekly mailing list, matching the booking
+                // flow's behaviour for newly-created users.
+                subscribed: true,
+              },
+              select: {
+                id: true,
+                odId: true,
+                email: true,
+                name: true,
+                consentGivenAt: true,
+              },
+            });
 
-        // If the signup was bound to an invitation, mark it accepted now
-        // that the User row exists. The pre-check above already validated
-        // the token, but this call is the authoritative status flip — it
-        // uses an updateMany with preconditions so concurrent signups
-        // can't double-accept.
-        if (invitationToken) {
-          const acceptResult = await markAccepted({
-            rawToken: invitationToken,
-            userId: updated.id,
-            email: updated.email,
-          });
-          if (!acceptResult.accepted) {
-            // The invitation slipped state between the pre-check and the
-            // accept (e.g. admin revoked mid-flight). The signup itself
-            // succeeded; we just log and continue.
-            logger.warn(
-              { requestId, email, reason: acceptResult.reason },
-              'Invitation accept-flip failed after signup committed',
-            );
-          } else if (acceptResult.invitation) {
-            // Fire-and-forget Slack notification so admins see the
-            // conversion in real time. Failure here doesn't affect the
-            // signup outcome.
-            slackNotificationService
-              .notifyInvitationAccepted({
-                invitationId: acceptResult.invitation.id,
-                email: updated.email,
-                name: updated.name,
-                invitedBy: acceptResult.invitation.invitedBy,
-              })
-              .catch((err) => {
-                logger.warn(
-                  { err, requestId, invitationId: acceptResult.invitation?.id },
-                  'Failed to send Slack notification for invitation acceptance',
-                );
-              });
-          }
+            const acceptResult = invitationToken
+              ? await markAccepted(
+                  {
+                    rawToken: invitationToken,
+                    userId: updated.id,
+                    email: updated.email,
+                  },
+                  tx,
+                )
+              : null;
+
+            return { updated, acceptResult };
+          },
+          { timeout: 10_000 },
+        );
+
+        // Post-commit side effects. The accept-flip's outcome is observed
+        // here AFTER commit so a Slack notification never fires for a tx
+        // that ultimately rolled back.
+        if (acceptResult && !acceptResult.accepted) {
+          // The invitation slipped state between the pre-check and the
+          // accept (e.g. admin revoked mid-flight). The signup itself
+          // succeeded; we just log and continue.
+          logger.warn(
+            { requestId, email, reason: acceptResult.reason },
+            'Invitation accept-flip failed after signup committed',
+          );
+        } else if (acceptResult?.accepted && acceptResult.invitation) {
+          // Fire-and-forget Slack notification so admins see the
+          // conversion in real time. Failure here doesn't affect the
+          // signup outcome.
+          slackNotificationService
+            .notifyInvitationAccepted({
+              invitationId: acceptResult.invitation.id,
+              email: updated.email,
+              name: updated.name,
+              invitedBy: acceptResult.invitation.invitedBy,
+            })
+            .catch((err) => {
+              logger.warn(
+                { err, requestId, invitationId: acceptResult.invitation?.id },
+                'Failed to send Slack notification for invitation acceptance',
+              );
+            });
         }
 
         logger.info(

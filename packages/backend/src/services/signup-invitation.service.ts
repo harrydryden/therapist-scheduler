@@ -199,15 +199,25 @@ interface MarkAcceptedResult {
  * Atomically mark an invitation as accepted. Uses an updateMany with a
  * full set of preconditions so concurrent signups can't double-accept the
  * same invitation.
+ *
+ * Accepts an optional `tx` so callers can compose this write with related
+ * writes (e.g. signup.routes.ts wraps the user-consent update + this
+ * accept in one tx — without that, a crash between the two left a fully-
+ * consented User and a `pending` invitation, which is hard to clean up).
+ * When `tx` is omitted the function uses the default prisma client.
  */
-export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcceptedResult> {
+export async function markAccepted(
+  params: MarkAcceptedParams,
+  tx?: Prisma.TransactionClient,
+): Promise<MarkAcceptedResult> {
+  const db = tx ?? prisma;
   if (!isWellFormedInvitationToken(params.rawToken)) {
     return { accepted: false, reason: 'not-found' };
   }
   const tokenHash = hashInvitationToken(params.rawToken);
 
   // Look up first so we can return a precise reason on failure.
-  const existing = await prisma.signupInvitation.findUnique({ where: { tokenHash } });
+  const existing = await db.signupInvitation.findUnique({ where: { tokenHash } });
   if (!existing) return { accepted: false, reason: 'not-found' };
 
   const now = new Date();
@@ -223,7 +233,7 @@ export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcce
   // Atomic precondition: only flip to accepted if still pending. updateMany
   // returns count=0 if the row was concurrently mutated, in which case we
   // re-fetch to surface the current state.
-  const result = await prisma.signupInvitation.updateMany({
+  const result = await db.signupInvitation.updateMany({
     where: {
       tokenHash,
       acceptedAt: null,
@@ -235,7 +245,7 @@ export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcce
   });
 
   if (result.count === 0) {
-    const racedRow = await prisma.signupInvitation.findUnique({ where: { tokenHash } });
+    const racedRow = await db.signupInvitation.findUnique({ where: { tokenHash } });
     if (!racedRow) return { accepted: false, reason: 'not-found' };
     return {
       accepted: false,
@@ -244,7 +254,7 @@ export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcce
     };
   }
 
-  const updated = await prisma.signupInvitation.findUnique({ where: { tokenHash } });
+  const updated = await db.signupInvitation.findUnique({ where: { tokenHash } });
   return { accepted: true, invitation: updated ? toView(updated, now) : undefined };
 }
 
