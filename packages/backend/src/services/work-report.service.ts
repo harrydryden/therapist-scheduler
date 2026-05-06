@@ -349,6 +349,33 @@ ${appointmentSummaries.join('\n\n')}`,
       this.generateSynopsis(periodStart, periodEnd),
     ]);
 
+    // If nothing actually happened in the period, skip both the DB write
+    // and the Slack post — quiet days shouldn't produce a noisy report.
+    // Pipeline counts are excluded from the check because they're a
+    // point-in-time snapshot, not "work done since the last report".
+    const activityTotal =
+      emailsSent +
+      emailsReceived +
+      appointmentsCreated +
+      appointmentsConfirmed +
+      appointmentsCompleted +
+      appointmentsCancelled +
+      staleConversationsFlagged +
+      humanControlTakeovers +
+      chaseFollowUpsSent +
+      closureRecommendations +
+      feedbackSubmissions;
+    if (activityTotal === 0) {
+      logger.info(
+        {
+          periodStart: periodStart.toISOString(),
+          periodEnd: periodEnd.toISOString(),
+        },
+        'No activity in period — skipping work report',
+      );
+      return;
+    }
+
     // Save report to database
     const report = await prisma.workReport.create({
       data: {
