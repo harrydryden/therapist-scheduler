@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToastContext } from '../components/Toast';
 import { listUsers, getUser, updateUser } from '../api/users';
@@ -34,6 +35,7 @@ function ConsentBadge({ given }: { given: boolean | null }) {
 function SourceBadge({ source }: { source: UserListItem['signupSource'] }) {
   const colors: Record<string, string> = {
     signup_form: 'bg-spill-blue-100 text-spill-blue-800',
+    invitation: 'bg-indigo-100 text-indigo-800',
     booking: 'bg-teal-100 text-teal-800',
     admin: 'bg-purple-100 text-purple-800',
     legacy: 'bg-slate-100 text-slate-600',
@@ -299,7 +301,12 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
 }
 
 export default function AdminUsersPage() {
-  const [search, setSearch] = useState('');
+  // Allow deep links like /admin/users?search=alice@example.com (used by
+  // the Invitations page "View user" link) to seed the search box. We
+  // only seed on first render — subsequent edits are local-only so the
+  // URL doesn't churn on every keystroke.
+  const [searchParams] = useSearchParams();
+  const [search, setSearch] = useState(() => searchParams.get('search') ?? '');
   const [subscribed, setSubscribed] = useState<UserFilters['subscribed']>('all');
   const [signupSource, setSignupSource] = useState<UserFilters['signupSource']>('all');
   const [page, setPage] = useState(1);
@@ -373,6 +380,7 @@ export default function AdminUsersPage() {
           >
             <option value="all">All</option>
             <option value="signup_form">Signup form</option>
+            <option value="invitation">Invitation</option>
             <option value="booking">Booking</option>
             <option value="admin">Admin</option>
             <option value="legacy">Legacy</option>

@@ -22,6 +22,7 @@ const AdminWorkReportsPage = lazy(() => import('./pages/AdminWorkReportsPage'));
 const AdminVouchersPage = lazy(() => import('./pages/AdminVouchersPage'));
 const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage'));
 const AdminTherapistsPage = lazy(() => import('./pages/AdminTherapistsPage'));
+const AdminInvitationsPage = lazy(() => import('./pages/AdminInvitationsPage'));
 
 function AdminLoadingFallback() {
   return (
@@ -91,6 +92,7 @@ function App() {
             <Route path="appointments" element={<AdminAppointmentsPage />} />
             <Route path="users" element={<AdminUsersPage />} />
             <Route path="therapists" element={<AdminTherapistsPage />} />
+            <Route path="invitations" element={<AdminInvitationsPage />} />
             <Route path="vouchers" element={<AdminVouchersPage />} />
             <Route path="ingestion" element={<AdminIngestionPage />} />
             <Route path="knowledge" element={<AdminKnowledgePage />} />

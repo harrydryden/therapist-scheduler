@@ -962,6 +962,77 @@ Best wishes
 
 {agentFirstName}`,
   },
+
+  // === SIGNUP INVITATIONS ===
+  'invitation.expiryDays': {
+    category: 'general',
+    label: 'Invitation Expiry (days)',
+    description: 'How long an invitation link stays valid before passively expiring.',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 90,
+    defaultValue: 30,
+  },
+  'invitation.reminderDaysBefore': {
+    category: 'general',
+    label: 'Invitation Reminder (days before expiry)',
+    description: 'Send a pre-expiry reminder this many days before the invitation expires. Set to 0 to disable reminders. Each invitation gets at most one reminder.',
+    valueType: 'number',
+    minValue: 0,
+    maxValue: 30,
+    defaultValue: 3,
+  },
+  'invitation.archiveAfterDays': {
+    category: 'general',
+    label: 'Invitation Archive Lookback (days)',
+    description: 'Archive expired or revoked invitations older than this many days. Accepted invitations are kept indefinitely. Archived rows stay in the database for audit but disappear from the default admin listing.',
+    valueType: 'number',
+    minValue: 30,
+    maxValue: 365,
+    defaultValue: 90,
+  },
+  'email.invitationReminderSubject': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation Reminder - Subject',
+    description: 'Subject line for the pre-expiry reminder email. Variables: {recipientName}, {daysRemaining}',
+    valueType: 'string',
+    defaultValue: 'Your Spill therapy invitation expires in {daysRemaining} days',
+  },
+  'email.invitationReminderBody': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation Reminder - Body',
+    description: 'Email body for the pre-expiry reminder. Variables: {recipientName}, {daysRemaining}, {expiryDate}. The link itself is not included because the raw token is not retrievable; the reminder asks the recipient to use the original email.',
+    valueType: 'string',
+    defaultValue: `Hi {recipientName},
+
+Just a quick reminder: your invitation to book a free therapy session at Spill expires on {expiryDate} ({daysRemaining} days from now).
+
+Use the original email we sent you to complete signup before then. If you can't find it, reply to this message and we'll re-issue.`,
+  },
+  'email.invitationSubject': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation - Subject',
+    description: 'Subject line for invitation emails. Variables: {recipientName}',
+    valueType: 'string',
+    defaultValue: 'You\'re invited to a free therapy session at Spill',
+  },
+  'email.invitationBody': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation - Body',
+    description: 'Email body for invitation emails. Variables: {recipientName}, {invitationUrl}, {expiryDate}. Supports markdown links.',
+    valueType: 'string',
+    defaultValue: `Hi {recipientName},
+
+You've been invited to book a free therapy session through Spill.
+
+To get started, click the link below to complete a short signup form. Once that's done you can browse our therapists and book a session.
+
+[Complete signup]({invitationUrl})
+
+This invitation expires on {expiryDate}.
+
+If you have any questions, just reply to this email.`,
+  },
 };
 
 export type SettingKey = keyof typeof SETTING_DEFINITIONS;

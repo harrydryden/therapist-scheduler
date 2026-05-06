@@ -1044,6 +1044,30 @@ class SlackNotificationService {
   async sendSimpleMessage(text: string, urgent: boolean = false): Promise<boolean> {
     return this.sendToSlack({ text }, urgent);
   }
+
+  /**
+   * Notify admins that a signup invitation was accepted (a prospect we
+   * invited has just completed signup and become a real user). Surfaces
+   * the conversion in real time so admins don't have to refresh
+   * /admin/invitations to see it.
+   */
+  async notifyInvitationAccepted(params: {
+    invitationId: string;
+    email: string;
+    name: string | null;
+    invitedBy: string;
+  }): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Signup Invitation Accepted',
+      severity: 'low',
+      details:
+        `${params.name || params.email} has completed signup via an invitation.`,
+      additionalFields: {
+        Email: params.email,
+        'Invited by': params.invitedBy,
+      },
+    });
+  }
 }
 
 // Singleton instance

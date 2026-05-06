@@ -1,7 +1,8 @@
-import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Link, useSearchParams } from 'react-router-dom';
 import { submitSignup } from '../api/signup';
+import { lookupInvitation } from '../api/invitations';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -23,8 +24,35 @@ const INITIAL_STATE: FormState = {
 };
 
 export default function SignupPage() {
+  const [params] = useSearchParams();
+  const invitationToken = useMemo(() => params.get('invite') || null, [params]);
+
   const [form, setForm] = useState<FormState>(INITIAL_STATE);
   const [submitted, setSubmitted] = useState(false);
+
+  // When ?invite=<token> is present, look the invitation up so we can
+  // prefill the email (locked) and surface a clear error if the token is
+  // bad / expired / already used / revoked before the user fills the form.
+  const invitationQuery = useQuery({
+    queryKey: ['signup-invitation', invitationToken],
+    queryFn: () => lookupInvitation(invitationToken!),
+    enabled: !!invitationToken,
+    retry: false,
+  });
+
+  // Prefill name/email from the invitation as soon as the lookup resolves.
+  // Only prefill when the invitation is redeemable (the non-redeemable
+  // shape has no email or name — by design, to avoid leaking who the
+  // invitation was sent to from a non-usable token).
+  useEffect(() => {
+    const inv = invitationQuery.data;
+    if (!inv || !inv.redeemable) return;
+    setForm((prev) => ({
+      ...prev,
+      email: prev.email || inv.email,
+      name: prev.name || inv.name || '',
+    }));
+  }, [invitationQuery.data]);
 
   const mutation = useMutation({
     mutationFn: submitSignup,
@@ -33,6 +61,10 @@ export default function SignupPage() {
 
   const emailValid = EMAIL_REGEX.test(form.email.trim());
   const nameValid = form.name.trim().length > 0;
+  const invitationLoaded = !invitationToken || invitationQuery.isFetched;
+  const invitation = invitationQuery.data;
+  // If we have an invitation and it's not redeemable, gate the form.
+  const invitationBlocked = !!invitation && invitation.redeemable === false;
 
   const canSubmit =
     nameValid &&
@@ -40,7 +72,9 @@ export default function SignupPage() {
     form.priorTherapy !== null &&
     form.acknowledgedRealSession === true &&
     form.agreedToFeedback === true &&
-    !mutation.isPending;
+    !mutation.isPending &&
+    !invitationBlocked &&
+    invitationLoaded;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,6 +86,7 @@ export default function SignupPage() {
       priorTherapy: form.priorTherapy === true,
       acknowledgedRealSession: true,
       agreedToFeedback: true,
+      ...(invitationToken ? { invitationToken } : {}),
     });
   };
 
@@ -90,6 +125,32 @@ export default function SignupPage() {
         </p>
       </div>
 
+      {/* Invitation banner: visible whenever ?invite= is in the URL. Shows
+          either "valid invitation for X" or a clear failure mode (expired,
+          revoked, already used) so the user understands why the form is
+          gated before they fill it in. */}
+      {invitationToken && invitationQuery.isLoading && (
+        <div className="mb-6 bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-600">
+          Verifying invitation…
+        </div>
+      )}
+      {/* Single banner for all "not usable" cases. The backend deliberately
+          collapses unknown / malformed / expired / revoked / already-accepted
+          into one shape (redeemable=false, reason='invalid') so we present
+          it the same way here — a leaked URL can't be probed via this page
+          to learn whether it ever pointed at a real invitation. */}
+      {invitationToken && invitationQuery.isFetched && (!invitation || invitation.redeemable === false) && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+          This invitation link isn&rsquo;t usable. It may have been revoked, used
+          already, or expired. Ask the person who invited you for a new link.
+        </div>
+      )}
+      {invitation && invitation.redeemable && (
+        <div className="mb-6 bg-spill-blue-50 border border-spill-blue-200 rounded-lg p-4 text-sm text-spill-blue-800">
+          You&rsquo;ve been invited to sign up. Use the email below &mdash; this invitation is for {invitation.email}.
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="bg-white border border-gray-200 rounded-lg p-6 space-y-6">
         {/* Name */}
         <div>
@@ -104,11 +165,13 @@ export default function SignupPage() {
             placeholder="Your full name"
             required
             autoComplete="name"
-            className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-colors"
+            disabled={invitationBlocked}
+            className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-colors disabled:bg-slate-50 disabled:cursor-not-allowed"
           />
         </div>
 
-        {/* Email */}
+        {/* Email — locked when an invitation is in play; the backend
+            requires the email to match the invitation address. */}
         <div>
           <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
             Email address
@@ -121,11 +184,18 @@ export default function SignupPage() {
             placeholder="you@example.com"
             required
             autoComplete="email"
+            readOnly={!!invitation && invitation.redeemable}
+            disabled={invitationBlocked}
             className={`w-full px-4 py-2 border rounded-md focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-colors ${
               form.email.length > 0 && !emailValid ? 'border-red-300' : 'border-gray-300'
-            }`}
+            } ${invitation && invitation.redeemable ? 'bg-slate-50 cursor-not-allowed' : ''} disabled:bg-slate-50`}
           />
-          {form.email.length > 0 && !emailValid && (
+          {invitation && invitation.redeemable && (
+            <p className="mt-1 text-xs text-slate-500">
+              Locked to the email this invitation was sent to.
+            </p>
+          )}
+          {form.email.length > 0 && !emailValid && !invitation && (
             <p className="mt-1 text-xs text-red-600">Please enter a valid email address</p>
           )}
         </div>

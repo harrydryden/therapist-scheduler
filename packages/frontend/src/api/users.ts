@@ -11,7 +11,7 @@ export interface UserListItem {
   acknowledgedRealSession: boolean | null;
   agreedToFeedback: boolean | null;
   consentGivenAt: string | null;
-  signupSource: 'signup_form' | 'booking' | 'admin' | 'legacy' | null;
+  signupSource: 'signup_form' | 'invitation' | 'booking' | 'admin' | 'legacy' | null;
   appointmentCount: number;
   createdAt: string;
   updatedAt: string;
@@ -45,7 +45,7 @@ export interface UserDetail extends Omit<UserListItem, 'appointmentCount'> {
 export interface UserFilters {
   search?: string;
   subscribed?: 'true' | 'false' | 'all';
-  signupSource?: 'signup_form' | 'booking' | 'admin' | 'legacy' | 'all';
+  signupSource?: 'signup_form' | 'invitation' | 'booking' | 'admin' | 'legacy' | 'all';
   page?: number;
   limit?: number;
   sortBy?: 'createdAt' | 'email' | 'name' | 'consentGivenAt';

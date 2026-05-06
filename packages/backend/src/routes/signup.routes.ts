@@ -6,6 +6,11 @@ import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
 import { getOrCreateUser } from '../utils/unique-id';
 import { validateEmail } from '../utils/email-validator';
+import {
+  findInvitationByToken,
+  markAccepted,
+} from '../services/signup-invitation.service';
+import { slackNotificationService } from '../services/slack-notification.service';
 
 /**
  * Public signup endpoint. Captures the consent + intake fields the public
@@ -36,6 +41,12 @@ const signupSchema = z.object({
       message: 'You must agree to complete the post-session feedback form',
     }),
   }),
+  /**
+   * Optional invitation token. When present, the signup is bound to a
+   * specific pending invitation: the email must match the invited address
+   * and the invitation is marked accepted.
+   */
+  invitationToken: z.string().trim().min(1).max(256).optional(),
 });
 
 type SignupBody = z.infer<typeof signupSchema>;
@@ -65,8 +76,42 @@ export async function signupRoutes(fastify: FastifyInstance) {
         return Errors.validationFailed(reply, validation.error.errors);
       }
 
-      const { name, email, priorTherapy, acknowledgedRealSession, agreedToFeedback } =
+      const { name, email, priorTherapy, acknowledgedRealSession, agreedToFeedback, invitationToken } =
         validation.data;
+
+      // If an invitation token is supplied, verify it before doing any
+      // other work. Pre-checking lets us return a precise error and avoids
+      // creating/updating a User row that we'd have to roll back.
+      if (invitationToken) {
+        const lookup = await findInvitationByToken(invitationToken);
+        if (!lookup) {
+          return reply.status(400).send({
+            success: false,
+            error: 'Invitation link is invalid or has been revoked.',
+            code: 'INVITATION_INVALID',
+          });
+        }
+        if (!lookup.redeemable) {
+          const reasonMessage =
+            lookup.reason === 'accepted'
+              ? 'This invitation has already been used.'
+              : lookup.reason === 'revoked'
+                ? 'This invitation has been revoked.'
+                : 'This invitation has expired.';
+          return reply.status(400).send({
+            success: false,
+            error: reasonMessage,
+            code: `INVITATION_${lookup.reason?.toUpperCase()}`,
+          });
+        }
+        if (lookup.invitation.email.toLowerCase() !== email.toLowerCase().trim()) {
+          return reply.status(400).send({
+            success: false,
+            error: 'Email address does not match the invitation. Use the email the invitation was sent to.',
+            code: 'INVITATION_EMAIL_MISMATCH',
+          });
+        }
+      }
 
       // Same email validation we run for booking: MX records, disposable
       // detection, typo suggestions. We don't want signups from bogus
@@ -106,7 +151,10 @@ export async function signupRoutes(fastify: FastifyInstance) {
             acknowledgedRealSession,
             agreedToFeedback,
             consentGivenAt: new Date(),
-            signupSource: 'signup_form',
+            // Distinguish organic /signup-form completions from invitation
+            // acceptances so the admin user filter can split conversion
+            // attribution (a self-service signup vs. a prospect we invited).
+            signupSource: invitationToken ? 'invitation' : 'signup_form',
             // Auto-subscribe to weekly mailing list, matching the booking
             // flow's behaviour (Notion users are auto-subscribed on create).
             subscribed: true,
@@ -120,8 +168,47 @@ export async function signupRoutes(fastify: FastifyInstance) {
           },
         });
 
+        // If the signup was bound to an invitation, mark it accepted now
+        // that the User row exists. The pre-check above already validated
+        // the token, but this call is the authoritative status flip — it
+        // uses an updateMany with preconditions so concurrent signups
+        // can't double-accept.
+        if (invitationToken) {
+          const acceptResult = await markAccepted({
+            rawToken: invitationToken,
+            userId: updated.id,
+            email: updated.email,
+          });
+          if (!acceptResult.accepted) {
+            // The invitation slipped state between the pre-check and the
+            // accept (e.g. admin revoked mid-flight). The signup itself
+            // succeeded; we just log and continue.
+            logger.warn(
+              { requestId, email, reason: acceptResult.reason },
+              'Invitation accept-flip failed after signup committed',
+            );
+          } else if (acceptResult.invitation) {
+            // Fire-and-forget Slack notification so admins see the
+            // conversion in real time. Failure here doesn't affect the
+            // signup outcome.
+            slackNotificationService
+              .notifyInvitationAccepted({
+                invitationId: acceptResult.invitation.id,
+                email: updated.email,
+                name: updated.name,
+                invitedBy: acceptResult.invitation.invitedBy,
+              })
+              .catch((err) => {
+                logger.warn(
+                  { err, requestId, invitationId: acceptResult.invitation?.id },
+                  'Failed to send Slack notification for invitation acceptance',
+                );
+              });
+          }
+        }
+
         logger.info(
-          { requestId, userId: updated.id, odId: updated.odId, email: updated.email },
+          { requestId, userId: updated.id, odId: updated.odId, email: updated.email, viaInvitation: !!invitationToken },
           'User signup recorded',
         );
 
@@ -142,6 +229,48 @@ export async function signupRoutes(fastify: FastifyInstance) {
         logger.error({ err, requestId, email }, 'Failed to record signup');
         return Errors.internal(reply, 'Failed to record signup');
       }
+    },
+  );
+
+  // GET /api/signup/invitation/:token
+  //
+  // Public endpoint used by the signup page to look up an invitation when
+  // the URL has `?invite=<token>`. Returns the invitee's email/name only
+  // when the token is currently redeemable, so the form can prefill and
+  // lock the email field. For every non-redeemable case (malformed,
+  // unknown, expired, revoked, accepted) the response is a uniform
+  // 200 + { redeemable: false, reason: 'invalid' }.
+  //
+  // The 256-bit random token space makes brute force computationally
+  // infeasible regardless of response shape, but uniform responses still
+  // matter as defence-in-depth: a leaked token (HTTP referer, browser
+  // history, screenshot) can't be probed to confirm it ever pointed at a
+  // real invitation, so an attacker can't use the public endpoint as a
+  // free oracle for "did Alice receive an invite?". HTTP status is also
+  // uniform (200 always) so reverse-proxy logs don't leak presence either.
+  fastify.get<{ Params: { token: string } }>(
+    '/api/signup/invitation/:token',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST.max,
+          timeWindow: RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { token } = request.params;
+      const lookup = await findInvitationByToken(token);
+      if (!lookup || !lookup.redeemable) {
+        return sendSuccess(reply, { redeemable: false, reason: 'invalid' as const });
+      }
+
+      return sendSuccess(reply, {
+        redeemable: true as const,
+        email: lookup.invitation.email,
+        name: lookup.invitation.name,
+        expiresAt: lookup.invitation.expiresAt.toISOString(),
+      });
     },
   );
 }

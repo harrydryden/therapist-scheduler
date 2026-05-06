@@ -38,6 +38,17 @@ jest.mock('../utils/unique-id', () => ({
   getOrCreateUser: jest.fn(),
 }));
 
+jest.mock('../services/signup-invitation.service', () => ({
+  findInvitationByToken: jest.fn(),
+  markAccepted: jest.fn(),
+}));
+
+jest.mock('../services/slack-notification.service', () => ({
+  slackNotificationService: {
+    notifyInvitationAccepted: jest.fn().mockResolvedValue(true),
+  },
+}));
+
 // ============================================
 // Imports
 // ============================================
@@ -47,6 +58,7 @@ import { prisma } from '../utils/database';
 import { validateEmail } from '../utils/email-validator';
 import { getOrCreateUser } from '../utils/unique-id';
 import { signupRoutes } from '../routes/signup.routes';
+import { findInvitationByToken, markAccepted } from '../services/signup-invitation.service';
 
 // ============================================
 // Helpers
@@ -291,6 +303,294 @@ describe('signup routes', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.json().success).toBe(false);
+    });
+  });
+
+  describe('invitation flow', () => {
+    const TOKEN = 'a'.repeat(64);
+    const INVITE_PAYLOAD = { ...VALID_PAYLOAD, invitationToken: TOKEN };
+
+    function mockInvitationRedeemable(email = 'jamie@example.com') {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email,
+          name: 'Jamie',
+          status: 'pending',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 86400000),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: null,
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: true,
+      });
+    }
+
+    it('happy path: validates invitation, completes signup, marks accepted', async () => {
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: true });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(201);
+      expect(markAccepted).toHaveBeenCalledWith({
+        rawToken: TOKEN,
+        userId: 'user-uuid',
+        email: 'jamie@example.com',
+      });
+    });
+
+    it('rejects when invitation lookup returns null (unknown/malformed)', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue(null);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_INVALID');
+      expect(getOrCreateUser).not.toHaveBeenCalled();
+    });
+
+    it('rejects when invitation is revoked', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'revoked',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 86400000),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: new Date(),
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: false,
+        reason: 'revoked',
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_REVOKED');
+    });
+
+    it('rejects when the email does not match the invitation', async () => {
+      mockInvitationRedeemable('different@example.com');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_EMAIL_MISMATCH');
+      expect(getOrCreateUser).not.toHaveBeenCalled();
+    });
+
+    it('still records signup if accept-flip races and fails (logs warning)', async () => {
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: false, reason: 'revoked' });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      // Signup itself succeeded; the invitation just couldn't be flipped.
+      expect(res.statusCode).toBe(201);
+    });
+  });
+
+  describe('GET /api/signup/invitation/:token (public lookup)', () => {
+    // The endpoint deliberately returns a uniform 200 response shape for
+    // every "not usable" case so an attacker scraping for live tokens
+    // can't distinguish unknown / malformed / expired / revoked /
+    // already-accepted from each other via the response.
+
+    it('returns redeemable=true with email + name for a live invitation', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'pending',
+          createdAt: new Date(),
+          expiresAt: new Date('2027-01-01T00:00:00Z'),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: null,
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: true,
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/signup/invitation/aaaa1111',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(body.data).toEqual({
+        redeemable: true,
+        email: 'jamie@example.com',
+        name: 'Jamie',
+        expiresAt: '2027-01-01T00:00:00.000Z',
+      });
+    });
+
+    it('returns 200 + redeemable=false reason=invalid for unknown token', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue(null);
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/signup/invitation/aaaa1111',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({ redeemable: false, reason: 'invalid' });
+    });
+
+    it('returns 200 + redeemable=false reason=invalid for expired invitation (no email leak)', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'expired',
+          createdAt: new Date(),
+          expiresAt: new Date('2020-01-01T00:00:00Z'),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: null,
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: false,
+        reason: 'expired',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/signup/invitation/aaaa1111',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Crucially: the expired invitation's email is NOT in the response.
+      expect(body.data).toEqual({ redeemable: false, reason: 'invalid' });
+      expect(JSON.stringify(body)).not.toContain('jamie@example.com');
+    });
+
+    it('returns 200 + redeemable=false for revoked invitations (same shape as unknown)', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'revoked',
+          createdAt: new Date(),
+          expiresAt: new Date('2027-01-01T00:00:00Z'),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: new Date(),
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: false,
+        reason: 'revoked',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/signup/invitation/aaaa1111',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({ redeemable: false, reason: 'invalid' });
+    });
+  });
+
+  describe('signupSource attribution', () => {
+    it('stamps signup_source=invitation when token is supplied', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'pending',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 86400000),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: null,
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: true,
+      });
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: true });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: { ...VALID_PAYLOAD, invitationToken: 'a'.repeat(64) },
+      });
+
+      expect(res.statusCode).toBe(201);
+      const updateCall = (prisma.user.update as jest.Mock).mock.calls[0][0];
+      expect(updateCall.data.signupSource).toBe('invitation');
+    });
+
+    it('stamps signup_source=signup_form when no token is supplied', async () => {
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: VALID_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(201);
+      const updateCall = (prisma.user.update as jest.Mock).mock.calls[0][0];
+      expect(updateCall.data.signupSource).toBe('signup_form');
     });
   });
 });

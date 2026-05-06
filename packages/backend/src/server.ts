@@ -27,6 +27,7 @@ import { adminWorkReportRoutes } from './routes/admin-work-reports.routes';
 import { adminVoucherRoutes } from './routes/admin-vouchers.routes';
 import { adminUserRoutes } from './routes/admin-users.routes';
 import { adminTherapistRoutes } from './routes/admin-therapists.routes';
+import { adminInvitationRoutes } from './routes/admin-invitations.routes';
 import { ingestionRoutes } from './routes/ingestion.routes';
 
 // ATS Integration routes (versioned, webhook secret auth required)
@@ -45,6 +46,7 @@ import { weeklyMailingListService } from './services/weekly-mailing-list.service
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { workReportService } from './services/work-report.service';
 import { appointmentLifecycleTickService } from './services/appointment-lifecycle-tick.service';
+import { invitationLifecycleService } from './services/invitation-lifecycle.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
@@ -338,6 +340,7 @@ async function buildServer() {
   await fastify.register(adminVoucherRoutes);      // Voucher management
   await fastify.register(adminUserRoutes);         // Postgres-backed user list/detail/edit
   await fastify.register(adminTherapistRoutes);    // Postgres-backed therapist list/detail/edit/unfreeze
+  await fastify.register(adminInvitationRoutes);   // Signup invitations CRUD + revoke + resend
   await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion
 
   // --- ATS Integration routes (versioned API for external ATS system) ---
@@ -441,6 +444,7 @@ async function start() {
       workReportService.stop();
       therapistNudgeService.stop();
       appointmentLifecycleTickService.stop();
+      invitationLifecycleService.stop();
 
       // Stop side-effect retries and pending email processing
       sideEffectRetryService.stop();
@@ -563,6 +567,7 @@ async function start() {
       { name: 'postBookingFollowupService', service: postBookingFollowupService, critical: false, async: false },
       { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
       { name: 'appointmentLifecycleTickService', service: appointmentLifecycleTickService, critical: false, async: false },
+      { name: 'invitationLifecycleService', service: invitationLifecycleService, critical: false, async: false },
       { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
       { name: 'workReportService', service: workReportService, critical: false, async: false },
       { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },

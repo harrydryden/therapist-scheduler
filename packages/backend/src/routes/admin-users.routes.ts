@@ -23,7 +23,7 @@ import { RATE_LIMITS, APPOINTMENT_STATUS } from '../constants';
 const listUsersSchema = z.object({
   search: z.string().trim().max(255).optional(),
   subscribed: z.enum(['true', 'false', 'all']).default('all'),
-  signupSource: z.enum(['signup_form', 'booking', 'admin', 'legacy', 'all']).default('all'),
+  signupSource: z.enum(['signup_form', 'invitation', 'booking', 'admin', 'legacy', 'all']).default('all'),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   sortBy: z.enum(['createdAt', 'email', 'name', 'consentGivenAt']).default('createdAt'),
