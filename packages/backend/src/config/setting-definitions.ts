@@ -1023,15 +1023,17 @@ Use the original email we sent you to complete signup before then. If you can't 
     valueType: 'string',
     defaultValue: `Hi {recipientName},
 
-You've been invited to book a free therapy session through Spill.
+As Spill continues to grow, our top priority is maintaining the quality of our therapy. We accept less than 5% of the counsellors who apply to work with us, and the most critical part of their evaluation is a live, real therapy session.
 
-To get started, click the link below to complete a short signup form. Once that's done you can browse our therapists and book a session.
+We are quietly opening up a free therapy platform specifically for this final stage, and we'd like to invite you to participate.
+
+You would have access to free sessions with highly qualified, experienced therapists. In exchange, our only ask is that you complete a 5-minute feedback form afterward to help us determine if the counsellor meets Spill's standards.
 
 [Complete signup]({invitationUrl})
 
 This invitation expires on {expiryDate}.
 
-If you have any questions, just reply to this email.`,
+Please note this is a private invitation for you and cannot be forwarded.`,
   },
 };
 
