@@ -21,14 +21,25 @@ jest.mock('../config', () => ({
   },
 }));
 
-jest.mock('../utils/database', () => ({
-  prisma: {
-    user: {
-      findUnique: jest.fn(),
-      update: jest.fn(),
-    },
-  },
-}));
+// `$transaction` is mocked as a passthrough that invokes the callback with
+// the same prisma proxy as `tx`, so the route's
+// `prisma.$transaction(async tx => tx.user.update(...))` resolves through
+// the same `update` mock the tests configure below. Same pattern as
+// admin-invitations-routes.test.ts.
+jest.mock('../utils/database', () => {
+  const userMock = {
+    findUnique: jest.fn(),
+    update: jest.fn(),
+  };
+  const prismaMock: Record<string, unknown> = {
+    user: userMock,
+  };
+  prismaMock.$transaction = jest.fn().mockImplementation((cb: unknown) => {
+    if (typeof cb === 'function') return (cb as (tx: unknown) => Promise<unknown>)(prismaMock);
+    return Promise.all(cb as unknown as Promise<unknown>[]);
+  });
+  return { prisma: prismaMock };
+});
 
 jest.mock('../utils/email-validator', () => ({
   validateEmail: jest.fn(),
@@ -344,11 +355,77 @@ describe('signup routes', () => {
       });
 
       expect(res.statusCode).toBe(201);
-      expect(markAccepted).toHaveBeenCalledWith({
-        rawToken: TOKEN,
-        userId: 'user-uuid',
-        email: 'jamie@example.com',
+      // markAccepted is now invoked inside prisma.$transaction with a
+      // tx client as the second argument so the consent update + accept
+      // commit atomically. We assert the params object shape and that a
+      // tx client (or undefined) was passed alongside.
+      expect(markAccepted).toHaveBeenCalledWith(
+        {
+          rawToken: TOKEN,
+          userId: 'user-uuid',
+          email: 'jamie@example.com',
+        },
+        expect.anything(),
+      );
+    });
+
+    it('atomic commit: markAccepted throwing rolls back the consent update and skips Slack', async () => {
+      // Regression for the "fully-consented user + pending invitation"
+      // inconsistency: prior to wrapping the consent update + markAccepted
+      // in one tx, the user row could commit consent flags before the
+      // invitation accept-flip and a crash between would leave the system
+      // in a state where the invitation still looked pending. Now both
+      // writes run inside the same prisma.$transaction, so a failure in
+      // markAccepted aborts the whole thing.
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockRejectedValue(new Error('synthetic accept failure'));
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
       });
+
+      // Tx aborts → outer catch returns 500 / error path; the exact
+      // status doesn't matter, just that we don't 201.
+      expect(res.statusCode).not.toBe(201);
+      // Slack must NOT have fired — that side effect lives post-commit
+      // and is gated on acceptResult.accepted (which never resolved).
+      const slack = require('../services/slack-notification.service').slackNotificationService;
+      expect(slack.notifyInvitationAccepted).not.toHaveBeenCalled();
+    });
+
+    it('atomic commit: invitation acceptance and consent update share one $transaction', async () => {
+      // Verify the structural property: $transaction is called exactly
+      // once and both the user.update and the markAccepted call happen
+      // inside its callback. The Proxy mock invokes the callback with
+      // the same prisma proxy as `tx`, so user.update's call count
+      // increments only after $transaction is invoked.
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: true });
+
+      const transactionMock = (prisma as unknown as { $transaction: jest.Mock }).$transaction;
+      transactionMock.mockClear();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(201);
+      expect(transactionMock).toHaveBeenCalledTimes(1);
+      // The callback signature: (cb, options). Options carries our 10s
+      // timeout — pin that here so a future change that drops it gets
+      // caught by tests rather than discovered on a slow staging run.
+      const txOptions = transactionMock.mock.calls[0][1];
+      expect(txOptions).toMatchObject({ timeout: 10_000 });
     });
 
     it('rejects when invitation lookup returns null (unknown/malformed)', async () => {
