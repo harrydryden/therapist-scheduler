@@ -204,6 +204,27 @@ const RESET_ALL_FOLLOWUP_SENTINELS = {
 } as const;
 
 /**
+ * Fields written alongside `status` whenever the lifecycle advances TO
+ * `targetStatus`. Currently this is just clearing the `isStale` flag on
+ * any progression to confirmed-or-beyond (or to cancelled): stale only
+ * applies to pre-confirmation statuses, so it must be cleared the moment
+ * the appointment moves past that point.
+ *
+ * Returning a partial update lets callers spread it into their existing
+ * update payloads without branching, and centralises the rule so any new
+ * lifecycle field that needs auto-clearing on progression has exactly one
+ * place to live.
+ */
+function progressionResetsFor(
+  targetStatus: AppointmentStatus,
+): Partial<Prisma.AppointmentRequestUpdateInput> {
+  const targetIdx = LIFECYCLE_STATUS_ORDER.indexOf(targetStatus);
+  const advancesPastNegotiation =
+    targetIdx >= CONFIRMED_IDX || targetStatus === APPOINTMENT_STATUS.CANCELLED;
+  return advancesPastNegotiation ? { isStale: false } : {};
+}
+
+/**
  * Compute the follow-up sentinel resets needed when an admin force-update
  * moves an appointment BACKWARDS in the lifecycle. Without these, the
  * automated post-booking services would skip re-sending emails because the
@@ -417,6 +438,110 @@ class AppointmentLifecycleService {
     promise.catch((err) => {
       logger.error({ err, appointmentId, label }, 'Lifecycle fire-and-forget dispatch failed');
     });
+  }
+
+  /**
+   * Fire the onSessionHeld side effects (Notion user sync — moves therapist
+   * from "Upcoming" to "Previous" on the user's Notion page) when a transition
+   * advances PAST `confirmed` directly to `feedback_requested` or `completed`,
+   * skipping the `session_held` intermediate.
+   *
+   * Awaited (not fire-and-forget) so the side-effect-tracker row is registered
+   * before the caller's audit/SSE event is emitted — guarantees a downstream
+   * crash leaves a retryable record rather than a silently-lost sync.
+   */
+  private async catchUpSessionHeldEffects(
+    previousStatus: AppointmentStatus,
+    args: { appointmentId: string; source: TransitionSource; adminId?: string; userEmail: string },
+  ): Promise<void> {
+    if (previousStatus !== APPOINTMENT_STATUS.CONFIRMED) return;
+    await transitionSideEffectsService.onSessionHeld(args);
+  }
+
+  /**
+   * Shared transactional skeleton for the terminal transitions (completed,
+   * cancelled). Both follow the same pattern:
+   *
+   *   $transaction(serializable, 10s timeout):
+   *     SELECT … FROM appointment_requests WHERE id = $id FOR UPDATE
+   *     classify(row): idempotent | atomicSkipped | proceed | (throw to abort)
+   *     UPDATE appointment_requests SET …
+   *     INSERT INTO appointment_audit_events (status_change, …)
+   *
+   * Centralising it gives:
+   *   - one place to tune isolation level / timeout / row-lock semantics;
+   *   - guaranteed atomicity between the row update and the status_change
+   *     audit event (both committed together or neither);
+   *   - a single classify() callback that subsumes idempotent skip,
+   *     atomic-precondition skip, and invalid-source-status throw — which
+   *     used to be three sprawling branches in each terminal method.
+   *
+   * The caller controls the SELECT field list via `fetchAndLock` so each
+   * transition only pulls the columns it actually dispatches on (the cancel
+   * path needs more fields than complete because it powers more outbound
+   * notifications). The returned outcome carries the same row, eliminating
+   * a second post-tx SELECT round-trip.
+   *
+   * Throwing from `classify` rolls the transaction back — the audit event
+   * row is never written for invalid transitions, so a forensic query for
+   * "all status_change events" only reflects actual successful changes.
+   */
+  private async runTerminalTransitionTx<TRow extends { id: string; status: string }>(args: {
+    appointmentId: string;
+    source: TransitionSource;
+    adminId?: string;
+    fetchAndLock: (tx: Prisma.TransactionClient) => Promise<TRow | null>;
+    classify: (row: TRow) => 'idempotent' | 'atomicSkipped' | 'proceed';
+    buildUpdateData: (row: TRow) => Prisma.AppointmentRequestUpdateInput;
+    buildAuditPayload: (row: TRow) => Prisma.InputJsonObject;
+  }): Promise<
+    | { kind: 'idempotent'; row: TRow; previousStatus: AppointmentStatus }
+    | { kind: 'atomicSkipped'; row: TRow; previousStatus: AppointmentStatus }
+    | { kind: 'success'; row: TRow; previousStatus: AppointmentStatus }
+  > {
+    return prisma.$transaction(
+      async (tx) => {
+        const row = await args.fetchAndLock(tx);
+        if (!row) {
+          throw new AppointmentNotFoundError(args.appointmentId);
+        }
+        const previousStatus = row.status as AppointmentStatus;
+        const decision = args.classify(row);
+        if (decision === 'idempotent') {
+          return { kind: 'idempotent' as const, row, previousStatus };
+        }
+        if (decision === 'atomicSkipped') {
+          return { kind: 'atomicSkipped' as const, row, previousStatus };
+        }
+
+        await tx.appointmentRequest.update({
+          where: { id: args.appointmentId },
+          data: args.buildUpdateData(row),
+          select: { id: true },
+        });
+
+        await tx.appointmentAuditEvent.create({
+          data: {
+            appointmentRequestId: args.appointmentId,
+            eventType: 'status_change',
+            actor: args.source === 'admin' ? `admin:${args.adminId || 'unknown'}` : args.source,
+            payload: args.buildAuditPayload(row),
+          },
+        });
+
+        return { kind: 'success' as const, row, previousStatus };
+      },
+      {
+        // Serializable + FOR UPDATE — concurrent terminal transitions on
+        // the same row serialize naturally; the second waiter sees the
+        // committed state and either idempotent-skips or hits the
+        // classify() guard. Brief unrelated writes (e.g. ai-conversation
+        // state saves) hold the row lock for tens of ms; bounded by the
+        // transaction timeout.
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        timeout: 10000,
+      },
+    );
   }
 
   /**
@@ -707,8 +832,8 @@ class AppointmentLifecycleService {
       updatedAt: new Date(),
       // Always clear rescheduling flags when confirming.
       ...CLEAR_RESCHEDULING_STATE,
-      // Clear stale flag — stale only applies to pre-confirmation statuses
-      isStale: false,
+      // Clear isStale + any other progression-based field resets.
+      ...progressionResetsFor(APPOINTMENT_STATUS.CONFIRMED),
     };
 
     // Handle reschedule-specific fields
@@ -916,20 +1041,13 @@ class AppointmentLifecycleService {
       validFromStatuses: [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED],
       extraData: { feedbackFormSentAt: new Date() },
       buildAuditMessage: (prev) => `Status changed: ${prev} → feedback_requested`,
-      onAfterUpdate: async (prev, apt) => {
-        // If transitioning from confirmed (skipping session_held), fire the
-        // onSessionHeld side effects so the user's Notion record is synced.
-        // We await this rather than fire-and-forget so the user-sync row in
-        // the side-effect tracker is registered before audit/SSE fire.
-        if (prev === APPOINTMENT_STATUS.CONFIRMED) {
-          await transitionSideEffectsService.onSessionHeld({
-            appointmentId,
-            source,
-            adminId,
-            userEmail: apt.userEmail,
-          });
-        }
-      },
+      onAfterUpdate: (prev, apt) =>
+        this.catchUpSessionHeldEffects(prev, {
+          appointmentId,
+          source,
+          adminId,
+          userEmail: apt.userEmail,
+        }),
     });
   }
 
@@ -954,144 +1072,93 @@ class AppointmentLifecycleService {
       APPOINTMENT_STATUS.CONFIRMED, // Edge case: complete without feedback
     ];
 
-    // Use serializable transaction with row-level lock for atomicity.
-    // FOR UPDATE (no NOWAIT) — concurrent transitions on the same row
-    // serialize naturally: the second waiter eventually sees the new status
-    // and either idempotent-skips (already completed) or hits the
-    // validFromStatuses guard. Brief unrelated writes (e.g. ai-conversation
-    // saving conversation state) hold the row lock for tens of ms; bounded
-    // by the transaction's 10s timeout below.
-    const result = await prisma.$transaction(async (tx) => {
-      type AppointmentRow = {
-        id: string;
-        status: string;
-        user_name: string | null;
-        user_email: string;
-        therapist_name: string;
-        therapist_notion_id: string;
-        notes: string | null;
-      };
+    type CompletedRow = {
+      id: string;
+      status: string;
+      user_name: string | null;
+      user_email: string;
+      therapist_name: string;
+      therapist_notion_id: string;
+      notes: string | null;
+    };
 
-      const rows = await tx.$queryRaw<AppointmentRow[]>`
-        SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes
-        FROM "appointment_requests"
-        WHERE id = ${appointmentId}
-        FOR UPDATE
-      `;
-      const appointment: AppointmentRow | null = rows[0] || null;
-
-      if (!appointment) {
-        throw new AppointmentNotFoundError(appointmentId);
-      }
-
-      const previousStatus = appointment.status as AppointmentStatus;
-
-      // Check if already completed (idempotent)
-      if (appointment.status === APPOINTMENT_STATUS.COMPLETED) {
-        return {
-          success: true,
-          previousStatus,
-          newStatus: APPOINTMENT_STATUS.COMPLETED,
-          skipped: true,
-          appointment: {
-            id: appointment.id,
-            userName: appointment.user_name,
-            userEmail: appointment.user_email,
-            therapistName: appointment.therapist_name,
-            therapistNotionId: appointment.therapist_notion_id,
-          }
-        };
-      }
-
-      // Validate state machine transition
-      const validStatuses: string[] = validFromStatuses;
-      if (!validStatuses.includes(appointment.status)) {
-        throw new InvalidTransitionError(appointment.status, 'completed');
-      }
-
-      // Build updated notes
-      const updatedNotes = note
-        ? appointment.notes
-          ? `${note}\n\n${appointment.notes}`
-          : note
-        : appointment.notes;
-
-      // Update appointment record within transaction.
-      // Clear rescheduling state — completion is terminal, no reschedule should remain active.
-      await tx.appointmentRequest.update({
-        where: { id: appointmentId },
-        data: {
-          status: APPOINTMENT_STATUS.COMPLETED,
-          notes: updatedNotes,
-          updatedAt: new Date(),
-          ...CLEAR_RESCHEDULING_STATE,
-        },
-        select: { id: true },
-      });
-
-      // Create audit log within transaction for atomicity
-      await tx.appointmentAuditEvent.create({
-        data: {
-          appointmentRequestId: appointmentId,
-          eventType: 'status_change',
-          actor: source === 'admin' ? `admin:${adminId || 'unknown'}` : source,
-          payload: {
-            previousStatus,
-            newStatus: APPOINTMENT_STATUS.COMPLETED,
-            reason: note,
-          },
-        },
-      });
-
-      return {
-        success: true,
-        previousStatus,
-        newStatus: APPOINTMENT_STATUS.COMPLETED,
-        skipped: false,
-        appointment: {
-          id: appointment.id,
-          userName: appointment.user_name,
-          userEmail: appointment.user_email,
-          therapistName: appointment.therapist_name,
-          therapistNotionId: appointment.therapist_notion_id,
+    const outcome = await this.runTerminalTransitionTx<CompletedRow>({
+      appointmentId,
+      source,
+      adminId,
+      fetchAndLock: async (tx) => {
+        const rows = await tx.$queryRaw<CompletedRow[]>`
+          SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes
+          FROM "appointment_requests"
+          WHERE id = ${appointmentId}
+          FOR UPDATE
+        `;
+        return rows[0] || null;
+      },
+      classify: (row) => {
+        if (row.status === APPOINTMENT_STATUS.COMPLETED) return 'idempotent';
+        if (!(validFromStatuses as string[]).includes(row.status)) {
+          throw new InvalidTransitionError(row.status, 'completed');
         }
-      };
-    }, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 10000, // 10 second timeout
+        return 'proceed';
+      },
+      buildUpdateData: (row) => ({
+        status: APPOINTMENT_STATUS.COMPLETED,
+        notes: note ? (row.notes ? `${note}\n\n${row.notes}` : note) : row.notes,
+        updatedAt: new Date(),
+        // Completion is terminal — no reschedule should remain active.
+        ...CLEAR_RESCHEDULING_STATE,
+        // Centralised progression-based field resets (clears isStale).
+        ...progressionResetsFor(APPOINTMENT_STATUS.COMPLETED),
+      }),
+      buildAuditPayload: (row) => ({
+        previousStatus: row.status,
+        newStatus: APPOINTMENT_STATUS.COMPLETED,
+        reason: note,
+      }),
     });
 
-    // If skipped (already completed), return early
-    if (result.skipped) {
+    if (outcome.kind === 'idempotent') {
       logger.debug(logContext, 'Appointment already completed - skipping');
-      return { success: true, previousStatus: result.previousStatus, newStatus: result.newStatus, skipped: true };
+      return {
+        success: true,
+        previousStatus: outcome.previousStatus,
+        newStatus: APPOINTMENT_STATUS.COMPLETED,
+        skipped: true,
+      };
     }
 
-    const { appointment, previousStatus } = result;
+    const previousStatus = outcome.previousStatus;
+    const appointment = {
+      id: outcome.row.id,
+      userName: outcome.row.user_name,
+      userEmail: outcome.row.user_email,
+      therapistName: outcome.row.therapist_name,
+      therapistNotionId: outcome.row.therapist_notion_id,
+    };
 
-    // Add audit trail (conversation state update - non-blocking)
-    this.addAuditMessage(
+    // Audit narrative (conversation_state JSON). Awaited so the message lands
+    // before the SSE event downstream — a UI subscriber tailing both channels
+    // sees the narrative entry no later than the status-change notification.
+    // Failures are swallowed by addAuditMessage itself (line ~410).
+    await this.addAuditMessage(
       appointmentId,
       source,
       `Status changed: ${previousStatus} → completed${note ? ` (${note})` : ''}`,
-      adminId
-    ).catch(err => logger.error({ err, appointmentId }, 'Failed to add audit message'));
+      adminId,
+    );
 
     logger.info(
       { ...logContext, previousStatus },
       'Appointment transitioned to completed'
     );
 
-    // If completing from confirmed (skipping session_held), fire the
-    // onSessionHeld side effects so the user's Notion record is synced
-    if (previousStatus === APPOINTMENT_STATUS.CONFIRMED) {
-      await transitionSideEffectsService.onSessionHeld({
-        appointmentId,
-        source,
-        adminId,
-        userEmail: appointment.userEmail,
-      });
-    }
+    await this.catchUpSessionHeldEffects(previousStatus, {
+      appointmentId,
+      source,
+      adminId,
+      userEmail: appointment.userEmail,
+    });
 
     // Post-transition side effects (therapist booking status, Notion sync, deactivation)
     this.fireAndForget(
@@ -1167,171 +1234,130 @@ class AppointmentLifecycleService {
       );
     }
 
-    // Use serializable transaction with row-level lock for atomicity.
-    // FOR UPDATE (no NOWAIT) — see transitionToCompleted's comment.
-    const result = await prisma.$transaction(async (tx) => {
-      type AppointmentRow = {
-        id: string;
-        status: string;
-        user_name: string | null;
-        user_email: string;
-        therapist_name: string;
-        therapist_email: string;
-        therapist_notion_id: string;
-        human_control_enabled: boolean;
-        notes: string | null;
-        confirmed_date_time: string | null;
-        confirmed_date_time_parsed: Date | null;
-        gmail_thread_id: string | null;
-        therapist_gmail_thread_id: string | null;
-      };
+    type CancelledRow = {
+      id: string;
+      status: string;
+      user_name: string | null;
+      user_email: string;
+      therapist_name: string;
+      therapist_email: string;
+      therapist_notion_id: string;
+      human_control_enabled: boolean;
+      notes: string | null;
+      confirmed_date_time: string | null;
+      confirmed_date_time_parsed: Date | null;
+      gmail_thread_id: string | null;
+      therapist_gmail_thread_id: string | null;
+    };
 
-      const rows = await tx.$queryRaw<AppointmentRow[]>`
-        SELECT id, status, user_name, user_email, therapist_name, therapist_email,
-               therapist_notion_id, human_control_enabled, notes,
-               confirmed_date_time, confirmed_date_time_parsed,
-               gmail_thread_id, therapist_gmail_thread_id
-        FROM "appointment_requests"
-        WHERE id = ${appointmentId}
-        FOR UPDATE
-      `;
-      const appointment: AppointmentRow | null = rows[0] || null;
-
-      if (!appointment) {
-        throw new AppointmentNotFoundError(appointmentId);
-      }
-
-      const previousStatus = appointment.status as AppointmentStatus;
-
-      // Check if already cancelled (idempotent)
-      if (appointment.status === APPOINTMENT_STATUS.CANCELLED) {
-        return {
-          success: true,
-          previousStatus,
-          newStatus: APPOINTMENT_STATUS.CANCELLED,
-          skipped: true,
-          wasConfirmed: false,
-          appointment: {
-            id: appointment.id,
-            userName: appointment.user_name,
-            userEmail: appointment.user_email,
-            therapistName: appointment.therapist_name,
-            therapistEmail: appointment.therapist_email,
-            therapistNotionId: appointment.therapist_notion_id,
-            confirmedDateTime: appointment.confirmed_date_time,
-            confirmedDateTimeParsed: appointment.confirmed_date_time_parsed,
-            gmailThreadId: appointment.gmail_thread_id,
-            therapistGmailThreadId: appointment.therapist_gmail_thread_id,
+    const outcome = await this.runTerminalTransitionTx<CancelledRow>({
+      appointmentId,
+      source,
+      adminId,
+      fetchAndLock: async (tx) => {
+        const rows = await tx.$queryRaw<CancelledRow[]>`
+          SELECT id, status, user_name, user_email, therapist_name, therapist_email,
+                 therapist_notion_id, human_control_enabled, notes,
+                 confirmed_date_time, confirmed_date_time_parsed,
+                 gmail_thread_id, therapist_gmail_thread_id
+          FROM "appointment_requests"
+          WHERE id = ${appointmentId}
+          FOR UPDATE
+        `;
+        return rows[0] || null;
+      },
+      classify: (row) => {
+        if (row.status === APPOINTMENT_STATUS.CANCELLED) return 'idempotent';
+        // Atomic preconditions (caller-supplied). Mismatches mean the row's
+        // current state has drifted from what the caller assumed, so we bail
+        // without writing — the caller will return atomicSkipped.
+        if (atomic) {
+          if (
+            atomic.requireStatusNotIn &&
+            atomic.requireStatusNotIn.includes(row.status as AppointmentStatus)
+          ) {
+            return 'atomicSkipped';
           }
-        };
-      }
-
-      // Check atomic conditions if provided. The post-transaction code returns
-      // early on atomicSkipped without touching the appointment fields, so we
-      // don't carry an `appointment` payload here — keeping it would force
-      // every consumer of the success branch's appointment fields to defensively
-      // narrow on a discriminator.
-      if (atomic) {
-        if (atomic.requireStatusNotIn && atomic.requireStatusNotIn.includes(appointment.status as AppointmentStatus)) {
-          return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true } as const;
+          if (atomic.requireHumanControlDisabled && row.human_control_enabled) {
+            return 'atomicSkipped';
+          }
         }
-
-        if (atomic.requireHumanControlDisabled && appointment.human_control_enabled) {
-          return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true } as const;
+        // State-machine guard — completed is the only forbidden source.
+        if (row.status === APPOINTMENT_STATUS.COMPLETED) {
+          throw new InvalidTransitionError(row.status, 'cancelled');
         }
-      }
-
-      // Validate state machine - can't cancel completed appointments
-      if (appointment.status === APPOINTMENT_STATUS.COMPLETED) {
-        throw new InvalidTransitionError(appointment.status, 'cancelled');
-      }
-
-      const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED;
-
-      // Build updated notes - prepend cancellation info while preserving history
-      const cancellationNote = `[CANCELLED ${new Date().toISOString()}] Reason: ${reason}. Cancelled by: ${cancelledBy}`;
-      const updatedNotes = appointment.notes
-        ? `${cancellationNote}\n\n${appointment.notes}`
-        : cancellationNote;
-
-      // Update appointment record within transaction.
-      // Clear rescheduling state and follow-up sentinels — cancellation is terminal,
-      // so no rescheduling or follow-up should remain active.
-      await tx.appointmentRequest.update({
-        where: { id: appointmentId },
-        data: {
+        return 'proceed';
+      },
+      buildUpdateData: (row) => {
+        // Prepend cancellation info to existing notes — preserves history.
+        const cancellationNote = `[CANCELLED ${new Date().toISOString()}] Reason: ${reason}. Cancelled by: ${cancelledBy}`;
+        const updatedNotes = row.notes
+          ? `${cancellationNote}\n\n${row.notes}`
+          : cancellationNote;
+        return {
           status: APPOINTMENT_STATUS.CANCELLED,
           notes: updatedNotes,
           updatedAt: new Date(),
-          // Clear rescheduling state — cancellation supersedes any in-progress reschedule
+          // Cancellation supersedes any in-progress reschedule.
           ...CLEAR_RESCHEDULING_STATE,
-        },
-        select: { id: true },
-      });
-
-      // Create audit log within transaction for atomicity
-      await tx.appointmentAuditEvent.create({
-        data: {
-          appointmentRequestId: appointmentId,
-          eventType: 'status_change',
-          actor: source === 'admin' ? `admin:${adminId || 'unknown'}` : source,
-          payload: {
-            previousStatus,
-            newStatus: APPOINTMENT_STATUS.CANCELLED,
-            reason,
-            cancelledBy,
-          },
-        },
-      });
-
-      return {
-        success: true,
-        previousStatus,
+          // Centralised progression-based field resets (clears isStale).
+          ...progressionResetsFor(APPOINTMENT_STATUS.CANCELLED),
+        };
+      },
+      buildAuditPayload: (row) => ({
+        previousStatus: row.status,
         newStatus: APPOINTMENT_STATUS.CANCELLED,
-        skipped: false,
-        wasConfirmed,
-        appointment: {
-          id: appointment.id,
-          userName: appointment.user_name,
-          userEmail: appointment.user_email,
-          therapistName: appointment.therapist_name,
-          therapistEmail: appointment.therapist_email,
-          therapistNotionId: appointment.therapist_notion_id,
-          confirmedDateTime: appointment.confirmed_date_time,
-          confirmedDateTimeParsed: appointment.confirmed_date_time_parsed,
-          gmailThreadId: appointment.gmail_thread_id,
-          therapistGmailThreadId: appointment.therapist_gmail_thread_id,
-        }
-      };
-    }, {
-      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 10000,
+        reason,
+        cancelledBy,
+      }),
     });
 
-    // Handle atomic skip
-    if (result.atomicSkipped) {
+    if (outcome.kind === 'atomicSkipped') {
       logger.warn(
-        { ...logContext, currentStatus: result.previousStatus },
+        { ...logContext, currentStatus: outcome.previousStatus },
         'Atomic cancellation skipped - conditions not met'
       );
-      return { success: false, previousStatus: result.previousStatus, newStatus: result.previousStatus, atomicSkipped: true };
+      return {
+        success: false,
+        previousStatus: outcome.previousStatus,
+        newStatus: outcome.previousStatus,
+        atomicSkipped: true,
+      };
     }
 
-    // Handle idempotent skip
-    if (result.skipped) {
+    if (outcome.kind === 'idempotent') {
       logger.debug(logContext, 'Appointment already cancelled - skipping');
-      return { success: true, previousStatus: result.previousStatus, newStatus: result.newStatus, skipped: true };
+      return {
+        success: true,
+        previousStatus: outcome.previousStatus,
+        newStatus: APPOINTMENT_STATUS.CANCELLED,
+        skipped: true,
+      };
     }
 
-    const { appointment, previousStatus, wasConfirmed } = result;
+    const previousStatus = outcome.previousStatus;
+    const wasConfirmed = previousStatus === APPOINTMENT_STATUS.CONFIRMED;
+    const appointment = {
+      id: outcome.row.id,
+      userName: outcome.row.user_name,
+      userEmail: outcome.row.user_email,
+      therapistName: outcome.row.therapist_name,
+      therapistEmail: outcome.row.therapist_email,
+      therapistNotionId: outcome.row.therapist_notion_id,
+      confirmedDateTime: outcome.row.confirmed_date_time,
+      confirmedDateTimeParsed: outcome.row.confirmed_date_time_parsed,
+      gmailThreadId: outcome.row.gmail_thread_id,
+      therapistGmailThreadId: outcome.row.therapist_gmail_thread_id,
+    };
 
-    // Add audit trail to conversation state (non-blocking)
-    this.addAuditMessage(
+    // Audit narrative (conversation_state JSON). Awaited so the message lands
+    // before the SSE event downstream — see transitionToCompleted note.
+    await this.addAuditMessage(
       appointmentId,
       source,
       `Status changed: ${previousStatus} → cancelled. Reason: ${reason}. Cancelled by: ${cancelledBy}`,
-      adminId
-    ).catch(err => logger.error({ err, appointmentId }, 'Failed to add audit message'));
+      adminId,
+    );
 
     logger.info(
       { ...logContext, wasConfirmed, reason },
@@ -1377,7 +1403,7 @@ class AppointmentLifecycleService {
       );
     }
 
-    const transitionResult: TransitionResult = { success: true, previousStatus: result.previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
+    const transitionResult: TransitionResult = { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CANCELLED };
     this.notifyTransition(transitionResult, appointmentId, source);
     return transitionResult;
   }
@@ -1562,13 +1588,8 @@ class AppointmentLifecycleService {
           Object.assign(updateData, CLEAR_RESCHEDULING_STATE);
         }
 
-        // Clear stale flag on any transition to confirmed or beyond —
-        // stale only applies to pre-confirmation statuses
-        const confirmedIdx = LIFECYCLE_STATUS_ORDER.indexOf(APPOINTMENT_STATUS.CONFIRMED);
-        const targetIdx = LIFECYCLE_STATUS_ORDER.indexOf(newStatus);
-        if (targetIdx >= confirmedIdx || newStatus === APPOINTMENT_STATUS.CANCELLED) {
-          updateData.isStale = false;
-        }
+        // Centralised "progressing past pre-booking" resets (e.g. clear isStale).
+        Object.assign(updateData, progressionResetsFor(newStatus));
       }
 
       if (dateChanging) {
