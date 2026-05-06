@@ -41,11 +41,12 @@ export default function SignupPage() {
   });
 
   // Prefill name/email from the invitation as soon as the lookup resolves.
-  // We track whether the user has typed anything yet to avoid clobbering
-  // their edits on a re-render.
+  // Only prefill when the invitation is redeemable (the non-redeemable
+  // shape has no email or name — by design, to avoid leaking who the
+  // invitation was sent to from a non-usable token).
   useEffect(() => {
     const inv = invitationQuery.data;
-    if (!inv) return;
+    if (!inv || !inv.redeemable) return;
     setForm((prev) => ({
       ...prev,
       email: prev.email || inv.email,
@@ -133,24 +134,20 @@ export default function SignupPage() {
           Verifying invitation…
         </div>
       )}
-      {invitationToken && invitationQuery.isFetched && !invitation && (
+      {/* Single banner for all "not usable" cases. The backend deliberately
+          collapses unknown / malformed / expired / revoked / already-accepted
+          into one shape (redeemable=false, reason='invalid') so we present
+          it the same way here — a leaked URL can't be probed via this page
+          to learn whether it ever pointed at a real invitation. */}
+      {invitationToken && invitationQuery.isFetched && (!invitation || invitation.redeemable === false) && (
         <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-          This invitation link is invalid. If you received it from us, ask the
-          person who sent it to issue a new one.
+          This invitation link isn&rsquo;t usable. It may have been revoked, used
+          already, or expired. Ask the person who invited you for a new link.
         </div>
       )}
       {invitation && invitation.redeemable && (
         <div className="mb-6 bg-spill-blue-50 border border-spill-blue-200 rounded-lg p-4 text-sm text-spill-blue-800">
           You&rsquo;ve been invited to sign up. Use the email below &mdash; this invitation is for {invitation.email}.
-        </div>
-      )}
-      {invitation && !invitation.redeemable && (
-        <div className="mb-6 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-          {invitation.status === 'accepted'
-            ? 'This invitation has already been used to sign up.'
-            : invitation.status === 'revoked'
-              ? 'This invitation has been revoked. Ask the person who invited you for a new link.'
-              : 'This invitation has expired. Ask the person who invited you for a new link.'}
         </div>
       )}
 

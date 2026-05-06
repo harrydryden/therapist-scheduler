@@ -167,6 +167,13 @@ export async function findInvitationByToken(rawToken: string): Promise<FindInvit
   if (!row) return null;
 
   const now = new Date();
+  // Archived invitations are treated as non-redeemable. The archival job
+  // only touches invites that were already expired or revoked, so this is
+  // belt-and-braces, but it ensures an unarchive (manual recovery via SQL)
+  // doesn't accidentally let an old token redeem.
+  if (row.archivedAt) {
+    return { invitation: toView(row, now), redeemable: false, reason: 'expired' };
+  }
   const status = computeStatus(row, now);
   if (status === 'pending') {
     return { invitation: toView(row, now), redeemable: true };
@@ -207,6 +214,7 @@ export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcce
   if (existing.acceptedAt) return { accepted: false, reason: 'already-accepted', invitation: toView(existing, now) };
   if (existing.revokedAt) return { accepted: false, reason: 'revoked', invitation: toView(existing, now) };
   if (existing.expiresAt <= now) return { accepted: false, reason: 'expired', invitation: toView(existing, now) };
+  if (existing.archivedAt) return { accepted: false, reason: 'expired', invitation: toView(existing, now) };
 
   if (existing.email.toLowerCase() !== params.email.toLowerCase().trim()) {
     return { accepted: false, reason: 'email-mismatch', invitation: toView(existing, now) };
@@ -220,6 +228,7 @@ export async function markAccepted(params: MarkAcceptedParams): Promise<MarkAcce
       tokenHash,
       acceptedAt: null,
       revokedAt: null,
+      archivedAt: null,
       expiresAt: { gt: now },
     },
     data: { acceptedAt: now, acceptedUserId: params.userId },
@@ -360,6 +369,12 @@ export interface InvitationListFilters {
   search?: string;
   page?: number;
   limit?: number;
+  /**
+   * Whether to include archived rows in the result. Default false: archived
+   * invitations are hidden from the standard admin listing but the row
+   * remains in the database for audit. Pass true to look for old data.
+   */
+  includeArchived?: boolean;
 }
 
 export interface InvitationListResult {
@@ -388,6 +403,9 @@ export async function listInvitations(filters: InvitationListFilters = {}): Prom
   const now = new Date();
 
   const where: Prisma.SignupInvitationWhereInput = {};
+  if (!filters.includeArchived) {
+    where.archivedAt = null;
+  }
   if (search) {
     where.OR = [
       { email: { contains: search, mode: 'insensitive' } },
@@ -417,8 +435,10 @@ export async function listInvitations(filters: InvitationListFilters = {}): Prom
       take: limit,
     }),
     prisma.signupInvitation.count({ where }),
-    // Summary across ALL rows (ignoring filter) so the badge counts stay
-    // stable as the admin filters.
+    // Summary across all non-archived rows (ignoring search/status filter)
+    // so the badge counts stay stable as the admin narrows the view. We
+    // intentionally drop archived rows so the total reflects "live" data
+    // rather than an ever-growing audit count.
     prisma.$queryRaw<Array<{
       total: bigint;
       pending: bigint;
@@ -437,6 +457,7 @@ export async function listInvitations(filters: InvitationListFilters = {}): Prom
           WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at <= ${now}
         ) AS expired
       FROM signup_invitations
+      WHERE archived_at IS NULL
     `,
   ]);
 
@@ -460,4 +481,137 @@ export async function listInvitations(filters: InvitationListFilters = {}): Prom
       expired: Number(summary.expired),
     },
   };
+}
+
+// ============================================================================
+// Lifecycle background operations: reminder emails + archival
+// ============================================================================
+
+/**
+ * Find invitations whose pre-expiry reminder is due.
+ *
+ * Selects pending invitations that:
+ *   - have not yet had a reminder sent (reminderSentAt IS NULL),
+ *   - haven't been accepted, revoked, or archived,
+ *   - aren't yet expired,
+ *   - and whose expires_at falls within the next `reminderDaysBefore` days.
+ *
+ * Bounded by `take` so a backlog doesn't fan out into thousands of emails
+ * in one tick. The caller (background service) loops via repeated ticks.
+ */
+export async function findInvitationsNeedingReminder(
+  reminderDaysBefore: number,
+  take: number = 50,
+): Promise<InvitationView[]> {
+  if (reminderDaysBefore <= 0) return [];
+  const now = new Date();
+  const reminderCutoff = new Date(now.getTime() + reminderDaysBefore * 24 * 60 * 60 * 1000);
+
+  const rows = await prisma.signupInvitation.findMany({
+    where: {
+      acceptedAt: null,
+      revokedAt: null,
+      archivedAt: null,
+      reminderSentAt: null,
+      expiresAt: { gt: now, lte: reminderCutoff },
+    },
+    orderBy: { expiresAt: 'asc' },
+    take,
+  });
+
+  return rows.map((r) => toView(r, now));
+}
+
+/**
+ * Send the pre-expiry reminder email and stamp `reminder_sent_at`.
+ * Stamping happens inside an updateMany with a precondition so concurrent
+ * reminder ticks can't double-fire. If the row was concurrently mutated
+ * (accepted, revoked, or already-reminded), the second tick is a no-op.
+ *
+ * Returns whether a reminder was actually sent.
+ */
+export async function sendInvitationReminder(invitationId: string): Promise<boolean> {
+  const row = await prisma.signupInvitation.findUnique({ where: { id: invitationId } });
+  if (!row) return false;
+
+  const now = new Date();
+  if (row.acceptedAt || row.revokedAt || row.archivedAt || row.expiresAt <= now) return false;
+  if (row.reminderSentAt) return false;
+
+  // Atomic claim: only the first caller to flip reminderSentAt actually
+  // sends the email.
+  const claimed = await prisma.signupInvitation.updateMany({
+    where: {
+      id: invitationId,
+      acceptedAt: null,
+      revokedAt: null,
+      archivedAt: null,
+      reminderSentAt: null,
+      expiresAt: { gt: now },
+    },
+    data: { reminderSentAt: now },
+  });
+  if (claimed.count === 0) return false;
+
+  const settings = await getSettingValues<string>([
+    'email.invitationReminderSubject',
+    'email.invitationReminderBody',
+  ]);
+  const subjectTemplate = settings.get('email.invitationReminderSubject') as string;
+  const bodyTemplate = settings.get('email.invitationReminderBody') as string;
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysRemaining = Math.max(0, Math.ceil((row.expiresAt.getTime() - now.getTime()) / msPerDay));
+  const variables = {
+    recipientName: row.name || 'there',
+    daysRemaining: String(daysRemaining),
+    expiryDate: row.expiresAt.toDateString(),
+  };
+
+  const subject = renderTemplate(subjectTemplate, variables);
+  const body = renderTemplate(bodyTemplate, variables);
+
+  try {
+    await emailProcessingService.sendEmail({ to: row.email, subject, body });
+    return true;
+  } catch (err) {
+    // Send failed but the claim has already stamped reminderSentAt — we
+    // accept that one missed reminder rather than risk double-sending on
+    // retry. Log loudly so an operator can intervene if it's systemic.
+    logger.error(
+      { err, invitationId, email: row.email },
+      'Failed to send invitation reminder after claim — reminderSentAt is set, no retry will occur',
+    );
+    return false;
+  }
+}
+
+/**
+ * Archive expired and revoked invitations older than `olderThanDays`. Sets
+ * `archivedAt` on matching rows; doesn't delete data. Accepted invitations
+ * are kept indefinitely for conversion-history reporting.
+ *
+ * Returns the count of rows archived.
+ */
+export async function archiveOldInvitations(olderThanDays: number): Promise<number> {
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+  const now = new Date();
+
+  const result = await prisma.signupInvitation.updateMany({
+    where: {
+      archivedAt: null,
+      acceptedAt: null,
+      OR: [
+        { revokedAt: { lt: cutoff } },
+        // Expired = past expires_at AND not accepted AND not revoked.
+        // Since acceptedAt is null at this point in the AND chain, this
+        // captures expired rows whose expiry was more than olderThanDays
+        // ago (so an admin had time to react).
+        { revokedAt: null, expiresAt: { lt: cutoff } },
+      ],
+    },
+    data: { archivedAt: now },
+  });
+
+  return result.count;
 }

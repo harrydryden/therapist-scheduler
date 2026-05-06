@@ -42,6 +42,16 @@ const listSchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
+const bulkSchema = z.object({
+  entries: z.array(z.object({
+    email: z.string().email().max(255),
+    name: z.string().trim().min(1).max(100).optional(),
+  })).min(1).max(100),
+  invitedBy: z.string().trim().min(1).max(100).default('admin'),
+  expiryDays: z.number().int().min(1).max(90).optional(),
+  sendEmail: z.boolean().default(true),
+});
+
 export async function adminInvitationRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', verifyWebhookSecret);
 
@@ -220,6 +230,110 @@ export async function adminInvitationRoutes(fastify: FastifyInstance) {
         logger.error({ err, invitationId: id }, 'Failed to resend invitation');
         return Errors.internal(reply, 'Failed to resend invitation');
       }
+    },
+  );
+
+  // POST /api/admin/invitations/bulk
+  //
+  // Accepts up to 100 prospects in a single request. Each row is validated
+  // and processed independently — one bad email doesn't fail the batch.
+  // Returns a per-row result so the admin sees which entries succeeded
+  // and which were rejected with reason.
+  fastify.post<{ Body: z.infer<typeof bulkSchema> }>(
+    '/api/admin/invitations/bulk',
+    {
+      config: {
+        rateLimit: {
+          // Bulk endpoint is heavier — tighter rate limit. Within one
+          // window an admin can process 5 batches × 100 = 500 invites.
+          max: 5,
+          timeWindow: 60_000,
+        },
+      },
+    },
+    async (request, reply) => {
+      const requestId = request.id;
+      const parsed = bulkSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return Errors.validationFailed(reply, parsed.error.errors);
+      }
+      const { entries, invitedBy, sendEmail, expiryDays: bodyExpiryDays } = parsed.data;
+      const expiryDays = bodyExpiryDays
+        ?? (await getSettingValue<number>('invitation.expiryDays'));
+
+      const results: Array<{
+        email: string;
+        ok: boolean;
+        invitationId?: string;
+        invitationUrl?: string;
+        emailSent?: boolean;
+        error?: string;
+      }> = [];
+
+      for (const entry of entries) {
+        try {
+          const validation = await validateEmail(entry.email, {
+            checkMx: true,
+            blockDisposable: true,
+            suggestTypos: true,
+          });
+          if (!validation.isValid) {
+            results.push({
+              email: entry.email,
+              ok: false,
+              error: validation.errors[0] || 'Invalid email address',
+            });
+            continue;
+          }
+
+          const created = await createInvitation({
+            email: entry.email,
+            name: entry.name,
+            invitedBy,
+            expiryDays,
+          });
+
+          let emailSent = false;
+          if (sendEmail) {
+            emailSent = await sendInvitationEmail({
+              email: entry.email,
+              recipientName: created.invitation.name,
+              invitationUrl: created.invitationUrl,
+              expiresAt: created.invitation.expiresAt,
+            });
+          }
+
+          results.push({
+            email: entry.email,
+            ok: true,
+            invitationId: created.invitation.id,
+            invitationUrl: created.invitationUrl,
+            emailSent,
+          });
+        } catch (err) {
+          logger.warn(
+            { err, requestId, email: entry.email },
+            'Bulk invitation entry failed',
+          );
+          results.push({
+            email: entry.email,
+            ok: false,
+            error: err instanceof Error ? err.message : 'Unknown error',
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.ok).length;
+      const failed = results.length - succeeded;
+      logger.info(
+        { requestId, total: results.length, succeeded, failed },
+        'Bulk invitation processed',
+      );
+
+      return sendSuccess(reply, {
+        results,
+        summary: { total: results.length, succeeded, failed },
+      });
     },
   );
 }

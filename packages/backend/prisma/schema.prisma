@@ -675,6 +675,14 @@ model SignupInvitation {
   // sends happened since createdAt; admin-only, not displayed publicly).
   lastSentAt  DateTime  @default(now()) @map("last_sent_at")
   sendCount   Int       @default(1) @map("send_count")
+  // When the pre-expiry reminder was sent. Null means "no reminder sent yet";
+  // the background tick uses this to make sure each invite gets at most one
+  // reminder regardless of how many cycles it sees.
+  reminderSentAt DateTime? @map("reminder_sent_at")
+  // When this row was archived (deleted-but-soft) by the cleanup job. Set
+  // for old expired/revoked rows so they fall out of the default admin
+  // listing without losing the audit trail.
+  archivedAt  DateTime? @map("archived_at")
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
@@ -682,5 +690,6 @@ model SignupInvitation {
   @@index([acceptedAt])
   @@index([revokedAt])
   @@index([expiresAt])
+  @@index([archivedAt])
   @@map("signup_invitations")
 }

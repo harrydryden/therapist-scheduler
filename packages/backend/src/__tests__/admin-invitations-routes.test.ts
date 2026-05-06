@@ -372,4 +372,65 @@ describe('admin invitation routes', () => {
       expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
     });
   });
+
+  describe('POST /api/admin/invitations/bulk', () => {
+    it('processes a batch with mixed valid/invalid emails, reporting per-row results', async () => {
+      // First call: valid email — succeeds. Second call: validateEmail
+      // returns invalid; we never hit createInvitation for that row.
+      const { validateEmail } = await import('../utils/email-validator');
+      (validateEmail as jest.Mock)
+        .mockResolvedValueOnce({ isValid: true, errors: [], warnings: [], suggestions: [] })
+        .mockResolvedValueOnce({ isValid: false, errors: ['No MX record'], warnings: [], suggestions: [] })
+        .mockResolvedValueOnce({ isValid: true, errors: [], warnings: [], suggestions: [] });
+
+      signupInvitation.create
+        .mockResolvedValueOnce(makeRow({ id: 'inv-a', email: 'a@example.com' }))
+        .mockResolvedValueOnce(makeRow({ id: 'inv-c', email: 'c@example.com' }));
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/invitations/bulk',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET, 'content-type': 'application/json' },
+        payload: {
+          entries: [
+            { email: 'a@example.com', name: 'Alice' },
+            { email: 'b@example.com' },
+            { email: 'c@example.com' },
+          ],
+          sendEmail: false,
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.data.summary).toEqual({ total: 3, succeeded: 2, failed: 1 });
+      expect(body.data.results[0]).toMatchObject({ email: 'a@example.com', ok: true });
+      expect(body.data.results[1]).toMatchObject({ email: 'b@example.com', ok: false });
+      expect(body.data.results[2]).toMatchObject({ email: 'c@example.com', ok: true });
+    });
+
+    it('rejects a batch with more than 100 entries', async () => {
+      const entries = Array.from({ length: 101 }, (_, i) => ({ email: `u${i}@example.com` }));
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/invitations/bulk',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET, 'content-type': 'application/json' },
+        payload: { entries, sendEmail: false },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(signupInvitation.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty batch', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/invitations/bulk',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET, 'content-type': 'application/json' },
+        payload: { entries: [], sendEmail: false },
+      });
+
+      expect(res.statusCode).toBe(400);
+    });
+  });
 });

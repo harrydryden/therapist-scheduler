@@ -1,9 +1,11 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToastContext } from '../components/Toast';
 import {
   listInvitations,
   createInvitation,
+  createBulkInvitations,
   revokeInvitation,
   resendInvitation,
 } from '../api/invitations';
@@ -12,7 +14,9 @@ import type {
   InvitationFilters,
   InvitationStatus,
   CreateInvitationResponse,
+  BulkInvitationResponse,
 } from '../api/invitations';
+import { listUsers } from '../api/users';
 import { getErrorMessage } from '../api/core';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
@@ -52,6 +56,21 @@ function InviteModal({ onClose, onCreated }: InviteModalProps) {
   const [invitedBy, setInvitedBy] = useState('');
   const [sendEmail, setSendEmail] = useState(true);
   const [result, setResult] = useState<CreateInvitationResponse | null>(null);
+
+  // Debounced lookup against the admin users list to surface a warning
+  // if we're inviting an email that already has a User row. Inviting an
+  // existing user is allowed (re-signup is idempotent) but it's almost
+  // always a mistake — usually the admin meant to invite someone else.
+  const debouncedEmail = useDebounce(email.trim(), 300);
+  const existingUserQuery = useQuery({
+    queryKey: ['invite-existing-user-check', debouncedEmail],
+    queryFn: () => listUsers({ search: debouncedEmail, limit: 1 }),
+    enabled: debouncedEmail.includes('@') && debouncedEmail.length > 5,
+    staleTime: 30_000,
+  });
+  const existingUser = existingUserQuery.data?.items.find(
+    (u) => u.email.toLowerCase() === debouncedEmail.toLowerCase(),
+  );
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -144,6 +163,12 @@ function InviteModal({ onClose, onCreated }: InviteModalProps) {
               className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
               autoFocus
             />
+            {existingUser && (
+              <div className="mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+                A user with this email already exists{existingUser.name ? ` (${existingUser.name})` : ''}.
+                Re-inviting is allowed but probably a mistake — they can already sign in.
+              </div>
+            )}
           </div>
 
           <div>
@@ -222,6 +247,7 @@ export default function AdminInvitationsPage() {
   const [status, setStatus] = useState<InvitationFilters['status']>('all');
   const [page, setPage] = useState(1);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showBulkModal, setShowBulkModal] = useState(false);
 
   const debouncedSearch = useDebounce(search, 300);
 
@@ -269,13 +295,22 @@ export default function AdminInvitationsPage() {
             Send one-time signup links to prospective users. Each invitation expires after 14 days unless overridden.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setShowInviteModal(true)}
-          className="px-4 py-2 text-sm font-medium text-white bg-spill-blue-800 rounded-lg hover:bg-spill-blue-400 flex-shrink-0"
-        >
-          Invite user
-        </button>
+        <div className="flex flex-shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={() => setShowBulkModal(true)}
+            className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50"
+          >
+            Bulk invite
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowInviteModal(true)}
+            className="px-4 py-2 text-sm font-medium text-white bg-spill-blue-800 rounded-lg hover:bg-spill-blue-400"
+          >
+            Invite user
+          </button>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -388,6 +423,15 @@ export default function AdminInvitationsPage() {
           }}
         />
       )}
+
+      {showBulkModal && (
+        <BulkInviteModal
+          onClose={() => setShowBulkModal(false)}
+          onCreated={() => {
+            queryClient.invalidateQueries({ queryKey: ['admin-invitations'] });
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -430,9 +474,13 @@ function InvitationRow({ invitation, onRevoke, onResend, actionsPending }: RowPr
               onClick={onResend}
               disabled={actionsPending}
               className="px-2 py-1 text-xs font-medium text-spill-blue-800 hover:bg-spill-blue-50 rounded disabled:opacity-50"
-              title={`Send a reminder email (sent ${invitation.sendCount}× so far)`}
+              title={
+                'Send a reminder email asking the recipient to use the original invitation link. ' +
+                `Sent ${invitation.sendCount}× so far. (The reminder does NOT contain the link — ` +
+                'we don\'t store raw tokens. If the recipient lost the original, revoke and re-invite.)'
+              }
             >
-              Resend
+              Send reminder
             </button>
             <button
               type="button"
@@ -443,10 +491,208 @@ function InvitationRow({ invitation, onRevoke, onResend, actionsPending }: RowPr
               Revoke
             </button>
           </>
+        ) : invitation.status === 'accepted' && invitation.acceptedUserId ? (
+          // Link to the accepted user's row in the users admin so admins can
+          // jump straight from "I invited Alice" to "here's Alice's row".
+          // The /admin/users page filters by email substring; passing the
+          // email lands the operator on the right row.
+          <Link
+            to={`/admin/users?search=${encodeURIComponent(invitation.email)}`}
+            className="text-xs text-spill-blue-800 hover:underline"
+          >
+            View user &rarr;
+          </Link>
         ) : (
           <span className="text-xs text-slate-400">—</span>
         )}
       </td>
     </tr>
+  );
+}
+
+// ============================================================================
+// Bulk invite modal
+// ============================================================================
+
+interface BulkInviteModalProps {
+  onClose: () => void;
+  onCreated: (response: BulkInvitationResponse) => void;
+}
+
+/** Parses a textarea where each line is `email` or `email,name`. */
+function parseBulkInput(raw: string): { entries: { email: string; name?: string }[]; errors: string[] } {
+  const entries: { email: string; name?: string }[] = [];
+  const errors: string[] = [];
+  const lines = raw.split(/\r?\n/);
+  for (const [idx, rawLine] of lines.entries()) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [email, ...rest] = line.split(',').map((s) => s.trim());
+    const name = rest.length > 0 ? rest.join(',').trim() : undefined;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      errors.push(`Line ${idx + 1}: "${line}" is not a valid email`);
+      continue;
+    }
+    entries.push({ email, name: name || undefined });
+  }
+  return { entries, errors };
+}
+
+function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
+  const [raw, setRaw] = useState('');
+  const [invitedBy, setInvitedBy] = useState('');
+  const [sendEmail, setSendEmail] = useState(true);
+  const [result, setResult] = useState<BulkInvitationResponse | null>(null);
+
+  const { entries, errors: parseErrors } = parseBulkInput(raw);
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      createBulkInvitations({
+        entries,
+        invitedBy: invitedBy.trim() || undefined,
+        sendEmail,
+      }),
+    onSuccess: (data) => {
+      setResult(data);
+      onCreated(data);
+    },
+  });
+
+  if (result) {
+    return (
+      <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
+        <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6" onClick={(e) => e.stopPropagation()}>
+          <h3 className="text-lg font-semibold text-slate-900 mb-3">Bulk invitation results</h3>
+          <p className="text-sm text-slate-600 mb-4">
+            <span className="text-green-700 font-medium">{result.summary.succeeded} succeeded</span>,{' '}
+            <span className="text-red-600 font-medium">{result.summary.failed} failed</span>,{' '}
+            of {result.summary.total} total.
+          </p>
+          <div className="border border-slate-200 rounded-lg max-h-80 overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
+                <tr>
+                  <th className="text-left px-3 py-2">Email</th>
+                  <th className="text-left px-3 py-2">Result</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {result.results.map((r, i) => (
+                  <tr key={i}>
+                    <td className="px-3 py-2 text-slate-700">{r.email}</td>
+                    <td className="px-3 py-2">
+                      {r.ok ? (
+                        <span className="text-green-700 text-xs font-medium">
+                          Created{r.emailSent ? ' (emailed)' : ''}
+                        </span>
+                      ) : (
+                        <span className="text-red-600 text-xs">{r.error || 'Failed'}</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="mt-4 w-full px-4 py-2 text-sm font-medium text-white bg-spill-blue-800 rounded-lg hover:bg-spill-blue-400"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-slate-900 mb-2">Bulk invite</h3>
+        <p className="text-sm text-slate-500 mb-4">
+          One per line, in <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">email</code> or{' '}
+          <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">email,name</code> format. Up to 100 per batch.
+        </p>
+
+        <textarea
+          value={raw}
+          onChange={(e) => setRaw(e.target.value)}
+          rows={10}
+          placeholder={'jane@example.com,Jane Doe\nbob@example.com\nalice@example.com,Alice'}
+          spellCheck={false}
+          className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg focus:ring-2 focus:ring-spill-blue-400 outline-none"
+        />
+
+        <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
+          <span>{entries.length} valid {entries.length === 1 ? 'entry' : 'entries'}</span>
+          {entries.length > 100 && (
+            <span className="text-red-600">Over 100 — only the first 100 will be sent.</span>
+          )}
+        </div>
+
+        {parseErrors.length > 0 && (
+          <div className="mt-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800 space-y-0.5 max-h-24 overflow-y-auto">
+            {parseErrors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
+            {parseErrors.length > 5 && <div className="font-medium">…and {parseErrors.length - 5} more</div>}
+          </div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <label htmlFor="bulk-invitedby" className="block text-sm font-medium text-slate-700 mb-1">
+              Invited by <span className="text-slate-400 font-normal">(audit label, applied to all)</span>
+            </label>
+            <input
+              id="bulk-invitedby"
+              type="text"
+              value={invitedBy}
+              onChange={(e) => setInvitedBy(e.target.value)}
+              placeholder="Your name (defaults to 'admin')"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none"
+            />
+          </div>
+
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={sendEmail}
+              onChange={(e) => setSendEmail(e.target.checked)}
+              className="mt-0.5 rounded border-slate-300 text-spill-blue-800 focus:ring-spill-blue-400"
+            />
+            <span className="text-sm text-slate-700">
+              Email each invitation. Uncheck to copy links from the result list and share manually.
+            </span>
+          </label>
+        </div>
+
+        {mutation.isError && (
+          <p className="mt-3 text-sm text-red-600">
+            {getErrorMessage(mutation.error, 'Bulk invitation failed')}
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2 mt-6">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => mutation.mutate()}
+            disabled={entries.length === 0 || mutation.isPending}
+            className="px-4 py-1.5 text-sm font-medium text-white bg-spill-blue-800 rounded-lg hover:bg-spill-blue-400 disabled:opacity-50"
+          >
+            {mutation.isPending
+              ? 'Processing…'
+              : `Send ${Math.min(entries.length, 100)} ${entries.length === 1 ? 'invitation' : 'invitations'}`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

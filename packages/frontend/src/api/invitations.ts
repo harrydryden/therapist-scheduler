@@ -98,14 +98,50 @@ export async function resendInvitation(id: string): Promise<{ invitation: Invita
   );
 }
 
-// Public lookup for the signup page when ?invite= is present in the URL.
-export interface InvitationLookup {
+export interface BulkInvitationEntry {
   email: string;
-  name: string | null;
-  status: InvitationStatus;
-  redeemable: boolean;
-  expiresAt: string;
+  name?: string;
 }
+
+export interface BulkInvitationResult {
+  email: string;
+  ok: boolean;
+  invitationId?: string;
+  invitationUrl?: string;
+  emailSent?: boolean;
+  error?: string;
+}
+
+export interface BulkInvitationResponse {
+  results: BulkInvitationResult[];
+  summary: { total: number; succeeded: number; failed: number };
+}
+
+export interface BulkInvitationParams {
+  entries: BulkInvitationEntry[];
+  invitedBy?: string;
+  expiryDays?: number;
+  sendEmail?: boolean;
+}
+
+export async function createBulkInvitations(params: BulkInvitationParams): Promise<BulkInvitationResponse> {
+  return unwrap(
+    await fetchAdminApi<BulkInvitationResponse>('/admin/invitations/bulk', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+    'bulk invitations',
+  );
+}
+
+// Public lookup for the signup page when ?invite= is present in the URL.
+// Two response shapes from the backend (uniform 200 status):
+//  - { redeemable: true, email, name, expiresAt } for valid live invitations
+//  - { redeemable: false, reason: 'invalid' } for everything else
+//    (malformed / unknown / expired / revoked / already-accepted)
+export type InvitationLookup =
+  | { redeemable: true; email: string; name: string | null; expiresAt: string }
+  | { redeemable: false; reason: 'invalid' };
 
 export async function lookupInvitation(token: string): Promise<InvitationLookup | null> {
   try {

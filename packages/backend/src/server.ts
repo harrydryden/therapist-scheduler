@@ -46,6 +46,7 @@ import { weeklyMailingListService } from './services/weekly-mailing-list.service
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { workReportService } from './services/work-report.service';
 import { appointmentLifecycleTickService } from './services/appointment-lifecycle-tick.service';
+import { invitationLifecycleService } from './services/invitation-lifecycle.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
@@ -443,6 +444,7 @@ async function start() {
       workReportService.stop();
       therapistNudgeService.stop();
       appointmentLifecycleTickService.stop();
+      invitationLifecycleService.stop();
 
       // Stop side-effect retries and pending email processing
       sideEffectRetryService.stop();
@@ -565,6 +567,7 @@ async function start() {
       { name: 'postBookingFollowupService', service: postBookingFollowupService, critical: false, async: false },
       { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
       { name: 'appointmentLifecycleTickService', service: appointmentLifecycleTickService, critical: false, async: false },
+      { name: 'invitationLifecycleService', service: invitationLifecycleService, critical: false, async: false },
       { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
       { name: 'workReportService', service: workReportService, critical: false, async: false },
       { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },
