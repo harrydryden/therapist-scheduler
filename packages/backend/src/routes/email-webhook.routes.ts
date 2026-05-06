@@ -4,17 +4,9 @@ import { OAuth2Client } from 'google-auth-library';
 import { config } from '../config';
 import { emailProcessingService } from '../services/email-processing.service';
 import { logger } from '../utils/logger';
-import { HEADERS, RATE_LIMITS } from '../constants';
+import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
-import { safeCompare } from '../middleware/auth';
-
-// FIX #43: Extract duplicated webhook secret check into a reusable helper
-function verifyWebhookSecretHeader(request: FastifyRequest): boolean {
-  const webhookSecret = request.headers[HEADERS.WEBHOOK_SECRET];
-  return typeof webhookSecret === 'string' &&
-    !!config.webhookSecret &&
-    safeCompare(webhookSecret, config.webhookSecret);
-}
+import { verifyWebhookSecret } from '../middleware/auth';
 
 // OAuth2 client for verifying Pub/Sub push tokens
 const oauth2Client = new OAuth2Client();
@@ -34,6 +26,31 @@ const gmailNotificationSchema = z.object({
   emailAddress: z.string(),
   historyId: z.number(),
 });
+
+// Body schema for the direct-send endpoint. Caps match RFC 5322 (998-char
+// subject) and a generous 5 MB body — sized for HTML emails with inline
+// images. Email format is the standard zod check; downstream Gmail API
+// will reject anything malformed.
+const sendEmailSchema = z.object({
+  to: z.string().email().max(320),
+  subject: z.string().min(1).max(998),
+  body: z.string().min(1).max(5_000_000),
+});
+
+// Shared options block for the admin-style Gmail control endpoints. Uses
+// the central `verifyWebhookSecret` preHandler (which carries per-IP
+// brute-force lockout) and the same rate-limit preset as other admin
+// mutation routes. The Pub/Sub `/push` endpoint authenticates differently
+// (Google ID token) and is registered separately below.
+const ADMIN_GMAIL_ROUTE_OPTS = {
+  preHandler: verifyWebhookSecret,
+  config: {
+    rateLimit: {
+      max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+      timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+    },
+  },
+};
 
 export async function emailWebhookRoutes(fastify: FastifyInstance) {
   /**
@@ -181,12 +198,9 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
    */
   fastify.post(
     '/api/webhooks/gmail/poll',
+    ADMIN_GMAIL_ROUTE_OPTS,
     async (request: FastifyRequest, reply: FastifyReply) => {
       const requestId = request.id;
-
-      if (!verifyWebhookSecretHeader(request)) {
-        return Errors.unauthorized(reply);
-      }
 
       logger.info({ requestId }, 'Manual email poll triggered');
 
@@ -206,11 +220,8 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
    */
   fastify.get(
     '/api/webhooks/gmail/health',
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      if (!verifyWebhookSecretHeader(request)) {
-        return Errors.unauthorized(reply);
-      }
-
+    ADMIN_GMAIL_ROUTE_OPTS,
+    async (_request: FastifyRequest, reply: FastifyReply) => {
       try {
         const status = await emailProcessingService.checkHealth();
         return reply.send({ success: true, data: status });
@@ -227,12 +238,9 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
    */
   fastify.post(
     '/api/webhooks/gmail/send-pending',
+    ADMIN_GMAIL_ROUTE_OPTS,
     async (request: FastifyRequest, reply: FastifyReply) => {
       const requestId = request.id;
-
-      if (!verifyWebhookSecretHeader(request)) {
-        return Errors.unauthorized(reply);
-      }
 
       logger.info({ requestId }, 'Processing pending emails');
 
@@ -252,12 +260,9 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
    */
   fastify.post(
     '/api/webhooks/gmail/watch',
+    ADMIN_GMAIL_ROUTE_OPTS,
     async (request: FastifyRequest, reply: FastifyReply) => {
       const requestId = request.id;
-
-      if (!verifyWebhookSecretHeader(request)) {
-        return Errors.unauthorized(reply);
-      }
 
       const topicName = config.googlePubsubTopic;
       if (!topicName) {
@@ -285,35 +290,20 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
    */
   fastify.post(
     '/api/webhooks/gmail/send',
+    ADMIN_GMAIL_ROUTE_OPTS,
     async (request: FastifyRequest, reply: FastifyReply) => {
       const requestId = request.id;
 
-      if (!verifyWebhookSecretHeader(request)) {
-        return Errors.unauthorized(reply);
+      const validation = sendEmailSchema.safeParse(request.body);
+      if (!validation.success) {
+        return Errors.validationFailed(reply, validation.error.errors);
       }
+      const { to, subject, body } = validation.data;
 
-      const body = request.body as { to: string; subject: string; body: string };
-
-      if (!body.to || !body.subject || !body.body) {
-        return Errors.badRequest(reply, 'Missing required fields: to, subject, body');
-      }
-
-      // Validate email format and enforce size limits
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(body.to)) {
-        return Errors.badRequest(reply, 'Invalid email address format');
-      }
-      if (body.subject.length > 998) {
-        return Errors.badRequest(reply, 'Subject line exceeds maximum length (998 characters)');
-      }
-      if (body.body.length > 5_000_000) {
-        return Errors.badRequest(reply, 'Email body exceeds maximum size (5MB)');
-      }
-
-      logger.info({ requestId, to: body.to, subject: body.subject }, 'Sending email directly');
+      logger.info({ requestId, to, subject }, 'Sending email directly');
 
       try {
-        const result = await emailProcessingService.sendEmail(body);
+        const result = await emailProcessingService.sendEmail({ to, subject, body });
         return reply.send({ success: true, data: result });
       } catch (err) {
         logger.error({ err, requestId }, 'Error sending email');

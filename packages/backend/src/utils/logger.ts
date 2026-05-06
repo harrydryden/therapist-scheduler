@@ -52,8 +52,14 @@ export function maskSensitiveData<T extends Record<string, unknown>>(obj: T): T 
   return result;
 }
 
-// Redaction paths for pino - automatically masks these fields
-const redactPaths = config.env === 'production' ? [
+// Redaction paths for pino — automatically masks these fields in every
+// environment. Previously this was production-only, but staging logs and
+// any non-local sink (e.g. a developer ssh'd into a dev VM tailing a
+// process) leak PII just as easily as prod logs do. The censor below
+// masks emails into a readable form (`j***e@e***.com`) and replaces
+// non-email values with `[REDACTED]`, so logs stay structurally readable.
+const redactPaths = [
+  // Emails (top-level + one-level nested)
   'email',
   'userEmail',
   'therapistEmail',
@@ -66,7 +72,25 @@ const redactPaths = config.env === 'production' ? [
   '*.email',
   '*.userEmail',
   '*.therapistEmail',
-] : [];
+  '*.fromEmail',
+  '*.toEmail',
+  '*.emailAddress',
+  // Names
+  'userName',
+  'therapistName',
+  '*.userName',
+  '*.therapistName',
+  // Email subjects/bodies — emails carry conversational PII, and subjects
+  // in this codebase routinely embed names ("Re: Booking with John").
+  'subject',
+  '*.subject',
+  // Specific fields known to carry full user-supplied content. We avoid
+  // adding bare `body`/`content` because those are too generic — they
+  // would mask harmless framework fields. Add new specific names here as
+  // PII-bearing log sites are discovered.
+  'responseContent',
+  '*.responseContent',
+];
 
 export const logger = pino({
   level: config.logLevel,
