@@ -16,6 +16,8 @@ import {
 import { prisma } from '../utils/database';
 import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
+import { JustinTimeService } from './justin-time.service';
+import { fetchSchedulingContext } from './scheduling-context.service';
 
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
@@ -171,6 +173,62 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     }
 
     switch (effect.effectType) {
+      case 'justintime_start': {
+        // Outbox recovery for the appointment-creation flow. The row is
+        // registered inside the appointment-creation tx; this executor runs
+        // when either the in-process startScheduling never resolved (process
+        // crashed between commit and run) or it threw and was marked failed.
+        //
+        // Idempotency: skip if the appointment has already been advanced
+        // beyond `pending`, or if any conversation activity has been
+        // recorded (messageCount > 0 / conversationState saved). The narrow
+        // "emails sent but state save failed" window is intentionally not
+        // re-driven here — that case logs COMPENSATION REQUIRED and waits
+        // for manual intervention rather than risking duplicate outreach.
+        const richAppointment = await prisma.appointmentRequest.findUnique({
+          where: { id: effect.appointmentId },
+          select: {
+            id: true,
+            status: true,
+            messageCount: true,
+            conversationState: true,
+          },
+        });
+
+        if (!richAppointment) {
+          throw new Error(
+            `Appointment ${effect.appointmentId} not found - cannot retry justintime_start`,
+          );
+        }
+
+        if (richAppointment.status !== 'pending') {
+          logger.info(
+            { effectId: effect.id, appointmentId: effect.appointmentId, status: richAppointment.status },
+            'justintime_start retry skipped: appointment already advanced',
+          );
+          return;
+        }
+
+        if (richAppointment.messageCount > 0 || richAppointment.conversationState !== null) {
+          logger.warn(
+            { effectId: effect.id, appointmentId: effect.appointmentId },
+            'justintime_start retry skipped: conversation activity already recorded; manual intervention may be required',
+          );
+          return;
+        }
+
+        const context = await fetchSchedulingContext(effect.appointmentId, `retry:${effect.idempotencyKey}`);
+        if (!context) {
+          throw new Error(
+            `Failed to build scheduling context for ${effect.appointmentId}`,
+          );
+        }
+
+        const justinTime = new JustinTimeService(`retry:${effect.idempotencyKey}`);
+        await justinTime.startScheduling(context);
+        break;
+      }
+
       case 'email_client_confirmation':
       case 'email_therapist_confirmation':
       case 'email_client_cancellation':
