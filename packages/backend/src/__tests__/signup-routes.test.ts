@@ -38,6 +38,11 @@ jest.mock('../utils/unique-id', () => ({
   getOrCreateUser: jest.fn(),
 }));
 
+jest.mock('../services/signup-invitation.service', () => ({
+  findInvitationByToken: jest.fn(),
+  markAccepted: jest.fn(),
+}));
+
 // ============================================
 // Imports
 // ============================================
@@ -47,6 +52,7 @@ import { prisma } from '../utils/database';
 import { validateEmail } from '../utils/email-validator';
 import { getOrCreateUser } from '../utils/unique-id';
 import { signupRoutes } from '../routes/signup.routes';
+import { findInvitationByToken, markAccepted } from '../services/signup-invitation.service';
 
 // ============================================
 // Helpers
@@ -291,6 +297,127 @@ describe('signup routes', () => {
 
       expect(res.statusCode).toBe(500);
       expect(res.json().success).toBe(false);
+    });
+  });
+
+  describe('invitation flow', () => {
+    const TOKEN = 'a'.repeat(64);
+    const INVITE_PAYLOAD = { ...VALID_PAYLOAD, invitationToken: TOKEN };
+
+    function mockInvitationRedeemable(email = 'jamie@example.com') {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email,
+          name: 'Jamie',
+          status: 'pending',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 86400000),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: null,
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: true,
+      });
+    }
+
+    it('happy path: validates invitation, completes signup, marks accepted', async () => {
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: true });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(201);
+      expect(markAccepted).toHaveBeenCalledWith({
+        rawToken: TOKEN,
+        userId: 'user-uuid',
+        email: 'jamie@example.com',
+      });
+    });
+
+    it('rejects when invitation lookup returns null (unknown/malformed)', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue(null);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_INVALID');
+      expect(getOrCreateUser).not.toHaveBeenCalled();
+    });
+
+    it('rejects when invitation is revoked', async () => {
+      (findInvitationByToken as jest.Mock).mockResolvedValue({
+        invitation: {
+          id: 'inv-1',
+          email: 'jamie@example.com',
+          name: 'Jamie',
+          status: 'revoked',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 86400000),
+          acceptedAt: null,
+          acceptedUserId: null,
+          revokedAt: new Date(),
+          lastSentAt: new Date(),
+          sendCount: 1,
+          invitedBy: 'admin',
+        },
+        redeemable: false,
+        reason: 'revoked',
+      });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_REVOKED');
+    });
+
+    it('rejects when the email does not match the invitation', async () => {
+      mockInvitationRedeemable('different@example.com');
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().code).toBe('INVITATION_EMAIL_MISMATCH');
+      expect(getOrCreateUser).not.toHaveBeenCalled();
+    });
+
+    it('still records signup if accept-flip races and fails (logs warning)', async () => {
+      mockInvitationRedeemable();
+      mockEmailValid();
+      mockGetOrCreateUser();
+      mockUserUpdate();
+      (markAccepted as jest.Mock).mockResolvedValue({ accepted: false, reason: 'revoked' });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/signup',
+        payload: INVITE_PAYLOAD,
+      });
+
+      // Signup itself succeeded; the invitation just couldn't be flipped.
+      expect(res.statusCode).toBe(201);
     });
   });
 });

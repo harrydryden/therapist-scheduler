@@ -962,6 +962,41 @@ Best wishes
 
 {agentFirstName}`,
   },
+
+  // === SIGNUP INVITATIONS ===
+  'invitation.expiryDays': {
+    category: 'general',
+    label: 'Invitation Expiry (days)',
+    description: 'How long an invitation link stays valid before passively expiring.',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 90,
+    defaultValue: 14,
+  },
+  'email.invitationSubject': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation - Subject',
+    description: 'Subject line for invitation emails. Variables: {recipientName}',
+    valueType: 'string',
+    defaultValue: 'You\'re invited to a free therapy session at Spill',
+  },
+  'email.invitationBody': {
+    category: 'emailTemplates',
+    label: 'Signup Invitation - Body',
+    description: 'Email body for invitation emails. Variables: {recipientName}, {invitationUrl}, {expiryDate}. Supports markdown links.',
+    valueType: 'string',
+    defaultValue: `Hi {recipientName},
+
+You've been invited to book a free therapy session through Spill.
+
+To get started, click the link below to complete a short signup form. Once that's done you can browse our therapists and book a session.
+
+[Complete signup]({invitationUrl})
+
+This invitation expires on {expiryDate}.
+
+If you have any questions, just reply to this email.`,
+  },
 };
 
 export type SettingKey = keyof typeof SETTING_DEFINITIONS;

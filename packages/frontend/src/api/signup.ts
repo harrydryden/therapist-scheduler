@@ -6,6 +6,8 @@ export interface SignupRequest {
   priorTherapy: boolean;
   acknowledgedRealSession: true;
   agreedToFeedback: true;
+  /** Present when the user is signing up via an invitation link (?invite=). */
+  invitationToken?: string;
 }
 
 export interface SignupResponse {

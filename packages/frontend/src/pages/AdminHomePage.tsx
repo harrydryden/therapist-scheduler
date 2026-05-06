@@ -24,6 +24,13 @@ const adminPages: AdminCard[] = [
     preview: 'View signups, edit names and subscriptions, see consent and appointment history.',
   },
   {
+    name: 'Invitations',
+    path: '/admin/invitations',
+    icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',
+    description: 'Send signup invitations',
+    preview: 'Issue one-time signup links to prospective users. Track pending vs accepted, revoke or resend.',
+  },
+  {
     name: 'Therapists',
     path: '/admin/therapists',
     icon: 'M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z',

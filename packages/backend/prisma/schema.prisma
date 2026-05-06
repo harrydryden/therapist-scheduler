@@ -640,3 +640,47 @@ model VoucherTracking {
   @@index([unsubscribedAt])
   @@map("voucher_tracking")
 }
+
+// ============================================
+// Signup Invitations
+// ============================================
+
+// Admin-issued one-time signup invitations. The token sent to the prospect
+// is a 32-byte random opaque string; only its SHA-256 hash is stored here.
+// Lifecycle: pending → accepted (signup completed using the token) | revoked
+// (admin) | passively expired (expiresAt < now). Rows are kept indefinitely
+// for audit; "delete" is not a state.
+model SignupInvitation {
+  id          String    @id @default(uuid())
+  // Lowercased email of the invitee. NOT @unique — once a row is accepted or
+  // revoked, the same email can be re-invited (the service auto-revokes any
+  // pending invitation for that email before creating a new one).
+  email       String
+  // Optional name the admin wants to pre-fill on the signup form.
+  name        String?
+  // SHA-256 hex digest of the raw token. The raw token is only ever in the
+  // emailed URL; if the DB leaks, leaked rows can't be redeemed.
+  tokenHash   String    @unique @map("token_hash")
+  // Who issued it (admin secret can't carry an identity, so this is the
+  // human-readable label the admin enters or 'admin' fallback).
+  invitedBy   String    @map("invited_by")
+  expiresAt   DateTime  @map("expires_at")
+  acceptedAt  DateTime? @map("accepted_at")
+  // Postgres User row created from this invite, linked at acceptance time
+  // for conversion reporting. Optional — older rows pre-link were not
+  // preserved.
+  acceptedUserId String? @map("accepted_user_id")
+  revokedAt   DateTime? @map("revoked_at")
+  // Last time the admin re-sent the email (counter is implicit: how many
+  // sends happened since createdAt; admin-only, not displayed publicly).
+  lastSentAt  DateTime  @default(now()) @map("last_sent_at")
+  sendCount   Int       @default(1) @map("send_count")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([email])
+  @@index([acceptedAt])
+  @@index([revokedAt])
+  @@index([expiresAt])
+  @@map("signup_invitations")
+}

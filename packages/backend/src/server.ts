@@ -27,6 +27,7 @@ import { adminWorkReportRoutes } from './routes/admin-work-reports.routes';
 import { adminVoucherRoutes } from './routes/admin-vouchers.routes';
 import { adminUserRoutes } from './routes/admin-users.routes';
 import { adminTherapistRoutes } from './routes/admin-therapists.routes';
+import { adminInvitationRoutes } from './routes/admin-invitations.routes';
 import { ingestionRoutes } from './routes/ingestion.routes';
 
 // ATS Integration routes (versioned, webhook secret auth required)
@@ -338,6 +339,7 @@ async function buildServer() {
   await fastify.register(adminVoucherRoutes);      // Voucher management
   await fastify.register(adminUserRoutes);         // Postgres-backed user list/detail/edit
   await fastify.register(adminTherapistRoutes);    // Postgres-backed therapist list/detail/edit/unfreeze
+  await fastify.register(adminInvitationRoutes);   // Signup invitations CRUD + revoke + resend
   await fastify.register(ingestionRoutes);          // Therapist CV/PDF ingestion
 
   // --- ATS Integration routes (versioned API for external ATS system) ---
