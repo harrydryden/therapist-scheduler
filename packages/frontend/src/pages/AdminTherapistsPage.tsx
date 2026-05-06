@@ -80,7 +80,7 @@ function StatusBadges({ row }: { row: TherapistListItem }) {
           row.active ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
         }`}
       >
-        {row.active ? 'Active' : 'Inactive'}
+        {row.active ? 'Active' : 'Archived'}
       </span>
       {row.frozen && (
         <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
@@ -189,6 +189,15 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
     onError,
   });
 
+  // Dedicated mutation for the archive/restore one-click action. We don't
+  // route through `updateMutation` so the in-progress draft (bio edits etc.)
+  // isn't accidentally saved alongside the archive flip.
+  const archiveMutation = useMutation({
+    mutationFn: (active: boolean) => updateAdminTherapist(therapistId, { active }),
+    onSuccess: onSaved,
+    onError,
+  });
+
   const merged = { ...data, ...draft } as TherapistDetail & TherapistUpdate;
 
   const setField = <K extends keyof TherapistUpdate>(key: K, value: TherapistUpdate[K]) => {
@@ -237,13 +246,30 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
               merged.active ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
             }`}
           >
-            {merged.active ? 'Active' : 'Inactive'}
+            {merged.active ? 'Active' : 'Archived'}
           </span>
           {data.bookingStatus?.frozen && (
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
               Frozen
             </span>
           )}
+          <button
+            type="button"
+            onClick={() => archiveMutation.mutate(!data.active)}
+            disabled={archiveMutation.isPending}
+            className={`mt-1 px-2.5 py-1 text-xs font-medium rounded border transition-colors disabled:opacity-50 ${
+              data.active
+                ? 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                : 'border-spill-blue-800 bg-spill-blue-800 text-white hover:bg-spill-blue-400'
+            }`}
+            title={data.active
+              ? 'Hide from public listing and the default admin view'
+              : 'Restore to active and bookable'}
+          >
+            {archiveMutation.isPending
+              ? '…'
+              : data.active ? 'Archive' : 'Restore'}
+          </button>
         </div>
       </div>
 
@@ -457,7 +483,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
 
 export default function AdminTherapistsPage() {
   const [search, setSearch] = useState('');
-  const [active, setActive] = useState<TherapistFilters['active']>('all');
+  // Default to Active so archived (active=false) therapists are out of the
+  // way until explicitly looked for. The filter dropdown still exposes them.
+  const [active, setActive] = useState<TherapistFilters['active']>('true');
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -500,7 +528,7 @@ export default function AdminTherapistsPage() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Active</label>
+          <label className="block text-xs font-medium text-slate-500 mb-1">Show</label>
           <select
             value={active}
             onChange={(e) => {
@@ -509,9 +537,9 @@ export default function AdminTherapistsPage() {
             }}
             className="px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-400 outline-none"
           >
-            <option value="all">All</option>
             <option value="true">Active</option>
-            <option value="false">Inactive</option>
+            <option value="false">Archived</option>
+            <option value="all">All</option>
           </select>
         </div>
       </div>
