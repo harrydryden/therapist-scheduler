@@ -29,7 +29,10 @@ export interface TherapistAvailability {
 export interface Therapist {
   id: string;
   name: string;
-  bio: string;
+  // Nullable since the Notion deprecation: therapists ingested via the
+  // signup form (or imported without a Notion mirror) may not have a bio
+  // until an admin fills one in. Render-side code must handle null.
+  bio: string | null;
   approach: string[];
   style: string[];
   areasOfFocus: string[];

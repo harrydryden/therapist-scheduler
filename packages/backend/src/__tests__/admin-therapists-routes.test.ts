@@ -207,6 +207,44 @@ describe('admin therapist routes', () => {
       expect(res.json().data.items[0].frozen).toBe(false);
     });
 
+    it('handles therapists with null notionId without crashing the booking-status lookup', async () => {
+      // Post-Notion-deprecation therapists have notionId=null. Prisma 5 throws
+      // PrismaClientValidationError on null entries inside `in:`, so the route
+      // must filter them out (and fall back to the Postgres uuid) rather than
+      // pass `[null, ...]` straight into the where clause.
+      const legacyTherapist = makeTherapist({ id: 'legacy-1', notionId: 'notion-page-1' });
+      const postNotionTherapist = makeTherapist({
+        id: 'post-notion-1',
+        // Cast around the test type's stricter shape — the real schema is `String?`.
+        notionId: null as unknown as string,
+        odId: '0000000001',
+        email: 'fresh@therapist.test',
+        name: 'Fresh Therapist',
+      });
+      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([legacyTherapist, postNotionTherapist]);
+      (prisma.therapist.count as jest.Mock).mockResolvedValue(2);
+      (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
+        { id: 'notion-page-1', frozenAt: new Date(), hasConfirmedBooking: false, uniqueRequestCount: 1 },
+      ]);
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/admin/therapists',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+      });
+
+      expect(res.statusCode).toBe(200);
+      // Crucial assertion: the lookup-keys array passed to Prisma must not contain null.
+      const where = (prisma.therapistBookingStatus.findMany as jest.Mock).mock.calls[0][0].where;
+      expect(where.id.in).toEqual(expect.arrayContaining(['notion-page-1', 'post-notion-1']));
+      expect(where.id.in).not.toContain(null);
+
+      const items = res.json().data.items;
+      expect(items).toHaveLength(2);
+      expect(items.find((i: { id: string }) => i.id === 'legacy-1').frozen).toBe(true);
+      expect(items.find((i: { id: string }) => i.id === 'post-notion-1').frozen).toBe(false);
+    });
+
     it('search filters by email/name/odId/notionId', async () => {
       (prisma.therapist.findMany as jest.Mock).mockResolvedValue([]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(0);
