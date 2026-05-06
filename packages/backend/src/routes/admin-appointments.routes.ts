@@ -351,40 +351,51 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       const { adminId, reason } = validation.data;
 
       try {
-        // Check if already in human control to prevent race condition
-        const current = await prisma.appointmentRequest.findUnique({
-          where: { id },
-          select: { humanControlEnabled: true, humanControlTakenBy: true },
-        });
-
-        if (!current) {
-          return Errors.notFound(reply, 'Appointment');
-        }
-
-        if (current.humanControlEnabled) {
-          // Already controlled - check if by same admin
-          if (current.humanControlTakenBy === adminId) {
-            return sendSuccess(reply, {
-                id,
-                humanControlEnabled: true,
-                humanControlTakenBy: adminId,
-                message: 'You already have control of this appointment',
-            });
-          }
-          // Different admin already has control
-          return sendError(reply, 409, `This appointment is already being handled by ${current.humanControlTakenBy}`);
-        }
-
-        const appointment = await prisma.appointmentRequest.update({
-          where: { id },
+        // Atomic claim: only flip the flag when no one currently holds
+        // control. Two admins clicking simultaneously can no longer both
+        // pass a check-then-write — exactly one updateMany returns count=1,
+        // the other returns count=0 and falls into the resolve-by-state
+        // branch below.
+        const takenAt = new Date();
+        const claim = await prisma.appointmentRequest.updateMany({
+          where: { id, humanControlEnabled: false },
           data: {
             humanControlEnabled: true,
             humanControlTakenBy: adminId,
-            humanControlTakenAt: new Date(),
+            humanControlTakenAt: takenAt,
             humanControlReason: reason || null,
           },
-          select: { id: true },
         });
+
+        if (claim.count === 0) {
+          // Either the row doesn't exist or someone else already holds
+          // control. Re-fetch to distinguish.
+          const current = await prisma.appointmentRequest.findUnique({
+            where: { id },
+            select: { humanControlEnabled: true, humanControlTakenBy: true },
+          });
+
+          if (!current) {
+            return Errors.notFound(reply, 'Appointment');
+          }
+
+          if (current.humanControlEnabled && current.humanControlTakenBy === adminId) {
+            // Idempotent: caller already holds control (e.g. retry).
+            return sendSuccess(reply, {
+              id,
+              humanControlEnabled: true,
+              humanControlTakenBy: adminId,
+              message: 'You already have control of this appointment',
+            });
+          }
+
+          // Different admin won the race.
+          return sendError(
+            reply,
+            409,
+            `This appointment is already being handled by ${current.humanControlTakenBy}`,
+          );
+        }
 
         logger.info(
           { requestId, appointmentId: id, adminId, reason },
@@ -401,10 +412,10 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         sseService.emitHumanControl(id, true, adminId);
 
         return sendSuccess(reply, {
-            id: appointment.id,
-            humanControlEnabled: true,
-            humanControlTakenBy: adminId,
-            humanControlTakenAt: new Date(),
+          id,
+          humanControlEnabled: true,
+          humanControlTakenBy: adminId,
+          humanControlTakenAt: takenAt,
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to enable human control');

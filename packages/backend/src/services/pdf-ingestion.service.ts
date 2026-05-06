@@ -245,7 +245,15 @@ class PDFIngestionService {
         yearsExperience: extracted.yearsExperience,
       };
     } catch (err) {
-      logger.error({ err, responseContent: response.content }, 'Failed to parse AI extraction response');
+      // Truncate the AI response so a parse failure doesn't dump a full
+      // CV (which can contain the therapist's full name, contact details,
+      // and qualifications) into the log line. The logger also redacts
+      // `responseContent` paths defense-in-depth, but we shouldn't rely
+      // on a single layer for sensitive content.
+      const responseContent = typeof response.content === 'string'
+        ? response.content.slice(0, 200) + (response.content.length > 200 ? '…' : '')
+        : '[non-string]';
+      logger.error({ err, responseContent, responseLength: typeof response.content === 'string' ? response.content.length : null }, 'Failed to parse AI extraction response');
       // Surface a user-friendly message instead of raw JSON.parse errors
       const isParseError = err instanceof SyntaxError;
       const message = isParseError
