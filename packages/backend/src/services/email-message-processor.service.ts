@@ -66,6 +66,7 @@ import {
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
 import { CLEANUP_CHECK_AND_RESET_SCRIPT, ATOMIC_LOCK_CHECK_SCRIPT } from '../utils/redis-scripts';
 import { findMatchingAppointmentRequest } from '../utils/thread-matcher';
+import { tryHandleInvitationReply } from './invitation-reply.service';
 
 // Redis keys — imported from centralized constants
 const {
@@ -257,6 +258,7 @@ export type ProcessedMessageContext =
   | 'own-email'
   | 'weekly-mailing-reply'
   | 'therapist-nudge-reply'
+  | 'invitation-reply'
   | 'unmatched-abandoned'
   | 'divergence-blocked-abandoned'
   | 'processing-failed-abandoned';
@@ -588,6 +590,18 @@ export class EmailMessageProcessorService {
             logger.warn({ traceId, err }, 'Failed to send Slack alert for therapist nudge reply (fallback)');
           });
           await markMessageProcessed(messageId, traceId, 'therapist-nudge-reply');
+          return true;
+        }
+
+        // Invitation auto-reply path: people we sent a SignupInvitation to
+        // sometimes reply to the invite email with questions before booking.
+        // The agent answers from the knowledge base or directs them to the
+        // web app — see invitation-reply.service.ts for the full prompt.
+        // Returns false if the sender has no pending/recent invitation, in
+        // which case we continue into the unmatched-tracker below.
+        const handledAsInvitationReply = await tryHandleInvitationReply(email, traceId);
+        if (handledAsInvitationReply) {
+          await markMessageProcessed(messageId, traceId, 'invitation-reply');
           return true;
         }
 
