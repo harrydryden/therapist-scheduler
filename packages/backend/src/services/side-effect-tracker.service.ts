@@ -24,6 +24,7 @@ import { runBackgroundTask, type BackgroundTaskOptions } from '../utils/backgrou
 
 // Side effect types
 export type SideEffectType =
+  | 'justintime_start'
   | 'slack_notify_confirmed'
   | 'slack_notify_cancelled'
   | 'slack_notify_completed'
@@ -35,7 +36,7 @@ export type SideEffectType =
   | 'therapist_freeze_sync'
   | 'therapist_unfreeze_sync';
 
-export type TransitionType = 'confirmed' | 'cancelled' | 'completed' | 'session_held';
+export type TransitionType = 'requested' | 'confirmed' | 'cancelled' | 'completed' | 'session_held';
 
 export interface SideEffectDefinition {
   effectType: SideEffectType;
@@ -171,6 +172,48 @@ class SideEffectTrackerService {
   }
 
   /**
+   * Register a single side effect from inside an open transaction. Used by
+   * the appointment-creation outbox path: the row is committed atomically
+   * with the appointment, so even if the process dies before the in-process
+   * task fires, the periodic retry runner has a row to recover.
+   *
+   * Idempotency: caller-supplied or hash-derived key remains unique across
+   * retries. The row is created in 'pending'; the caller flips it to
+   * completed/failed once the task resolves.
+   */
+  async registerInTransaction(
+    tx: Prisma.TransactionClient,
+    appointmentId: string,
+    transition: TransitionType,
+    effect: SideEffectDefinition,
+  ): Promise<RegisteredSideEffect> {
+    const idempotencyKey =
+      effect.idempotencyKey ||
+      this.generateIdempotencyKey(appointmentId, transition, effect.effectType);
+
+    const created = await tx.sideEffectLog.create({
+      data: {
+        appointmentId,
+        effectType: effect.effectType,
+        transition,
+        status: 'pending',
+        idempotencyKey,
+        payload:
+          effect.payload === undefined
+            ? undefined
+            : (effect.payload as Prisma.InputJsonValue),
+      },
+    });
+
+    return {
+      id: created.id,
+      effectType: effect.effectType,
+      idempotencyKey,
+      status: 'pending',
+    };
+  }
+
+  /**
    * Mark a side effect as completed
    */
   async markCompleted(idempotencyKey: string): Promise<void> {
@@ -259,17 +302,29 @@ class SideEffectTrackerService {
   }
 
   /**
-   * Get failed side effects that should be retried
-   * Used by background retry job
+   * Get side effects that should be retried. Used by the background retry
+   * runner. Returns two distinct buckets:
+   *
+   * 1. `failed` rows whose last attempt was long enough ago (the original
+   *    retry path).
+   * 2. `pending` rows that are older than `stalePendingAfterMs` and have
+   *    never been attempted (`attempts: 0`). These are produced by the
+   *    transactional outbox path: the row is registered inside an
+   *    appointment-creation tx so that even if the process crashes between
+   *    commit and the in-process task firing, the runner still picks the
+   *    work up. The cutoff is deliberately longer than `retryAfterMs` so
+   *    we don't race a still-running in-process attempt.
    *
    * @param maxAttempts - Maximum retry attempts before abandoning
-   * @param retryAfterMs - Only retry effects that failed at least this long ago
+   * @param retryAfterMs - Only retry failed effects whose last attempt was at least this long ago
    * @param limit - Maximum number of effects to return
+   * @param stalePendingAfterMs - Pick up pending effects older than this (default: 10 minutes)
    */
   async getEffectsToRetry(
     maxAttempts: number = 5,
     retryAfterMs: number = 60000, // 1 minute
-    limit: number = 100
+    limit: number = 100,
+    stalePendingAfterMs: number = 10 * 60 * 1000, // 10 minutes
   ): Promise<Array<{
     id: string;
     appointmentId: string;
@@ -278,15 +333,25 @@ class SideEffectTrackerService {
     attempts: number;
     payload: unknown;
   }>> {
-    const cutoffTime = new Date(Date.now() - retryAfterMs);
+    const failedCutoff = new Date(Date.now() - retryAfterMs);
+    const stalePendingCutoff = new Date(Date.now() - stalePendingAfterMs);
 
     const effects = await prisma.sideEffectLog.findMany({
       where: {
-        status: 'failed',
-        attempts: { lt: maxAttempts },
-        lastAttempt: { lt: cutoffTime },
+        OR: [
+          {
+            status: 'failed',
+            attempts: { lt: maxAttempts },
+            lastAttempt: { lt: failedCutoff },
+          },
+          {
+            status: 'pending',
+            attempts: 0,
+            createdAt: { lt: stalePendingCutoff },
+          },
+        ],
       },
-      orderBy: { lastAttempt: 'asc' },
+      orderBy: [{ lastAttempt: 'asc' }, { createdAt: 'asc' }],
       take: limit,
     });
 

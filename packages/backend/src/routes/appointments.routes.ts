@@ -10,7 +10,7 @@ import { therapistBookingStatusService } from '../services/therapist-booking-sta
 import { slackNotificationService } from '../services/slack-notification.service';
 import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
-import { emailQueueService } from '../services/email-queue.service';
+import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 import { validateEmail } from '../utils/email-validator';
 import { getSettingValue } from '../services/settings.service';
 import { runBackgroundTask } from '../utils/background-task';
@@ -331,7 +331,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         const maxActiveThreads = await getSettingValue<number>('general.maxActiveThreadsPerUser');
 
         // Serializable isolation ensures no phantom reads between duplicate check and create
-        const appointmentRequest = await prisma.$transaction(
+        const { newRequest: appointmentRequest, justinTimeEffect } = await prisma.$transaction(
           async (tx) => {
             // FIX B2: Re-check for duplicates INSIDE transaction
             // This is the authoritative check that prevents race conditions
@@ -416,7 +416,20 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
               tx // Pass transaction client
             );
 
-            return newRequest;
+            // Outbox: register the JustinTime kickoff inside the same tx so
+            // the row is committed atomically with the appointment. If the
+            // process dies between this commit and the in-process call below,
+            // the periodic side-effect-retry runner picks up the stale
+            // pending row and re-drives startScheduling. Idempotency is
+            // anchored on the appointment id + transition + effect type.
+            const justinTimeEffect = await sideEffectTrackerService.registerInTransaction(
+              tx,
+              newRequest.id,
+              'requested',
+              { effectType: 'justintime_start' },
+            );
+
+            return { newRequest, justinTimeEffect };
           },
           {
             // FIX B2: Serializable isolation prevents phantom reads
@@ -504,60 +517,57 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             userCountry: userEntity.country,
             therapistCountry: therapistEntity.country,
           })
-          .then(() => {
+          .then(async () => {
             logger.info(
               { requestId, appointmentRequestId: appointmentRequest.id },
               'Justin Time scheduling started successfully'
             );
+            await sideEffectTrackerService
+              .markCompleted(justinTimeEffect.idempotencyKey)
+              .catch((markErr) => {
+                logger.warn(
+                  { err: markErr, requestId, appointmentRequestId: appointmentRequest.id },
+                  'Failed to mark justintime_start outbox row completed (will be reconciled by retry runner)'
+                );
+              });
           })
           .catch(async (err) => {
             logger.error(
               { err, requestId, appointmentRequestId: appointmentRequest.id },
               'Failed to start Justin Time scheduling'
             );
-            // FIX B6: Enhanced error handling for JustinTime failures
-            // 1. Update appointment status and add error note
-            // 2. Queue a retry via pending email system
+            // Flip the outbox row to `failed` so the periodic retry runner
+            // picks it up. We also flag the appointment as stale for admin
+            // visibility. The pre-commit row registration means recovery is
+            // automatic even if this catch never fires (e.g. process crash).
             try {
               await prisma.appointmentRequest.update({
                 where: { id: appointmentRequest.id },
                 data: {
-                  // Keep as pending (not contacted) since initial outreach failed
                   status: 'pending',
                   notes: `[SYSTEM ERROR] Initial scheduling failed at ${new Date().toISOString()}: ${err?.message || 'Unknown error'}. Retry queued.`,
-                  isStale: true, // Flag for admin attention
+                  isStale: true,
                 },
                 select: { id: true },
               });
-
-              // FIX B6: Queue a retry via BullMQ (falls back to DB-only if Redis unavailable)
-              await emailQueueService.enqueue({
-                to: userEmail,
-                subject: `[RETRY] Initial scheduling for ${therapistName}`,
-                body: JSON.stringify({
-                  type: 'RETRY_JUSTINTIME_START',
-                  appointmentRequestId: appointmentRequest.id,
-                  userName,
-                  userEmail,
-                  therapistEmail,
-                  therapistName,
-                  therapistAvailability,
-                  originalError: err?.message || 'Unknown error',
-                  queuedAt: new Date().toISOString(),
-                }),
-                appointmentId: appointmentRequest.id,
-              });
-
-              logger.info(
-                { requestId, appointmentRequestId: appointmentRequest.id },
-                'JustinTime failure recorded and retry queued'
-              );
             } catch (updateErr) {
               logger.error(
                 { err: updateErr, requestId, appointmentRequestId: appointmentRequest.id },
-                'CRITICAL: Failed to record JustinTime failure - manual intervention required'
+                'Failed to flag appointment as stale after JustinTime failure'
               );
             }
+
+            await sideEffectTrackerService
+              .markFailed(
+                justinTimeEffect.idempotencyKey,
+                err instanceof Error ? err.message : String(err),
+              )
+              .catch((markErr) => {
+                logger.error(
+                  { err: markErr, requestId, appointmentRequestId: appointmentRequest.id },
+                  'Failed to mark justintime_start outbox row failed (stale-pending path will recover)'
+                );
+              });
           });
 
         return reply.status(201).send({
