@@ -269,10 +269,42 @@ class EmailQueueService {
       }
     }
 
-    // Idempotent send guard: check if this email was already sent successfully.
-    // This prevents duplicate sends when the email goes out via Gmail but the
-    // subsequent DB status update fails (e.g., DB blip after send).
-    // On retry, BullMQ would re-process the job and send the email again without this guard.
+    // Database status check (authoritative) — short-circuits when the
+    // polling fallback already sent this email.
+    //
+    // The Redis send-guard below is an OPTIMIZATION, not the source of
+    // truth. Critical scenario: during a Redis outage, the polling
+    // fallback (`processPendingEmails`) sends successfully and marks
+    // the DB row `status='sent'` but cannot write the send-guard
+    // (Redis is down). When Redis recovers and BullMQ processes the
+    // delayed job for the same row, the guard isn't there, so without
+    // this DB check BullMQ would send again — a real duplicate send.
+    //
+    // The DB read is cheap (~1ms) and is on every job, but `processJob`
+    // is concurrency: 1 so this isn't a hot path.
+    const dbRow = await prisma.pendingEmail.findUnique({
+      where: { id: pendingEmailId },
+      select: { status: true },
+    });
+    if (!dbRow) {
+      logger.warn(
+        { jobId: job.id, pendingEmailId },
+        'BullMQ job references a pendingEmail that no longer exists — skipping'
+      );
+      return;
+    }
+    if (dbRow.status === 'sent' || dbRow.status === 'abandoned') {
+      logger.info(
+        { jobId: job.id, pendingEmailId, status: dbRow.status },
+        `BullMQ saw pendingEmail already in terminal state '${dbRow.status}' — skipping (likely sent by polling fallback during a Redis outage)`
+      );
+      return;
+    }
+
+    // Idempotent send guard: faster than the DB check above when Redis
+    // is healthy. Catches the narrower case of "Gmail sent successfully
+    // but DB update failed" — on retry, the guard prevents the duplicate
+    // send before the failed DB row gets re-read.
     const sendGuardKey = `${SEND_GUARD_PREFIX}${pendingEmailId}`;
     try {
       const alreadySent = await redis.get(sendGuardKey);
@@ -288,8 +320,9 @@ class EmailQueueService {
         return;
       }
     } catch {
-      // Redis unavailable for guard check — proceed with send
-      // Worst case: a duplicate send, which is better than no send
+      // Redis unavailable for guard check — proceed with send.
+      // The DB status check above is the authoritative guard against
+      // duplicates; the Redis guard is just an optimization.
     }
 
     // Use top-level import (circular dependency resolved via event bus architecture)
@@ -317,14 +350,27 @@ class EmailQueueService {
 
   /**
    * Update DB retry state when a job fails (non-final).
+   *
+   * `nextRetryAt` is set to the BullMQ-computed backoff delay so the
+   * polling fallback's `WHERE nextRetryAt <= now` filter respects the
+   * exponential backoff. Previously this only set
+   * retryCount/lastRetryAt, leaving nextRetryAt null — and the polling
+   * fallback's null-allowed filter would then re-pick the row up on
+   * its next 2-minute tick, sending right away despite BullMQ having
+   * scheduled the next retry hours out. The two paths now agree on
+   * when this row is eligible for the next attempt.
    */
   private async updateRetryState(job: Job<EmailJobData>, errorMessage: string): Promise<void> {
+    const attemptsMade = job.attemptsMade ?? 0;
+    const nextRetryDelayMs = getBackoffDelay(attemptsMade);
+    const nextRetryAt = new Date(Date.now() + nextRetryDelayMs);
     await prisma.pendingEmail.update({
       where: { id: job.data.pendingEmailId },
       data: {
         errorMessage,
-        retryCount: job.attemptsMade ?? 0,
+        retryCount: attemptsMade,
         lastRetryAt: new Date(),
+        nextRetryAt,
       },
     });
   }
