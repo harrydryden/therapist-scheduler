@@ -10,6 +10,7 @@ import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
 import { getSettingValues } from '../services/settings.service';
 import { renderTemplate } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getTaskMetrics } from '../utils/background-task';
@@ -158,9 +159,10 @@ export async function adminRoutes(fastify: FastifyInstance) {
         const unsubscribeUrl = generateUnsubscribeUrl(email, config.backendUrl);
 
         // Render templates
-        const subject = renderTemplate(subjectTemplate, { userName: name });
+        const userFirstName = firstName(name);
+        const subject = renderTemplate(subjectTemplate, { userName: userFirstName });
         const body = renderTemplate(bodyTemplate, {
-          userName: name,
+          userName: userFirstName,
           webAppUrl,
           unsubscribeUrl,
         });

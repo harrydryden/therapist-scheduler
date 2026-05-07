@@ -17,6 +17,7 @@
  */
 
 import { logger } from '../utils/logger';
+import { firstName } from '../utils/first-name';
 import { TIMEOUTS } from '../constants';
 import { knowledgeService } from './knowledge.service';
 import { getSettingValues } from './settings.service';
@@ -114,7 +115,7 @@ export async function buildSystemPrompt(
   const toneStyle = settingsMap.get('agent.toneStyle')!;
   const toneGuidance = getToneGuidance(toneStyle as string);
   const agentName = settingsMap.get('agent.fromName')! as string;
-  const agentFirstName = agentName.split(' ')[0];
+  const agentFirstName = firstName(agentName);
   const sessionDuration = settingsMap.get('agent.sessionDurationMinutes')! as unknown as number;
   const maxSlotsPerGroup = settingsMap.get('agent.maxSlotsPerGroup')! as unknown as number;
   const maxTotalSlots = settingsMap.get('agent.maxTotalSlots')! as unknown as number;

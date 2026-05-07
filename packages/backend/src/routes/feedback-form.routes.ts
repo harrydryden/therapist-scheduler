@@ -18,6 +18,7 @@ import { appointmentLifecycleService } from '../services/appointment-lifecycle.s
 import { slackNotificationService } from '../services/slack-notification.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { sanitizeName, sanitizeObject } from '../utils/input-sanitizer';
+import { firstName } from '../utils/first-name';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
@@ -161,9 +162,9 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         // Only return what the feedback form needs: tracking code and therapist first name.
         const prefilled: PrefilledData = {
           trackingCode: appointment.trackingCode || splCode,
-          userName: appointment.userName ? appointment.userName.split(' ')[0] : null,
+          userName: appointment.userName ? firstName(appointment.userName) : null,
           userEmail: '', // Redacted - not needed for form display
-          therapistName: appointment.therapistName.split(' ')[0], // First name only
+          therapistName: firstName(appointment.therapistName),
           appointmentId: appointment.id,
         };
 

@@ -17,6 +17,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
 import { loadEmailTemplate } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { runBackgroundTask } from '../utils/background-task';
@@ -226,8 +227,13 @@ class AppointmentNotificationsService {
 
     // Send confirmation emails (non-blocking, tracked)
     if (sendEmails) {
-      const therapistFirstName = (therapistName || 'there').split(' ')[0];
-      const clientFirstName = (userName || 'the client').split(' ')[0];
+      // Two fallbacks: 'there' for the client-facing greeting (so they
+      // see "Hi there,"), and 'the client' for the therapist-facing
+      // body (so the therapist reads "your client X" rather than
+      // "your client there").
+      const therapistFirstName = firstName(therapistName, 'your therapist');
+      const clientGreetingName = firstName(userName);
+      const clientFirstName = firstName(userName, 'the client');
 
       // Send client confirmation email — replayable: payload rendered once
       // at registration time so the periodic retry runner replays the exact
@@ -248,12 +254,12 @@ class AppointmentNotificationsService {
               const { subject, body } = await loadEmailTemplate(
                 'clientConfirmation',
                 {
-                  therapistName: therapistName || 'your therapist',
+                  therapistName: therapistFirstName,
                   confirmedDateTime: formattedDateTime,
                 },
                 {
-                  userName: userName || 'there',
-                  therapistName: therapistName || 'your therapist',
+                  userName: clientGreetingName,
+                  therapistName: therapistFirstName,
                   confirmedDateTime: formattedDateTime,
                 },
               );
@@ -412,9 +418,13 @@ class AppointmentNotificationsService {
       );
     }
 
-    // Send cancellation emails (non-blocking, tracked)
-    const therapistFirstName = (therapistName || 'your therapist').split(' ')[0];
-    const clientFirstName = (userName || 'the client').split(' ')[0];
+    // Send cancellation emails (non-blocking, tracked).
+    // Same two-fallback pattern as the confirmation path: 'there' for
+    // the client-facing greeting, 'the client' / 'your therapist' for
+    // the body of the *other* party's email.
+    const therapistFirstName = firstName(therapistName, 'your therapist');
+    const clientGreetingName = firstName(userName);
+    const clientFirstName = firstName(userName, 'the client');
     // Only include reason in the email to the *other* party (empty string hides the line)
     const cancellationReasonForClient = cancelledBy === 'therapist' ? `\nReason: ${reason}` : '';
     const cancellationReasonForTherapist = cancelledBy === 'client' ? `\nReason: ${reason}` : '';
@@ -437,7 +447,7 @@ class AppointmentNotificationsService {
               'clientCancellation',
               { therapistName: therapistFirstName },
               {
-                userName: userName || 'there',
+                userName: clientGreetingName,
                 therapistName: therapistFirstName,
                 confirmedDateTime: formattedDateTime,
                 cancellationReason: cancellationReasonForClient,

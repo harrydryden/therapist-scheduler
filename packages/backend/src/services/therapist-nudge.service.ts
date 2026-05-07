@@ -4,6 +4,7 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
 import { renderTemplate } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { ACTIVE_STATUSES } from '../constants';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 
@@ -130,7 +131,7 @@ class TherapistNudgeService {
     }
 
     const cutoff = new Date(Date.now() - intervalWeeks * 7 * 24 * 60 * 60 * 1000);
-    const agentFirstName = agentName.split(' ')[0];
+    const agentFirstName = firstName(agentName);
 
     const excludedNotionIds = new Set(therapistsWithAppointments.map(a => a.therapistNotionId));
     // The public handle is notionId for legacy rows and the Postgres uuid
@@ -201,10 +202,14 @@ class TherapistNudgeService {
       }
 
       try {
-        const firstName = therapist.name.split(' ')[0];
+        const therapistFirstName = firstName(therapist.name);
         const variables = {
-          therapistFirstName: firstName,
-          therapistName: therapist.name,
+          therapistFirstName,
+          // therapistName intentionally also resolves to the first name —
+          // the user wants every email salutation to address therapists
+          // by first name only. Templates that referenced the full
+          // {therapistName} now render the first name too.
+          therapistName: therapistFirstName,
           agentFirstName,
         };
 

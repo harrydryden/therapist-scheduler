@@ -5,6 +5,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
@@ -199,20 +200,25 @@ class ChaseEmailService {
               }
             }
 
-            const therapistFirstName = (appointment.therapistName || 'there').split(' ')[0];
-            const clientFirstName = (appointment.userName || 'the client').split(' ')[0];
+            const therapistFirstName = firstName(appointment.therapistName);
+            // 'the client' for the therapist-facing email body (so they
+            // read "your client X"); 'there' for the user-facing greeting
+            // (so they see "Hi there,").
+            const clientFirstName = firstName(appointment.userName, 'the client');
+            const userGreetingName = firstName(appointment.userName);
 
-            // Build the chase email using templates
+            // Build the chase email using templates. Templates address the
+            // recipient by first name only — see utils/first-name.ts.
             let subject: string;
             let body: string;
 
             if (target === 'user') {
               subject = await getEmailSubject('chaseUser', {
-                therapistName: appointment.therapistName,
+                therapistName: therapistFirstName,
               });
               body = await getEmailBody('chaseUser', {
-                userName: appointment.userName || 'there',
-                therapistName: appointment.therapistName,
+                userName: userGreetingName,
+                therapistName: therapistFirstName,
               });
             } else {
               subject = await getEmailSubject('chaseTherapist', {

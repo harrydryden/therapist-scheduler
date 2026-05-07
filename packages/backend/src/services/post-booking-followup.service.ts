@@ -32,6 +32,7 @@ import {
   formatEmailDateFromSettings,
 } from '../utils/date';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { auditEventService } from './audit-event.service';
@@ -832,7 +833,9 @@ class PostBookingFollowupService extends PeriodicService {
     confirmedDateTimeParsed: Date | null;
     gmailThreadId: string | null;
   }): Promise<void> {
-    const userName = appointment.userName || 'there';
+    // Address the recipient by first name only — see utils/first-name.ts.
+    const userName = firstName(appointment.userName);
+    const therapistFirstName = firstName(appointment.therapistName);
 
     // Meeting-link-check goes to the user; format the time in their local zone.
     const recipientTz = await resolveRecipientTimezone(appointment.userEmail);
@@ -843,11 +846,11 @@ class PostBookingFollowupService extends PeriodicService {
     );
 
     const subject = await getEmailSubject('meetingLinkCheck', {
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
     });
     const body = await getEmailBody('meetingLinkCheck', {
       userName,
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
       confirmedDateTime: formattedDateTime,
     });
 
@@ -873,7 +876,8 @@ class PostBookingFollowupService extends PeriodicService {
     trackingCode: string | null;
     gmailThreadId: string | null;
   }): Promise<void> {
-    const userName = appointment.userName || 'there';
+    const userName = firstName(appointment.userName);
+    const therapistFirstName = firstName(appointment.therapistName);
 
     // Build feedback form URL using native form with tracking code
     if (!appointment.trackingCode) {
@@ -889,11 +893,11 @@ class PostBookingFollowupService extends PeriodicService {
     const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}`;
 
     const subject = await getEmailSubject('feedbackForm', {
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
     });
     const body = await getEmailBody('feedbackForm', {
       userName,
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
       feedbackFormUrl,
     });
 
@@ -927,8 +931,8 @@ class PostBookingFollowupService extends PeriodicService {
       return;
     }
 
-    const therapistFirstName = appointment.therapistName.split(' ')[0];
-    const clientFirstName = appointment.userName ? appointment.userName.split(' ')[0] : 'your client';
+    const therapistFirstName = firstName(appointment.therapistName);
+    const clientFirstName = firstName(appointment.userName, 'your client');
 
     const subject = await getEmailSubject('therapistFeedbackNotification', {
       therapistFirstName,
@@ -1079,7 +1083,8 @@ class PostBookingFollowupService extends PeriodicService {
     trackingCode: string | null;
     gmailThreadId: string | null;
   }): Promise<void> {
-    const userName = appointment.userName || 'there';
+    const userName = firstName(appointment.userName);
+    const therapistFirstName = firstName(appointment.therapistName);
 
     // Build feedback form URL using native form with tracking code
     if (!appointment.trackingCode) {
@@ -1095,11 +1100,11 @@ class PostBookingFollowupService extends PeriodicService {
     const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}`;
 
     const subject = await getEmailSubject('feedbackReminder', {
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
     });
     const body = await getEmailBody('feedbackReminder', {
       userName,
-      therapistName: appointment.therapistName,
+      therapistName: therapistFirstName,
       feedbackFormUrl,
     });
 
@@ -1130,13 +1135,13 @@ class PostBookingFollowupService extends PeriodicService {
   ): Promise<void> {
     const isUser = recipient === 'user';
     const recipientName = isUser
-      ? (appointment.userName ? appointment.userName.split(' ')[0] : 'there')
-      : appointment.therapistName.split(' ')[0];
+      ? firstName(appointment.userName)
+      : firstName(appointment.therapistName);
     const recipientEmail = isUser ? appointment.userEmail : appointment.therapistEmail;
     const threadId = isUser ? appointment.gmailThreadId : appointment.therapistGmailThreadId;
     const otherPartyName = isUser
-      ? appointment.therapistName.split(' ')[0]
-      : (appointment.userName ? appointment.userName.split(' ')[0] : 'your client');
+      ? firstName(appointment.therapistName)
+      : firstName(appointment.userName, 'your client');
 
     // Format the date in the recipient's local timezone (their country's
     // default zone) — falls back to the platform timezone if unknown.

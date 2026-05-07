@@ -15,6 +15,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { firstName } from '../utils/first-name';
 import type { ConversationAction } from '../services/conversation-checkpoint.service';
 
 /**
@@ -88,10 +89,13 @@ export function buildSchedulingContext(
 ): SchedulingContext {
   return {
     appointmentRequestId: appointmentRequest.id,
-    userName: appointmentRequest.userName || 'there',
+    // Names flow into AI prompts and email salutations — first-name only,
+    // see utils/first-name.ts. Centralising the trim here means the AI's
+    // tool calls render "Hi John," not "Hi John Smith,".
+    userName: firstName(appointmentRequest.userName),
     userEmail: appointmentRequest.userEmail,
     therapistEmail: appointmentRequest.therapistEmail,
-    therapistName: appointmentRequest.therapistName,
+    therapistName: firstName(appointmentRequest.therapistName),
     therapistAvailability: appointmentRequest.therapistAvailability as Record<string, unknown> | null,
     bookingMethod: (appointmentRequest.bookingMethod as BookingMethod) || 'agent_negotiated',
     userCountry: appointmentRequest.user?.country || 'UK',

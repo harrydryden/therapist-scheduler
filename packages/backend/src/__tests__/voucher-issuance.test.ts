@@ -100,7 +100,9 @@ describe('issueWelcomeVoucher', () => {
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
     const sendArgs = sendEmailMock.mock.calls[0][0];
     expect(sendArgs.to).toBe('new@example.com');
-    expect(sendArgs.subject).toContain('New User');
+    // Subject uses first name only (utils/first-name.ts) — so "New User" → "New".
+    expect(sendArgs.subject).toContain('New');
+    expect(sendArgs.subject).not.toContain('New User');
     expect(sendArgs.body).toContain('personal booking link');
     expect(sendArgs.body).toContain('https://free.spill.app/book?voucher=');
   });
