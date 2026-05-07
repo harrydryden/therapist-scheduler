@@ -61,16 +61,32 @@ export interface RegisteredSideEffect {
 
 class SideEffectTrackerService {
   /**
-   * Generate an idempotency key for a side effect
-   * This ensures the same effect isn't executed twice
+   * Generate an idempotency key for a side effect.
+   *
+   * The optional `transitionGeneration` differentiates effects fired
+   * across re-entries of the same status — the lifecycle service bumps
+   * `appointmentRequest.transitionGeneration` on every status change,
+   * and threads it through here. Without the generation, a cancel →
+   * re-confirm sequence would dedupe the second confirmation's
+   * Slack/email side effects against the first confirmation's
+   * already-completed rows.
+   *
+   * Existing rows registered before this column existed used the
+   * shorter (id:transition:type) shape; new generation-aware keys hash
+   * a different input string so they never collide with old keys.
    */
   private generateIdempotencyKey(
     appointmentId: string,
     transition: TransitionType,
-    effectType: SideEffectType
+    effectType: SideEffectType,
+    transitionGeneration?: number,
   ): string {
+    const input =
+      transitionGeneration === undefined
+        ? `${appointmentId}:${transition}:${effectType}`
+        : `${appointmentId}:gen${transitionGeneration}:${transition}:${effectType}`;
     const hash = createHash('sha256')
-      .update(`${appointmentId}:${transition}:${effectType}`)
+      .update(input)
       .digest('hex')
       .substring(0, 32);
     return hash;
@@ -88,14 +104,15 @@ class SideEffectTrackerService {
   async registerSideEffects(
     appointmentId: string,
     transition: TransitionType,
-    effects: SideEffectDefinition[]
+    effects: SideEffectDefinition[],
+    transitionGeneration?: number,
   ): Promise<RegisteredSideEffect[]> {
     const registered: RegisteredSideEffect[] = [];
 
     for (const effect of effects) {
       const idempotencyKey =
         effect.idempotencyKey ||
-        this.generateIdempotencyKey(appointmentId, transition, effect.effectType);
+        this.generateIdempotencyKey(appointmentId, transition, effect.effectType, transitionGeneration);
 
       try {
         // Upsert to handle idempotency - if key exists, return existing record
@@ -186,10 +203,11 @@ class SideEffectTrackerService {
     appointmentId: string,
     transition: TransitionType,
     effect: SideEffectDefinition,
+    transitionGeneration?: number,
   ): Promise<RegisteredSideEffect> {
     const idempotencyKey =
       effect.idempotencyKey ||
-      this.generateIdempotencyKey(appointmentId, transition, effect.effectType);
+      this.generateIdempotencyKey(appointmentId, transition, effect.effectType, transitionGeneration);
 
     const created = await tx.sideEffectLog.create({
       data: {
@@ -468,7 +486,8 @@ export function runTrackedSideEffect(
   transition: TransitionType,
   effectType: SideEffectType,
   task: () => Promise<unknown>,
-  options: BackgroundTaskOptions
+  options: BackgroundTaskOptions,
+  transitionGeneration?: number,
 ): void {
   runBackgroundTask(async () => {
     let registered;
@@ -477,6 +496,7 @@ export function runTrackedSideEffect(
         appointmentId,
         transition,
         [{ effectType }],
+        transitionGeneration,
       );
       registered = reg;
     } catch (regErr) {
@@ -556,6 +576,7 @@ export function runReplayableTrackedSideEffect<P>(
     execute: (payload: P) => Promise<unknown>;
   },
   options: BackgroundTaskOptions,
+  transitionGeneration?: number,
 ): void {
   runBackgroundTask(async () => {
     const payload = await spec.renderPayload();
@@ -566,6 +587,7 @@ export function runReplayableTrackedSideEffect<P>(
         appointmentId,
         transition,
         [{ effectType, payload }],
+        transitionGeneration,
       );
       registered = reg;
     } catch (regErr) {

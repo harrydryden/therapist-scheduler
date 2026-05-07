@@ -631,6 +631,13 @@ class AppointmentLifecycleService {
         status: targetStatus,
         lastActivityAt: new Date(),
         updatedAt: new Date(),
+        // Bump generation atomically with the status flip so any side
+        // effects keyed off this transition won't dedupe against prior
+        // generations. Even light transitions (contacted, negotiating,
+        // session_held, feedback_requested) get a unique generation so
+        // callers like onSessionHeld don't have to know whether they
+        // need versioning.
+        transitionGeneration: { increment: 1 },
         ...extraData,
       },
     });
@@ -791,6 +798,7 @@ class AppointmentLifecycleService {
         therapistNotionId: true,
         confirmedDateTime: true,
         humanControlEnabled: true,
+        transitionGeneration: true,
       },
     });
 
@@ -835,6 +843,11 @@ class AppointmentLifecycleService {
       notes: notes || undefined,
       lastActivityAt: new Date(),
       updatedAt: new Date(),
+      // Bump generation atomically with the status flip. Critical for the
+      // cancel → re-confirm path: without this, the second confirmation's
+      // Slack/email side-effect rows would dedupe against the first
+      // confirmation's already-completed entries and never fire.
+      transitionGeneration: { increment: 1 },
       // Always clear rescheduling flags when confirming.
       ...CLEAR_RESCHEDULING_STATE,
       // Clear isStale + any other progression-based field resets.
@@ -1032,7 +1045,13 @@ class AppointmentLifecycleService {
       'onConfirmed',
     );
 
-    // Send Slack + email notifications (delegated to notifications service)
+    // Send Slack + email notifications (delegated to notifications service).
+    // Pass the post-update generation so side-effect-tracker idempotency
+    // keys are unique across re-confirmations (cancel → re-confirm cycles).
+    // The atomic updateMany above incremented generation by 1; reading
+    // appointment.transitionGeneration + 1 here is correct because the
+    // updateMany's precondition matched.
+    const newGeneration = appointment.transitionGeneration + 1;
     this.fireAndForget(
       appointmentNotificationsService.notifyConfirmed({
         appointmentId,
@@ -1045,6 +1064,7 @@ class AppointmentLifecycleService {
         confirmedDateTime,
         confirmedDateTimeParsed,
         sendEmails,
+        transitionGeneration: newGeneration,
       }),
       appointmentId,
       'notifyConfirmed',
@@ -1140,6 +1160,7 @@ class AppointmentLifecycleService {
       therapist_name: string;
       therapist_notion_id: string;
       notes: string | null;
+      transition_generation: number;
     };
 
     const outcome = await runTerminalTransitionTx<CompletedRow>({
@@ -1148,7 +1169,7 @@ class AppointmentLifecycleService {
       adminId,
       fetchAndLock: async (tx) => {
         const rows = await tx.$queryRaw<CompletedRow[]>`
-          SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes
+          SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes, transition_generation
           FROM "appointment_requests"
           WHERE id = ${appointmentId}
           FOR UPDATE
@@ -1166,6 +1187,10 @@ class AppointmentLifecycleService {
         status: APPOINTMENT_STATUS.COMPLETED,
         notes: note ? (row.notes ? `${note}\n\n${row.notes}` : note) : row.notes,
         updatedAt: new Date(),
+        // Bump generation atomically with the status flip so side-effect
+        // idempotency keys for this transition don't collide with prior
+        // generations' completed rows.
+        transitionGeneration: { increment: 1 },
         // Completion is terminal — no reschedule should remain active.
         ...CLEAR_RESCHEDULING_STATE,
         // Centralised progression-based field resets (clears isStale).
@@ -1236,7 +1261,10 @@ class AppointmentLifecycleService {
       'onCompleted',
     );
 
-    // Send Slack notification (delegated to notifications service)
+    // Send Slack notification (delegated to notifications service).
+    // outcome.row is pre-update; the atomic update incremented the column
+    // by 1, so the post-update generation is +1.
+    const newGeneration = outcome.row.transition_generation + 1;
     this.fireAndForget(
       appointmentNotificationsService.notifyCompleted({
         appointmentId,
@@ -1246,6 +1274,7 @@ class AppointmentLifecycleService {
         therapistName: appointment.therapistName,
         feedbackSubmissionId,
         feedbackData,
+        transitionGeneration: newGeneration,
       }),
       appointmentId,
       'notifyCompleted',
@@ -1308,6 +1337,7 @@ class AppointmentLifecycleService {
       confirmed_date_time_parsed: Date | null;
       gmail_thread_id: string | null;
       therapist_gmail_thread_id: string | null;
+      transition_generation: number;
     };
 
     const outcome = await runTerminalTransitionTx<CancelledRow>({
@@ -1319,7 +1349,7 @@ class AppointmentLifecycleService {
           SELECT id, status, user_name, user_email, therapist_name, therapist_email,
                  therapist_notion_id, human_control_enabled, notes,
                  confirmed_date_time, confirmed_date_time_parsed,
-                 gmail_thread_id, therapist_gmail_thread_id
+                 gmail_thread_id, therapist_gmail_thread_id, transition_generation
           FROM "appointment_requests"
           WHERE id = ${appointmentId}
           FOR UPDATE
@@ -1358,6 +1388,10 @@ class AppointmentLifecycleService {
           status: APPOINTMENT_STATUS.CANCELLED,
           notes: updatedNotes,
           updatedAt: new Date(),
+          // Bump generation atomically with the status flip so side-effect
+          // idempotency keys for this transition don't collide with prior
+          // generations' completed rows.
+          transitionGeneration: { increment: 1 },
           // Cancellation supersedes any in-progress reschedule.
           ...CLEAR_RESCHEDULING_STATE,
           // Centralised progression-based field resets (clears isStale).
@@ -1442,6 +1476,9 @@ class AppointmentLifecycleService {
     // Skipped when the caller wants to fire its own specialized notification
     // (e.g. bounce handler) — data-consistency side effects above still run.
     if (!skipNotifications) {
+      // outcome.row is pre-update; the atomic update incremented the
+      // generation column by 1.
+      const newGeneration = outcome.row.transition_generation + 1;
       this.fireAndForget(
         appointmentNotificationsService.notifyCancelled({
           appointmentId,
@@ -1457,6 +1494,7 @@ class AppointmentLifecycleService {
           confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
           gmailThreadId: appointment.gmailThreadId,
           therapistGmailThreadId: appointment.therapistGmailThreadId,
+          transitionGeneration: newGeneration,
         }),
         appointmentId,
         'notifyCancelled',
@@ -1628,6 +1666,11 @@ class AppointmentLifecycleService {
 
       if (statusChanging) {
         updateData.status = newStatus;
+        // Admin force-update is the path that re-flips status (e.g.
+        // cancel → re-confirm). Bumping generation here is the whole
+        // point of the column — without it, side-effects from the
+        // re-entered status dedupe against the prior generation.
+        updateData.transitionGeneration = { increment: 1 };
         if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
           updateData.confirmedAt = new Date();
         }
