@@ -17,6 +17,7 @@
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
+import { firstName } from '../utils/first-name';
 import { prisma } from '../utils/database';
 import { emailProcessingService } from './email-processing.service';
 import { auditEventService } from './audit-event.service';
@@ -635,7 +636,7 @@ export class AIToolExecutorService {
 
     // Normalize email body: fix line breaks and replace full agent name with first name
     const agentName = await getSettingValue<string>('agent.fromName');
-    const agentFirstName = agentName.split(' ')[0];
+    const agentFirstName = firstName(agentName);
     const normalizedBody = this.normalizeEmailBody(params.body, agentFirstName);
 
     logger.debug(

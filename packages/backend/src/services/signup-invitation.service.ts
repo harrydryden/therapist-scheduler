@@ -24,6 +24,7 @@ import {
 } from '../utils/invitation-token';
 import { getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { emailProcessingService } from '../services/email-processing.service';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
@@ -312,11 +313,12 @@ export async function resendInvitationEmail(id: string): Promise<ResendResult> {
     'email.invitationBody',
   ]);
   const subjectTemplate = settings.get('email.invitationSubject') as string;
+  const recipientFirstName = firstName(row.name);
   const subject = renderTemplate(`Reminder: ${subjectTemplate}`, {
-    recipientName: row.name || 'there',
+    recipientName: recipientFirstName,
   });
   const body =
-    `Hi ${row.name || 'there'},\n\n` +
+    `Hi ${recipientFirstName},\n\n` +
     `Just a reminder about your Spill therapy session invitation. ` +
     `Please use the original signup link sent to you previously. The link ` +
     `expires on ${row.expiresAt.toDateString()}.\n\n` +
@@ -360,7 +362,7 @@ export async function sendInvitationEmail(params: SendInvitationEmailParams): Pr
   const bodyTemplate = settings.get('email.invitationBody') as string;
 
   const variables = {
-    recipientName: params.recipientName || 'there',
+    recipientName: firstName(params.recipientName),
     invitationUrl: params.invitationUrl,
     expiryDate: params.expiresAt.toDateString(),
   };
@@ -576,7 +578,7 @@ export async function sendInvitationReminder(invitationId: string): Promise<bool
   const msPerDay = 24 * 60 * 60 * 1000;
   const daysRemaining = Math.max(0, Math.ceil((row.expiresAt.getTime() - now.getTime()) / msPerDay));
   const variables = {
-    recipientName: row.name || 'there',
+    recipientName: firstName(row.name),
     daysRemaining: String(daysRemaining),
     expiryDate: row.expiresAt.toDateString(),
   };

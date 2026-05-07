@@ -42,6 +42,7 @@ import { generateVoucherUrl } from '../utils/voucher-token';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
 import { renderTemplate } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { emailProcessingService } from './email-processing.service';
 
 interface IssueWelcomeVoucherParams {
@@ -132,7 +133,10 @@ export async function issueWelcomeVoucher(
   // this email arrived via signup-welcome, weekly tick, or reminder.
   let emailSent = false;
   try {
-    const userName = params.name?.trim() || emailLower.split('@')[0];
+    // First name only — see utils/first-name.ts. Falls back to the
+    // email's local-part when the supplied name is null/empty so the
+    // salutation is never literally "Hi there,".
+    const userName = firstName(params.name, emailLower.split('@')[0]);
     const subjectTemplate = await getSettingValue<string>('email.welcomeBookingSubject');
     const bodyTemplate = await getSettingValue<string>('email.welcomeBookingBody');
     const voucherExpiry = formatVoucherExpiry(voucherResult.expiresAt);

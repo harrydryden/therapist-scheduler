@@ -12,6 +12,7 @@ import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModifica
 import { recordAppointmentEvent } from '../services/appointment-event.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
+import { firstName } from '../utils/first-name';
 import { getSettingValue } from '../services/settings.service';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -895,13 +896,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           feedbackFormUrl = await getSettingValue<string>('postBooking.feedbackFormUrl');
         }
 
-        const userName = appointment.userName || 'there';
+        const userName = firstName(appointment.userName);
+        const therapistFirstName = firstName(appointment.therapistName);
         const subject = await getEmailSubject('feedbackForm', {
-          therapistName: appointment.therapistName,
+          therapistName: therapistFirstName,
         });
         const emailBody = await getEmailBody('feedbackForm', {
           userName,
-          therapistName: appointment.therapistName,
+          therapistName: therapistFirstName,
           feedbackFormUrl,
         });
 

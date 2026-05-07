@@ -28,6 +28,7 @@ import { renderTemplate, TemplateVariables } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
+import { firstName } from '../utils/first-name';
 import { safeJsonParse } from '../utils/json-parser';
 import { WEEKLY_MAILING, APPOINTMENT_STATUS } from '../constants';
 
@@ -640,10 +641,11 @@ class WeeklyMailingListService extends LockedPeriodicService {
       voucherSection: string;
     },
   ): Promise<void> {
-    const subject = renderTemplate(emailSettings.subjectTemplate, { userName: user.name });
+    const userFirstName = firstName(user.name);
+    const subject = renderTemplate(emailSettings.subjectTemplate, { userName: userFirstName });
     const body = renderUnifiedBody(
       emailSettings.bodyTemplate,
-      { userName: user.name, webAppUrl: sections.webAppUrl, unsubscribeUrl: sections.unsubscribeUrl },
+      { userName: userFirstName, webAppUrl: sections.webAppUrl, unsubscribeUrl: sections.unsubscribeUrl },
       sections.newTherapistsSection,
       sections.voucherSection,
     );
@@ -663,9 +665,10 @@ class WeeklyMailingListService extends LockedPeriodicService {
     const emailLower = user.email.toLowerCase();
 
     // Send final notice email
-    const subject = renderTemplate(emailSettings.finalNoticeSubjectTemplate, { userName: user.name });
+    const userFirstName = firstName(user.name);
+    const subject = renderTemplate(emailSettings.finalNoticeSubjectTemplate, { userName: userFirstName });
     const body = renderTemplate(emailSettings.finalNoticeBodyTemplate, {
-      userName: user.name,
+      userName: userFirstName,
       unsubscribeUrl,
     });
 

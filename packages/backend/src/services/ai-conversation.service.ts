@@ -13,6 +13,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { anthropicClient } from '../utils/anthropic-client';
 import { CLAUDE_MODELS, MODEL_CONFIG } from '../config/models';
 import { logger } from '../utils/logger';
+import { firstName } from '../utils/first-name';
 import { prisma } from '../utils/database';
 import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
@@ -794,7 +795,7 @@ Example responses for booking requests:
 - Be warm and encouraging without being pushy
 - For questions about therapy approaches, specific therapists, or pricing, suggest they explore the booking page or book a session
 - **Always** include the booking URL in your response
-- Sign off as "${agentName.split(' ')[0]}" or "The Spill Team"
+- Sign off as "${firstName(agentName)}" or "The Spill Team"
 
 ## What You Can Help With
 - General questions about Spill's therapy services
