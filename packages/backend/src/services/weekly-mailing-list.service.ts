@@ -27,6 +27,7 @@ import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate, TemplateVariables } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { generateVoucherUrl } from '../utils/voucher-token';
+import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
 import { safeJsonParse } from '../utils/json-parser';
 import { WEEKLY_MAILING, APPOINTMENT_STATUS } from '../constants';
 
@@ -428,22 +429,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
-   * Build the voucher section for the weekly email.
-   * For new vouchers: tells user they have a new booking link that expires.
-   * For reminders: tells user their existing link expires in X days.
-   * Never exposes the voucher code as text — it's only embedded in the booking URL.
-   */
-  private buildVoucherSection(isReminder: boolean, voucherExpiry: string, daysRemaining?: number): string {
-    if (isReminder) {
-      const daysText = daysRemaining !== undefined && daysRemaining >= 0
-        ? `in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`
-        : `on ${voucherExpiry}`;
-      return `Just a reminder — your personal booking link expires ${daysText}. Don't miss out on your free therapy session.`;
-    }
-    return `You've been allocated a new personal booking link. It expires on ${voucherExpiry}, so please book before then. Once it's gone, your spot will be offered to someone else.`;
-  }
-
-  /**
    * Get users eligible for the weekly mailing: subscribed and with no
    * confirmed upcoming appointment. Reads from Postgres now that the
    * Notion users database has been retired.
@@ -566,7 +551,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
         webAppUrl: voucherWebAppUrl,
         unsubscribeUrl,
         newTherapistsSection,
-        voucherSection: this.buildVoucherSection(true, formatExpiryDate(expiresAt), daysRemaining),
+        voucherSection: renderVoucherSection({ isReminder: true, voucherExpiry: formatVoucherExpiry(expiresAt), daysRemaining }),
       });
 
       await prisma.voucherTracking.update({
@@ -632,7 +617,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       webAppUrl: voucherResult.url,
       unsubscribeUrl,
       newTherapistsSection,
-      voucherSection: this.buildVoucherSection(false, formatExpiryDate(voucherResult.expiresAt)),
+      voucherSection: renderVoucherSection({ isReminder: false, voucherExpiry: formatVoucherExpiry(voucherResult.expiresAt) }),
     });
 
     logger.info(
@@ -735,14 +720,6 @@ interface EmailSettings {
 /**
  * Format a date for display in emails (e.g., "2 April 2026")
  */
-function formatExpiryDate(date: Date): string {
-  return date.toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
-}
-
 /**
  * Render the unified weekly email body.
  *

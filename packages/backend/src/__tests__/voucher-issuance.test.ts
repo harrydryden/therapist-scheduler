@@ -60,7 +60,7 @@ const SETTINGS_DEFAULTS: Record<string, unknown> = {
   'weeklyMailing.webAppUrl': 'https://free.spill.app/book',
   'email.welcomeBookingSubject': 'Welcome {userName}',
   'email.welcomeBookingBody':
-    'Hi {userName}, code {voucherCode} expires {voucherExpiry}. Book at {webAppUrl}.',
+    'Hi {userName},\n\nThanks for signing up.\n\n{voucherSection}\n\nBook at {webAppUrl}.',
 };
 
 beforeEach(() => {
@@ -91,12 +91,17 @@ describe('issueWelcomeVoucher', () => {
     expect(upsertArgs.update.reminderSentAt).toBeNull();
 
     // Email rendered + sent. Body contains the booking URL with the
-    // voucher token embedded as a query param.
+    // voucher token embedded as a query param. Body uses the SHARED
+    // voucher section (utils/voucher-section.ts::renderVoucherSection)
+    // so the user-facing copy is identical to weekly-mailing's
+    // first-issue text. Assert on the canonical "personal booking
+    // link" phrase rather than on the displayCode (which the section
+    // intentionally doesn't expose — the URL is enough for the user).
     expect(sendEmailMock).toHaveBeenCalledTimes(1);
     const sendArgs = sendEmailMock.mock.calls[0][0];
     expect(sendArgs.to).toBe('new@example.com');
     expect(sendArgs.subject).toContain('New User');
-    expect(sendArgs.body).toContain(result.displayCode!);
+    expect(sendArgs.body).toContain('personal booking link');
     expect(sendArgs.body).toContain('https://free.spill.app/book?voucher=');
   });
 
@@ -144,6 +149,25 @@ describe('issueWelcomeVoucher', () => {
 
     await issueWelcomeVoucher({ email: 'john@example.com', name: '   ' });
     expect(sendEmailMock.mock.calls[1][0].subject).toContain('john');
+  });
+
+  it('voucher copy is coherent with the weekly mailing (same shared renderVoucherSection helper)', async () => {
+    // The whole point of extracting renderVoucherSection into a shared
+    // util: the welcome email's voucher block must match what the
+    // weekly mailing produces for a first-issue voucher. If the two
+    // ever drift (someone tweaks one path's hardcoded text), this
+    // assertion catches it. We pin the canonical phrasing so a copy
+    // change in the helper requires updating both consumers in
+    // lockstep.
+    await issueWelcomeVoucher({ email: 'coherence@example.com', name: 'Test' });
+
+    const body = sendEmailMock.mock.calls[0][0].body as string;
+    // Exact phrase from utils/voucher-section.ts::renderVoucherSection
+    // for isReminder=false. Same string the weekly mailing injects.
+    expect(body).toContain(
+      "You've been allocated a new personal booking link. It expires on",
+    );
+    expect(body).toContain('please book before then');
   });
 
   it('lowercases the email everywhere (DB key + recipient)', async () => {

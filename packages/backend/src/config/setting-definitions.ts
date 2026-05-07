@@ -1045,15 +1045,15 @@ Please note this is a private invitation for you and cannot be forwarded.`,
   'email.welcomeBookingBody': {
     category: 'emailTemplates',
     label: 'Welcome (post-signup) - Body',
-    description: 'Email body sent immediately after signup, containing the booking URL with embedded voucher. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}. Supports markdown links.',
+    description: 'Email body sent immediately after signup, containing the booking URL with embedded voucher. Variables: {userName}, {voucherSection}, {webAppUrl}, {unsubscribeUrl}. {voucherSection} renders the same copy used in weekly mailings (single source of truth in utils/voucher-section.ts) — keeps voucher language coherent across welcome / weekly / reminder emails.',
     valueType: 'string',
     defaultValue: `Hi {userName},
 
-Thanks for signing up to Spill. Here's your booking link to schedule your first session whenever you're ready:
+Thanks for signing up to Spill.
+
+{voucherSection}
 
 [Book a session]({webAppUrl})
-
-Your session code is **{voucherCode}**. It expires on {voucherExpiry}.
 
 If you have any questions, just reply to this email.
 
