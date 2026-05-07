@@ -16,6 +16,7 @@ jest.mock('../utils/logger', () => ({
 jest.mock('../config', () => ({
   config: {
     backendUrl: 'https://backend.test',
+    frontendUrl: 'https://frontend.test',
   },
 }));
 

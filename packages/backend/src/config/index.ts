@@ -92,6 +92,20 @@ const configSchema = z.object({
     },
     { message: 'BACKEND_URL must be set to a non-localhost URL in production' }
   ).default('http://localhost:3000'),
+
+  // Frontend URL for generating links to user-facing routes
+  // (e.g. signup invitations land on /signup which is served by the frontend
+  // host, NOT the backend). Mirrors backendUrl's prod-validation: localhost
+  // is rejected in prod so a missed env-var doesn't ship 404-ing invite links.
+  frontendUrl: z.string().refine(
+    (val) => {
+      if (process.env.NODE_ENV === 'production' && val.includes('localhost')) {
+        return false;
+      }
+      return true;
+    },
+    { message: 'FRONTEND_URL must be set to a non-localhost URL in production' }
+  ).default('http://localhost:5173'),
 });
 
 function loadConfig() {
@@ -141,6 +155,7 @@ function loadConfig() {
     },
     timezone: process.env.TIMEZONE,
     backendUrl: process.env.BACKEND_URL,
+    frontendUrl: process.env.FRONTEND_URL,
   };
 
   try {

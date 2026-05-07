@@ -18,6 +18,7 @@ jest.mock('../config', () => ({
     jwtSecret: 'test-secret-key-for-unit-tests',
     webhookSecret: 'test-webhook-secret',
     backendUrl: 'https://backend.test',
+    frontendUrl: 'https://frontend.test',
   },
 }));
 
