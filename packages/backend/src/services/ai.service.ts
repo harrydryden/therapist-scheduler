@@ -105,8 +105,11 @@ export class AIService {
         // Check for transient errors - retry with backoff
         if (isTransientError(error) && attempt < TRANSIENT_RETRY_CONFIG.MAX_RETRIES) {
           const delay = TRANSIENT_RETRY_CONFIG.RETRY_DELAYS_MS[Math.min(attempt, TRANSIENT_RETRY_CONFIG.RETRY_DELAYS_MS.length - 1)];
+          // `error` is `unknown` under strict mode; surface the class name
+          // when it's an Error, otherwise fall back to a static label.
+          const errorType = error instanceof Error ? error.constructor.name : 'UnknownError';
           logger.warn(
-            { traceId, attempt: attempt + 1, maxRetries: TRANSIENT_RETRY_CONFIG.MAX_RETRIES, delayMs: delay, errorType: error.constructor.name },
+            { traceId, attempt: attempt + 1, maxRetries: TRANSIENT_RETRY_CONFIG.MAX_RETRIES, delayMs: delay, errorType },
             'AI service transient error - retrying'
           );
           await sleep(delay);

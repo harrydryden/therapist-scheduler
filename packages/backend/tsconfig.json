@@ -5,7 +5,7 @@
     "lib": ["ES2020"],
     "outDir": "./dist",
     "rootDir": "./src",
-    "strict": false,
+    "strict": true,
     "allowSyntheticDefaultImports": true,
     "moduleResolution": "node"
   },

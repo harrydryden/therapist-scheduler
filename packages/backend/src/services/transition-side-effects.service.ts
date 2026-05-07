@@ -157,7 +157,7 @@ class TransitionSideEffectsService {
       try {
         await therapistBookingStatusService.markConfirmed(
           therapistNotionId,
-          therapistName
+          therapistName ?? 'unknown therapist'
         );
       } catch (err) {
         logger.error(
@@ -306,7 +306,7 @@ class TransitionSideEffectsService {
         if (nowConfirmed && !wasConfirmed) {
           await therapistBookingStatusService.markConfirmed(
             appointment.therapistNotionId,
-            appointment.therapistName
+            appointment.therapistName ?? 'unknown therapist'
           );
         } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
           await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);

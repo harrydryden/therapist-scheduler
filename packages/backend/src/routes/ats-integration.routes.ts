@@ -875,7 +875,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         // Enrich with booking status
         const enriched = await Promise.all(
           therapists.map(async (t) => {
-            const bookingStatus = await therapistBookingStatusService.canAcceptNewRequest(t.notionId, '');
+            const bookingStatus = await therapistBookingStatusService.canAcceptNewRequest(t.notionId ?? t.id, '');
             return {
               id: t.id,
               odId: t.odId,

@@ -180,7 +180,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
         const result = await pdfIngestionService.ingestPDF(pdfBuffer, requestId, adminNotes);
 
         if (!result.success) {
-          return sendError(reply, 422, result.error);
+          return sendError(reply, 422, result.error ?? 'PDF ingestion failed');
         }
 
         return sendSuccess(reply, {
@@ -251,7 +251,7 @@ export async function ingestionRoutes(fastify: FastifyInstance) {
           }
         }
 
-        validateSourceData(pdfBuffer, additionalInfo);
+        validateSourceData(pdfBuffer, additionalInfo ?? undefined);
 
         // Extract text from PDF if provided
         let pdfText = '';

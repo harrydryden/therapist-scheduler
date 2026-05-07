@@ -211,7 +211,7 @@ class AppointmentNotificationsService {
         () => slackNotificationService.notifyAppointmentConfirmed(
           appointmentId,
           userName,
-          therapistName,
+          therapistName ?? 'unknown therapist',
           confirmedDateTime
         ),
         {

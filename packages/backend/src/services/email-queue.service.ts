@@ -63,6 +63,17 @@ function getBackoffDelay(attemptsMade: number): number {
 // Queue & Worker
 // ============================================
 
+interface EmailQueueStats {
+  totalProcessed: number;
+  totalSent: number;
+  totalFailed: number;
+  lastRunTime: Date | null;
+  lastRunSent: number;
+  lastRunFailed: number;
+  lastQueueDepth: number;
+  lastBatchSize: number;
+}
+
 class EmailQueueService {
   private queue: Queue<EmailJobData> | null = null;
   private worker: Worker<EmailJobData> | null = null;
@@ -500,11 +511,13 @@ class PendingEmailService {
   private processIntervalMs: number;
   private instanceId: string;
   private lockedRunner: LockedTaskRunner;
-  private stats = {
+  // Named type so callers (and getStatus's return shape) can reference it
+  // without `typeof this.stats`, which fails under noImplicitThis.
+  private stats: EmailQueueStats = {
     totalProcessed: 0,
     totalSent: 0,
     totalFailed: 0,
-    lastRunTime: null as Date | null,
+    lastRunTime: null,
     lastRunSent: 0,
     lastRunFailed: 0,
     lastQueueDepth: 0,
@@ -653,7 +666,7 @@ class PendingEmailService {
     processIntervalMs: number;
     processIntervalMinutes: number;
     instanceId: string;
-    stats: typeof this.stats;
+    stats: EmailQueueStats;
   } {
     return {
       running: this.intervalId !== null,
