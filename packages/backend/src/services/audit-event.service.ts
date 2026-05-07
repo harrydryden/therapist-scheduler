@@ -11,6 +11,7 @@
  * - Analytics on agent behavior patterns
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 
@@ -205,7 +206,10 @@ class AuditEventService {
           appointmentRequestId,
           eventType,
           actor,
-          payload: payload ? (payload as object) : null,
+          // Prisma's nullable JSON column needs the sentinel `Prisma.JsonNull`
+          // (DB NULL) or `Prisma.DbNull` to distinguish from JSON's `null`.
+          // Plain JS null gets rejected by the type checker.
+          payload: payload ? (payload as Prisma.InputJsonValue) : Prisma.JsonNull,
         },
       });
 

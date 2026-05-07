@@ -218,8 +218,11 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           return Errors.notFound(reply, 'Therapist');
         }
 
+        // Booking-status rows are keyed on the public handle (notionId for
+        // legacy rows, Postgres uuid for post-Notion ingestions). Same
+        // resolution as the list endpoint at line ~125.
         const status = await prisma.therapistBookingStatus.findUnique({
-          where: { id: therapist.notionId },
+          where: { id: therapist.notionId ?? therapist.id },
           select: {
             frozenAt: true,
             hasConfirmedBooking: true,
@@ -380,16 +383,18 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
       try {
         const therapist = await prisma.therapist.findUnique({
           where: { id },
-          select: { notionId: true, name: true },
+          select: { id: true, notionId: true, name: true },
         });
         if (!therapist) {
           return Errors.notFound(reply, 'Therapist');
         }
 
         // updateMany returns count=0 if there's no booking-status row yet;
-        // that's fine — there's nothing to unfreeze.
+        // that's fine — there's nothing to unfreeze. Booking-status rows
+        // are keyed on the public handle (notionId for legacy, Postgres
+        // uuid for post-Notion ingestions).
         const result = await prisma.therapistBookingStatus.updateMany({
-          where: { id: therapist.notionId },
+          where: { id: therapist.notionId ?? therapist.id },
           data: { frozenAt: null, frozenUntil: null },
         });
 

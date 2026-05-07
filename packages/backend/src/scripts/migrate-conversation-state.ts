@@ -8,6 +8,7 @@
  * Or via npm script: npm run migrate:conversation-state
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import {
@@ -83,7 +84,9 @@ async function migrateConversationStates() {
 
   const appointments = await prisma.appointmentRequest.findMany({
     where: {
-      conversationState: { not: null },
+      // Prisma's nullable JSON column needs `Prisma.DbNull` to express
+      // "DB NULL" rather than the JSON value `null`.
+      conversationState: { not: Prisma.DbNull },
     },
     select: {
       id: true,

@@ -380,6 +380,17 @@ type UpdateStatusDispatcher = (
 ) => Promise<TransitionResult>;
 
 /**
+ * Identity helper that forces TS to infer each dispatcher arrow's
+ * parameter types from the function-type annotation. Without this,
+ * `Partial<Record<K, F>>` widens the value to `F | undefined` at each
+ * key, and TS doesn't propagate the function-type's parameter info
+ * down into the arrow literal — every parameter ends up implicitly
+ * `any`. Wrapping each dispatcher in `dispatch(...)` keeps the map
+ * literal flat and avoids 21 inline parameter annotations.
+ */
+const dispatch = (fn: UpdateStatusDispatcher): UpdateStatusDispatcher => fn;
+
+/**
  * Routes a generic admin/system "set the status to X" request to the matching
  * specialised transition method, with the param translation each transition
  * needs (e.g. cancellation needs `cancelledBy` derived from `source`,
@@ -394,22 +405,22 @@ type UpdateStatusDispatcher = (
  *     "Unknown status" instead of being explicitly rejected as a target.
  */
 const UPDATE_STATUS_DISPATCH: Partial<Record<AppointmentStatus, UpdateStatusDispatcher>> = {
-  [APPOINTMENT_STATUS.CONTACTED]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.CONTACTED]: dispatch((service, appointmentId, opts) =>
     service.transitionToContacted({
       appointmentId,
       source: opts.source,
       adminId: opts.adminId,
       hasAvailability: false,
-    }),
+    })),
 
-  [APPOINTMENT_STATUS.NEGOTIATING]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.NEGOTIATING]: dispatch((service, appointmentId, opts) =>
     service.transitionToNegotiating({
       appointmentId,
       source: opts.source,
       adminId: opts.adminId,
-    }),
+    })),
 
-  [APPOINTMENT_STATUS.CONFIRMED]: (service, appointmentId, opts) => {
+  [APPOINTMENT_STATUS.CONFIRMED]: dispatch((service, appointmentId, opts) => {
     if (!opts.confirmedDateTime) {
       throw new Error('confirmedDateTime is required for confirmed status');
     }
@@ -421,31 +432,31 @@ const UPDATE_STATUS_DISPATCH: Partial<Record<AppointmentStatus, UpdateStatusDisp
       adminId: opts.adminId,
       sendEmails: opts.sendEmails,
     });
-  },
+  }),
 
-  [APPOINTMENT_STATUS.SESSION_HELD]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.SESSION_HELD]: dispatch((service, appointmentId, opts) =>
     service.transitionToSessionHeld({
       appointmentId,
       source: opts.source,
       adminId: opts.adminId,
-    }),
+    })),
 
-  [APPOINTMENT_STATUS.FEEDBACK_REQUESTED]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.FEEDBACK_REQUESTED]: dispatch((service, appointmentId, opts) =>
     service.transitionToFeedbackRequested({
       appointmentId,
       source: opts.source,
       adminId: opts.adminId,
-    }),
+    })),
 
-  [APPOINTMENT_STATUS.COMPLETED]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.COMPLETED]: dispatch((service, appointmentId, opts) =>
     service.transitionToCompleted({
       appointmentId,
       source: opts.source,
       adminId: opts.adminId,
       note: opts.reason,
-    }),
+    })),
 
-  [APPOINTMENT_STATUS.CANCELLED]: (service, appointmentId, opts) =>
+  [APPOINTMENT_STATUS.CANCELLED]: dispatch((service, appointmentId, opts) =>
     service.transitionToCancelled({
       appointmentId,
       reason: opts.reason || 'No reason provided',
@@ -456,7 +467,7 @@ const UPDATE_STATUS_DISPATCH: Partial<Record<AppointmentStatus, UpdateStatusDisp
       cancelledBy: opts.source === 'admin' ? 'admin' : 'system',
       source: opts.source,
       adminId: opts.adminId,
-    }),
+    })),
 };
 
 // ============================================

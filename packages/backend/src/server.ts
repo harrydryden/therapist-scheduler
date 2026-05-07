@@ -60,7 +60,7 @@ import { registerAgentProcessor } from './services/email-message-processor.servi
 import { JustinTimeService } from './services/justin-time.service';
 import { therapistNudgeService } from './services/therapist-nudge.service';
 import { missedMessageScannerService } from './services/missed-message-scanner.service';
-import { adminAuthHook } from './middleware/auth';
+import { verifyWebhookSecret } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 
 const logger = pino({
@@ -77,8 +77,14 @@ const logger = pino({
 });
 
 async function buildServer() {
+  // Pino's `Logger` type is structurally compatible with Fastify's
+  // `FastifyBaseLogger`, but Fastify 4's strict-mode generic resolution
+  // can't pick the right overload from the option bag alone — without
+  // the cast it falls back to Http2SecureServer types, which then
+  // breaks every preHandler signature downstream. The runtime is
+  // unaffected.
   const fastify = Fastify({
-    logger,
+    logger: logger as unknown as import('fastify').FastifyBaseLogger,
     requestIdHeader: 'x-request-id',
     requestIdLogLabel: 'requestId',
   });
@@ -197,7 +203,7 @@ async function buildServer() {
 
   // /health/circuits - Circuit breaker status for monitoring (auth required)
   // Shows the state of all circuit breakers (Slack, Gmail, Claude)
-  fastify.get('/health/circuits', { ...adminAuthHook }, async () => {
+  fastify.get('/health/circuits', { preHandler: verifyWebhookSecret }, async () => {
     const stats = circuitBreakerRegistry.getAllStats();
     const circuits: Record<string, {
       state: string;
@@ -232,7 +238,7 @@ async function buildServer() {
 
   // /health/tasks - Background task health for monitoring (auth required)
   // Shows success rates and recent errors for fire-and-forget operations
-  fastify.get('/health/tasks', { ...adminAuthHook }, async () => {
+  fastify.get('/health/tasks', { preHandler: verifyWebhookSecret }, async () => {
     const health = getBackgroundTaskHealth();
     const metrics = getAllTaskMetrics();
     const timeoutStats = getTimeoutStats();
@@ -248,7 +254,7 @@ async function buildServer() {
 
   // /health/full - Comprehensive health check combining all checks (auth required)
   // Use this for detailed debugging and monitoring dashboards
-  fastify.get('/health/full', { ...adminAuthHook }, async () => {
+  fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async () => {
     const checks: Record<string, unknown> = {};
 
     // Database
