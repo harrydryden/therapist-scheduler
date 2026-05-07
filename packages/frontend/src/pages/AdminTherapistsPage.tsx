@@ -229,12 +229,12 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
         {data.profileImage && (
           <img
             src={data.profileImage}
-            alt={data.name}
+            alt={merged.name ?? data.name}
             className="w-16 h-16 rounded-full object-cover border border-slate-200"
           />
         )}
         <div className="flex-1">
-          <h3 className="text-xl font-semibold text-slate-900">{data.name}</h3>
+          <h3 className="text-xl font-semibold text-slate-900">{merged.name ?? data.name}</h3>
           <p className="text-sm text-slate-500">{data.email}</p>
           <p className="text-xs text-slate-400 mt-1 font-mono">
             ID: {data.odId}
@@ -271,6 +271,18 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
               : data.active ? 'Archive' : 'Restore'}
           </button>
         </div>
+      </div>
+
+      {/* Name (full-width, since names are long and this is the most-edited field) */}
+      <div>
+        <label className="block text-xs font-medium text-slate-500 mb-1">Name</label>
+        <input
+          value={merged.name ?? ''}
+          onChange={(e) => setField('name', e.target.value)}
+          maxLength={200}
+          placeholder="Dr. Smith"
+          className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+        />
       </div>
 
       {/* Toggles + simple fields */}
