@@ -16,6 +16,11 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import {
+  tryClaimSentinel,
+  confirmSentinelClaim,
+  releaseSentinelClaim,
+} from '../utils/atomic-sentinel-claim';
 import { PeriodicService } from '../utils/periodic-service';
 import { emailProcessingService } from './email-processing.service';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
@@ -343,20 +348,12 @@ class PostBookingFollowupService extends PeriodicService {
         continue;
       }
 
-      // OPTIMISTIC LOCKING: Try to mark as "sending" first
-      const lockResult = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointment.id,
-          reminderSentAt: null, // Only if still null
-          status: APPOINTMENT_STATUS.CONFIRMED, // Verify still confirmed
-        },
-        data: {
-          reminderSentAt: new Date(0), // Sentinel value: epoch = "sending"
-        },
-      });
-
-      // If no rows updated, another process got there first or status changed
-      if (lockResult.count === 0) {
+      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
+      // status precondition aborts the claim if the appointment drifted
+      // out of `confirmed` between the candidate query and the claim.
+      if (!(await tryClaimSentinel(appointment.id, 'reminderSentAt', {
+        extraWhere: { status: APPOINTMENT_STATUS.CONFIRMED },
+      }))) {
         logger.debug(
           { checkId, appointmentId: appointment.id },
           'Session reminder already being processed or appointment status changed'
@@ -394,15 +391,9 @@ class PostBookingFollowupService extends PeriodicService {
         // FIX #16: Handle partial vs full success differently
         if (userSent && therapistSent) {
           // Full success - mark as complete
-          const updateResult = await prisma.appointmentRequest.updateMany({
-            where: {
-              id: appointment.id,
-              reminderSentAt: new Date(0), // Must still be our sentinel
-            },
-            data: { reminderSentAt: now },
-          });
+          const confirmed = await confirmSentinelClaim(appointment.id, 'reminderSentAt', now);
 
-          if (updateResult.count === 0) {
+          if (!confirmed) {
             logger.error(
               { checkId, appointmentId: appointment.id },
               'ALERT: Session reminder emails sent but sentinel update failed - possible duplicate'
@@ -431,18 +422,13 @@ class PostBookingFollowupService extends PeriodicService {
           const failedRecipient = !userSent ? 'user' : 'therapist';
           const succeededRecipient = userSent ? 'user' : 'therapist';
 
-          const updateResult = await prisma.appointmentRequest.updateMany({
-            where: {
-              id: appointment.id,
-              reminderSentAt: new Date(0), // Must still be our sentinel
-            },
-            data: {
-              reminderSentAt: now,
-              isStale: true, // Flag for admin attention
-            },
+          // Partial-success confirm: set the real timestamp AND
+          // raise isStale atomically with the sentinel flip.
+          const confirmed = await confirmSentinelClaim(appointment.id, 'reminderSentAt', now, {
+            extraData: { isStale: true },
           });
 
-          if (updateResult.count > 0) {
+          if (confirmed) {
             try {
               await prisma.appointmentRequest.update({
                 where: { id: appointment.id },
@@ -571,19 +557,9 @@ class PostBookingFollowupService extends PeriodicService {
 
       // OPTIMISTIC LOCKING: Try to mark as "sending" first
       // This prevents duplicates if another instance or the same instance processes this
-      const lockResult = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointment.id,
-          meetingLinkCheckSentAt: null, // Only if still null (not claimed by another process)
-          status: APPOINTMENT_STATUS.CONFIRMED, // Verify still confirmed
-        },
-        data: {
-          meetingLinkCheckSentAt: new Date(0), // Sentinel value: epoch = "sending"
-        },
-      });
-
-      // If no rows updated, another process got there first or status changed
-      if (lockResult.count === 0) {
+      if (!(await tryClaimSentinel(appointment.id, 'meetingLinkCheckSentAt', {
+        extraWhere: { status: APPOINTMENT_STATUS.CONFIRMED },
+      }))) {
         logger.debug(
           { checkId, appointmentId: appointment.id },
           'Meeting link check already being processed or appointment status changed'
@@ -601,16 +577,10 @@ class PostBookingFollowupService extends PeriodicService {
 
         // FIX B5: Use atomic update with sentinel check to verify we still own the lock
         // This prevents race condition where update fails silently after email sent
-        const updateResult = await prisma.appointmentRequest.updateMany({
-          where: {
-            id: appointment.id,
-            meetingLinkCheckSentAt: new Date(0), // Must still be our sentinel
-          },
-          data: { meetingLinkCheckSentAt: now },
-        });
+        const confirmed = await confirmSentinelClaim(appointment.id, 'meetingLinkCheckSentAt', now);
 
         // FIX B5: Verify update succeeded
-        if (updateResult.count === 0) {
+        if (!confirmed) {
           // This should never happen - sentinel was taken by another process
           // or something went wrong. Email was already sent though.
           logger.error(
@@ -721,20 +691,15 @@ class PostBookingFollowupService extends PeriodicService {
         continue; // Not yet due
       }
 
-      // OPTIMISTIC LOCKING: Try to mark as "sending" first
-      const lockResult = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointment.id,
-          feedbackFormSentAt: null, // Only if still null
-          status: APPOINTMENT_STATUS.SESSION_HELD, // FIX #11: require session_held only
-        },
-        data: {
-          feedbackFormSentAt: new Date(0), // Sentinel value: epoch = "sending"
-        },
+      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
+      // status precondition (FIX #11) restricts the claim to rows still
+      // in `session_held`.
+      const claimed = await tryClaimSentinel(appointment.id, 'feedbackFormSentAt', {
+        extraWhere: { status: APPOINTMENT_STATUS.SESSION_HELD },
       });
 
       // If no rows updated, another process got there first or status changed
-      if (lockResult.count === 0) {
+      if (!claimed) {
         logger.debug(
           { checkId, appointmentId: appointment.id },
           'Feedback form already being processed or appointment status changed'
@@ -750,13 +715,10 @@ class PostBookingFollowupService extends PeriodicService {
             { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
             'Appointment missing tracking code - skipping feedback form email to prevent infinite retry'
           );
-          await prisma.appointmentRequest.updateMany({
-            where: {
-              id: appointment.id,
-              feedbackFormSentAt: new Date(0), // Must still be our sentinel
-            },
-            data: { feedbackFormSentAt: now },
-          });
+          // No tracking code → skip the send; flip the sentinel to a
+          // real timestamp so we don't retry next tick (admin notes
+          // surface the manual-send required state).
+          await confirmSentinelClaim(appointment.id, 'feedbackFormSentAt', now);
           try {
             await prisma.appointmentRequest.update({
               where: { id: appointment.id },
@@ -783,20 +745,13 @@ class PostBookingFollowupService extends PeriodicService {
           followUpType: 'feedback_form',
         });
 
-        // FIX B5: Use atomic update with sentinel check to verify we still own the lock
-        // Only update feedbackFormSentAt here - status transition handled by lifecycle service
-        const updateResult = await prisma.appointmentRequest.updateMany({
-          where: {
-            id: appointment.id,
-            feedbackFormSentAt: new Date(0), // Must still be our sentinel
-          },
-          data: {
-            feedbackFormSentAt: now,
-          },
-        });
+        // FIX B5: confirm via the helper so the sentinel-still-ours
+        // precondition is enforced. Status transition is handled
+        // separately by the lifecycle service.
+        const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackFormSentAt', now);
 
         // FIX B5: Verify update succeeded
-        if (updateResult.count === 0) {
+        if (!confirmed) {
           logger.error(
             { checkId, appointmentId: appointment.id },
             'ALERT: Feedback form email sent but sentinel update failed - possible duplicate'
@@ -1056,20 +1011,13 @@ class PostBookingFollowupService extends PeriodicService {
     let skipped = 0;
 
     for (const appointment of candidates) {
-      // OPTIMISTIC LOCKING: Try to mark as "sending" first
-      const lockResult = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointment.id,
-          feedbackReminderSentAt: null, // Only if still null
-          status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED, // Still waiting for feedback
-        },
-        data: {
-          feedbackReminderSentAt: new Date(0), // Sentinel value: epoch = "sending"
-        },
+      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
+      // status precondition keeps the claim scoped to rows still
+      // waiting for feedback.
+      const claimed = await tryClaimSentinel(appointment.id, 'feedbackReminderSentAt', {
+        extraWhere: { status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED },
       });
-
-      // If no rows updated, another process got there first or status changed
-      if (lockResult.count === 0) {
+      if (!claimed) {
         logger.debug(
           { checkId, appointmentId: appointment.id },
           'Feedback reminder already being processed or status changed'
@@ -1085,18 +1033,11 @@ class PostBookingFollowupService extends PeriodicService {
           followUpType: 'feedback_reminder',
         });
 
-        // Atomic update with sentinel check
-        const updateResult = await prisma.appointmentRequest.updateMany({
-          where: {
-            id: appointment.id,
-            feedbackReminderSentAt: new Date(0), // Must still be our sentinel
-          },
-          data: {
-            feedbackReminderSentAt: now,
-          },
-        });
+        // Atomic confirm — sentinel-still-ours precondition enforced by
+        // the helper.
+        const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
 
-        if (updateResult.count === 0) {
+        if (!confirmed) {
           logger.error(
             { checkId, appointmentId: appointment.id },
             'ALERT: Feedback reminder email sent but sentinel update failed - possible duplicate'
@@ -1109,12 +1050,11 @@ class PostBookingFollowupService extends PeriodicService {
           );
         }
       } catch (error) {
-        // On failure, reset to null so it can be retried
-        await prisma.appointmentRequest.update({
-          where: { id: appointment.id },
-          data: { feedbackReminderSentAt: null },
-          select: { id: true },
-        });
+        // On failure, release the sentinel so it can be retried next
+        // tick. The release helper guards on `=== EPOCH_SENTINEL` so we
+        // can't accidentally null out a real timestamp another writer
+        // just wrote.
+        await releaseSentinelClaim(appointment.id, 'feedbackReminderSentAt');
 
         logger.error(
           { checkId, appointmentId: appointment.id, error },

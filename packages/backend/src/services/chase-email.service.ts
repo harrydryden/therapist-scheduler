@@ -1,5 +1,6 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { tryClaimSentinel, releaseSentinelClaim } from '../utils/atomic-sentinel-claim';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
@@ -106,19 +107,10 @@ class ChaseEmailService {
 
           const { target, email, threadId } = chaseTarget;
 
-          // OPTIMISTIC LOCKING: claim this appointment with a sentinel
-          const lockResult = await prisma.appointmentRequest.updateMany({
-            where: {
-              id: appointment.id,
-              chaseSentAt: null, // Only if still unclaimed
-            },
-            data: {
-              chaseSentAt: new Date(0), // Sentinel: epoch = "sending"
-            },
-          });
-
-          if (lockResult.count === 0) {
-            // Another process claimed it
+          // OPTIMISTIC LOCKING: claim this appointment via the shared
+          // sentinel helper (utils/atomic-sentinel-claim.ts). Returns
+          // false if another process beat us to it.
+          if (!(await tryClaimSentinel(appointment.id, 'chaseSentAt'))) {
             continue;
           }
 
@@ -162,10 +154,7 @@ class ChaseEmailService {
                   );
 
                   // Release the sentinel so the appointment can be re-evaluated.
-                  await prisma.appointmentRequest.updateMany({
-                    where: { id: appointment.id, chaseSentAt: new Date(0) },
-                    data: { chaseSentAt: null },
-                  });
+                  await releaseSentinelClaim(appointment.id, 'chaseSentAt');
 
                   // Also attempt to recover any unprocessed messages (best-effort).
                   // This handles the case where the reply was never processed at all.
