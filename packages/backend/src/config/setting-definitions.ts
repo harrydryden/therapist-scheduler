@@ -1035,6 +1035,31 @@ This invitation expires on {expiryDate}.
 
 Please note this is a private invitation for you and cannot be forwarded.`,
   },
+  'email.welcomeBookingSubject': {
+    category: 'emailTemplates',
+    label: 'Welcome (post-signup) - Subject',
+    description: 'Subject line for the welcome email sent immediately after signup, carrying the booking link with embedded voucher. Variables: {userName}',
+    valueType: 'string',
+    defaultValue: 'Welcome to Spill — book your first session',
+  },
+  'email.welcomeBookingBody': {
+    category: 'emailTemplates',
+    label: 'Welcome (post-signup) - Body',
+    description: 'Email body sent immediately after signup, containing the booking URL with embedded voucher. Variables: {userName}, {voucherCode}, {voucherExpiry}, {webAppUrl}. Supports markdown links.',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+Thanks for signing up to Spill. Here's your booking link to schedule your first session whenever you're ready:
+
+[Book a session]({webAppUrl})
+
+Your session code is **{voucherCode}**. It expires on {voucherExpiry}.
+
+If you have any questions, just reply to this email.
+
+Best wishes,
+The Spill team`,
+  },
 };
 
 export type SettingKey = keyof typeof SETTING_DEFINITIONS;

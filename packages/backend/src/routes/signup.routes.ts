@@ -11,6 +11,7 @@ import {
   markAccepted,
 } from '../services/signup-invitation.service';
 import { slackNotificationService } from '../services/slack-notification.service';
+import { issueWelcomeVoucher } from '../services/voucher-issuance.service';
 
 /**
  * Public signup endpoint. Captures the consent + intake fields the public
@@ -225,6 +226,23 @@ export async function signupRoutes(fastify: FastifyInstance) {
               );
             });
         }
+
+        // Fire-and-forget: issue the user's first booking voucher
+        // immediately so they don't have to wait for the next weekly
+        // tick to be able to book. Without this, freshly-signed-up
+        // users with `voucher.required=true` are stranded for up to
+        // a week. Failure here is logged loudly but does NOT fail
+        // the signup — the admin-vouchers UI can re-issue manually.
+        issueWelcomeVoucher({
+          email: updated.email,
+          name: updated.name,
+          traceId: requestId,
+        }).catch((err) => {
+          logger.error(
+            { err, requestId, userId: updated.id, email: updated.email },
+            'Failed to issue welcome voucher (signup itself succeeded; admin can re-issue)',
+          );
+        });
 
         logger.info(
           { requestId, userId: updated.id, odId: updated.odId, email: updated.email, viaInvitation: !!invitationToken },
