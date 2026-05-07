@@ -31,6 +31,15 @@ export class RedisClientManager {
   };
 
   constructor() {
+    // In Jest, transitive imports of services that depend on this module
+    // were opening real ioredis sockets at module load — the timers /
+    // sockets never closed, producing the "worker process force exited"
+    // warning. Guard so the singleton stays inert in tests; consumers
+    // already handle `client === null` (see cache-manager.ts:20).
+    if (config.env === 'test') {
+      this.client = null;
+      return;
+    }
     try {
       this.client = new Redis(config.redisUrl);
       this.client.on('error', (err) => {

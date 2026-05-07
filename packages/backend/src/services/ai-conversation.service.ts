@@ -245,6 +245,61 @@ export class AIConversationService {
   }
 
   /**
+   * Append a single message to the conversation log under optimistic
+   * locking so a concurrent agent save / chase-tick / second admin click
+   * can't silently overwrite the append.
+   *
+   * Used by admin endpoints (send-message, release-control) that need to
+   * record an audit-style entry alongside other concurrent writers. The
+   * caller's email/Slack side effect should already have fired; this
+   * persists the audit trail.
+   *
+   * Behaviour:
+   *   - If the appointment row has no conversationState, this is a
+   *     no-op (matches the previous read-modify-write call sites'
+   *     silent skip). Returns false in that case.
+   *   - On a single optimistic-lock conflict the helper re-reads and
+   *     re-applies once. If the second attempt also conflicts the error
+   *     bubbles so the caller can log loudly — the prior side effect
+   *     (email send) already happened, so a missed audit entry is the
+   *     loss of record, not duplicate work.
+   *
+   * Returns: true if the message was appended, false if there was no
+   * conversationState to append to.
+   */
+  async appendConversationMessage(
+    appointmentRequestId: string,
+    message: ConversationMessage,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const row = await prisma.appointmentRequest.findUnique({
+        where: { id: appointmentRequestId },
+        select: { conversationState: true, updatedAt: true },
+      });
+      if (!row?.conversationState) return false;
+      const state = parseConversationState(row.conversationState);
+      if (!state) return false;
+
+      state.messages.push(message);
+      try {
+        await this.storeConversationState(appointmentRequestId, state, row.updatedAt);
+        return true;
+      } catch (err) {
+        if (err instanceof ConcurrentModificationError && attempt === 0) {
+          logger.warn(
+            { traceId: this.traceId, appointmentRequestId },
+            'appendConversationMessage hit optimistic-lock conflict — retrying once',
+          );
+          continue;
+        }
+        throw err;
+      }
+    }
+    // Unreachable: the loop either returns or throws.
+    return false;
+  }
+
+  /**
    * FIX RSA-4: Retry state save with exponential backoff
    * If all retries fail, records compensation data for manual recovery
    */

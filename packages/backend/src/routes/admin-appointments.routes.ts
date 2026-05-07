@@ -14,8 +14,8 @@ import { therapistBookingStatusService } from '../services/therapist-booking-sta
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { getSettingValue } from '../services/settings.service';
 import { verifyWebhookSecret } from '../middleware/auth';
-import { parseConversationState, parseTherapistAvailability } from '../utils/json-parser';
-import { extractConversationMeta } from '../utils/conversation-meta';
+import { parseTherapistAvailability } from '../utils/json-parser';
+import { aiConversationService } from '../services/ai-conversation.service';
 import { PAGINATION, RATE_LIMITS } from '../constants';
 import { ConversationStage, STAGE_COMPLETION_PERCENTAGE } from '../services/conversation-checkpoint.service';
 import { buildAppointmentSummary, parseRawConversationState } from '../utils/appointment-summary';
@@ -443,29 +443,22 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
       const requestId = request.id;
 
       try {
-        // First get the current conversation state to add system note
-        const currentAppointment = await prisma.appointmentRequest.findUnique({
-          where: { id },
-          select: { conversationState: true },
-        });
-
-        // Add system note to conversation about control release
-        if (currentAppointment?.conversationState) {
-          const state = parseConversationState(currentAppointment.conversationState);
-          if (state) {
-            state.messages.push({
-              role: 'admin',
-              content: '[System] Human control released. Agent resuming automated responses.',
-            });
-            const stateJson = JSON.stringify(state);
-            const meta = extractConversationMeta(stateJson);
-            await prisma.appointmentRequest.update({
-              where: { id },
-              data: { conversationState: stateJson, ...meta },
-              select: { id: true },
-            });
-          }
-        }
+        // Append a system note via the optimistic-locked helper so a
+        // concurrent agent save / chase-tick can't silently overwrite
+        // this audit entry. If the helper fails (twice), the disable
+        // below still proceeds — losing the audit entry is preferable
+        // to leaving the appointment stuck in human-control state.
+        await aiConversationService
+          .appendConversationMessage(id, {
+            role: 'admin',
+            content: '[System] Human control released. Agent resuming automated responses.',
+          })
+          .catch((err) => {
+            logger.error(
+              { err, requestId, appointmentId: id },
+              'Release-control audit append failed twice — manual reconciliation may be needed',
+            );
+          });
 
         const appointment = await prisma.appointmentRequest.update({
           where: { id },
@@ -809,31 +802,22 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           body,
         });
 
-        // Add to conversation state with admin role
-        // PERF: Only load conversationState blob after email sent successfully
-        const appointmentWithState = await prisma.appointmentRequest.findUnique({
-          where: { id },
-          select: { conversationState: true },
-        });
-        if (appointmentWithState?.conversationState) {
-          const state = parseConversationState(appointmentWithState.conversationState);
-          if (state) {
-            state.messages.push({
-              role: 'admin',
-              content: `[Admin: ${adminId}] Email sent to ${to}:\n\nSubject: ${subject}\n\n${body}`,
-            });
-            const stateJson = JSON.stringify(state);
-            const meta = extractConversationMeta(stateJson);
-            await prisma.appointmentRequest.update({
-              where: { id },
-              data: {
-                conversationState: stateJson,
-                updatedAt: new Date(),
-                ...meta,
-              },
-              select: { id: true },
-            });
-          }
+        // Add an audit message to the conversation log under optimistic
+        // locking so a concurrent agent save / chase-tick / second admin
+        // click can't silently overwrite this append. The email already
+        // went out — if appendConversationMessage fails twice we log
+        // loudly for manual reconciliation rather than failing the
+        // request.
+        try {
+          await aiConversationService.appendConversationMessage(id, {
+            role: 'admin',
+            content: `[Admin: ${adminId}] Email sent to ${to}:\n\nSubject: ${subject}\n\n${body}`,
+          });
+        } catch (appendErr) {
+          logger.error(
+            { err: appendErr, requestId, appointmentId: id, adminId, to },
+            'Admin send-message audit append failed twice — manual reconciliation needed (email was sent)',
+          );
         }
 
         logger.info(
