@@ -142,7 +142,10 @@ export async function createInvitation(params: CreateInvitationParams): Promise<
   return {
     invitation: toView(created, now),
     token: raw,
-    invitationUrl: buildInvitationUrl(config.backendUrl, raw),
+    // The /signup route is served by the FRONTEND host, not the backend.
+    // Using config.backendUrl here generated 404-ing links pointing at
+    // backend-production-fe25.up.railway.app/signup which doesn't exist.
+    invitationUrl: buildInvitationUrl(config.frontendUrl, raw),
   };
 }
 

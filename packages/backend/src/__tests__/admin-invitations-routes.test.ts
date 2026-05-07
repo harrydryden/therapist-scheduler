@@ -15,6 +15,7 @@ jest.mock('../config', () => ({
     jwtSecret: 'test-secret-key-for-unit-tests',
     webhookSecret: 'test-webhook-secret',
     backendUrl: 'https://backend.test',
+    frontendUrl: 'https://frontend.test',
   },
 }));
 
@@ -192,8 +193,12 @@ describe('admin invitation routes', () => {
       expect(body.success).toBe(true);
       expect(body.data.invitation.email).toBe('jamie@example.com');
       expect(body.data.invitation.status).toBe('pending');
+      // The /signup route is served by the frontend host, not the
+      // backend — the URL must be built from config.frontendUrl.
+      // Bug fix: previously this used config.backendUrl and produced
+      // 404-ing links.
       expect(body.data.invitationUrl).toMatch(
-        /^https:\/\/backend\.test\/signup\?invite=[a-f0-9]{64}$/,
+        /^https:\/\/frontend\.test\/signup\?invite=[a-f0-9]{64}$/,
       );
       expect(body.data.emailSent).toBe(true);
 
