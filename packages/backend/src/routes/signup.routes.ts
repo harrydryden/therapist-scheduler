@@ -12,6 +12,7 @@ import {
 } from '../services/signup-invitation.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { issueWelcomeVoucher } from '../services/voucher-issuance.service';
+import { isCountryCode, DEFAULT_COUNTRY } from '@therapist-scheduler/shared';
 
 /**
  * Public signup endpoint. Captures the consent + intake fields the public
@@ -48,6 +49,17 @@ const signupSchema = z.object({
    * and the invitation is marked accepted.
    */
   invitationToken: z.string().trim().min(1).max(256).optional(),
+  // Country code (UK, IE, US, etc — see shared/constants/countries.ts).
+  // Drives the IANA timezone every email salutation/time block uses for
+  // this user (resolveRecipientTimezone reads User.country). Defaults to
+  // UK to match the column default — legacy users were stamped UK by the
+  // 20260427 migration.
+  country: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .refine(isCountryCode, { message: 'Unsupported country code' })
+    .default(DEFAULT_COUNTRY),
 });
 
 type SignupBody = z.infer<typeof signupSchema>;
@@ -77,8 +89,15 @@ export async function signupRoutes(fastify: FastifyInstance) {
         return Errors.validationFailed(reply, validation.error.errors);
       }
 
-      const { name, email, priorTherapy, acknowledgedRealSession, agreedToFeedback, invitationToken } =
-        validation.data;
+      const {
+        name,
+        email,
+        priorTherapy,
+        acknowledgedRealSession,
+        agreedToFeedback,
+        invitationToken,
+        country,
+      } = validation.data;
 
       // If an invitation token is supplied, verify it before doing any
       // other work. Pre-checking lets us return a precise error and avoids
@@ -144,7 +163,7 @@ export async function signupRoutes(fastify: FastifyInstance) {
         // outside the consent+accept tx below: a fresh User row with no
         // consent flags is a normal pre-signup state, so committing it
         // independently is safe.
-        const user = await getOrCreateUser(email, name);
+        const user = await getOrCreateUser(email, name, country);
 
         // Atomically commit the consent update AND (if invitation-bound)
         // the invitation acceptance. Previously these ran as two separate
@@ -160,6 +179,9 @@ export async function signupRoutes(fastify: FastifyInstance) {
               data: {
                 // Refresh name in case it changed since first booking
                 name,
+                // Refresh country too — a returning user signing up from a
+                // new location should get times in their current zone.
+                country,
                 priorTherapy,
                 acknowledgedRealSession,
                 agreedToFeedback,
