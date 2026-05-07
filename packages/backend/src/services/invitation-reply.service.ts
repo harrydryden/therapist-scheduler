@@ -30,6 +30,7 @@ import { knowledgeService } from './knowledge.service';
 import { AIService } from './ai.service';
 import { emailProcessingService } from './email-processing.service';
 import { slackNotificationService } from './slack-notification.service';
+import { firstName } from '../utils/first-name';
 import type { EmailMessage } from '../utils/email-mime-parser';
 
 /**
@@ -191,11 +192,15 @@ async function notifyAdminsOfAutoReply(params: {
   invitation: { id: string; name: string | null };
   replyBody: string;
 }): Promise<void> {
+  // PII discipline: identify the invitee by first name only — never echo
+  // their email address into Slack. The invitation ID is the canonical
+  // pointer admins click through to.
+  const inviteeFirstName = firstName(params.invitation.name, '(invitee)');
   await slackNotificationService.sendAlert({
     title: 'Invitation auto-reply sent',
     severity: 'low',
     details:
-      `Auto-replied to *${params.invitation.name || params.fromEmail}* (\`${params.fromEmail}\`).\n\n` +
+      `Auto-replied to *${inviteeFirstName}*.\n\n` +
       `*Their question:*\n${truncate(params.email.body, SLACK_BODY_PREVIEW)}\n\n` +
       `*Our reply:*\n${truncate(params.replyBody, SLACK_BODY_PREVIEW)}`,
     additionalFields: {
@@ -210,13 +215,15 @@ async function notifyAdminsOfFollowupReply(params: {
   fromEmail: string;
   invitation: { id: string; name: string | null };
 }): Promise<void> {
+  // PII discipline: first name only; no email address in Slack.
+  const inviteeFirstName = firstName(params.invitation.name, '(invitee)');
   await slackNotificationService.sendAlert({
     title: 'Invitee replied again — needs human follow-up',
     severity: 'medium',
     details:
-      `*${params.invitation.name || params.fromEmail}* (\`${params.fromEmail}\`) ` +
-      `replied to their invitation thread within the auto-reply cooldown window. ` +
-      `The previous auto-reply may not have answered them.\n\n` +
+      `*${inviteeFirstName}* replied to their invitation thread within the ` +
+      `auto-reply cooldown window. The previous auto-reply may not have ` +
+      `answered them.\n\n` +
       `*Their message:*\n${truncate(params.email.body, SLACK_BODY_PREVIEW)}`,
     additionalFields: {
       'Invitation ID': params.invitation.id,

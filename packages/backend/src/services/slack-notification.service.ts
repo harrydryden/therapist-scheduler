@@ -23,6 +23,7 @@ import { circuitBreakerRegistry, CircuitBreakerError } from '../utils/circuit-br
 import { DEFAULT_TIMEOUTS } from '../utils/timeout';
 import { cacheManager } from '../utils/redis';
 import { SLACK_OPERATIONAL } from '../constants';
+import { firstName } from '../utils/first-name';
 
 // Operational constants — imported from centralized constants
 const SLACK_QUEUE_KEY = SLACK_OPERATIONAL.QUEUE_KEY;
@@ -618,15 +619,23 @@ class SlackNotificationService {
     appointmentId: string,
     userName: string | null,
     therapistName: string,
-    bouncedEmail: string,
+    bouncedRole: 'client' | 'therapist',
     bounceReason: string
   ): Promise<boolean> {
+    // PII discipline: don't include the bounced email address in Slack.
+    // Admins use the appointmentId link to view the full record. We
+    // surface only the role so they know whether the client or
+    // therapist email failed.
+    const recipientLabel =
+      bouncedRole === 'therapist'
+        ? `Therapist (${therapistName})`
+        : `Client (${firstName(userName, 'unknown')})`;
     return this.sendAlert({
       title: 'Email Bounce',
       severity: 'critical',
       appointmentId,
       therapistName,
-      details: `Email to \`${bouncedEmail}\` bounced.`,
+      details: `Email to *${recipientLabel}* bounced.`,
       additionalFields: {
         'Reason': bounceReason,
       },
@@ -854,7 +863,9 @@ class SlackNotificationService {
     therapistName: string,
     reason: string
   ): Promise<boolean> {
-    const userLabel = userName || 'Unknown user';
+    // PII discipline: first name only for the user; appointmentId in the
+    // alert metadata gives admins a click-through to the full record.
+    const userLabel = firstName(userName, 'The client');
     return this.sendAlert({
       title: 'Cancel Match Recommended',
       severity: 'high',
@@ -879,12 +890,18 @@ class SlackNotificationService {
     subject: string,
     attempts: number
   ): Promise<boolean> {
+    // PII discipline: don't echo the sender's email. Subject is kept
+    // because it's needed for admins to find the message in Gmail; the
+    // Message ID lets ops correlate with logs. The subject may itself
+    // contain the user's name, but we trust admins to handle it once
+    // they pivot from this alert into Gmail; the Slack channel itself
+    // shouldn't be the leak point.
+    void from;
     return this.sendAlert({
       title: 'Unmatched Email Dropped',
       severity: 'high',
       details: `Incoming email could not be matched to any appointment after *${attempts}* attempts and was abandoned. Manual review needed.`,
       additionalFields: {
-        'From': from,
         'Subject': subject.slice(0, 100),
         'Message ID': messageId,
       },
@@ -1057,13 +1074,16 @@ class SlackNotificationService {
     name: string | null;
     invitedBy: string;
   }): Promise<boolean> {
+    // PII discipline: never put a user's email or full name in Slack.
+    // First name is enough for admins to recognise the conversion; the
+    // invitation ID lets them click through to /admin/invitations for
+    // the rest of the detail. See utils/first-name.ts.
     return this.sendAlert({
       title: 'Signup Invitation Accepted',
       severity: 'low',
-      details:
-        `${params.name || params.email} has completed signup via an invitation.`,
+      details: `${firstName(params.name)} has completed signup via an invitation.`,
       additionalFields: {
-        Email: params.email,
+        'Invitation ID': params.invitationId,
         'Invited by': params.invitedBy,
       },
     });

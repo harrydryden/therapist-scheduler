@@ -297,6 +297,9 @@ export class JustinTimeService {
         const sender = emailClassification.isFromTherapist ? 'therapist' : 'client';
 
         runBackgroundTask(
+          // PII discipline: drop the sender's email. The Sender label
+          // (therapist|client) plus appointmentId is enough for admins
+          // to triage and click through.
           () => slackNotificationService.sendAlert({
             title: alertTitle,
             severity: specialHandling.reason === 'urgent' ? 'high' : 'medium',
@@ -304,7 +307,6 @@ export class JustinTimeService {
             therapistName: appointmentRequest.therapistName,
             details: `${sender === 'therapist' ? 'Therapist' : 'Client'} email flagged: ${specialHandling.reason}`,
             additionalFields: {
-              'From': fromEmail,
               'Sender': sender,
             },
           }),
