@@ -186,7 +186,7 @@ export async function handleBounce(
           ],
           status: { notIn: ['cancelled', 'confirmed'] },
         },
-        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true },
+        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
       });
     }
 
@@ -197,7 +197,7 @@ export async function handleBounce(
           status: { notIn: ['cancelled', 'confirmed'] },
         },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true },
+        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
       });
     }
 
@@ -280,7 +280,10 @@ export async function handleBounce(
       'Therapist unfrozen after email bounce'
     );
 
-    // Log the bounce event for admin visibility
+    // Log the bounce event for admin visibility. The userEmail/userName
+    // are intentionally retained in the application log (server-side,
+    // PII-redacted by the pino logger config) but kept out of Slack —
+    // see notifyEmailBounce.
     logger.warn(
       {
         traceId,
@@ -296,12 +299,18 @@ export async function handleBounce(
       `Appointment cancelled due to email bounce - therapist unfrozen`
     );
 
-    // Send Slack notification for email bounce
+    // Send Slack notification for email bounce. Determine which role
+    // bounced so the alert says "Client (Maria)" or "Therapist (X)" —
+    // never the bounced email itself (PII).
+    const bouncedRole: 'client' | 'therapist' =
+      bounceInfo.originalRecipient?.toLowerCase() === appointment.therapistEmail.toLowerCase()
+        ? 'therapist'
+        : 'client';
     await slackNotificationService.notifyEmailBounce(
       appointment.id,
       appointment.userName,
       appointment.therapistName,
-      bounceInfo.originalRecipient || appointment.userEmail,
+      bouncedRole,
       bounceInfo.reason || bounceInfo.bounceType || 'Unknown bounce reason'
     );
 

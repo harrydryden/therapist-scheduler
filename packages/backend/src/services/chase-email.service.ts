@@ -171,7 +171,8 @@ class ChaseEmailService {
                   }
 
                   // Alert admins so they can investigate why the reply wasn't
-                  // processed successfully through normal paths.
+                  // processed successfully through normal paths. PII discipline:
+                  // first name only for the user (utils/first-name.ts).
                   slackNotificationService.sendAlert({
                     title: 'Chase prevented — reply exists on thread',
                     severity: 'high',
@@ -182,8 +183,7 @@ class ChaseEmailService {
                       `contains an inbound reply. The reply was likely abandoned ` +
                       `after processing failures — investigate and manually recover.`,
                     additionalFields: {
-                      'User': appointment.userName || '(unknown)',
-                      'Therapist': appointment.therapistName || '(unknown)',
+                      'Client': firstName(appointment.userName, '(unknown)'),
                       'Chase target': target,
                     },
                   }).catch(() => {});
@@ -281,14 +281,17 @@ class ChaseEmailService {
                   therapistName: appointment.therapistName,
                 },
                 slack: {
+                  // PII discipline: drop the chased email (PII for clients).
+                  // Therapist's full name is fine; client uses first name.
+                  // appointmentId in the alert metadata gives admins a
+                  // click-through to the full record.
                   title: 'Chase follow-up sent',
                   severity: 'medium',
                   details:
                     `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
                     `*${inactiveHours}h*. Sent a follow-up nudge.`,
                   additionalFields: {
-                    'To': email,
-                    'User': appointment.userName || '(unknown)',
+                    'Client': firstName(appointment.userName, '(unknown)'),
                     'Therapist': appointment.therapistName || '(unknown)',
                   },
                 },
@@ -528,6 +531,7 @@ class ChaseEmailService {
               therapistName: appointment.therapistName,
             },
             slack: {
+              // PII discipline: first name only for the user.
               title: 'Closure recommended',
               severity: 'high',
               details:
@@ -535,7 +539,7 @@ class ChaseEmailService {
                 `after chase follow-up *${hoursSinceChase}h* ago. ` +
                 `Total inactivity: *${inactiveHours}h*. Admin review needed.`,
               additionalFields: {
-                'User': appointment.userName || '(unknown)',
+                'Client': firstName(appointment.userName, '(unknown)'),
                 'Therapist': appointment.therapistName || '(unknown)',
               },
             },

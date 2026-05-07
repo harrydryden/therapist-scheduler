@@ -731,6 +731,9 @@ export class EmailMessageProcessorService {
                 subject: email.subject.slice(0, 100),
               },
               slack: {
+                // PII discipline: don't echo the sender's email address.
+                // Subject is enough for admins to find the thread; the
+                // appointmentId on the alert is the click-through.
                 title: 'Closure Recommendation Auto-Dismissed',
                 severity: 'medium',
                 details:
@@ -738,7 +741,6 @@ export class EmailMessageProcessorService {
                   'recommendation was auto-dismissed and the chase cycle reset so the agent ' +
                   'can resume processing.',
                 additionalFields: {
-                  'From': email.from,
                   'Subject': email.subject.slice(0, 100),
                 },
               },

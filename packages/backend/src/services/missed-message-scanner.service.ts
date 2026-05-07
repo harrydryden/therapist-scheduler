@@ -5,6 +5,7 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { runWithTrace } from '../utils/request-tracing';
 import { emailProcessingService } from './email-processing.service';
 import { slackNotificationService } from './slack-notification.service';
+import { firstName } from '../utils/first-name';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
 
 // Redis key for the scanner heartbeat — written on every successful scan completion.
@@ -298,10 +299,11 @@ class MissedMessageScannerService {
       `Missed message scan complete — recovered ${totalRecovered} messages from ${totalScanned} threads`
     );
 
-    // Alert via Slack when messages are recovered
+    // Alert via Slack when messages are recovered. PII discipline:
+    // first name only for the user (utils/first-name.ts).
     if (totalRecovered > 0) {
       const appointmentSummary = recoveredAppointments
-        .map(a => `• ${a.userName} / ${a.therapistName}: ${a.count} message(s)`)
+        .map(a => `• ${firstName(a.userName, '(unknown)')} / ${a.therapistName}: ${a.count} message(s)`)
         .join('\n');
 
       slackNotificationService.sendAlert({
