@@ -16,8 +16,8 @@
     "typecheck": "prisma generate && tsc --noEmit",
     "lint": "eslint src/**/*.ts",
     "test": "jest --testPathIgnorePatterns=/integration/",
-    "test:integration": "jest --testPathPattern=/integration/",
-    "test:all": "jest",
+    "test:integration": "jest --testPathPattern=/integration/ --runInBand",
+    "test:all": "jest --runInBand",
     "check:schema-migration": "node scripts/check-schema-migration.js"
   },
   "dependencies": {

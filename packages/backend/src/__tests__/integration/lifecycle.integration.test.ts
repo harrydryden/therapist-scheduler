@@ -45,21 +45,21 @@ jest.mock('../../config', () => ({
 
 jest.mock('../../services/appointment-notifications.service', () => ({
   appointmentNotificationsService: {
-    notifyAdminForceUpdate: jest.fn(),
-    notifyConfirmed: jest.fn(),
-    notifyCompleted: jest.fn(),
-    notifyCancelled: jest.fn(),
+    notifyAdminForceUpdate: jest.fn().mockResolvedValue(undefined),
+    notifyConfirmed: jest.fn().mockResolvedValue(undefined),
+    notifyCompleted: jest.fn().mockResolvedValue(undefined),
+    notifyCancelled: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
 jest.mock('../../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {
-    notifyTransition: jest.fn(),
-    onConfirmed: jest.fn(),
-    onSessionHeld: jest.fn(),
-    onCompleted: jest.fn(),
-    onCancelled: jest.fn(),
-    onAdminForceUpdate: jest.fn(),
+    notifyTransition: jest.fn().mockResolvedValue(undefined),
+    onConfirmed: jest.fn().mockResolvedValue(undefined),
+    onSessionHeld: jest.fn().mockResolvedValue(undefined),
+    onCompleted: jest.fn().mockResolvedValue(undefined),
+    onCancelled: jest.fn().mockResolvedValue(undefined),
+    onAdminForceUpdate: jest.fn().mockResolvedValue(undefined),
   },
 }));
 

@@ -16,6 +16,13 @@
  *
  * Integration tests gated behind TEST_DATABASE_URL. When the env var is
  * unset, any test importing this helper will skip via `describe.skip`.
+ *
+ * IMPORTANT — must run serially:
+ *   Multiple integration test files all call `getIntegrationDb()`, each of
+ *   which runs `prisma db push --force-reset`. Jest's default worker pool
+ *   would have parallel workers racing the reset, wiping each others' seed
+ *   data mid-test. Use the `test:integration` npm script (which sets
+ *   `--runInBand`) or pass it explicitly when running directly.
  */
 import { execSync } from 'child_process';
 import * as path from 'path';
