@@ -297,7 +297,9 @@ describe('signup routes', () => {
       expect(res.statusCode).toBe(201);
       // getOrCreateUser does its own normalization, but signup passes the
       // user-supplied email; the route trims whitespace via zod.
-      expect(getOrCreateUser).toHaveBeenCalledWith('Jamie@Example.com', 'Jamie Doe');
+      // Country defaults to UK when the form omits it (as VALID_PAYLOAD does);
+      // the route applies that default before calling getOrCreateUser.
+      expect(getOrCreateUser).toHaveBeenCalledWith('Jamie@Example.com', 'Jamie Doe', 'UK');
     });
   });
 

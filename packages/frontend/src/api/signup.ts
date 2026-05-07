@@ -1,4 +1,5 @@
 import { fetchApi, unwrap } from './core';
+import type { CountryCode } from '@therapist-scheduler/shared';
 
 export interface SignupRequest {
   name: string;
@@ -8,6 +9,8 @@ export interface SignupRequest {
   agreedToFeedback: true;
   /** Present when the user is signing up via an invitation link (?invite=). */
   invitationToken?: string;
+  /** Country code — drives recipient timezone for every email this user receives. */
+  country: CountryCode;
 }
 
 export interface SignupResponse {

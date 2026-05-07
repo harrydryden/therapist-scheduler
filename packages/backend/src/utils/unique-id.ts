@@ -88,10 +88,18 @@ export async function generateUniqueTherapistId(): Promise<string> {
  * Returns the user with their unique odId. Return type is inferred from
  * Prisma so that new columns added to the User model are automatically
  * carried through to callers.
+ *
+ * `country` is a country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA).
+ * Drives recipient timezone resolution (see recipient-timezone.service.ts).
+ * When the user already exists, country is only overwritten when an
+ * explicit value is passed AND it differs from the stored one — passing
+ * undefined leaves the existing country intact. New users without an
+ * explicit country fall through to the schema's `@default("UK")`.
  */
 export async function getOrCreateUser(
   email: string,
-  name?: string | null
+  name?: string | null,
+  country?: string,
 ) {
   const normalizedEmail = email.toLowerCase().trim();
 
@@ -101,20 +109,20 @@ export async function getOrCreateUser(
   });
 
   if (existing) {
-    // Update name if provided and different
-    if (name && name !== existing.name) {
-      const updated = await prisma.user.update({
-        where: { email: normalizedEmail },
-        data: { name },
-      });
-      return updated;
-    }
-    return existing;
+    const updates: { name?: string; country?: string } = {};
+    if (name && name !== existing.name) updates.name = name;
+    if (country && country !== existing.country) updates.country = country;
+    if (Object.keys(updates).length === 0) return existing;
+    return prisma.user.update({
+      where: { email: normalizedEmail },
+      data: updates,
+    });
   }
 
   // Create new user with unique ID
   // Catch P2002 (unique constraint violation) to handle concurrent creation race
-  // Country defaults to 'UK' via the schema default.
+  // Country falls back to the schema's `@default("UK")` when the caller
+  // doesn't pass one (e.g. the booking flow, which doesn't ask for country).
   const odId = await generateUniqueUserId();
   try {
     const newUser = await prisma.user.create({
@@ -122,6 +130,7 @@ export async function getOrCreateUser(
         email: normalizedEmail,
         name: name || null,
         odId,
+        ...(country ? { country } : {}),
       },
     });
 
