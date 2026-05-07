@@ -40,6 +40,7 @@ import { config } from '../config';
 import { getSettingValue } from './settings.service';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
+import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
 import { renderTemplate } from '../utils/email-templates';
 import { emailProcessingService } from './email-processing.service';
 
@@ -122,31 +123,41 @@ export async function issueWelcomeVoucher(
     return { tokenIssued: false, emailSent: false, displayCode: voucherResult.displayCode };
   }
 
-  // Render + send the welcome email.
+  // Render + send the welcome email. The two-pass design matches
+  // weekly-mailing-list.ts::renderUnifiedBody: user-supplied variables
+  // go through renderTemplate (which HTML-escapes them), then the
+  // {voucherSection} placeholder is replaced with the raw shared
+  // section string. Same shared `renderVoucherSection` helper as the
+  // weekly mailing — the user sees identical voucher copy whether
+  // this email arrived via signup-welcome, weekly tick, or reminder.
   let emailSent = false;
   try {
     const userName = params.name?.trim() || emailLower.split('@')[0];
     const subjectTemplate = await getSettingValue<string>('email.welcomeBookingSubject');
     const bodyTemplate = await getSettingValue<string>('email.welcomeBookingBody');
-    const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
+    const voucherExpiry = formatVoucherExpiry(voucherResult.expiresAt);
+    const voucherSection = renderVoucherSection({
+      isReminder: false,
+      voucherExpiry,
     });
     const subject = renderTemplate(subjectTemplate, {
       userName,
       voucherCode: voucherResult.displayCode,
     });
-    const body = renderTemplate(bodyTemplate, {
+    // First pass: escape user-supplied variables. Admins editing the
+    // template can still reference {voucherCode}, {voucherExpiry},
+    // {unsubscribeUrl} for backwards compat with custom layouts —
+    // those are passed here. The {voucherSection} placeholder is
+    // intentionally NOT in this map so it survives to the second pass.
+    const rendered = renderTemplate(bodyTemplate, {
       userName,
       voucherCode: voucherResult.displayCode,
       voucherExpiry,
       webAppUrl: voucherResult.url,
-      // Unsubscribe URL is included in the body footer if the template
-      // references {unsubscribeUrl}. Default template doesn't, but
-      // expose it so admins editing the template can add it.
       unsubscribeUrl: generateUnsubscribeUrl(emailLower, config.backendUrl),
     });
+    // Second pass: inject the shared voucher section verbatim.
+    const body = rendered.replace(/\{voucherSection\}/g, voucherSection);
     await emailProcessingService.sendEmail({ to: emailLower, subject, body });
     emailSent = true;
   } catch (err) {
