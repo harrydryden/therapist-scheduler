@@ -17,6 +17,7 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { cacheManager } from '../utils/redis';
+import { subscribeToSettingsInvalidation } from '../utils/settings-pubsub';
 import { SettingDefinition, SETTING_DEFINITIONS, SettingKey } from '../config/setting-definitions';
 export { SettingDefinition, SETTING_DEFINITIONS, SettingKey };
 
@@ -51,6 +52,16 @@ export function memoryCacheInvalidate(key: string): void {
 export function memoryCacheInvalidateAll(): void {
   memoryCache.clear();
 }
+
+// Subscribe at module load so peer instances' admin updates clear THIS
+// instance's in-memory cache. Without this, a setting change took up to
+// 30 s to propagate across instances (the memory-cache TTL); during that
+// window, ops-critical toggles like `voucher.required` were inconsistent
+// across the fleet. Test-env safe — `subscribeToSettingsInvalidation` is
+// a no-op when Redis is unavailable.
+subscribeToSettingsInvalidation((keys) => {
+  for (const key of keys) memoryCache.delete(key);
+});
 
 // ============================================
 // Public API

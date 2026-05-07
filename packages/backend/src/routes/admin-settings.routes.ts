@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { RATE_LIMITS } from '../constants';
 import { cacheManager } from '../utils/redis';
+import { publishSettingsInvalidation } from '../utils/settings-pubsub';
 import { adminNotificationService } from '../services/admin-notification.service';
 import {
   SETTING_DEFINITIONS,
@@ -245,9 +246,13 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
           },
         });
 
-        // Double-invalidate after write to ensure consistency
+        // Double-invalidate after write to ensure consistency on this
+        // instance, then publish so peer instances clear their memory
+        // caches too. Without the publish, peers would serve stale
+        // values for up to 30 s (memoryCacheTTL).
         memoryCacheInvalidate(key);
         await cacheManager.delete(`${SETTINGS_CACHE_PREFIX}${key}`);
+        await publishSettingsInvalidation([key]);
 
         logger.info({ requestId, key, value, adminId }, 'Setting updated');
 
@@ -377,11 +382,14 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
           })
         );
 
-        // Double-invalidate after write
+        // Double-invalidate after write, then publish to peers so
+        // their memory caches drop too. Single batched publish keeps
+        // wire traffic flat regardless of `settings.length`.
         for (const { key } of settings) memoryCacheInvalidate(key);
         const postInvalidationResults = await Promise.allSettled(
           settings.map(({ key }) => cacheManager.delete(`${SETTINGS_CACHE_PREFIX}${key}`))
         );
+        await publishSettingsInvalidation(settings.map(({ key }) => key));
         const postInvalidationFailures = postInvalidationResults.filter(r => r.status === 'rejected');
         if (postInvalidationFailures.length > 0) {
           logger.warn(
