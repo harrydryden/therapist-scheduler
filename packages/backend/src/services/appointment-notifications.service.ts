@@ -78,6 +78,13 @@ export interface NotifyConfirmedParams {
   confirmedDateTime: string;
   confirmedDateTimeParsed?: Date | null;
   sendEmails: boolean;
+  /**
+   * Post-update transition generation. Threaded into side-effect-tracker
+   * idempotency keys so that re-confirmation after cancellation gets a
+   * different key than the original confirmation's already-completed
+   * Slack/email rows. See appointment-lifecycle.service for the bump.
+   */
+  transitionGeneration?: number;
 }
 
 export interface NotifyCompletedParams {
@@ -88,6 +95,7 @@ export interface NotifyCompletedParams {
   therapistName: string;
   feedbackSubmissionId?: string;
   feedbackData?: Record<string, string>;
+  transitionGeneration?: number;
 }
 
 export interface NotifyCancelledParams {
@@ -104,6 +112,7 @@ export interface NotifyCancelledParams {
   confirmedDateTimeParsed: Date | null;
   gmailThreadId: string | null;
   therapistGmailThreadId: string | null;
+  transitionGeneration?: number;
 }
 
 export interface NotifyAdminForceUpdateParams {
@@ -185,6 +194,7 @@ class AppointmentNotificationsService {
       confirmedDateTime,
       confirmedDateTimeParsed,
       sendEmails,
+      transitionGeneration,
     } = params;
     const logContext = { appointmentId, source, adminId };
 
@@ -209,7 +219,8 @@ class AppointmentNotificationsService {
           context: logContext,
           retry: true,
           maxRetries: 2,
-        }
+        },
+        transitionGeneration,
       );
     }
 
@@ -259,6 +270,7 @@ class AppointmentNotificationsService {
             retry: true,
             maxRetries: 2,
           },
+          transitionGeneration,
         );
       }
 
@@ -299,6 +311,7 @@ class AppointmentNotificationsService {
             retry: true,
             maxRetries: 2,
           },
+          transitionGeneration,
         );
       }
     }
@@ -317,6 +330,7 @@ class AppointmentNotificationsService {
       therapistName,
       feedbackSubmissionId,
       feedbackData,
+      transitionGeneration,
     } = params;
     const logContext = { appointmentId, source, adminId };
 
@@ -341,7 +355,8 @@ class AppointmentNotificationsService {
           context: logContext,
           retry: true,
           maxRetries: 2,
-        }
+        },
+        transitionGeneration,
       );
     }
   }
@@ -367,6 +382,7 @@ class AppointmentNotificationsService {
       confirmedDateTimeParsed,
       gmailThreadId,
       therapistGmailThreadId,
+      transitionGeneration,
     } = params;
     const logContext = { appointmentId, source, adminId, cancelledBy };
 
@@ -391,7 +407,8 @@ class AppointmentNotificationsService {
           context: logContext,
           retry: true,
           maxRetries: 2,
-        }
+        },
+        transitionGeneration,
       );
     }
 
@@ -444,6 +461,7 @@ class AppointmentNotificationsService {
           retry: true,
           maxRetries: 2,
         },
+        transitionGeneration,
       );
     }
 
@@ -491,6 +509,7 @@ class AppointmentNotificationsService {
           retry: true,
           maxRetries: 2,
         },
+        transitionGeneration,
       );
     }
   }

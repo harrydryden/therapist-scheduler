@@ -126,6 +126,13 @@ model AppointmentRequest {
   therapistAvailability Json?     @map("therapist_availability")
   status                String @default("pending")
 
+  // Bumped inside the atomic update of every status transition (see
+  // appointment-lifecycle.service). Included in side-effect-tracker
+  // idempotency keys so that re-entering the same status (e.g. cancel
+  // → re-confirm) doesn't dedupe against the previous generation's
+  // already-completed Slack/email side-effect rows.
+  transitionGeneration  Int       @default(0) @map("transition_generation")
+
   // Links to User and Therapist entities (for data management)
   // NOTE: Optional for backwards compatibility with records created before User/Therapist
   // entities existed. All new appointments set these via getOrCreateUser/getOrCreateTherapist.
