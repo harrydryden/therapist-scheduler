@@ -64,7 +64,7 @@ export type BookingMethod = 'agent_negotiated' | 'direct_link';
 export interface AppointmentRequest {
   userName: string;
   userEmail: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   therapistName?: string;
   therapistAvailability?: TherapistAvailability | null;
   /** HMAC-signed voucher token from weekly promotional email (auto-applied via URL or manually entered) */
@@ -142,7 +142,7 @@ export interface AppointmentListItem {
   userEmail: string;
   therapistName: string;
   therapistEmail: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   status: AppointmentStatus;
   messageCount: number;
   confirmedAt: string | null;
@@ -400,7 +400,7 @@ export type AdminAppointmentStage = 'confirmed' | 'session_held' | 'feedback_req
 export interface CreateAdminAppointmentRequest {
   userEmail: string;
   userName: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   stage: AdminAppointmentStage;
   confirmedDateTime: string;
   adminId: string;

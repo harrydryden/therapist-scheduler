@@ -23,7 +23,7 @@ export interface ValidationResult {
 }
 
 export interface ValidateBookingParams {
-  therapistNotionId: string;
+  therapistHandle: string;
   userEmail: string;
   /** Optional: check if specific time slot is available */
   confirmedDateTime?: string;
@@ -41,15 +41,15 @@ class BookingValidatorService {
    * This is the primary validation called before creating an appointment
    */
   async validateTherapistAvailability(params: ValidateBookingParams): Promise<ValidationResult> {
-    const { therapistNotionId, userEmail, confirmedDateTime } = params;
-    const logContext = { therapistNotionId, userEmail };
+    const { therapistHandle, userEmail, confirmedDateTime } = params;
+    const logContext = { therapistHandle, userEmail };
 
     try {
       // 1. Check if therapist exists. The public-facing identifier is either
       // the legacy notionId or the Postgres uuid for post-Notion ingestions —
       // accept either.
       const therapist = await prisma.therapist.findFirst({
-        where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
         select: { active: true, email: true },
       });
 
@@ -87,7 +87,7 @@ class BookingValidatorService {
       // in appointments.routes.ts re-validates inside a Serializable transaction
       // to prevent race conditions between this check and appointment creation.
       const bookingStatus = await therapistBookingStatusService.canAcceptNewRequest(
-        therapistNotionId,
+        therapistHandle,
         userEmail
       );
 
@@ -107,7 +107,7 @@ class BookingValidatorService {
 
       // 6. If confirmedDateTime provided, check for slot conflicts
       if (confirmedDateTime) {
-        const slotConflict = await this.checkSlotConflict(therapistNotionId, confirmedDateTime);
+        const slotConflict = await this.checkSlotConflict(therapistHandle, confirmedDateTime);
         if (slotConflict) {
           logger.info(
             { ...logContext, confirmedDateTime },
@@ -123,7 +123,7 @@ class BookingValidatorService {
       }
 
       // 7. Check for very recent bookings (race condition window - 5 seconds)
-      const recentBooking = await this.checkRecentBookings(therapistNotionId, userEmail);
+      const recentBooking = await this.checkRecentBookings(therapistHandle, userEmail);
       if (recentBooking) {
         logger.info(
           { ...logContext, recentBookingId: recentBooking.id },
@@ -161,7 +161,7 @@ class BookingValidatorService {
    * "Monday 3rd Feb at 10am" vs "2025-02-03T10:00:00").
    */
   private async checkSlotConflict(
-    therapistNotionId: string,
+    therapistHandle: string,
     confirmedDateTime: string
   ): Promise<{ id: string } | null> {
     // First try: check confirmedDateTimeParsed (ISO column) if available
@@ -172,7 +172,7 @@ class BookingValidatorService {
       const windowEnd = new Date(requestedDate.getTime() + 30 * 60 * 1000);
       const conflict = await prisma.appointmentRequest.findFirst({
         where: {
-          therapistNotionId,
+          therapistHandle,
           confirmedDateTimeParsed: { gte: windowStart, lte: windowEnd },
           status: { notIn: ['cancelled', 'completed'] },
         },
@@ -184,7 +184,7 @@ class BookingValidatorService {
     // Fallback: exact string match for appointments without parsed dates
     const exactConflict = await prisma.appointmentRequest.findFirst({
       where: {
-        therapistNotionId,
+        therapistHandle,
         confirmedDateTime,
         status: { notIn: ['cancelled', 'completed'] },
       },
@@ -198,14 +198,14 @@ class BookingValidatorService {
    * Check for very recent bookings (within 5 seconds) to catch race conditions
    */
   private async checkRecentBookings(
-    therapistNotionId: string,
+    therapistHandle: string,
     userEmail: string
   ): Promise<{ id: string } | null> {
     const fiveSecondsAgo = new Date(Date.now() - 5000);
 
     const recent = await prisma.appointmentRequest.findFirst({
       where: {
-        therapistNotionId,
+        therapistHandle,
         userEmail,
         createdAt: { gte: fiveSecondsAgo },
         status: { notIn: ['cancelled'] },
@@ -222,7 +222,7 @@ class BookingValidatorService {
    */
   async validateConfirmation(
     appointmentId: string,
-    therapistNotionId: string,
+    therapistHandle: string,
     confirmedDateTime: string
   ): Promise<ValidationResult> {
     // Check for conflicts using parsed datetime comparison (30-min window)
@@ -234,7 +234,7 @@ class BookingValidatorService {
       const windowEnd = new Date(requestedDate.getTime() + 30 * 60 * 1000);
       conflict = await prisma.appointmentRequest.findFirst({
         where: {
-          therapistNotionId,
+          therapistHandle,
           confirmedDateTimeParsed: { gte: windowStart, lte: windowEnd },
           status: { notIn: ['cancelled', 'completed'] },
           id: { not: appointmentId },
@@ -247,7 +247,7 @@ class BookingValidatorService {
     if (!conflict) {
       conflict = await prisma.appointmentRequest.findFirst({
         where: {
-          therapistNotionId,
+          therapistHandle,
           confirmedDateTime,
           status: { notIn: ['cancelled', 'completed'] },
           id: { not: appointmentId },
@@ -258,7 +258,7 @@ class BookingValidatorService {
 
     if (conflict) {
       logger.warn(
-        { appointmentId, therapistNotionId, confirmedDateTime, conflictId: conflict.id },
+        { appointmentId, therapistHandle, confirmedDateTime, conflictId: conflict.id },
         'Confirmation validation failed: slot already booked'
       );
       return {
@@ -277,18 +277,18 @@ class BookingValidatorService {
    * Returns a map of therapist IDs to their availability status
    */
   async batchValidateTherapists(
-    therapistNotionIds: string[]
+    therapistHandles: string[]
   ): Promise<Map<string, { available: boolean; reason?: string }>> {
     const results = new Map<string, { available: boolean; reason?: string }>();
 
     // Get all booking statuses in one query
     const bookingStatuses = await prisma.therapistBookingStatus.findMany({
-      where: { id: { in: therapistNotionIds } },
+      where: { id: { in: therapistHandles } },
     });
 
     const statusMap = new Map(bookingStatuses.map(s => [s.id, s]));
 
-    for (const therapistId of therapistNotionIds) {
+    for (const therapistId of therapistHandles) {
       const status = statusMap.get(therapistId);
 
       if (status?.hasConfirmedBooking) {

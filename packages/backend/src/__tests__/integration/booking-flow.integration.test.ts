@@ -199,7 +199,7 @@ integrationDescribe('Booking flow (e2e)', () => {
         payload: {
           userName: 'Alice Test',
           userEmail: 'alice@example.com',
-          therapistNotionId: therapist.notionId!,
+          therapistHandle: therapist.notionId!,
         },
       });
 
@@ -213,7 +213,7 @@ integrationDescribe('Booking flow (e2e)', () => {
       const apt = await prisma.appointmentRequest.findUnique({ where: { id: appointmentId } });
       expect(apt).not.toBeNull();
       expect(apt!.userEmail).toBe('alice@example.com');
-      expect(apt!.therapistNotionId).toBe(therapist.notionId);
+      expect(apt!.therapistHandle).toBe(therapist.notionId);
       expect(apt!.status).toBe('pending');
       // transitionGeneration starts at 0 — no transitions yet, just creation.
       expect(apt!.transitionGeneration).toBe(0);
@@ -236,7 +236,7 @@ integrationDescribe('Booking flow (e2e)', () => {
       const payload = {
         userName: 'Bob Test',
         userEmail: 'bob@example.com',
-        therapistNotionId: therapist.notionId!,
+        therapistHandle: therapist.notionId!,
       };
 
       const first = await app.inject({ method: 'POST', url: '/api/appointments/request', payload });
@@ -259,7 +259,7 @@ integrationDescribe('Booking flow (e2e)', () => {
       // The dedup is the whole point — we don't want a phantom second
       // appointment from a double-click.
       const apts = await prisma.appointmentRequest.findMany({
-        where: { therapistNotionId: therapist.notionId! },
+        where: { therapistHandle: therapist.notionId! },
       });
       expect(apts).toHaveLength(1);
       expect(apts[0].id).toBe(firstId);
@@ -286,7 +286,7 @@ integrationDescribe('Booking flow (e2e)', () => {
           userEmail: 'carol@example.com',
           userName: 'Carol Test',
           therapistEmail: therapist.email,
-          therapistNotionId: therapist.notionId!,
+          therapistHandle: therapist.notionId!,
           therapistName: therapist.name,
           status: 'pending',
         },

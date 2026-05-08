@@ -484,21 +484,21 @@ export class AIToolExecutorService {
       // fall back to the country default) when stamping the new slots.
       const appointmentRequest = await prisma.appointmentRequest.findUnique({
         where: { id: context.appointmentRequestId },
-        select: { therapistId: true, therapistNotionId: true },
+        select: { therapistId: true, therapistHandle: true },
       });
 
-      if (!appointmentRequest?.therapistNotionId) {
+      if (!appointmentRequest?.therapistHandle) {
         logger.error({ traceId: this.traceId }, 'No therapist handle found on appointment');
         return;
       }
 
-      // therapistNotionId is the public handle: legacy Notion page id for
+      // therapistHandle is the public handle: legacy Notion page id for
       // older rows, Postgres uuid for post-Notion ingestions. Match by either.
       const therapist = await prisma.therapist.findFirst({
         where: {
           OR: [
-            { notionId: appointmentRequest.therapistNotionId },
-            { id: appointmentRequest.therapistNotionId },
+            { notionId: appointmentRequest.therapistHandle },
+            { id: appointmentRequest.therapistHandle },
           ],
         },
         select: { id: true, country: true, availability: true },
@@ -506,7 +506,7 @@ export class AIToolExecutorService {
 
       if (!therapist) {
         logger.error(
-          { traceId: this.traceId, therapistNotionId: appointmentRequest.therapistNotionId },
+          { traceId: this.traceId, therapistHandle: appointmentRequest.therapistHandle },
           'Therapist not found in Postgres — cannot persist availability',
         );
         return;

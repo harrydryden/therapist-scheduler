@@ -77,10 +77,9 @@ model Therapist {
   // the therapist provides availability (or the agent records what they share).
   availability Json?   @map("availability")
 
-  // Profile fields mirroring the Notion therapists database. Populated by
-  // the one-shot Notion→Postgres backfill script and then kept in sync by
-  // notionSyncManager while Notion remains authoritative. Reads cut over to
-  // these columns in PR 2.
+  // Profile fields. Originally mirrored the Notion therapists database via a
+  // one-shot Notion→Postgres backfill; Postgres is now the source of truth
+  // and these columns are written directly by the ingestion pipeline.
   bio           String?  @db.Text
   // Multi-select category tags. Postgres String[] arrays so we can index/query
   // without JSON unwrapping. Empty array on rows that haven't been backfilled.
@@ -89,9 +88,8 @@ model Therapist {
   areasOfFocus  String[] @default([]) @map("areas_of_focus")
   profileImage  String?  @map("profile_image")
   bookingLink   String?  @map("booking_link")
-  // Whether the therapist is accepting bookings at all. Mirrors the Notion
-  // Active checkbox; default true so unbackfilled rows don't disappear from
-  // any future Postgres-backed read.
+  // Whether the therapist is accepting bookings at all. Default true so
+  // legacy unbackfilled rows don't disappear from any Postgres-backed read.
   active        Boolean  @default(true)
 
   ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
@@ -120,7 +118,7 @@ model AppointmentRequest {
   id                    String    @id @default(uuid())
   userName              String?   @map("user_name")
   userEmail             String    @map("user_email")
-  therapistNotionId     String    @map("therapist_notion_id")
+  therapistHandle       String    @map("therapist_handle")
   therapistEmail        String    @map("therapist_email")
   therapistName         String    @map("therapist_name")
   therapistAvailability Json?     @map("therapist_availability")
@@ -256,8 +254,8 @@ model AppointmentRequest {
   @@index([gmailThreadId])
   @@index([therapistGmailThreadId])
   @@index([userEmail])
-  @@index([therapistNotionId])
-  @@index([userEmail, therapistNotionId, status])
+  @@index([therapistHandle])
+  @@index([userEmail, therapistHandle, status])
   @@index([status, lastActivityAt]) // For stale check queries
   @@index([status, isStale]) // For filtering active stale conversations
   @@index([confirmedAt]) // For dashboard stats queries
@@ -316,7 +314,7 @@ model KnowledgeBase {
 
 // Track therapist booking availability status
 model TherapistBookingStatus {
-  id                  String    @id // therapistNotionId
+  id                  String    @id // therapistHandle (legacy notionId or therapist.id)
   therapistName       String    @map("therapist_name")
   hasConfirmedBooking Boolean   @default(false) @map("has_confirmed_booking")
   confirmedAt         DateTime? @map("confirmed_at")
@@ -549,8 +547,8 @@ model SideEffectLog {
 
   // Rendered payload captured at registration time so retries can replay the
   // exact original outbound (e.g. localised email subject/body, slack args).
-  // Optional — slack/notion-sync effects don't need a payload because their
-  // retry path re-fetches state from the DB.
+  // Optional — some effects (e.g. slack notify) don't need a payload because
+  // their retry path re-fetches state from the DB.
   payload   Json?     @map("payload")
 
   // Timing

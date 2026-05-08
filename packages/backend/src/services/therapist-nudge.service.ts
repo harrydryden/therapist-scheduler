@@ -108,8 +108,8 @@ class TherapistNudgeService {
         where: {
           status: { in: [...ACTIVE_STATUSES, 'completed'] },
         },
-        select: { therapistNotionId: true },
-        distinct: ['therapistNotionId'],
+        select: { therapistHandle: true },
+        distinct: ['therapistHandle'],
       }),
       // Active therapist set (post-Notion-deprecation: read from Postgres).
       // Returns null on error so the run aborts cleanly rather than nudging
@@ -133,16 +133,16 @@ class TherapistNudgeService {
     const cutoff = new Date(Date.now() - intervalWeeks * 7 * 24 * 60 * 60 * 1000);
     const agentFirstName = firstName(agentName);
 
-    const excludedNotionIds = new Set(therapistsWithAppointments.map(a => a.therapistNotionId));
+    const excludedHandles = new Set(therapistsWithAppointments.map(a => a.therapistHandle));
     // The public handle is notionId for legacy rows and the Postgres uuid
     // for post-Notion ingestions. Compose the active-set from both fields
     // so the filter below still excludes inactive therapists either way.
-    const activeNotionIds = new Set<string>();
+    const activeHandles = new Set<string>();
     for (const t of activeTherapists) {
-      if (t.notionId) activeNotionIds.add(t.notionId);
-      activeNotionIds.add(t.id);
+      if (t.notionId) activeHandles.add(t.notionId);
+      activeHandles.add(t.id);
     }
-    const unavailableNotionIds = new Set(unavailableIds);
+    const unavailableHandles = new Set(unavailableIds);
 
     // Find eligible therapists:
     //  - Have an ingestedAt date
@@ -179,9 +179,9 @@ class TherapistNudgeService {
     const eligible = candidates.filter(t => {
       const handle = t.notionId ?? t.id;
       return (
-        !excludedNotionIds.has(handle) &&
-        activeNotionIds.has(handle) &&
-        !unavailableNotionIds.has(handle)
+        !excludedHandles.has(handle) &&
+        activeHandles.has(handle) &&
+        !unavailableHandles.has(handle)
       );
     });
 

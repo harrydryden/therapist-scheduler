@@ -25,7 +25,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
   const [bookingMethodUsed, setBookingMethodUsed] = useState<'agent_negotiated' | 'direct_link'>('agent_negotiated');
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
-    therapistNotionId: therapist.id,
+    therapistHandle: therapist.id,
     therapistName: therapist.name,
     onSuccess: () => setSubmitted(true),
     voucherToken: voucher?.voucherToken,

@@ -91,7 +91,7 @@ export interface InternalAppointmentListItem {
   userEmail: string;
   therapistName: string;
   therapistEmail: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   status: AppointmentStatus;
   messageCount: number;
   confirmedAt: Date | null;

@@ -111,7 +111,7 @@ const baseRow = {
   userEmail: 'user@example.com',
   therapistName: 'Therapist',
   therapistEmail: 't@example.com',
-  therapistNotionId: 'therapist-notion',
+  therapistHandle: 'therapist-notion',
   confirmedDateTime: PREVIOUS,
   humanControlEnabled: false,
 };

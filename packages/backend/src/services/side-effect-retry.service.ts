@@ -161,7 +161,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         userEmail: true,
         therapistName: true,
         therapistEmail: true,
-        therapistNotionId: true,
+        therapistHandle: true,
         status: true,
         confirmedDateTime: true,
         trackingCode: true,

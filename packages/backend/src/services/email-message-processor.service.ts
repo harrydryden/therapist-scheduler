@@ -1111,13 +1111,13 @@ export class EmailMessageProcessorService {
 
       // Step 3: Does this therapist have any active appointments?
       // If they do, this email should go through normal appointment matching,
-      // not be captured as a nudge reply. AppointmentRequest.therapistNotionId
+      // not be captured as a nudge reply. AppointmentRequest.therapistHandle
       // stores the public handle (notionId for legacy rows, Postgres uuid for
       // post-Notion ingestions) so look up by either.
       const therapistHandle = therapist.notionId ?? therapist.id;
       const activeAppointment = await prisma.appointmentRequest.findFirst({
         where: {
-          therapistNotionId: therapistHandle,
+          therapistHandle: therapistHandle,
           status: { in: [...ACTIVE_STATUSES] },
         },
         select: { id: true },
