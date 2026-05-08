@@ -51,10 +51,12 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       // NOTE: Email is intentionally NOT included in public API response for privacy
       const response = therapists
         .filter((t) => {
-          // therapistBookingStatus is keyed on the legacy notionId. Rows
-          // without a notionId (post-Notion ingestions) are never in the
-          // unavailable set, so they pass through unconditionally.
-          if (t.notionId && unavailableSet.has(t.notionId)) return false;
+          // therapistBookingStatus is keyed on the same handle the booking
+          // flow uses: notionId for legacy rows, Postgres uuid for post-
+          // Notion ingestions. Match that here so frozen post-Notion
+          // therapists don't slip through with `notionId = null`.
+          const lookupKey = t.notionId ?? t.id;
+          if (unavailableSet.has(lookupKey)) return false;
           return true;
         })
         .map((t) => {
