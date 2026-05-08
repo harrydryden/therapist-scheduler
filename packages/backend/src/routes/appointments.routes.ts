@@ -23,11 +23,11 @@ const IDEMPOTENCY_WINDOW_MS = 5 * 60 * 1000;
 
 // Validation schema for appointment request from public frontend
 // NOTE: therapistEmail and therapistName are optional - we re-fetch them
-// from Postgres by therapistNotionId for security (clients can't spoof them).
+// from Postgres by therapistHandle for security (clients can't spoof them).
 const appointmentRequestSchema = z.object({
   userName: z.string().min(1, 'Name is required').max(100),
   userEmail: z.string().email('Invalid email address').max(255),
-  therapistNotionId: z.string().min(1, 'Therapist ID is required').max(100),
+  therapistHandle: z.string().min(1, 'Therapist ID is required').max(100),
   // Idempotency key for preventing duplicate requests (optional - will be computed if not provided)
   idempotencyKey: z.string().max(255).optional(),
   // Legacy fields - kept for backward compatibility but not used
@@ -44,10 +44,10 @@ const appointmentRequestSchema = z.object({
  * Generate an idempotency key based on request content
  * Uses SHA256 hash of user+therapist+time window (rounded to minute)
  */
-function generateIdempotencyKey(userEmail: string, therapistNotionId: string): string {
+function generateIdempotencyKey(userEmail: string, therapistHandle: string): string {
   const timeWindow = Math.floor(Date.now() / IDEMPOTENCY_WINDOW_MS);
   return createHash('sha256')
-    .update(`${userEmail}:${therapistNotionId}:${timeWindow}`)
+    .update(`${userEmail}:${therapistHandle}:${timeWindow}`)
     .digest('hex')
     .substring(0, 32); // Use first 32 chars for shorter key
 }
@@ -87,10 +87,10 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const { userName, userEmail, therapistNotionId, idempotencyKey: providedKey, bookingMethod } = validation.data;
+      const { userName, userEmail, therapistHandle, idempotencyKey: providedKey, bookingMethod } = validation.data;
 
       // Generate or use provided idempotency key
-      const idempotencyKey = providedKey || generateIdempotencyKey(userEmail, therapistNotionId);
+      const idempotencyKey = providedKey || generateIdempotencyKey(userEmail, therapistHandle);
 
       // Check for duplicate request within idempotency window (fast path)
       const existingByIdempotency = await prisma.appointmentRequest.findFirst({
@@ -219,11 +219,11 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         // public-facing handle is either the legacy notionId or the
         // Postgres uuid for post-Notion ingestions — accept either.
         const therapist = await prisma.therapist.findFirst({
-          where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+          where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
         });
 
         if (!therapist || !therapist.active) {
-          logger.warn({ requestId, therapistNotionId }, 'Therapist not found or inactive');
+          logger.warn({ requestId, therapistHandle }, 'Therapist not found or inactive');
           return reply.status(404).send({
             success: false,
             error: 'Therapist not found',
@@ -242,7 +242,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         // Without this, the agent cannot contact the therapist and may hallucinate an email
         if (!therapistEmail || therapistEmail.trim() === '') {
           logger.error(
-            { requestId, therapistNotionId, therapistName },
+            { requestId, therapistHandle, therapistName },
             'Therapist has no email address configured'
           );
           return reply.status(400).send({
@@ -258,7 +258,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         const hasAvailability = parsedAvailability && parsedAvailability.slots && parsedAvailability.slots.length > 0;
 
         logger.info(
-          { requestId, therapistNotionId, therapistName, hasAvailability },
+          { requestId, therapistHandle, therapistName, hasAvailability },
           'Resolved therapist for booking'
         );
 
@@ -273,7 +273,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
 
         if (!availabilityStatus.canAcceptNewRequests) {
           logger.info(
-            { requestId, therapistNotionId, reason: availabilityStatus.reason },
+            { requestId, therapistHandle, reason: availabilityStatus.reason },
             'Therapist not accepting new requests'
           );
 
@@ -298,7 +298,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         const quickDuplicateCheck = await prisma.appointmentRequest.findFirst({
           where: {
             userEmail,
-            therapistNotionId: therapistLookupKey,
+            therapistHandle: therapistLookupKey,
             status: { in: [...PRE_BOOKING_STATUSES] },
           },
           select: { id: true },
@@ -306,7 +306,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
 
         if (quickDuplicateCheck) {
           logger.info(
-            { requestId, existingRequestId: quickDuplicateCheck.id, userEmail, therapistNotionId },
+            { requestId, existingRequestId: quickDuplicateCheck.id, userEmail, therapistHandle },
             'Duplicate appointment request detected (quick check)'
           );
           return reply.status(400).send({
@@ -339,7 +339,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             const existingRequest = await tx.appointmentRequest.findFirst({
               where: {
                 userEmail,
-                therapistNotionId: therapistLookupKey,
+                therapistHandle: therapistLookupKey,
                 status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true, status: true },
@@ -394,7 +394,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
                 id: uuidv4(),
                 userName,
                 userEmail,
-                therapistNotionId: therapistLookupKey,
+                therapistHandle: therapistLookupKey,
                 therapistEmail,
                 therapistName,
                 therapistAvailability: therapistAvailability,
@@ -586,7 +586,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         // Duplicate request detected inside transaction
         if (errorMessage === 'DUPLICATE_REQUEST') {
           logger.info(
-            { requestId, userEmail, therapistNotionId },
+            { requestId, userEmail, therapistHandle },
             'Duplicate appointment request detected (transaction check)'
           );
           return reply.status(400).send({
@@ -628,7 +628,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         if (errorMessage.includes('Therapist no longer accepting requests')) {
           const reason = errorMessage.includes('confirmed') ? 'confirmed' : 'frozen';
           logger.info(
-            { requestId, therapistNotionId, reason },
+            { requestId, therapistHandle, reason },
             'Therapist became unavailable during request processing'
           );
 
@@ -647,7 +647,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         // Serialization conflict (concurrent transaction)
         if (errorMessage.includes('could not serialize')) {
           logger.warn(
-            { requestId, userEmail, therapistNotionId },
+            { requestId, userEmail, therapistHandle },
             'Serialization conflict - likely concurrent request'
           );
           return Errors.conflict(reply, 'Another request is being processed. Please try again.');

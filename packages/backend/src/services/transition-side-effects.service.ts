@@ -37,43 +37,43 @@ import type { TransitionSource, TransitionResult } from './appointment-lifecycle
  */
 async function deactivateTherapistIfLastAppointment(args: {
   appointmentId: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   taskName: string;
   logContext: Record<string, unknown>;
   successLogMessage: string;
 }): Promise<void> {
-  const { appointmentId, therapistNotionId, taskName, logContext, successLogMessage } = args;
+  const { appointmentId, therapistHandle, taskName, logContext, successLogMessage } = args;
 
   try {
     const otherActiveAppointments = await prisma.appointmentRequest.count({
       where: {
-        therapistNotionId,
+        therapistHandle,
         id: { not: appointmentId },
         status: { in: [...ACTIVE_STATUSES] },
       },
     });
 
     if (otherActiveAppointments === 0) {
-      // therapistNotionId is the public handle: legacy notionId or
+      // therapistHandle is the public handle: legacy notionId or
       // post-Notion Postgres uuid. Match by either — updateMany returns
       // count=0 if no row matches, which is fine for missing therapists.
       const result = await prisma.therapist.updateMany({
-        where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+        where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
         data: { active: false },
       });
       logger.info(
-        { ...logContext, therapistNotionId, taskName, updated: result.count },
+        { ...logContext, therapistHandle, taskName, updated: result.count },
         successLogMessage,
       );
     } else {
       logger.info(
-        { ...logContext, therapistNotionId, otherActiveAppointments },
+        { ...logContext, therapistHandle, otherActiveAppointments },
         'Therapist still has active appointments - keeping active',
       );
     }
   } catch (err) {
     logger.error(
-      { ...logContext, therapistNotionId, err },
+      { ...logContext, therapistHandle, err },
       `Failed to deactivate therapist (${taskName}) — non-fatal`,
     );
   }
@@ -90,7 +90,7 @@ export interface SideEffectContext {
 }
 
 export interface OnConfirmedParams extends SideEffectContext {
-  therapistNotionId: string | null;
+  therapistHandle: string | null;
   therapistName: string | null;
   userEmail: string;
 }
@@ -100,7 +100,7 @@ export interface OnSessionHeldParams extends SideEffectContext {
 }
 
 export interface OnCompletedParams extends SideEffectContext {
-  therapistNotionId: string | null;
+  therapistHandle: string | null;
   therapistName: string;
   userEmail: string;
   userName: string | null;
@@ -108,14 +108,14 @@ export interface OnCompletedParams extends SideEffectContext {
 }
 
 export interface OnCancelledParams extends SideEffectContext {
-  therapistNotionId: string | null;
+  therapistHandle: string | null;
   wasConfirmed: boolean;
   userEmail: string;
 }
 
 export interface OnAdminForceUpdateParams extends SideEffectContext {
   appointment: {
-    therapistNotionId: string | null;
+    therapistHandle: string | null;
     therapistName: string | null;
     userName: string | null;
     userEmail: string;
@@ -146,17 +146,17 @@ class TransitionSideEffectsService {
    * - Mark therapist as confirmed (freeze for other bookings)
    */
   async onConfirmed(params: OnConfirmedParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistNotionId, therapistName, userEmail } = params;
+    const { appointmentId, source, adminId, therapistHandle, therapistName, userEmail } = params;
     const logContext = { appointmentId, source, adminId };
 
     // Mark therapist as confirmed (freezes for other bookings).
     // The previous Notion freeze-mirror has been retired (PR 2 of the
     // Notion deprecation): the Postgres TherapistBookingStatus row is
     // authoritative and is read directly by the public listing.
-    if (therapistNotionId) {
+    if (therapistHandle) {
       try {
         await therapistBookingStatusService.markConfirmed(
-          therapistNotionId,
+          therapistHandle,
           therapistName ?? 'unknown therapist'
         );
       } catch (err) {
@@ -194,23 +194,23 @@ class TransitionSideEffectsService {
    * - Sync user to Notion
    */
   async onCompleted(params: OnCompletedParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistNotionId, userEmail } = params;
+    const { appointmentId, source, adminId, therapistHandle, userEmail } = params;
     const logContext = { appointmentId, source, adminId };
 
     // Update therapist booking status and conditionally deactivate in Notion
     // Each operation has its own try/catch so a failure in one does not block the others.
     // Previously, a single try/catch meant a failure in unmarkConfirmed or
     // recalculateUniqueRequestCount would skip deactivation entirely.
-    if (therapistNotionId) {
+    if (therapistHandle) {
       // Step 1: Clear confirmed flag and recalculate request count (independent, non-blocking)
       try {
         await Promise.all([
-          therapistBookingStatusService.unmarkConfirmed(therapistNotionId),
-          therapistBookingStatusService.recalculateUniqueRequestCount(therapistNotionId),
+          therapistBookingStatusService.unmarkConfirmed(therapistHandle),
+          therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle),
         ]);
       } catch (err) {
         logger.error(
-          { ...logContext, therapistNotionId, err },
+          { ...logContext, therapistHandle, err },
           'Failed to update therapist booking status after completion (non-fatal, continuing to deactivation)'
         );
       }
@@ -219,7 +219,7 @@ class TransitionSideEffectsService {
       // of Step 1). Only deactivate if they have NO other active appointments.
       await deactivateTherapistIfLastAppointment({
         appointmentId,
-        therapistNotionId,
+        therapistHandle,
         taskName: 'therapist-deactivate-completion',
         logContext,
         successLogMessage: 'Marked therapist as inactive after last appointment completed',
@@ -239,24 +239,24 @@ class TransitionSideEffectsService {
    * - Sync therapist freeze status to Notion
    */
   async onCancelled(params: OnCancelledParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistNotionId, wasConfirmed, userEmail } = params;
+    const { appointmentId, source, adminId, therapistHandle, wasConfirmed, userEmail } = params;
     const logContext = { appointmentId, source, adminId };
 
     // Update therapist status
     // Each operation has its own try/catch so a failure in one does not block the others.
-    if (therapistNotionId) {
+    if (therapistHandle) {
       // Step 1: Update booking status (non-blocking for deactivation)
       try {
         if (wasConfirmed) {
-          await therapistBookingStatusService.unmarkConfirmed(therapistNotionId);
+          await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
         }
 
         await therapistBookingStatusService.recalculateUniqueRequestCount(
-          therapistNotionId
+          therapistHandle
         );
       } catch (err) {
         logger.error(
-          { ...logContext, therapistNotionId, err },
+          { ...logContext, therapistHandle, err },
           'Failed to update therapist booking status after cancellation (non-fatal, continuing to deactivation)'
         );
       }
@@ -264,7 +264,7 @@ class TransitionSideEffectsService {
       // Step 2: Conditionally deactivate therapist (independent of Step 1).
       await deactivateTherapistIfLastAppointment({
         appointmentId,
-        therapistNotionId,
+        therapistHandle,
         taskName: 'therapist-deactivate-cancellation',
         logContext,
         successLogMessage: 'Marked therapist as inactive after last appointment cancelled',
@@ -300,26 +300,26 @@ class TransitionSideEffectsService {
 
     // --- Therapist booking status ---
     // Each operation has its own try/catch so a failure in one does not block the others.
-    if (appointment.therapistNotionId) {
+    if (appointment.therapistHandle) {
       // Step 1: Update booking status flags
       try {
         if (nowConfirmed && !wasConfirmed) {
           await therapistBookingStatusService.markConfirmed(
-            appointment.therapistNotionId,
+            appointment.therapistHandle,
             appointment.therapistName ?? 'unknown therapist'
           );
         } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
-          await therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId);
+          await therapistBookingStatusService.unmarkConfirmed(appointment.therapistHandle);
         }
 
         if (nowCompleted || nowCancelled) {
           await therapistBookingStatusService.recalculateUniqueRequestCount(
-            appointment.therapistNotionId
+            appointment.therapistHandle
           );
         }
       } catch (err) {
         logger.error(
-          { ...logContext, therapistNotionId: appointment.therapistNotionId, err },
+          { ...logContext, therapistHandle: appointment.therapistHandle, err },
           'Failed to update therapist booking status after admin force update (non-fatal, continuing to deactivation)'
         );
       }
@@ -328,7 +328,7 @@ class TransitionSideEffectsService {
       if (nowCompleted || nowCancelled) {
         await deactivateTherapistIfLastAppointment({
           appointmentId,
-          therapistNotionId: appointment.therapistNotionId,
+          therapistHandle: appointment.therapistHandle,
           taskName: 'therapist-deactivate-admin-force',
           logContext,
           successLogMessage: `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`,

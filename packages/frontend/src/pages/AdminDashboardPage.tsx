@@ -114,12 +114,12 @@ export default function AdminDashboardPage() {
     const groups = new Map<string, TherapistGroup>();
 
     for (const apt of filteredAppointments) {
-      const key = apt.therapistNotionId;
+      const key = apt.therapistHandle;
       if (!groups.has(key)) {
         groups.set(key, {
           therapistName: apt.therapistName,
           therapistEmail: apt.therapistEmail,
-          therapistNotionId: apt.therapistNotionId,
+          therapistHandle: apt.therapistHandle,
           appointments: [],
           pendingCount: 0,
           negotiatingCount: 0,

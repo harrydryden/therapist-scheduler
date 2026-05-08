@@ -25,7 +25,7 @@ import { parseTherapistAvailability } from '../utils/json-parser';
 const createAppointmentSchema = z.object({
   userEmail: z.string().email('Invalid email address').max(255),
   userName: z.string().min(1, 'Name is required').max(100),
-  therapistNotionId: z.string().min(1, 'Therapist ID is required').max(100),
+  therapistHandle: z.string().min(1, 'Therapist ID is required').max(100),
   stage: z.enum(['confirmed', 'session_held', 'feedback_requested']),
   confirmedDateTime: z.string().min(1, 'Appointment date/time is required'),
   adminId: z.string().min(1, 'Admin ID is required'),
@@ -60,13 +60,13 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
         return Errors.validationFailed(reply, validation.error.errors);
       }
 
-      const { userEmail, userName, therapistNotionId, stage, confirmedDateTime, adminId, notes } = validation.data;
+      const { userEmail, userName, therapistHandle, stage, confirmedDateTime, adminId, notes } = validation.data;
 
       try {
         // 1. Resolve therapist from Postgres (the source of truth post-Notion-deprecation).
-        // therapistNotionId is the public handle: legacy notionId or post-Notion uuid.
+        // therapistHandle is the public handle: legacy notionId or post-Notion uuid.
         const therapistEntity = await prisma.therapist.findFirst({
-          where: { OR: [{ notionId: therapistNotionId }, { id: therapistNotionId }] },
+          where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
         });
         if (!therapistEntity || !therapistEntity.active) {
           return Errors.notFound(reply, 'Therapist');
@@ -96,7 +96,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
             const existingRequest = await tx.appointmentRequest.findFirst({
               where: {
                 userEmail,
-                therapistNotionId,
+                therapistHandle,
                 status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true, status: true },
@@ -115,7 +115,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
                 id: uuidv4(),
                 userName,
                 userEmail,
-                therapistNotionId,
+                therapistHandle,
                 therapistEmail,
                 therapistName,
                 therapistAvailability,
@@ -132,7 +132,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
             // Record request for freeze tracking inside transaction
             // This ensures the therapist is frozen and can't be booked by other users
             await therapistBookingStatusService.recordNewRequest(
-              therapistNotionId,
+              therapistHandle,
               therapistName,
               userEmail,
               tx
@@ -271,7 +271,7 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
 
         if (errorMessage === 'DUPLICATE_REQUEST') {
           logger.info(
-            { requestId, userEmail, therapistNotionId },
+            { requestId, userEmail, therapistHandle },
             'Admin duplicate appointment request detected'
           );
           return Errors.badRequest(reply, 'This user already has an active appointment with this therapist.');

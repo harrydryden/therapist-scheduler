@@ -58,7 +58,7 @@ class TherapistBookingStatusService {
    * @param tx - Optional transaction client for atomic operations (IMPORTANT for race condition prevention)
    */
   async canAcceptNewRequest(
-    therapistNotionId: string,
+    therapistHandle: string,
     userEmail: string,
     tx?: TransactionClient
   ): Promise<TherapistAvailabilityStatus> {
@@ -67,7 +67,7 @@ class TherapistBookingStatusService {
 
     try {
       const status = await client.therapistBookingStatus.findUnique({
-        where: { id: therapistNotionId },
+        where: { id: therapistHandle },
       });
 
       // If no status record exists, therapist can accept requests
@@ -83,7 +83,7 @@ class TherapistBookingStatusService {
       // Check if user already has an active request (always allow continuation)
       const existingRequest = await client.appointmentRequest.findFirst({
         where: {
-          therapistNotionId,
+          therapistHandle,
           userEmail,
           status: { in: [...ACTIVE_STATUSES] },
         },
@@ -109,7 +109,7 @@ class TherapistBookingStatusService {
         // instead of auto-unfreezing. Admin can manually unfreeze via dashboard.
         const activeRequest = await client.appointmentRequest.findFirst({
           where: {
-            therapistNotionId,
+            therapistHandle,
             status: { in: [...ACTIVE_STATUSES] },
           },
           select: { id: true },
@@ -128,7 +128,7 @@ class TherapistBookingStatusService {
       logger.error(
         {
           error,
-          therapistNotionId,
+          therapistHandle,
           userEmail,
           operation: 'canAcceptNewRequest',
           inTransaction: !!tx,
@@ -156,14 +156,14 @@ class TherapistBookingStatusService {
    * @param tx - Optional transaction client for atomic operations
    */
   async recordNewRequest(
-    therapistNotionId: string,
+    therapistHandle: string,
     therapistName: string,
     userEmail: string,
     tx?: TransactionClient
   ): Promise<void> {
     // If already in a transaction, use it directly
     if (tx) {
-      await this.recordNewRequestInner(tx, therapistNotionId, therapistName, userEmail);
+      await this.recordNewRequestInner(tx, therapistHandle, therapistName, userEmail);
       return;
     }
 
@@ -175,7 +175,7 @@ class TherapistBookingStatusService {
       try {
         await prisma.$transaction(
           async (txClient) => {
-            await this.recordNewRequestInner(txClient, therapistNotionId, therapistName, userEmail);
+            await this.recordNewRequestInner(txClient, therapistHandle, therapistName, userEmail);
           },
           {
             // Serializable isolation prevents race conditions by ensuring
@@ -191,7 +191,7 @@ class TherapistBookingStatusService {
         if (isSerializationError(error) && attempt < SERIALIZATION_RETRY.MAX_RETRIES) {
           const delay = getBackoffDelay(attempt);
           logger.warn(
-            { therapistNotionId, userEmail, attempt: attempt + 1, delayMs: delay },
+            { therapistHandle, userEmail, attempt: attempt + 1, delayMs: delay },
             'Serialization conflict in recordNewRequest - retrying with backoff'
           );
           await sleep(delay);
@@ -208,7 +208,7 @@ class TherapistBookingStatusService {
     // 2. Incorrect uniqueRequestCount
     // 3. Caller thinking operation succeeded
     logger.error(
-      { error: lastError, therapistNotionId, userEmail, operation: 'recordNewRequest', retries: SERIALIZATION_RETRY.MAX_RETRIES },
+      { error: lastError, therapistHandle, userEmail, operation: 'recordNewRequest', retries: SERIALIZATION_RETRY.MAX_RETRIES },
       'Failed to record new request after retries - propagating error'
     );
     throw lastError;
@@ -219,7 +219,7 @@ class TherapistBookingStatusService {
    */
   private async recordNewRequestInner(
     client: TransactionClient,
-    therapistNotionId: string,
+    therapistHandle: string,
     therapistName: string,
     userEmail: string
   ): Promise<void> {
@@ -229,7 +229,7 @@ class TherapistBookingStatusService {
     const uniqueEmails = await client.appointmentRequest.groupBy({
       by: ['userEmail'],
       where: {
-        therapistNotionId,
+        therapistHandle,
         status: { in: [...ACTIVE_STATUSES] },
       },
     });
@@ -242,9 +242,9 @@ class TherapistBookingStatusService {
     const now = new Date();
 
     await client.therapistBookingStatus.upsert({
-      where: { id: therapistNotionId },
+      where: { id: therapistHandle },
       create: {
-        id: therapistNotionId,
+        id: therapistHandle,
         therapistName,
         uniqueRequestCount: uniqueCount,
         frozenAt: now, // Always freeze on first request
@@ -261,7 +261,7 @@ class TherapistBookingStatusService {
     });
 
     logger.info(
-      { therapistNotionId, therapistName, uniqueCount, userEmail },
+      { therapistHandle, therapistName, uniqueCount, userEmail },
       'Therapist frozen due to new request'
     );
   }
@@ -269,12 +269,12 @@ class TherapistBookingStatusService {
   /**
    * Mark a therapist as having a confirmed booking
    */
-  async markConfirmed(therapistNotionId: string, therapistName: string): Promise<void> {
+  async markConfirmed(therapistHandle: string, therapistName: string): Promise<void> {
     try {
       await prisma.therapistBookingStatus.upsert({
-        where: { id: therapistNotionId },
+        where: { id: therapistHandle },
         create: {
-          id: therapistNotionId,
+          id: therapistHandle,
           therapistName,
           hasConfirmedBooking: true,
           confirmedAt: new Date(),
@@ -287,11 +287,11 @@ class TherapistBookingStatusService {
       });
 
       logger.info(
-        { therapistNotionId, therapistName },
+        { therapistHandle, therapistName },
         'Therapist marked as having confirmed booking'
       );
     } catch (error) {
-      logger.error({ error, therapistNotionId }, 'Failed to mark therapist as confirmed');
+      logger.error({ error, therapistHandle }, 'Failed to mark therapist as confirmed');
       // Propagate error so caller knows the freeze failed
       throw error;
     }
@@ -343,8 +343,8 @@ class TherapistBookingStatusService {
    * Batch compute freeze status for multiple therapists
    * Optimized: Uses 2 queries total instead of N+1
    *
-   * @param therapistIds - Array of therapist Notion IDs to check
-   * @returns Map of therapistNotionId → shouldBeFrozen
+   * @param therapistIds - Array of therapist handles to check
+   * @returns Map of therapistHandle → shouldBeFrozen
    */
   async batchComputeFreezeStatus(therapistIds: string[]): Promise<Map<string, boolean>> {
     const result = new Map<string, boolean>();
@@ -384,13 +384,13 @@ class TherapistBookingStatusService {
       if (needsConfirmedCheck.length > 0) {
         const confirmedAppointments = await prisma.appointmentRequest.findMany({
           where: {
-            therapistNotionId: { in: needsConfirmedCheck },
+            therapistHandle: { in: needsConfirmedCheck },
             status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
           },
-          select: { therapistNotionId: true },
-          distinct: ['therapistNotionId'],
+          select: { therapistHandle: true },
+          distinct: ['therapistHandle'],
         });
-        confirmedAppointments.forEach(a => therapistsWithConfirmedAppointments.add(a.therapistNotionId));
+        confirmedAppointments.forEach(a => therapistsWithConfirmedAppointments.add(a.therapistHandle));
       }
 
       // Query 3: Get therapists with active pre-booking conversations (single query)
@@ -398,13 +398,13 @@ class TherapistBookingStatusService {
       if (needsActiveCheck.length > 0) {
         const activeAppointments = await prisma.appointmentRequest.findMany({
           where: {
-            therapistNotionId: { in: needsActiveCheck },
+            therapistHandle: { in: needsActiveCheck },
             status: { in: [...PRE_BOOKING_STATUSES] },
           },
-          select: { therapistNotionId: true },
-          distinct: ['therapistNotionId'],
+          select: { therapistHandle: true },
+          distinct: ['therapistHandle'],
         });
-        activeAppointments.forEach(a => therapistsWithActiveConversations.add(a.therapistNotionId));
+        activeAppointments.forEach(a => therapistsWithActiveConversations.add(a.therapistHandle));
       }
 
       // Compute freeze status for each therapist
@@ -480,12 +480,12 @@ class TherapistBookingStatusService {
           AND tbs.admin_alert_at IS NULL
           AND EXISTS (
             SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_notion_id = tbs.id
+            WHERE ar.therapist_handle = tbs.id
               AND ar.status IN (${Prisma.join(preBookingStatuses)})
           )
           AND NOT EXISTS (
             SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_notion_id = tbs.id
+            WHERE ar.therapist_handle = tbs.id
               AND ar.status IN (${Prisma.join(preBookingStatuses)})
               AND ar.last_activity_at IS NOT NULL
               AND ar.last_activity_at >= ${inactivityThreshold}
@@ -510,18 +510,18 @@ class TherapistBookingStatusService {
         const therapistIds = therapistsToUnfreeze.map(t => t.id);
         const allActiveConversations = await prisma.appointmentRequest.findMany({
           where: {
-            therapistNotionId: { in: therapistIds },
+            therapistHandle: { in: therapistIds },
             status: { in: [...PRE_BOOKING_STATUSES] },
           },
-          select: { therapistNotionId: true, lastActivityAt: true },
+          select: { therapistHandle: true, lastActivityAt: true },
         });
 
         // Group conversations by therapist
         const conversationsByTherapist = new Map<string, Array<{ lastActivityAt: Date | null }>>();
         for (const conv of allActiveConversations) {
-          const existing = conversationsByTherapist.get(conv.therapistNotionId) || [];
+          const existing = conversationsByTherapist.get(conv.therapistHandle) || [];
           existing.push({ lastActivityAt: conv.lastActivityAt });
-          conversationsByTherapist.set(conv.therapistNotionId, existing);
+          conversationsByTherapist.set(conv.therapistHandle, existing);
         }
 
         // Collect IDs to unfreeze in bulk
@@ -624,16 +624,16 @@ class TherapistBookingStatusService {
   /**
    * Acknowledge a flagged therapist (admin action)
    */
-  async acknowledgeFlaggedTherapist(therapistNotionId: string): Promise<void> {
+  async acknowledgeFlaggedTherapist(therapistHandle: string): Promise<void> {
     try {
       await prisma.therapistBookingStatus.update({
-        where: { id: therapistNotionId },
+        where: { id: therapistHandle },
         data: { adminAlertAcknowledged: true },
       });
 
-      logger.info({ therapistNotionId }, 'Admin acknowledged flagged therapist');
+      logger.info({ therapistHandle }, 'Admin acknowledged flagged therapist');
     } catch (error) {
-      logger.error({ error, therapistNotionId }, 'Failed to acknowledge flagged therapist');
+      logger.error({ error, therapistHandle }, 'Failed to acknowledge flagged therapist');
       throw error;
     }
   }
@@ -681,12 +681,12 @@ class TherapistBookingStatusService {
             WHEN tbs.has_confirmed_booking = true THEN true
             WHEN EXISTS (
               SELECT 1 FROM appointment_requests ar
-              WHERE ar.therapist_notion_id = tbs.id
+              WHERE ar.therapist_handle = tbs.id
                 AND ar.status IN ('confirmed', 'session_held', 'feedback_requested')
             ) THEN true
             WHEN tbs.frozen_at IS NOT NULL AND EXISTS (
               SELECT 1 FROM appointment_requests ar
-              WHERE ar.therapist_notion_id = tbs.id
+              WHERE ar.therapist_handle = tbs.id
                 AND ar.status IN ('pending', 'contacted', 'negotiating')
             ) THEN true
             ELSE false
@@ -718,7 +718,7 @@ class TherapistBookingStatusService {
    * IMPORTANT: Uses Serializable transaction to prevent race conditions
    * when multiple cancellations happen concurrently.
    */
-  async recalculateUniqueRequestCount(therapistNotionId: string): Promise<void> {
+  async recalculateUniqueRequestCount(therapistHandle: string): Promise<void> {
     const MAX_ATTEMPTS = 2;
     let lastError: unknown = null;
     const maxReqsThreshold = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
@@ -733,7 +733,7 @@ class TherapistBookingStatusService {
             const uniqueEmails = await tx.appointmentRequest.groupBy({
               by: ['userEmail'],
               where: {
-                therapistNotionId,
+                therapistHandle,
                 status: { in: [...ACTIVE_STATUSES] },
               },
             });
@@ -742,7 +742,7 @@ class TherapistBookingStatusService {
 
             // Check if status record exists
             const status = await tx.therapistBookingStatus.findUnique({
-              where: { id: therapistNotionId },
+              where: { id: therapistHandle },
             });
 
             if (!status) {
@@ -753,10 +753,10 @@ class TherapistBookingStatusService {
             // If count is 0, we can delete the status record (therapist fully available)
             if (uniqueCount === 0) {
               await tx.therapistBookingStatus.delete({
-                where: { id: therapistNotionId },
+                where: { id: therapistHandle },
               });
               logger.info(
-                { therapistNotionId },
+                { therapistHandle },
                 'Removed therapist booking status - no active requests remaining'
               );
               return;
@@ -764,7 +764,7 @@ class TherapistBookingStatusService {
 
             // Update the count
             await tx.therapistBookingStatus.update({
-              where: { id: therapistNotionId },
+              where: { id: therapistHandle },
               data: {
                 uniqueRequestCount: uniqueCount,
                 // Reset admin alert if count drops below threshold
@@ -776,7 +776,7 @@ class TherapistBookingStatusService {
             });
 
             logger.info(
-              { therapistNotionId, uniqueCount },
+              { therapistHandle, uniqueCount },
               'Recalculated unique request count for therapist'
             );
           },
@@ -792,7 +792,7 @@ class TherapistBookingStatusService {
         if (isSerializationError(error) && attempt < MAX_ATTEMPTS - 1) {
           const delay = getBackoffDelay(attempt);
           logger.warn(
-            { therapistNotionId, attempt: attempt + 1, delayMs: delay },
+            { therapistHandle, attempt: attempt + 1, delayMs: delay },
             'Serialization conflict in recalculateUniqueRequestCount - retrying with backoff'
           );
           await sleep(delay);
@@ -803,7 +803,7 @@ class TherapistBookingStatusService {
     }
 
     logger.error(
-      { error: lastError, therapistNotionId, operation: 'recalculateUniqueRequestCount' },
+      { error: lastError, therapistHandle, operation: 'recalculateUniqueRequestCount' },
       'Failed to recalculate unique request count'
     );
   }
@@ -814,7 +814,7 @@ class TherapistBookingStatusService {
    * Uses Serializable transaction to prevent race conditions where another
    * appointment is confirmed between our check and update
    */
-  async unmarkConfirmed(therapistNotionId: string): Promise<void> {
+  async unmarkConfirmed(therapistHandle: string): Promise<void> {
     const MAX_ATTEMPTS = 2;
     let lastError: unknown = null;
 
@@ -823,7 +823,7 @@ class TherapistBookingStatusService {
         await prisma.$transaction(
           async (tx) => {
             const status = await tx.therapistBookingStatus.findUnique({
-              where: { id: therapistNotionId },
+              where: { id: therapistHandle },
             });
 
             if (!status || !status.hasConfirmedBooking) {
@@ -832,7 +832,7 @@ class TherapistBookingStatusService {
 
             const otherConfirmed = await tx.appointmentRequest.findFirst({
               where: {
-                therapistNotionId,
+                therapistHandle,
                 status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
               },
               select: { id: true },
@@ -843,7 +843,7 @@ class TherapistBookingStatusService {
             }
 
             await tx.therapistBookingStatus.update({
-              where: { id: therapistNotionId },
+              where: { id: therapistHandle },
               data: {
                 hasConfirmedBooking: false,
                 confirmedAt: null,
@@ -851,7 +851,7 @@ class TherapistBookingStatusService {
             });
 
             logger.info(
-              { therapistNotionId },
+              { therapistHandle },
               'Unmarked therapist as having confirmed booking'
             );
           },
@@ -867,7 +867,7 @@ class TherapistBookingStatusService {
         if (isSerializationError(error) && attempt < MAX_ATTEMPTS - 1) {
           const delay = getBackoffDelay(attempt);
           logger.warn(
-            { therapistNotionId, attempt: attempt + 1, delayMs: delay },
+            { therapistHandle, attempt: attempt + 1, delayMs: delay },
             'Serialization conflict in unmarkConfirmed - retrying with backoff'
           );
           await sleep(delay);
@@ -878,7 +878,7 @@ class TherapistBookingStatusService {
     }
 
     logger.error(
-      { error: lastError, therapistNotionId, operation: 'unmarkConfirmed' },
+      { error: lastError, therapistHandle, operation: 'unmarkConfirmed' },
       'Failed to unmark therapist confirmed status'
     );
   }

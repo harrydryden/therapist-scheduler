@@ -44,7 +44,8 @@ export interface ATSTherapistResponse {
   id: string;
   /** 10-digit unique reference ID */
   odId: string;
-  /** Notion page ID (if synced) */
+  /** Legacy Notion page ID — populated only for therapists ingested while
+   *  Notion was authoritative; null for post-Notion ingestions. */
   notionId: string | null;
   /** ATS-assigned external ID echoed back */
   externalId: string;
@@ -65,7 +66,8 @@ export interface ATSAppointmentRequest {
   userName: string;
   /** User's email address */
   userEmail: string;
-  /** Therapist identifier — accepts internal ID, Notion ID, or ATS external ID */
+  /** Therapist identifier — accepts internal UUID, legacy Notion page ID,
+   *  or ATS external ID. */
   therapistId: string;
   /** Optional idempotency key to prevent duplicate creation */
   idempotencyKey?: string;
@@ -98,7 +100,11 @@ export interface ATSAppointmentRecord {
   userEmail: string;
   therapistName: string;
   therapistEmail: string;
-  therapistNotionId: string;
+  /** Public-facing therapist identifier — legacy Notion page ID for
+   *  therapists ingested while Notion was authoritative, otherwise the
+   *  therapist's UUID. Use this to correlate appointments back to a
+   *  therapist record via the same lookup the booking flow uses. */
+  therapistHandle: string;
   confirmedAt: string | null;
   confirmedDateTime: string | null;
   createdAt: string;

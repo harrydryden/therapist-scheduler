@@ -94,7 +94,7 @@ async function createTestAppointment(
   overrides: Partial<{
     userEmail: string;
     therapistEmail: string;
-    therapistNotionId: string;
+    therapistHandle: string;
     therapistName: string;
     status: string;
   }> = {}
@@ -103,7 +103,7 @@ async function createTestAppointment(
     data: {
       userEmail: overrides.userEmail ?? `test-${Date.now()}@example.com`,
       therapistEmail: overrides.therapistEmail ?? 'therapist@example.com',
-      therapistNotionId: overrides.therapistNotionId ?? `notion-${Date.now()}`,
+      therapistHandle: overrides.therapistHandle ?? `notion-${Date.now()}`,
       therapistName: overrides.therapistName ?? 'Dr. Test',
       status: overrides.status ?? 'pending',
     },

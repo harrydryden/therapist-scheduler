@@ -345,7 +345,7 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
   const [selectedUserId, setSelectedUserId] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserName, setNewUserName] = useState('');
-  const [selectedTherapistNotionId, setSelectedTherapistNotionId] = useState('');
+  const [selectedTherapistHandle, setSelectedTherapistHandle] = useState('');
   const [stage, setStage] = useState<AdminAppointmentStage>('confirmed');
   const [confirmedDateTime, setConfirmedDateTime] = useState('');
   const [notes, setNotes] = useState('');
@@ -390,7 +390,7 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
       setSelectedUserId('');
       setNewUserEmail('');
       setNewUserName('');
-      setSelectedTherapistNotionId('');
+      setSelectedTherapistHandle('');
       setStage('confirmed');
       setConfirmedDateTime('');
       setNotes('');
@@ -417,12 +417,12 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
       userName = newUserName;
     }
 
-    if (!userEmail || !userName || !selectedTherapistNotionId || !confirmedDateTime) return;
+    if (!userEmail || !userName || !selectedTherapistHandle || !confirmedDateTime) return;
 
     createMutation.mutate({
       userEmail,
       userName,
-      therapistNotionId: selectedTherapistNotionId,
+      therapistHandle: selectedTherapistHandle,
       stage,
       confirmedDateTime: new Date(confirmedDateTime).toISOString(),
       adminId: 'admin',
@@ -431,8 +431,8 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
   };
 
   const isFormValid = userMode === 'existing'
-    ? !!selectedUserId && !!selectedTherapistNotionId && !!confirmedDateTime
-    : !!newUserEmail && !!newUserName && !!selectedTherapistNotionId && !!confirmedDateTime;
+    ? !!selectedUserId && !!selectedTherapistHandle && !!confirmedDateTime
+    : !!newUserEmail && !!newUserName && !!selectedTherapistHandle && !!confirmedDateTime;
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm">
@@ -530,8 +530,8 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
               <label className="block text-sm font-medium text-slate-700 mb-1.5">Therapist</label>
               <SearchableSelect
                 options={therapistOptions}
-                value={selectedTherapistNotionId}
-                onChange={setSelectedTherapistNotionId}
+                value={selectedTherapistHandle}
+                onChange={setSelectedTherapistHandle}
                 placeholder="Select a therapist..."
                 isLoading={loadingTherapists}
               />

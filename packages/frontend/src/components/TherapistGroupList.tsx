@@ -11,7 +11,7 @@ import Pagination from './Pagination';
 interface TherapistGroup {
   therapistName: string;
   therapistEmail: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   appointments: AppointmentListItem[];
   pendingCount: number;
   negotiatingCount: number;
@@ -201,8 +201,8 @@ function VirtualRow(props: RowComponentProps<VirtualRowProps>) {
       <div style={style}>
         <TherapistHeaderContent
           group={row.group}
-          isExpanded={expandedTherapists.has(row.group.therapistNotionId)}
-          onToggle={() => onToggleTherapist(row.group.therapistNotionId)}
+          isExpanded={expandedTherapists.has(row.group.therapistHandle)}
+          onToggle={() => onToggleTherapist(row.group.therapistHandle)}
         />
       </div>
     );
@@ -229,11 +229,11 @@ function renderStaticRow(
 ) {
   if (row.type === 'header') {
     return (
-      <div key={`header-${row.group.therapistNotionId}`}>
+      <div key={`header-${row.group.therapistHandle}`}>
         <TherapistHeaderContent
           group={row.group}
-          isExpanded={expandedTherapists.has(row.group.therapistNotionId)}
-          onToggle={() => onToggleTherapist(row.group.therapistNotionId)}
+          isExpanded={expandedTherapists.has(row.group.therapistHandle)}
+          onToggle={() => onToggleTherapist(row.group.therapistHandle)}
         />
       </div>
     );
@@ -265,9 +265,9 @@ export default memo(function TherapistGroupList({
     const rows: FlatRow[] = [];
     for (const group of therapistGroups) {
       rows.push({ type: 'header', group });
-      if (expandedTherapists.has(group.therapistNotionId)) {
+      if (expandedTherapists.has(group.therapistHandle)) {
         for (const apt of group.appointments) {
-          rows.push({ type: 'appointment', apt, groupId: group.therapistNotionId });
+          rows.push({ type: 'appointment', apt, groupId: group.therapistHandle });
         }
       }
     }

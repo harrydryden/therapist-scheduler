@@ -109,7 +109,7 @@ function mapAppointmentToATS(apt: {
   userEmail: string;
   therapistName: string;
   therapistEmail: string;
-  therapistNotionId: string;
+  therapistHandle: string;
   confirmedAt: Date | null;
   confirmedDateTime: string | null;
   createdAt: Date;
@@ -149,7 +149,7 @@ function mapAppointmentToATS(apt: {
     userEmail: apt.userEmail,
     therapistName: apt.therapistName,
     therapistEmail: apt.therapistEmail,
-    therapistNotionId: apt.therapistNotionId,
+    therapistHandle: apt.therapistHandle,
     confirmedAt: apt.confirmedAt?.toISOString() ?? null,
     confirmedDateTime: apt.confirmedDateTime,
     createdAt: apt.createdAt.toISOString(),
@@ -221,7 +221,7 @@ const APPOINTMENT_SELECT = {
   userEmail: true,
   therapistName: true,
   therapistEmail: true,
-  therapistNotionId: true,
+  therapistHandle: true,
   confirmedAt: true,
   confirmedDateTime: true,
   createdAt: true,
@@ -452,13 +452,13 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         const therapistEmail = therapist.email;
         const therapistName = therapist.name;
         // Public handle for the booking-status row and the AppointmentRequest
-        // therapistNotionId column. Legacy rows have a notionId; post-Notion
+        // therapistHandle column. Legacy rows have a notionId; post-Notion
         // rows fall back to the Postgres uuid.
-        const therapistNotionId = therapist.notionId ?? therapist.id;
+        const therapistHandle = therapist.notionId ?? therapist.id;
 
         // Check therapist availability
         const availabilityStatus = await therapistBookingStatusService.canAcceptNewRequest(
-          therapistNotionId,
+          therapistHandle,
           userEmail
         );
 
@@ -487,7 +487,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             const existing = await tx.appointmentRequest.findFirst({
               where: {
                 userEmail,
-                therapistNotionId,
+                therapistHandle,
                 status: { in: [...PRE_BOOKING_STATUSES] },
               },
               select: { id: true },
@@ -499,7 +499,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
 
             // Re-check availability inside transaction
             const recheck = await therapistBookingStatusService.canAcceptNewRequest(
-              therapistNotionId, userEmail, tx
+              therapistHandle, userEmail, tx
             );
 
             if (!recheck.canAcceptNewRequests) {
@@ -513,7 +513,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
                 id: uuidv4(),
                 userName,
                 userEmail,
-                therapistNotionId,
+                therapistHandle,
                 therapistEmail,
                 therapistName,
                 therapistAvailability,
@@ -527,7 +527,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             });
 
             await therapistBookingStatusService.recordNewRequest(
-              therapistNotionId, therapistName, userEmail, tx
+              therapistHandle, therapistName, userEmail, tx
             );
 
             return newRequest;

@@ -37,14 +37,14 @@ export async function therapistRoutes(fastify: FastifyInstance) {
       // Postgres is now the single source of truth. Fetch active therapists
       // and compute the unavailable set in parallel; we filter out any
       // therapist whose booking status flags them as frozen/confirmed.
-      const [therapists, unavailableNotionIds] = await Promise.all([
+      const [therapists, unavailableHandles] = await Promise.all([
         prisma.therapist.findMany({
           where: { active: true },
           orderBy: { ingestedAt: 'asc' }, // longest on platform first
         }),
         therapistBookingStatusService.getUnavailableTherapistIds(),
       ]);
-      const unavailableSet = new Set(unavailableNotionIds);
+      const unavailableSet = new Set(unavailableHandles);
 
       const now = new Date();
 
@@ -80,7 +80,7 @@ export async function therapistRoutes(fastify: FastifyInstance) {
         });
 
       logger.info(
-        { requestId, count: response.length, unavailableCount: unavailableNotionIds.length },
+        { requestId, count: response.length, unavailableCount: unavailableHandles.length },
         'Returned therapists',
       );
       return sendSuccess(reply, response, { count: response.length });

@@ -129,7 +129,7 @@ async function testFormsAdminPage(): Promise<TestResult> {
 
 // Test: Create appointment request using the dedicated TEST therapist account
 // Uses the known test therapist ID directly (bypasses public list which may show them as frozen)
-async function testCreateAppointment(): Promise<{ appointmentId: string; therapistName: string; therapistNotionId: string } | null> {
+async function testCreateAppointment(): Promise<{ appointmentId: string; therapistName: string; therapistHandle: string } | null> {
   console.log('\n  Creating appointment request...');
 
   // Use the dedicated test therapist directly by ID
@@ -140,7 +140,7 @@ async function testCreateAppointment(): Promise<{ appointmentId: string; therapi
   const { status, data } = await apiRequest('/api/appointments/request', {
     method: 'POST',
     body: JSON.stringify({
-      therapistNotionId: testTherapist.notionId,
+      therapistHandle: testTherapist.notionId,
       therapistName: testTherapist.name,
       therapistEmail: testTherapist.email,
       userName: TEST_CONFIG.testUserName,
@@ -167,7 +167,7 @@ async function testCreateAppointment(): Promise<{ appointmentId: string; therapi
   return {
     appointmentId: data.data.appointmentRequestId,
     therapistName: testTherapist.name,
-    therapistNotionId: testTherapist.notionId,
+    therapistHandle: testTherapist.notionId,
   };
 }
 
@@ -467,7 +467,7 @@ async function runCompletionScenario(): Promise<TestResult[]> {
     notificationChecks.push({
       type: 'TEST Therapist Inactive',
       expected: true,
-      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is marked active=false in Postgres (admin therapists list)`,
+      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistHandle}) is marked active=false in Postgres (admin therapists list)`,
     });
   } else {
     results.push({ name: 'Verify Completed Status', passed: false });
@@ -521,7 +521,7 @@ async function runCancellationScenario(): Promise<TestResult[]> {
     notificationChecks.push({
       type: 'TEST Therapist Unfrozen',
       expected: true,
-      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistNotionId}) is unfrozen in Postgres (TherapistBookingStatus.frozenAt is null)`,
+      note: `Verify TEST therapist "${created.therapistName}" (${created.therapistHandle}) is unfrozen in Postgres (TherapistBookingStatus.frozenAt is null)`,
     });
   } else {
     results.push({ name: 'Cancel Appointment', passed: false });

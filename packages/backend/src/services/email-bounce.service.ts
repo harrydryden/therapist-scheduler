@@ -186,7 +186,7 @@ export async function handleBounce(
           ],
           status: { notIn: ['cancelled', 'confirmed'] },
         },
-        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
+        select: { id: true, therapistHandle: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
       });
     }
 
@@ -197,7 +197,7 @@ export async function handleBounce(
           status: { notIn: ['cancelled', 'confirmed'] },
         },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, therapistNotionId: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
+        select: { id: true, therapistHandle: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
       });
     }
 
@@ -274,7 +274,7 @@ export async function handleBounce(
       {
         traceId,
         appointmentId: appointment.id,
-        therapistNotionId: appointment.therapistNotionId,
+        therapistHandle: appointment.therapistHandle,
         userEmail: bounceInfo.originalRecipient,
       },
       'Therapist unfrozen after email bounce'
@@ -292,7 +292,7 @@ export async function handleBounce(
         userName: appointment.userName,
         userEmail: appointment.userEmail,
         therapistName: appointment.therapistName,
-        therapistNotionId: appointment.therapistNotionId,
+        therapistHandle: appointment.therapistHandle,
         bounceType: bounceInfo.bounceType,
         bounceReason: bounceInfo.reason,
       },

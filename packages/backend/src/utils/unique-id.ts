@@ -288,11 +288,11 @@ export async function backfillTherapists(): Promise<{
   // Get all unique therapists from appointments
   const uniqueTherapists = await prisma.appointmentRequest.findMany({
     select: {
-      therapistNotionId: true,
+      therapistHandle: true,
       therapistEmail: true,
       therapistName: true,
     },
-    distinct: ['therapistNotionId'],
+    distinct: ['therapistHandle'],
   });
 
   logger.info({ count: uniqueTherapists.length }, 'Found unique therapists to backfill');
@@ -302,10 +302,10 @@ export async function backfillTherapists(): Promise<{
   const errors: string[] = [];
   const createdRecords: Array<{ notionId: string; odId: string }> = [];
 
-  for (const { therapistNotionId, therapistEmail, therapistName } of uniqueTherapists) {
+  for (const { therapistHandle, therapistEmail, therapistName } of uniqueTherapists) {
     try {
       const existing = await prisma.therapist.findUnique({
-        where: { notionId: therapistNotionId },
+        where: { notionId: therapistHandle },
       });
 
       if (existing) {
@@ -313,13 +313,13 @@ export async function backfillTherapists(): Promise<{
         continue;
       }
 
-      const record = await getOrCreateTherapist(therapistNotionId, therapistEmail, therapistName);
+      const record = await getOrCreateTherapist(therapistHandle, therapistEmail, therapistName);
       created++;
-      createdRecords.push({ notionId: therapistNotionId, odId: record.odId });
+      createdRecords.push({ notionId: therapistHandle, odId: record.odId });
     } catch (error) {
-      const errorMsg = `Failed to create therapist for ${therapistNotionId}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      const errorMsg = `Failed to create therapist for ${therapistHandle}: ${error instanceof Error ? error.message : 'Unknown error'}`;
       errors.push(errorMsg);
-      logger.error({ notionId: therapistNotionId, error }, 'Failed to backfill therapist');
+      logger.error({ notionId: therapistHandle, error }, 'Failed to backfill therapist');
     }
   }
 
@@ -346,7 +346,7 @@ export async function linkAppointmentsToEntities(): Promise<{
     select: {
       id: true,
       userEmail: true,
-      therapistNotionId: true,
+      therapistHandle: true,
     },
   });
 
@@ -365,7 +365,7 @@ export async function linkAppointmentsToEntities(): Promise<{
 
       // Find the therapist
       const therapist = await prisma.therapist.findUnique({
-        where: { notionId: appointment.therapistNotionId },
+        where: { notionId: appointment.therapistHandle },
         select: { id: true },
       });
 

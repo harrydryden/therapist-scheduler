@@ -806,7 +806,7 @@ class AppointmentLifecycleService {
         userEmail: true,
         therapistName: true,
         therapistEmail: true,
-        therapistNotionId: true,
+        therapistHandle: true,
         confirmedDateTime: true,
         humanControlEnabled: true,
         transitionGeneration: true,
@@ -1048,7 +1048,7 @@ class AppointmentLifecycleService {
         appointmentId,
         source,
         adminId,
-        therapistNotionId: appointment.therapistNotionId,
+        therapistHandle: appointment.therapistHandle,
         therapistName: appointment.therapistName,
         userEmail: appointment.userEmail,
       }),
@@ -1169,7 +1169,7 @@ class AppointmentLifecycleService {
       user_name: string | null;
       user_email: string;
       therapist_name: string;
-      therapist_notion_id: string;
+      therapist_handle: string;
       notes: string | null;
       transition_generation: number;
     };
@@ -1180,7 +1180,7 @@ class AppointmentLifecycleService {
       adminId,
       fetchAndLock: async (tx) => {
         const rows = await tx.$queryRaw<CompletedRow[]>`
-          SELECT id, status, user_name, user_email, therapist_name, therapist_notion_id, notes, transition_generation
+          SELECT id, status, user_name, user_email, therapist_name, therapist_handle, notes, transition_generation
           FROM "appointment_requests"
           WHERE id = ${appointmentId}
           FOR UPDATE
@@ -1230,7 +1230,7 @@ class AppointmentLifecycleService {
       userName: outcome.row.user_name,
       userEmail: outcome.row.user_email,
       therapistName: outcome.row.therapist_name,
-      therapistNotionId: outcome.row.therapist_notion_id,
+      therapistHandle: outcome.row.therapist_handle,
     };
 
     // Audit narrative (conversation_state JSON). Awaited so the message lands
@@ -1262,7 +1262,7 @@ class AppointmentLifecycleService {
         appointmentId,
         source,
         adminId,
-        therapistNotionId: appointment.therapistNotionId,
+        therapistHandle: appointment.therapistHandle,
         therapistName: appointment.therapistName,
         userEmail: appointment.userEmail,
         userName: appointment.userName,
@@ -1341,7 +1341,7 @@ class AppointmentLifecycleService {
       user_email: string;
       therapist_name: string;
       therapist_email: string;
-      therapist_notion_id: string;
+      therapist_handle: string;
       human_control_enabled: boolean;
       notes: string | null;
       confirmed_date_time: string | null;
@@ -1358,7 +1358,7 @@ class AppointmentLifecycleService {
       fetchAndLock: async (tx) => {
         const rows = await tx.$queryRaw<CancelledRow[]>`
           SELECT id, status, user_name, user_email, therapist_name, therapist_email,
-                 therapist_notion_id, human_control_enabled, notes,
+                 therapist_handle, human_control_enabled, notes,
                  confirmed_date_time, confirmed_date_time_parsed,
                  gmail_thread_id, therapist_gmail_thread_id, transition_generation
           FROM "appointment_requests"
@@ -1448,7 +1448,7 @@ class AppointmentLifecycleService {
       userEmail: outcome.row.user_email,
       therapistName: outcome.row.therapist_name,
       therapistEmail: outcome.row.therapist_email,
-      therapistNotionId: outcome.row.therapist_notion_id,
+      therapistHandle: outcome.row.therapist_handle,
       confirmedDateTime: outcome.row.confirmed_date_time,
       confirmedDateTimeParsed: outcome.row.confirmed_date_time_parsed,
       gmailThreadId: outcome.row.gmail_thread_id,
@@ -1475,7 +1475,7 @@ class AppointmentLifecycleService {
         appointmentId,
         source,
         adminId,
-        therapistNotionId: appointment.therapistNotionId,
+        therapistHandle: appointment.therapistHandle,
         wasConfirmed,
         userEmail: appointment.userEmail,
       }),
@@ -1615,7 +1615,7 @@ class AppointmentLifecycleService {
       user_email: string;
       therapist_name: string;
       therapist_email: string | null;
-      therapist_notion_id: string;
+      therapist_handle: string;
     };
 
     let appointment!: {
@@ -1627,7 +1627,7 @@ class AppointmentLifecycleService {
       userEmail: string;
       therapistName: string;
       therapistEmail: string | null;
-      therapistNotionId: string;
+      therapistHandle: string;
     };
     // Track whether sentinel fields were reset inside the transaction for audit trail
     let sentinelFieldsReset = false;
@@ -1637,7 +1637,7 @@ class AppointmentLifecycleService {
       // comment) to prevent concurrent modifications.
       const rows = await tx.$queryRaw<AdminForceUpdateRow[]>`
         SELECT id, status, confirmed_date_time, confirmed_at, user_name, user_email,
-               therapist_name, therapist_email, therapist_notion_id
+               therapist_name, therapist_email, therapist_handle
         FROM "appointment_requests"
         WHERE id = ${appointmentId}
         FOR UPDATE
@@ -1658,7 +1658,7 @@ class AppointmentLifecycleService {
         userEmail: row.user_email,
         therapistName: row.therapist_name,
         therapistEmail: row.therapist_email,
-        therapistNotionId: row.therapist_notion_id,
+        therapistHandle: row.therapist_handle,
       };
 
       const previousStatus = appointment.status as AppointmentStatus;

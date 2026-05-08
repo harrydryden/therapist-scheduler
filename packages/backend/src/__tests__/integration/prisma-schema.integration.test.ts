@@ -48,7 +48,7 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
       data: {
         userName: 'Test User',
         userEmail: 'user@example.com',
-        therapistNotionId: 'test-notion-id',
+        therapistHandle: 'test-notion-id',
         therapistEmail: 'therapist@example.com',
         therapistName: 'Test Therapist',
         status: 'contacted',
@@ -66,7 +66,7 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
     const created = await prisma.appointmentRequest.create({
       data: {
         userEmail: 'user@example.com',
-        therapistNotionId: 'test-notion-id',
+        therapistHandle: 'test-notion-id',
         therapistEmail: 'therapist@example.com',
         therapistName: 'Test Therapist',
       },
@@ -87,7 +87,7 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
     await prisma.appointmentRequest.create({
       data: {
         userEmail: 'a@example.com',
-        therapistNotionId: 't1',
+        therapistHandle: 't1',
         therapistEmail: 't1@example.com',
         therapistName: 'T1',
       },
@@ -95,7 +95,7 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
     await prisma.appointmentRequest.create({
       data: {
         userEmail: 'b@example.com',
-        therapistNotionId: 't2',
+        therapistHandle: 't2',
         therapistEmail: 't2@example.com',
         therapistName: 'T2',
       },
@@ -142,7 +142,7 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
           await prisma.appointmentRequest.create({
             data: {
               userEmail: 'u@x',
-              therapistNotionId: 'n',
+              therapistHandle: 'n',
               therapistEmail: 't@x',
               therapistName: 'T',
             },

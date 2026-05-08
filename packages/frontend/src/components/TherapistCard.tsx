@@ -114,7 +114,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
   const [enteredViaDirectLink, setEnteredViaDirectLink] = useState(false);
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
-    therapistNotionId: therapist.id,
+    therapistHandle: therapist.id,
     therapistName: therapist.name,
     voucherToken: voucher?.voucherToken,
   });

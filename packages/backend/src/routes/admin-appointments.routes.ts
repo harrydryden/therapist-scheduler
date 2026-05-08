@@ -107,7 +107,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         where.status = status;
       }
       if (therapistId) {
-        where.therapistNotionId = therapistId;
+        where.therapistHandle = therapistId;
       }
       if (dateFrom || dateTo) {
         where.createdAt = {};
@@ -137,7 +137,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               userEmail: true,
               therapistName: true,
               therapistEmail: true,
-              therapistNotionId: true,
+              therapistHandle: true,
               status: true,
               confirmedAt: true,
               confirmedDateTime: true,
@@ -189,7 +189,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             userEmail: apt.userEmail,
             therapistName: apt.therapistName,
             therapistEmail: apt.therapistEmail,
-            therapistNotionId: apt.therapistNotionId,
+            therapistHandle: apt.therapistHandle,
             status: apt.status,
             messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
@@ -251,7 +251,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             userEmail: true,
             therapistName: true,
             therapistEmail: true,
-            therapistNotionId: true,
+            therapistHandle: true,
             therapistAvailability: true,
             status: true,
             confirmedAt: true,
@@ -294,7 +294,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             userEmail: appointment.userEmail,
             therapistName: appointment.therapistName,
             therapistEmail: appointment.therapistEmail,
-            therapistNotionId: appointment.therapistNotionId,
+            therapistHandle: appointment.therapistHandle,
             therapistAvailability: parseTherapistAvailability(appointment.therapistAvailability),
             status: appointment.status,
             trackingCode: appointment.trackingCode,
@@ -527,7 +527,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             userEmail: true,
             therapistEmail: true,
             therapistName: true,
-            therapistNotionId: true,
+            therapistHandle: true,
           },
         });
 
@@ -548,18 +548,18 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         });
 
         // Recalculate therapist booking status
-        if (appointment.therapistNotionId) {
+        if (appointment.therapistHandle) {
           if (wasConfirmed) {
             // Recalculate and unmark in parallel (independent status operations).
             // The previous Notion freeze-mirror has been retired — the
             // Postgres TherapistBookingStatus row is authoritative.
             await Promise.all([
-              therapistBookingStatusService.recalculateUniqueRequestCount(appointment.therapistNotionId),
-              therapistBookingStatusService.unmarkConfirmed(appointment.therapistNotionId),
+              therapistBookingStatusService.recalculateUniqueRequestCount(appointment.therapistHandle),
+              therapistBookingStatusService.unmarkConfirmed(appointment.therapistHandle),
             ]);
           } else {
             await therapistBookingStatusService.recalculateUniqueRequestCount(
-              appointment.therapistNotionId
+              appointment.therapistHandle
             );
           }
         }
@@ -1234,7 +1234,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
               userEmail: true,
               therapistName: true,
               therapistEmail: true,
-              therapistNotionId: true,
+              therapistHandle: true,
               status: true,
               confirmedAt: true,
               confirmedDateTime: true,
@@ -1277,7 +1277,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             userEmail: apt.userEmail,
             therapistName: apt.therapistName,
             therapistEmail: apt.therapistEmail,
-            therapistNotionId: apt.therapistNotionId,
+            therapistHandle: apt.therapistHandle,
             status: apt.status,
             messageCount: apt.messageCount,
             confirmedAt: apt.confirmedAt,
