@@ -693,11 +693,15 @@ export class EmailMessageProcessorService {
 
       // Classify once and reuse for both the closure auto-dismiss gate
       // (below) and the agent path (passed via precomputedClassification).
+      // Forward the RFC 3834 Auto-Submitted header — when present it's
+      // a canonical signal the message came from an autoresponder, more
+      // reliable than the body-pattern fallback.
       const earlyClassification = classifyEmail(
         email.body,
         email.from,
         appointmentRequest.therapistEmail,
         appointmentRequest.userEmail,
+        email.autoSubmitted,
       );
 
       // Auto-dismiss any pending closure recommendation: the recipient has now

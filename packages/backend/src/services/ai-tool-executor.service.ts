@@ -1059,16 +1059,26 @@ export class AIToolExecutorService {
       ? [APPOINTMENT_STATUS.CONFIRMED]
       : [APPOINTMENT_STATUS.PENDING, APPOINTMENT_STATUS.CONTACTED, APPOINTMENT_STATUS.NEGOTIATING];
 
-    // Parse the confirmed datetime for post-booking follow-ups
+    // Parse the confirmed datetime for post-booking follow-ups.
+    //
+    // Timezone interpretation: the agent emits the datetime in a single
+    // wall-clock rendering (e.g. "Monday 10am"); we parse it as the
+    // USER's local time. The user reads the confirmation email first,
+    // and the agent's prompt asks it to communicate in the user's
+    // timezone. Falling back to platform default (Europe/London) when
+    // the user's country is unknown or multi-timezone (US/CA/AU).
     const { parseConfirmedDateTime } = await import('../utils/date');
+    const { resolveRecipientTimezone } = await import('./recipient-timezone.service');
+    const userTimezone = await resolveRecipientTimezone(context.userEmail);
     const confirmedDateTimeParsed = parseConfirmedDateTime(
       params.confirmed_datetime,
-      new Date()
+      new Date(),
+      userTimezone ? { timezone: userTimezone } : {},
     );
 
     if (!confirmedDateTimeParsed) {
       logger.warn(
-        { traceId: this.traceId, confirmedDateTime: params.confirmed_datetime },
+        { traceId: this.traceId, confirmedDateTime: params.confirmed_datetime, userTimezone },
         'Could not parse confirmed datetime - follow-up emails may not be sent automatically'
       );
     }
