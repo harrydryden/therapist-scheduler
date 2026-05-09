@@ -478,6 +478,75 @@ describe('classifyEmail', () => {
         expect(result.flags.isAutoReply).toBe(false);
         expect(result.flags.mentionsFutureAbsence).toBe(false);
       });
+
+      describe('RFC 3834 Auto-Submitted header', () => {
+        it('treats Auto-Submitted: auto-replied as auto-reply even when body looks normal', () => {
+          // The body is plain scheduling text; only the header signals
+          // it's autoresponder output. The header MUST win — it's the
+          // canonical RFC 3834 signal.
+          const result = classifyEmail(
+            'Thanks for your message. We will get back to you soon.',
+            THERAPIST_EMAIL,
+            THERAPIST_EMAIL,
+            USER_EMAIL,
+            'auto-replied',
+          );
+          expect(result.flags.isAutoReply).toBe(true);
+        });
+
+        it('treats Auto-Submitted: auto-generated as auto-reply', () => {
+          const result = classifyEmail(
+            'Your message has been received.',
+            THERAPIST_EMAIL,
+            THERAPIST_EMAIL,
+            USER_EMAIL,
+            'auto-generated',
+          );
+          expect(result.flags.isAutoReply).toBe(true);
+        });
+
+        it('respects Auto-Submitted: no (explicit not-an-autoresponder)', () => {
+          // Header explicitly says it is NOT auto-submitted, body is
+          // normal scheduling text — must NOT be flagged.
+          const result = classifyEmail(
+            'Monday at 10am works for me.',
+            THERAPIST_EMAIL,
+            THERAPIST_EMAIL,
+            USER_EMAIL,
+            'no',
+          );
+          expect(result.flags.isAutoReply).toBe(false);
+        });
+
+        it('falls back to body regex when header is absent', () => {
+          // Without the header, the existing body-pattern detector
+          // remains the only signal — preserves prior behaviour.
+          const result = classifyEmail(
+            "I'm currently out of office until next week.",
+            THERAPIST_EMAIL,
+            THERAPIST_EMAIL,
+            USER_EMAIL,
+            // no autoSubmitted
+          );
+          expect(result.flags.isAutoReply).toBe(true);
+        });
+
+        it('header-says-no does NOT override body-pattern match', () => {
+          // Defensive: a misconfigured mailer might emit `no` even
+          // when generating an OOO. We still want to flag it as
+          // auto-reply because the body screams OOO. The header is a
+          // STRONG positive signal but its absence/`no` value falls
+          // through to the body regex rather than overriding it.
+          const result = classifyEmail(
+            "Automatic reply: I am currently out of office.",
+            THERAPIST_EMAIL,
+            THERAPIST_EMAIL,
+            USER_EMAIL,
+            'no',
+          );
+          expect(result.flags.isAutoReply).toBe(true);
+        });
+      });
     });
 
     it('detects preferences mentioned', () => {

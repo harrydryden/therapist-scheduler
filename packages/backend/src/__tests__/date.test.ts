@@ -120,6 +120,57 @@ describe('parseConfirmedDateTime', () => {
       expect(hours === 14 || hours === 13 || hours === 15).toBe(true);
     });
   });
+
+  describe('timezone interpretation', () => {
+    // The agent emits a wall-clock time without an explicit zone
+    // ("Monday 10am"). The lifecycle service now passes the user's
+    // timezone so the same string parses to different UTC instants
+    // depending on where the user is. February → no DST in either zone.
+    const refDate = new Date('2026-02-01T12:00:00Z');
+
+    it('parses "10am" in America/New_York as 15:00 UTC (EST)', () => {
+      const result = parseConfirmedDateTime(
+        'Tuesday 3rd February at 10am',
+        refDate,
+        { timezone: 'America/New_York' },
+      );
+      expect(result).not.toBeNull();
+      expect(result!.toISOString()).toBe('2026-02-03T15:00:00.000Z');
+    });
+
+    it('parses "10am" in Europe/London as 10:00 UTC (GMT)', () => {
+      const result = parseConfirmedDateTime(
+        'Tuesday 3rd February at 10am',
+        refDate,
+        { timezone: 'Europe/London' },
+      );
+      expect(result).not.toBeNull();
+      expect(result!.toISOString()).toBe('2026-02-03T10:00:00.000Z');
+    });
+
+    it('parses "10am" in Asia/Singapore as 02:00 UTC (SGT)', () => {
+      const result = parseConfirmedDateTime(
+        'Tuesday 3rd February at 10am',
+        refDate,
+        { timezone: 'Asia/Singapore' },
+      );
+      expect(result).not.toBeNull();
+      expect(result!.toISOString()).toBe('2026-02-03T02:00:00.000Z');
+    });
+
+    it('produces different UTC instants for different timezones with the same string', () => {
+      // The whole point of the M9 fix: same wall-clock string, different
+      // timezones, different absolute instants. If these collapse, we're
+      // back to the previous bug where every appointment was assumed
+      // Europe/London regardless of user country.
+      const ny = parseConfirmedDateTime('Tuesday 3rd February at 10am', refDate, { timezone: 'America/New_York' });
+      const london = parseConfirmedDateTime('Tuesday 3rd February at 10am', refDate, { timezone: 'Europe/London' });
+      const singapore = parseConfirmedDateTime('Tuesday 3rd February at 10am', refDate, { timezone: 'Asia/Singapore' });
+      expect(ny!.getTime()).not.toBe(london!.getTime());
+      expect(ny!.getTime()).not.toBe(singapore!.getTime());
+      expect(london!.getTime()).not.toBe(singapore!.getTime());
+    });
+  });
 });
 
 describe('calculateMeetingLinkCheckTime', () => {

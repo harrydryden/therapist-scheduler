@@ -465,9 +465,26 @@ function detectSentiment(text: string): EmailSentiment {
 }
 
 /**
- * Check if email is an actual auto-reply (sender is unreachable)
+ * Check if an email is an actual auto-reply (sender is unreachable).
+ *
+ * RFC 3834 defines an `Auto-Submitted` header that mailers append to
+ * auto-generated responses. Any value other than `no` (or absent) is
+ * the canonical signal an autoresponder produced this message — much
+ * more reliable than scraping the body. We trust it when present and
+ * fall back to body-pattern matching only when the header is missing
+ * or explicitly `no`.
+ *
+ * Common header values per RFC 3834: `auto-replied`, `auto-generated`,
+ * `auto-notified`. We treat anything that's not `no` and not empty as
+ * auto-submitted.
  */
-function isAutoReply(text: string): boolean {
+function isAutoReply(text: string, autoSubmitted?: string): boolean {
+  if (autoSubmitted) {
+    const normalized = autoSubmitted.trim().toLowerCase();
+    if (normalized && normalized !== 'no') {
+      return true;
+    }
+  }
   return AUTO_REPLY_PATTERNS.some(pattern => pattern.test(text));
 }
 
@@ -558,13 +575,17 @@ function generateSuggestedAction(classification: Omit<EmailClassification, 'sugg
  * @param fromEmail - Sender's email address
  * @param therapistEmail - The therapist's email address
  * @param userEmail - The user/client's email address
+ * @param autoSubmitted - RFC 3834 `Auto-Submitted` header value when
+ *   present. Anything other than `no` is the canonical signal the
+ *   message came from an autoresponder; we trust it over body regex.
  * @returns Classification result with intent, sentiment, and extracted data
  */
 export function classifyEmail(
   emailBody: string,
   fromEmail: string,
   therapistEmail: string,
-  userEmail: string
+  userEmail: string,
+  autoSubmitted?: string,
 ): EmailClassification {
   const isFromTherapist = fromEmail.toLowerCase() === therapistEmail.toLowerCase();
 
@@ -576,7 +597,7 @@ export function classifyEmail(
 
   const textLower = emailBody.toLowerCase();
 
-  const autoReply = isAutoReply(emailBody);
+  const autoReply = isAutoReply(emailBody, autoSubmitted);
   const futureAbsence = hasFutureAbsenceMention(emailBody);
 
   const flags = {

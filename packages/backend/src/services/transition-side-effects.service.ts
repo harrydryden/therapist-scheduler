@@ -22,6 +22,7 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { APPOINTMENT_STATUS, AppointmentStatus, ACTIVE_STATUSES } from '../constants';
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
+import { runTrackedSideEffect } from './side-effect-tracker.service';
 import type { TransitionSource, TransitionResult } from './appointment-lifecycle.service';
 
 /**
@@ -144,27 +145,29 @@ class TransitionSideEffectsService {
   /**
    * Side effects after a successful confirmation:
    * - Mark therapist as confirmed (freeze for other bookings)
+   *
+   * Routed through `runTrackedSideEffect` so a transient Postgres flap
+   * during therapist-status update doesn't silently drop the freeze —
+   * the side-effect-retry runner picks up failed rows and re-runs them
+   * (idempotent: markConfirmed sets a flag).
    */
   async onConfirmed(params: OnConfirmedParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistHandle, therapistName, userEmail } = params;
-    const logContext = { appointmentId, source, adminId };
+    const { appointmentId, therapistHandle, therapistName, userEmail } = params;
 
-    // Mark therapist as confirmed (freezes for other bookings).
-    // The previous Notion freeze-mirror has been retired (PR 2 of the
-    // Notion deprecation): the Postgres TherapistBookingStatus row is
-    // authoritative and is read directly by the public listing.
     if (therapistHandle) {
-      try {
-        await therapistBookingStatusService.markConfirmed(
+      runTrackedSideEffect(
+        appointmentId,
+        'confirmed',
+        'therapist_freeze_sync',
+        () => therapistBookingStatusService.markConfirmed(
           therapistHandle,
-          therapistName ?? 'unknown therapist'
-        );
-      } catch (err) {
-        logger.error(
-          { ...logContext, err },
-          'Failed to mark therapist as confirmed (non-critical)'
-        );
-      }
+          therapistName ?? 'unknown therapist',
+        ),
+        {
+          name: 'therapist-freeze-sync',
+          context: { appointmentId, therapistHandle },
+        },
+      );
     }
     // userEmail intentionally unused — the Notion user sync that consumed it
     // was retired with the Notion deprecation.
@@ -194,36 +197,35 @@ class TransitionSideEffectsService {
    * - Sync user to Notion
    */
   async onCompleted(params: OnCompletedParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistHandle, userEmail } = params;
-    const logContext = { appointmentId, source, adminId };
+    const { appointmentId, therapistHandle, userEmail } = params;
 
-    // Update therapist booking status and conditionally deactivate in Notion
-    // Each operation has its own try/catch so a failure in one does not block the others.
-    // Previously, a single try/catch meant a failure in unmarkConfirmed or
-    // recalculateUniqueRequestCount would skip deactivation entirely.
     if (therapistHandle) {
-      // Step 1: Clear confirmed flag and recalculate request count (independent, non-blocking)
-      try {
-        await Promise.all([
-          therapistBookingStatusService.unmarkConfirmed(therapistHandle),
-          therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle),
-        ]);
-      } catch (err) {
-        logger.error(
-          { ...logContext, therapistHandle, err },
-          'Failed to update therapist booking status after completion (non-fatal, continuing to deactivation)'
-        );
-      }
-
-      // Step 2: Conditionally deactivate therapist in Postgres (independent
-      // of Step 1). Only deactivate if they have NO other active appointments.
-      await deactivateTherapistIfLastAppointment({
+      // Routed through the side-effect tracker so a Postgres flap during
+      // these writes doesn't strand the therapist as confirmed-or-frozen
+      // for a closed appointment. The retry runner re-runs failed rows.
+      // The two steps share a single tracked task (one retry unit) so
+      // partial-progress on retry doesn't fork into two separate retry
+      // schedules. Both inner ops are idempotent.
+      runTrackedSideEffect(
         appointmentId,
-        therapistHandle,
-        taskName: 'therapist-deactivate-completion',
-        logContext,
-        successLogMessage: 'Marked therapist as inactive after last appointment completed',
-      });
+        'completed',
+        'therapist_unfreeze_sync',
+        async () => {
+          await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
+          await therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle);
+          await deactivateTherapistIfLastAppointment({
+            appointmentId,
+            therapistHandle,
+            taskName: 'therapist-deactivate-completion',
+            logContext: { appointmentId },
+            successLogMessage: 'Marked therapist as inactive after last appointment completed',
+          });
+        },
+        {
+          name: 'therapist-unfreeze-completion',
+          context: { appointmentId, therapistHandle },
+        },
+      );
     }
 
     // userEmail intentionally unused — the Notion user sync that consumed it
@@ -235,40 +237,37 @@ class TransitionSideEffectsService {
    * Side effects after a successful cancellation:
    * - Unmark therapist as confirmed (if was confirmed)
    * - Recalculate therapist booking status
-   * - Conditionally deactivate therapist in Notion
-   * - Sync therapist freeze status to Notion
+   * - Conditionally deactivate therapist if no other active appointments
+   *
+   * Same retry semantics as onCompleted — failed writes are re-driven
+   * by the side-effect retry runner.
    */
   async onCancelled(params: OnCancelledParams): Promise<void> {
-    const { appointmentId, source, adminId, therapistHandle, wasConfirmed, userEmail } = params;
-    const logContext = { appointmentId, source, adminId };
+    const { appointmentId, therapistHandle, wasConfirmed, userEmail } = params;
 
-    // Update therapist status
-    // Each operation has its own try/catch so a failure in one does not block the others.
     if (therapistHandle) {
-      // Step 1: Update booking status (non-blocking for deactivation)
-      try {
-        if (wasConfirmed) {
-          await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
-        }
-
-        await therapistBookingStatusService.recalculateUniqueRequestCount(
-          therapistHandle
-        );
-      } catch (err) {
-        logger.error(
-          { ...logContext, therapistHandle, err },
-          'Failed to update therapist booking status after cancellation (non-fatal, continuing to deactivation)'
-        );
-      }
-
-      // Step 2: Conditionally deactivate therapist (independent of Step 1).
-      await deactivateTherapistIfLastAppointment({
+      runTrackedSideEffect(
         appointmentId,
-        therapistHandle,
-        taskName: 'therapist-deactivate-cancellation',
-        logContext,
-        successLogMessage: 'Marked therapist as inactive after last appointment cancelled',
-      });
+        'cancelled',
+        'therapist_unfreeze_sync',
+        async () => {
+          if (wasConfirmed) {
+            await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
+          }
+          await therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle);
+          await deactivateTherapistIfLastAppointment({
+            appointmentId,
+            therapistHandle,
+            taskName: 'therapist-deactivate-cancellation',
+            logContext: { appointmentId },
+            successLogMessage: 'Marked therapist as inactive after last appointment cancelled',
+          });
+        },
+        {
+          name: 'therapist-unfreeze-cancellation',
+          context: { appointmentId, therapistHandle, wasConfirmed },
+        },
+      );
     }
     // userEmail intentionally unused — the Notion user sync that consumed it
     // was retired with the Notion deprecation.

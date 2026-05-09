@@ -18,6 +18,8 @@ import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
 import { JustinTimeService } from './justin-time.service';
 import { fetchSchedulingContext } from './scheduling-context.service';
+import { therapistBookingStatusService } from './therapist-booking-status.service';
+import { APPOINTMENT_STATUS, ACTIVE_STATUSES } from '../constants';
 
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
@@ -284,17 +286,72 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         );
         break;
 
-      // Legacy effect types from when Notion was authoritative. They no
-      // longer have any work to do — Postgres is the source of truth, and
-      // the data they used to mirror is written inline by the transition
-      // path. Treat as no-ops so that pre-existing rows in side_effect_logs
-      // drain cleanly without throwing.
+      case 'therapist_freeze_sync': {
+        // Re-driven freeze for an appointment whose original onConfirmed
+        // hit a transient Postgres failure. We re-derive the operation
+        // from the current appointment row: only freeze if the row is
+        // still in `confirmed`. If it drifted (cancelled/completed in
+        // the meantime), the freeze is wrong and the unfreeze path will
+        // already have run; skip.
+        if (!appointment.therapistHandle) {
+          logger.info(
+            { effectType: effect.effectType, appointmentId: appointment.id },
+            'therapist_freeze_sync no-op: appointment has no therapistHandle',
+          );
+          break;
+        }
+        if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
+          logger.info(
+            { effectType: effect.effectType, appointmentId: appointment.id, status: appointment.status },
+            'therapist_freeze_sync no-op: appointment no longer confirmed',
+          );
+          break;
+        }
+        await therapistBookingStatusService.markConfirmed(
+          appointment.therapistHandle,
+          appointment.therapistName ?? 'unknown therapist',
+        );
+        break;
+      }
+
+      case 'therapist_unfreeze_sync': {
+        // Re-driven unfreeze for completed/cancelled appointments. The
+        // operations are all idempotent so it's safe to re-run, even if
+        // the in-process attempt partially completed before failing.
+        if (!appointment.therapistHandle) {
+          logger.info(
+            { effectType: effect.effectType, appointmentId: appointment.id },
+            'therapist_unfreeze_sync no-op: appointment has no therapistHandle',
+          );
+          break;
+        }
+        const handle = appointment.therapistHandle;
+        await therapistBookingStatusService.unmarkConfirmed(handle);
+        await therapistBookingStatusService.recalculateUniqueRequestCount(handle);
+        // Conditional deactivation: only if no other active appointments.
+        const otherActive = await prisma.appointmentRequest.count({
+          where: {
+            therapistHandle: handle,
+            id: { not: appointment.id },
+            status: { in: [...ACTIVE_STATUSES] },
+          },
+        });
+        if (otherActive === 0) {
+          await prisma.therapist.updateMany({
+            where: { OR: [{ notionId: handle }, { id: handle }] },
+            data: { active: false },
+          });
+        }
+        break;
+      }
+
+      // Legacy: when Notion was authoritative, user_sync mirrored the
+      // user record there. With Notion retired, there's no work to do.
+      // Pre-existing rows still drain through here without throwing.
       case 'user_sync':
-      case 'therapist_freeze_sync':
-      case 'therapist_unfreeze_sync':
         logger.debug(
           { effectType: effect.effectType, appointmentId: appointment.id },
-          'Skipping legacy Notion-mirror side effect (no-op post-cutover)',
+          'Skipping legacy user_sync side effect (no-op post-Notion-cutover)',
         );
         break;
 
