@@ -13,21 +13,13 @@
  * occurred. After the fix we use areDatetimesEqual (semantic compare).
  */
 
-jest.mock('../utils/logger', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
-}));
-
-jest.mock('../config', () => ({
-  config: {
-    jwtSecret: 'test-secret',
-    backendUrl: 'https://backend.test',
-    frontendUrl: 'https://frontend.test',
-  },
-}));
-
-jest.mock('../utils/redis', () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
-}));
+jest.mock('../utils/logger', () => require('./_lifecycle-mocks').loggerMock());
+jest.mock('../config', () => require('./_lifecycle-mocks').configMock());
+jest.mock('../utils/redis', () => require('./_lifecycle-mocks').redisMock());
+jest.mock('../services/audit-event.service', () => require('./_lifecycle-mocks').auditEventMock());
+jest.mock('../services/appointment-event.service', () => require('./_lifecycle-mocks').appointmentEventMock());
+jest.mock('../services/ai-conversation.service', () => require('./_lifecycle-mocks').aiConversationMock());
+jest.mock('../services/slack-notification.service', () => require('./_lifecycle-mocks').slackNotificationMock());
 
 const mockFindUnique = jest.fn();
 const mockUpdate = jest.fn();
@@ -45,6 +37,8 @@ jest.mock('../utils/database', () => ({
 
 const mockOnConfirmed = jest.fn();
 const mockNotifyTransition = jest.fn();
+const mockNotifyConfirmed = jest.fn();
+
 jest.mock('../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {
     notifyTransition: (...a: unknown[]) => mockNotifyTransition(...a),
@@ -56,34 +50,11 @@ jest.mock('../services/transition-side-effects.service', () => ({
   },
 }));
 
-const mockNotifyConfirmed = jest.fn();
 jest.mock('../services/appointment-notifications.service', () => ({
   appointmentNotificationsService: {
     notifyConfirmed: (...a: unknown[]) => mockNotifyConfirmed(...a),
     notifyCancelled: jest.fn(),
     notifyCompleted: jest.fn(),
-  },
-}));
-
-jest.mock('../services/audit-event.service', () => ({
-  auditEventService: { log: jest.fn() },
-}));
-
-jest.mock('../services/appointment-event.service', () => ({
-  recordAppointmentEvent: jest.fn(),
-}));
-
-jest.mock('../services/ai-conversation.service', () => ({
-  aiConversationService: { applyCheckpointUpdate: jest.fn() },
-  inferRestoredStage: jest.fn(),
-}));
-
-jest.mock('../services/slack-notification.service', () => ({
-  slackNotificationService: {
-    sendAlert: jest.fn(),
-    notifyAppointmentConfirmed: jest.fn(),
-    notifyAppointmentCancelled: jest.fn(),
-    notifyAppointmentCompleted: jest.fn(),
   },
 }));
 

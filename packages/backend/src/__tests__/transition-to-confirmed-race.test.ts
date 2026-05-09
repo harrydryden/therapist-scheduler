@@ -24,21 +24,15 @@
  *     atomicSkipped (atomic)
  */
 
-jest.mock('../utils/logger', () => ({
-  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+jest.mock('../utils/logger', () => require('./_lifecycle-mocks').loggerMock());
+jest.mock('../config', () => require('./_lifecycle-mocks').configMock());
+jest.mock('../utils/redis', () => require('./_lifecycle-mocks').redisMock());
+jest.mock('../services/audit-event.service', () => ({
+  auditEventService: { log: (...a: unknown[]) => mockAuditLog(...a) },
 }));
-
-jest.mock('../config', () => ({
-  config: {
-    jwtSecret: 'test-secret',
-    backendUrl: 'https://backend.test',
-    frontendUrl: 'https://frontend.test',
-  },
-}));
-
-jest.mock('../utils/redis', () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
-}));
+jest.mock('../services/appointment-event.service', () => require('./_lifecycle-mocks').appointmentEventMock());
+jest.mock('../services/ai-conversation.service', () => require('./_lifecycle-mocks').aiConversationMock());
+jest.mock('../services/slack-notification.service', () => require('./_lifecycle-mocks').slackNotificationMock());
 
 const mockFindUnique = jest.fn();
 const mockUpdate = jest.fn();
@@ -55,10 +49,6 @@ jest.mock('../utils/database', () => ({
 }));
 
 const mockOnConfirmed = jest.fn();
-const mockOnSessionHeld = jest.fn();
-const mockOnCompleted = jest.fn();
-const mockOnCancelled = jest.fn();
-const mockOnAdminForceUpdate = jest.fn();
 const mockNotifyTransition = jest.fn();
 const mockNotifyConfirmed = jest.fn();
 const mockAuditLog = jest.fn();
@@ -67,10 +57,10 @@ jest.mock('../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {
     notifyTransition: (...a: unknown[]) => mockNotifyTransition(...a),
     onConfirmed: (...a: unknown[]) => mockOnConfirmed(...a),
-    onSessionHeld: (...a: unknown[]) => mockOnSessionHeld(...a),
-    onCompleted: (...a: unknown[]) => mockOnCompleted(...a),
-    onCancelled: (...a: unknown[]) => mockOnCancelled(...a),
-    onAdminForceUpdate: (...a: unknown[]) => mockOnAdminForceUpdate(...a),
+    onSessionHeld: jest.fn(),
+    onCompleted: jest.fn(),
+    onCancelled: jest.fn(),
+    onAdminForceUpdate: jest.fn(),
   },
 }));
 
@@ -82,31 +72,9 @@ jest.mock('../services/appointment-notifications.service', () => ({
   },
 }));
 
-jest.mock('../services/audit-event.service', () => ({
-  auditEventService: { log: (...a: unknown[]) => mockAuditLog(...a) },
-}));
-
-jest.mock('../services/appointment-event.service', () => ({
-  recordAppointmentEvent: jest.fn(),
-}));
-
-jest.mock('../services/ai-conversation.service', () => ({
-  aiConversationService: { applyCheckpointUpdate: jest.fn() },
-  inferRestoredStage: jest.fn(),
-}));
-
-jest.mock('../services/slack-notification.service', () => ({
-  slackNotificationService: {
-    sendAlert: jest.fn(),
-    notifyAppointmentConfirmed: jest.fn(),
-    notifyAppointmentCancelled: jest.fn(),
-    notifyAppointmentCompleted: jest.fn(),
-  },
-}));
-
-import { Prisma } from '@prisma/client';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { InvalidTransitionError } from '../errors';
+import { p2025 } from './_lifecycle-mocks';
 
 const TARGET = '2026-06-01T10:00:00.000Z';
 const PREVIOUS = '2026-05-15T10:00:00.000Z';
@@ -123,17 +91,6 @@ const baseRow = {
   humanControlEnabled: false,
   transitionGeneration: 5,
 };
-
-/**
- * Build a P2025 (RecordNotFound) error matching what Prisma emits when
- * an `update` call's where-clause preconditions don't match any row.
- */
-function p2025(): Prisma.PrismaClientKnownRequestError {
-  return new Prisma.PrismaClientKnownRequestError(
-    'No record was found for an update.',
-    { code: 'P2025', clientVersion: 'test' },
-  );
-}
 
 beforeEach(() => {
   jest.clearAllMocks();

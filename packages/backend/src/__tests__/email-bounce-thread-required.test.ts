@@ -62,8 +62,6 @@ const baseAppointment = {
 const bounceInfo: BounceInfo = {
   isBounce: true,
   bounceType: 'hard',
-  originalRecipient: VICTIM_EMAIL,
-  reason: '550 user unknown',
   detectionMethod: 'sender',
 };
 
@@ -75,10 +73,12 @@ beforeEach(() => {
 });
 
 describe('handleBounce — thread-id requirement', () => {
-  it('refuses to cancel when no threadId is provided, even with a body-extracted recipient', async () => {
-    // The attacker scenario: forged `mailer-daemon` email, body contains
-    // "Original recipient: victim@example.com", but no threadId because
-    // it didn't arrive in any of our existing Gmail threads.
+  it('refuses to cancel when no threadId is provided', async () => {
+    // The attacker scenario: forged `mailer-daemon` email arriving with
+    // no threadId (it didn't arrive in any of our existing Gmail
+    // threads). After the body-extraction removal, refusal is the only
+    // possible behaviour here — there's nothing for the attacker to
+    // even attempt to spoof.
     const result = await handleBounce(bounceInfo, { messageId: 'attacker-msg' });
 
     expect(result.handled).toBe(false);
@@ -118,22 +118,20 @@ describe('handleBounce — thread-id requirement', () => {
     );
   });
 
-  it('derives bouncedRole from the matched thread, not the attacker-controlled body', async () => {
-    // Body claims the therapist bounced, but the thread that matched is
-    // the *client* thread — so bouncedRole must be 'client', ignoring
-    // the body-extracted recipient.
-    mockFindFirst.mockResolvedValueOnce(baseAppointment); // gmailThreadId match
+  it('derives bouncedRole from the matched thread', async () => {
+    // The matched thread (gmailThreadId) is the client thread, so the
+    // bouncedRole must be 'client'. The body-extracted recipient was
+    // removed entirely after C1 — there is no longer any way for the
+    // attacker-controlled body to override this decision.
+    mockFindFirst.mockResolvedValueOnce(baseAppointment);
 
-    await handleBounce(
-      { ...bounceInfo, originalRecipient: 'therapist@example.com' },
-      { threadId: APPOINTMENT_THREAD_ID, messageId: 'msg-1' },
-    );
+    await handleBounce(bounceInfo, { threadId: APPOINTMENT_THREAD_ID, messageId: 'msg-1' });
 
     expect(mockNotifyEmailBounce).toHaveBeenCalledWith(
       'apt-real',
       'Victim',
       'Therapist',
-      'client', // derived from gmailThreadId match, not body
+      'client',
       expect.any(String),
     );
   });

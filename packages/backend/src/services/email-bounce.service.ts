@@ -17,7 +17,7 @@ import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { InvalidTransitionError } from '../errors';
 
 /**
- * Common bounce message patterns
+ * Subject-line markers for bounce notifications.
  */
 const BOUNCE_SUBJECT_PATTERNS = [
   /delivery.*fail/i,
@@ -35,6 +35,9 @@ const BOUNCE_SUBJECT_PATTERNS = [
   /could.*not.*be.*delivered/i,
 ];
 
+/**
+ * Sender envelopes that signal a bounce.
+ */
 const BOUNCE_SENDER_PATTERNS = [
   /mailer-daemon/i,
   /postmaster/i,
@@ -43,32 +46,30 @@ const BOUNCE_SENDER_PATTERNS = [
   /noreply.*google/i,
 ];
 
-const BOUNCE_BODY_PATTERNS = [
-  /550.*user.*unknown/i,
-  /550.*no.*such.*user/i,
-  /550.*mailbox.*not.*found/i,
-  /550.*recipient.*rejected/i,
-  /550.*invalid.*recipient/i,
-  /553.*mailbox.*name.*not.*allowed/i,
-  /554.*delivery.*error/i,
-  /552.*mailbox.*full/i, // Soft bounce but still indicates issue
-  /address.*does.*not.*exist/i,
-  /no.*mailbox.*here/i,
-  /account.*disabled/i,
-  /account.*suspended/i,
-  /this.*address.*no.*longer.*accepts.*mail/i,
-];
+/**
+ * SMTP-code regexes used to classify a bounce as hard / soft / unknown.
+ * Hard = permanent failure (550-class, "user unknown", "no such user").
+ * Soft = transient (552-class, mailbox full, try again).
+ * The classification informs the cancellation note and the Slack alert
+ * but does NOT drive any decision about whether to cancel — that's
+ * handled by the threadId match in `handleBounce`.
+ */
+const HARD_BOUNCE_BODY = /550|553|554|invalid|unknown|not.*found|rejected|does.*not.*exist/i;
+const SOFT_BOUNCE_BODY = /552|full|quota|temporarily|try.*again/i;
 
 export interface BounceInfo {
   isBounce: boolean;
   bounceType: 'hard' | 'soft' | 'unknown' | null;
-  originalRecipient: string | null;
-  reason: string | null;
-  detectionMethod: 'subject' | 'sender' | 'body' | null;
+  detectionMethod: 'subject' | 'sender' | null;
 }
 
 /**
- * Analyze an email to determine if it's a bounce notification
+ * Analyze an email to determine if it's a bounce notification.
+ *
+ * Body-extracted recipient and SMTP-error-string fields used to be
+ * surfaced too, but after the threadId-required hardening they're not
+ * load-bearing for any decision (and were attacker-controllable). The
+ * bounceType + detectionMethod is the triage signal we actually use.
  */
 export function detectBounce(email: {
   from: string;
@@ -78,12 +79,10 @@ export function detectBounce(email: {
   const result: BounceInfo = {
     isBounce: false,
     bounceType: null,
-    originalRecipient: null,
-    reason: null,
     detectionMethod: null,
   };
 
-  // Check sender patterns (highest confidence)
+  // Sender patterns are the strongest signal — checked first.
   for (const pattern of BOUNCE_SENDER_PATTERNS) {
     if (pattern.test(email.from)) {
       result.isBounce = true;
@@ -92,7 +91,6 @@ export function detectBounce(email: {
     }
   }
 
-  // Check subject patterns
   if (!result.isBounce) {
     for (const pattern of BOUNCE_SUBJECT_PATTERNS) {
       if (pattern.test(email.subject)) {
@@ -103,32 +101,13 @@ export function detectBounce(email: {
     }
   }
 
-  // If we detected a bounce, analyze the body for more details
   if (result.isBounce) {
-    // Determine bounce type
-    if (/550|553|554|invalid|unknown|not.*found|rejected|does.*not.*exist/i.test(email.body)) {
-      result.bounceType = 'hard'; // Permanent failure
-    } else if (/552|full|quota|temporarily|try.*again/i.test(email.body)) {
-      result.bounceType = 'soft'; // Temporary failure
+    if (HARD_BOUNCE_BODY.test(email.body)) {
+      result.bounceType = 'hard';
+    } else if (SOFT_BOUNCE_BODY.test(email.body)) {
+      result.bounceType = 'soft';
     } else {
       result.bounceType = 'unknown';
-    }
-
-    // Try to extract the original recipient email
-    const recipientMatch = email.body.match(
-      /(?:original.*recipient|to:|recipient|address)[:\s]*<?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})>?/i
-    );
-    if (recipientMatch) {
-      result.originalRecipient = recipientMatch[1].toLowerCase();
-    }
-
-    // Extract reason
-    for (const pattern of BOUNCE_BODY_PATTERNS) {
-      const match = email.body.match(pattern);
-      if (match) {
-        result.reason = match[0];
-        break;
-      }
     }
   }
 
@@ -156,12 +135,7 @@ export async function handleBounce(
   const traceId = `bounce-${Date.now().toString(36)}`;
 
   logger.info(
-    {
-      traceId,
-      bounceType: bounceInfo.bounceType,
-      recipient: bounceInfo.originalRecipient,
-      reason: bounceInfo.reason,
-    },
+    { traceId, bounceType: bounceInfo.bounceType, detection: bounceInfo.detectionMethod },
     'Handling email bounce'
   );
 
@@ -178,13 +152,9 @@ export async function handleBounce(
     // proves that the bounce relates to one of our outbound messages —
     // without it, an attacker could craft a fake bounce email naming any
     // victim's address in the body and silently cancel their appointment.
-    //
-    // The body-extracted `originalRecipient` is attacker-controlled and is
-    // therefore no longer used to find appointments. It's still surfaced in
-    // logs and Slack alerts as low-confidence context.
     if (!originalEmail?.threadId) {
       logger.warn(
-        { traceId, recipient: bounceInfo.originalRecipient },
+        { traceId },
         'Bounce detected but no threadId — refusing to auto-cancel (admin review required)'
       );
       result.error = 'No threadId on bounce — admin review required';
@@ -227,8 +197,8 @@ export async function handleBounce(
     // confirmed/cancelled to preserve the legacy "skip if already confirmed"
     // behaviour — admins should manually action a confirmed-then-bounced case).
     const bounceReason =
-      `[BOUNCE] Email delivery failed: ${bounceInfo.reason || bounceInfo.bounceType}. ` +
-      `Original recipient: ${bounceInfo.originalRecipient || 'unknown'}.`;
+      `[BOUNCE] Email delivery failed (${bounceInfo.bounceType ?? 'unknown'} bounce, ` +
+      `detected via ${bounceInfo.detectionMethod ?? 'unknown'}).`;
 
     try {
       const transitionResult = await appointmentLifecycleService.transitionToCancelled({
@@ -271,20 +241,9 @@ export async function handleBounce(
     result.therapistUnfrozen = true;
     result.handled = true;
 
-    logger.info(
-      {
-        traceId,
-        appointmentId: appointment.id,
-        therapistHandle: appointment.therapistHandle,
-        userEmail: bounceInfo.originalRecipient,
-      },
-      'Therapist unfrozen after email bounce'
-    );
-
-    // Log the bounce event for admin visibility. The userEmail/userName
-    // are intentionally retained in the application log (server-side,
-    // PII-redacted by the pino logger config) but kept out of Slack —
-    // see notifyEmailBounce.
+    // Log the bounce event for admin visibility. userEmail/userName are
+    // retained in application logs (server-side, PII-redacted by pino
+    // config) but kept out of Slack — see notifyEmailBounce.
     logger.warn(
       {
         traceId,
@@ -295,14 +254,13 @@ export async function handleBounce(
         therapistName: appointment.therapistName,
         therapistHandle: appointment.therapistHandle,
         bounceType: bounceInfo.bounceType,
-        bounceReason: bounceInfo.reason,
+        detection: bounceInfo.detectionMethod,
       },
-      `Appointment cancelled due to email bounce - therapist unfrozen`
+      'Appointment cancelled due to email bounce - therapist unfrozen'
     );
 
     // Send Slack notification for email bounce. Derive the bounced role
-    // from which thread matched (therapistGmailThreadId vs gmailThreadId)
-    // rather than the attacker-controlled body-extracted recipient.
+    // from which thread matched (therapistGmailThreadId vs gmailThreadId).
     const bouncedRole: 'client' | 'therapist' =
       appointment.therapistGmailThreadId === originalEmail.threadId
         ? 'therapist'
@@ -312,13 +270,13 @@ export async function handleBounce(
       appointment.userName,
       appointment.therapistName,
       bouncedRole,
-      bounceInfo.reason || bounceInfo.bounceType || 'Unknown bounce reason'
+      `${bounceInfo.bounceType ?? 'unknown'} bounce`,
     );
 
     return result;
   } catch (error) {
     logger.error(
-      { traceId, error, recipient: bounceInfo.originalRecipient },
+      { traceId, error },
       'Failed to handle email bounce'
     );
     result.error = error instanceof Error ? error.message : 'Unknown error';
@@ -348,7 +306,7 @@ export async function processPotentialBounce(email: {
       from: email.from,
       subject: email.subject.substring(0, 100),
       bounceType: bounceInfo.bounceType,
-      recipient: bounceInfo.originalRecipient,
+      detection: bounceInfo.detectionMethod,
     },
     'Detected bounce email'
   );
@@ -373,8 +331,8 @@ export async function processPotentialBounce(email: {
         `If this is a real bounce, the appointment must be cancelled manually.`,
       additionalFields: {
         'Detection method': bounceInfo.detectionMethod ?? 'unknown',
+        'Bounce type': bounceInfo.bounceType ?? 'unknown',
         'Subject': email.subject.slice(0, 100),
-        'Reason': bounceInfo.reason ?? 'unspecified',
       },
     }).catch((err) => {
       logger.warn({ err }, 'Failed to send Slack alert for unactioned bounce');
