@@ -47,8 +47,12 @@ import {
   addNote,
   getThreadMemory,
   formatMemoryForPrompt,
+  addAvailabilityWindow,
+  getActiveWindows,
+  formatAvailabilityWindowsForPrompt,
   MAX_NOTES_PER_THREAD,
   MAX_NOTE_LENGTH,
+  MAX_WINDOWS_PER_THREAD,
 } from '../services/agent-memory.service';
 
 beforeEach(() => {
@@ -229,7 +233,7 @@ describe('agent-memory: corrupt-data robustness', () => {
 
 describe('agent-memory: prompt formatting', () => {
   it('returns empty string when there are no notes', () => {
-    expect(formatMemoryForPrompt({ notes: [] })).toBe('');
+    expect(formatMemoryForPrompt({ notes: [], availabilityWindows: [] })).toBe('');
   });
 
   it('groups notes by category in stable order', () => {
@@ -240,6 +244,7 @@ describe('agent-memory: prompt formatting', () => {
         { id: '3', category: 'preference', text: 'short emails', createdAt: '2026-01-01' },
         { id: '4', category: 'decision', text: 'weekly Mondays going forward', createdAt: '2026-01-01' },
       ],
+      availabilityWindows: [],
     });
 
     // Stable order is preference → constraint → context → decision
@@ -262,10 +267,281 @@ describe('agent-memory: prompt formatting', () => {
       notes: [
         { id: '1', category: 'preference', text: 'just one', createdAt: '2026-01-01' },
       ],
+      availabilityWindows: [],
     });
     expect(formatted).toContain('Preferences');
     expect(formatted).not.toContain('Constraints');
     expect(formatted).not.toContain('Context');
     expect(formatted).not.toContain('Decisions');
+  });
+});
+
+describe('agent-memory: availability windows — cross-appointment isolation', () => {
+  it('windows written to one appointment never appear when reading another', async () => {
+    seedAppointment('apt-A');
+    seedAppointment('apt-B');
+
+    await addAvailabilityWindow('apt-A', {
+      startsAt: '2099-01-05T10:00:00+00:00',
+      endsAt: '2099-01-05T11:00:00+00:00',
+      status: 'available',
+      source: 'therapist',
+      quote: 'A: this Friday morning',
+    });
+    await addAvailabilityWindow('apt-B', {
+      startsAt: '2099-01-12T14:00:00+00:00',
+      endsAt: '2099-01-12T15:00:00+00:00',
+      status: 'unavailable',
+      source: 'therapist',
+      quote: 'B: out next Friday afternoon',
+    });
+
+    const memA = await getThreadMemory('apt-A');
+    const memB = await getThreadMemory('apt-B');
+
+    expect(memA.availabilityWindows).toHaveLength(1);
+    expect(memA.availabilityWindows[0].quote).toContain('A:');
+    expect(memB.availabilityWindows).toHaveLength(1);
+    expect(memB.availabilityWindows[0].quote).toContain('B:');
+    // The critical assertion: B's read does NOT contain A's content.
+    expect(memB.availabilityWindows.some((w) => w.quote.includes('A:'))).toBe(false);
+  });
+
+  it('notes and windows live in the same memory blob without overwriting each other', async () => {
+    seedAppointment('apt-1');
+    await addNote('apt-1', 'preference', 'prefers afternoons');
+    await addAvailabilityWindow('apt-1', {
+      startsAt: '2099-01-05T10:00:00+00:00',
+      endsAt: '2099-01-05T11:00:00+00:00',
+      status: 'available',
+      source: 'therapist',
+      quote: 'this Friday',
+    });
+    await addNote('apt-1', 'context', 'job interview Friday');
+
+    const mem = await getThreadMemory('apt-1');
+    expect(mem.notes.map((n) => n.text)).toEqual(['prefers afternoons', 'job interview Friday']);
+    expect(mem.availabilityWindows).toHaveLength(1);
+  });
+});
+
+describe('agent-memory: addAvailabilityWindow validation', () => {
+  beforeEach(() => seedAppointment('apt-1'));
+
+  it('rejects unparseable timestamps', async () => {
+    await expect(
+      addAvailabilityWindow('apt-1', {
+        startsAt: 'not a date',
+        endsAt: '2099-01-05T11:00:00+00:00',
+        status: 'available',
+        source: 'therapist',
+        quote: 'q',
+      }),
+    ).rejects.toThrow(/parseable ISO/);
+  });
+
+  it('rejects endsAt <= startsAt', async () => {
+    await expect(
+      addAvailabilityWindow('apt-1', {
+        startsAt: '2099-01-05T11:00:00+00:00',
+        endsAt: '2099-01-05T10:00:00+00:00',
+        status: 'available',
+        source: 'therapist',
+        quote: 'q',
+      }),
+    ).rejects.toThrow(/strictly after/);
+  });
+
+  it('dedupes identical windows on the same appointment', async () => {
+    const params = {
+      startsAt: '2099-01-05T10:00:00+00:00',
+      endsAt: '2099-01-05T11:00:00+00:00',
+      status: 'available' as const,
+      source: 'therapist' as const,
+      quote: 'this Friday morning',
+    };
+    const first = await addAvailabilityWindow('apt-1', params);
+    const second = await addAvailabilityWindow('apt-1', { ...params, quote: 'paraphrased differently' });
+    expect(first.added).toBe(true);
+    expect(second.added).toBe(false);
+    // Quote on the stored window is from the first call, not overwritten
+    // by the second's paraphrase.
+    expect(second.memory.availabilityWindows[0].quote).toBe('this Friday morning');
+  });
+
+  it('treats different status as different windows', async () => {
+    const base = {
+      startsAt: '2099-01-05T10:00:00+00:00',
+      endsAt: '2099-01-05T11:00:00+00:00',
+      source: 'therapist' as const,
+      quote: 'q',
+    };
+    await addAvailabilityWindow('apt-1', { ...base, status: 'available' });
+    const second = await addAvailabilityWindow('apt-1', { ...base, status: 'unavailable' });
+    expect(second.added).toBe(true);
+    expect(second.memory.availabilityWindows).toHaveLength(2);
+  });
+});
+
+describe('agent-memory: window FIFO eviction', () => {
+  it('evicts the oldest window once MAX_WINDOWS_PER_THREAD is exceeded', async () => {
+    seedAppointment('apt-1');
+    // Each window must have a unique (start, end) combo to dedupe across,
+    // so we space them by an hour.
+    const baseStart = Date.parse('2099-01-01T00:00:00+00:00');
+    for (let i = 0; i < MAX_WINDOWS_PER_THREAD; i++) {
+      const s = new Date(baseStart + i * 3600_000).toISOString();
+      const e = new Date(baseStart + (i + 1) * 3600_000).toISOString();
+      await addAvailabilityWindow('apt-1', {
+        startsAt: s,
+        endsAt: e,
+        status: 'available',
+        source: 'therapist',
+        quote: `slot-${i}`,
+      });
+    }
+    let mem = await getThreadMemory('apt-1');
+    expect(mem.availabilityWindows).toHaveLength(MAX_WINDOWS_PER_THREAD);
+    expect(mem.availabilityWindows[0].quote).toBe('slot-0');
+
+    // One overflow → evicts slot-0
+    const overflowStart = new Date(baseStart + (MAX_WINDOWS_PER_THREAD) * 3600_000).toISOString();
+    const overflowEnd = new Date(baseStart + (MAX_WINDOWS_PER_THREAD + 1) * 3600_000).toISOString();
+    await addAvailabilityWindow('apt-1', {
+      startsAt: overflowStart,
+      endsAt: overflowEnd,
+      status: 'available',
+      source: 'therapist',
+      quote: 'overflow',
+    });
+    mem = await getThreadMemory('apt-1');
+    expect(mem.availabilityWindows).toHaveLength(MAX_WINDOWS_PER_THREAD);
+    expect(mem.availabilityWindows[0].quote).toBe('slot-1');
+    expect(mem.availabilityWindows[mem.availabilityWindows.length - 1].quote).toBe('overflow');
+  });
+});
+
+describe('agent-memory: getActiveWindows future-only filter', () => {
+  it('drops windows whose endsAt is in the past', () => {
+    const now = new Date('2026-06-01T12:00:00Z');
+    const memory = {
+      notes: [],
+      availabilityWindows: [
+        // Past — must be dropped
+        {
+          id: 'past',
+          startsAt: '2026-05-15T10:00:00Z',
+          endsAt: '2026-05-15T11:00:00Z',
+          status: 'available' as const,
+          source: 'therapist' as const,
+          quote: 'past',
+          recordedAt: '2026-05-10T10:00:00Z',
+        },
+        // Future — kept
+        {
+          id: 'future',
+          startsAt: '2026-06-05T10:00:00Z',
+          endsAt: '2026-06-05T11:00:00Z',
+          status: 'available' as const,
+          source: 'therapist' as const,
+          quote: 'future',
+          recordedAt: '2026-05-30T10:00:00Z',
+        },
+      ],
+    };
+    const active = getActiveWindows(memory, now);
+    expect(active).toHaveLength(1);
+    expect(active[0].id).toBe('future');
+  });
+
+  it('sorts active windows by startsAt ascending', () => {
+    const now = new Date('2026-06-01T12:00:00Z');
+    const memory = {
+      notes: [],
+      availabilityWindows: [
+        {
+          id: 'later',
+          startsAt: '2026-06-20T10:00:00Z',
+          endsAt: '2026-06-20T11:00:00Z',
+          status: 'available' as const,
+          source: 'therapist' as const,
+          quote: 'later',
+          recordedAt: '2026-05-30T10:00:00Z',
+        },
+        {
+          id: 'sooner',
+          startsAt: '2026-06-05T10:00:00Z',
+          endsAt: '2026-06-05T11:00:00Z',
+          status: 'available' as const,
+          source: 'therapist' as const,
+          quote: 'sooner',
+          recordedAt: '2026-05-30T10:00:00Z',
+        },
+      ],
+    };
+    const active = getActiveWindows(memory, now);
+    expect(active.map((w) => w.id)).toEqual(['sooner', 'later']);
+  });
+});
+
+describe('agent-memory: window prompt formatting', () => {
+  it('returns empty string when there are no future windows', () => {
+    expect(formatAvailabilityWindowsForPrompt({ notes: [], availabilityWindows: [] })).toBe('');
+  });
+
+  it('separates available from unavailable sections', () => {
+    const now = new Date('2026-06-01T12:00:00Z');
+    const formatted = formatAvailabilityWindowsForPrompt(
+      {
+        notes: [],
+        availabilityWindows: [
+          {
+            id: 'a1',
+            startsAt: '2026-06-05T10:00:00Z',
+            endsAt: '2026-06-05T11:00:00Z',
+            status: 'available',
+            source: 'therapist',
+            quote: 'this Friday',
+            recordedAt: '2026-05-30T10:00:00Z',
+          },
+          {
+            id: 'b1',
+            startsAt: '2026-06-15T00:00:00Z',
+            endsAt: '2026-06-22T00:00:00Z',
+            status: 'unavailable',
+            source: 'therapist',
+            quote: 'out the week of the 15th',
+            recordedAt: '2026-05-30T10:00:00Z',
+          },
+        ],
+      },
+      now,
+    );
+    expect(formatted).toContain('Mentioned available windows');
+    expect(formatted).toContain('Mentioned unavailable windows');
+    expect(formatted).toContain('this Friday');
+    expect(formatted).toContain('out the week of the 15th');
+  });
+
+  it('omits expired windows from the rendered prompt', () => {
+    const now = new Date('2026-06-01T12:00:00Z');
+    const formatted = formatAvailabilityWindowsForPrompt(
+      {
+        notes: [],
+        availabilityWindows: [
+          {
+            id: 'expired',
+            startsAt: '2026-05-15T10:00:00Z',
+            endsAt: '2026-05-15T11:00:00Z',
+            status: 'available',
+            source: 'therapist',
+            quote: 'last week',
+            recordedAt: '2026-05-10T10:00:00Z',
+          },
+        ],
+      },
+      now,
+    );
+    expect(formatted).toBe('');
   });
 });

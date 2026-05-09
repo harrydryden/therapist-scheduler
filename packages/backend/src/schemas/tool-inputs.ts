@@ -43,3 +43,23 @@ export const rememberInputSchema = z.object({
   note: z.string().min(1).max(280),
   category: z.enum(['preference', 'constraint', 'context', 'decision']),
 });
+
+/**
+ * Validate an availability-window tool call. Both ends must be
+ * parseable ISO 8601 datetimes; ordering and "not entirely in the
+ * past" are checked at execution time so we can give the agent a
+ * specific error message rather than a generic Zod failure.
+ */
+export const recordAvailabilityWindowInputSchema = z.object({
+  starts_at: z.string().min(1).max(50).refine(
+    (s) => !isNaN(Date.parse(s)),
+    'starts_at must be a parseable ISO 8601 datetime (e.g. "2026-02-03T10:00:00+00:00")',
+  ),
+  ends_at: z.string().min(1).max(50).refine(
+    (s) => !isNaN(Date.parse(s)),
+    'ends_at must be a parseable ISO 8601 datetime',
+  ),
+  status: z.enum(['available', 'unavailable']),
+  source: z.enum(['therapist', 'user']),
+  quote: z.string().min(1).max(280),
+});

@@ -197,6 +197,39 @@ export const schedulingTools: Anthropic.Tool[] = [
       required: ['note', 'category'],
     },
   },
+  {
+    name: 'record_availability_window',
+    description:
+      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. The quote field captures the original phrasing for traceability.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        starts_at: {
+          type: 'string',
+          description: 'Absolute start of the window in ISO 8601 with offset, e.g. "2026-02-03T10:00:00+00:00". Compute this from the relative phrasing using today\'s date.',
+        },
+        ends_at: {
+          type: 'string',
+          description: 'Absolute end of the window in ISO 8601 with offset. Must be strictly after starts_at and not entirely in the past.',
+        },
+        status: {
+          type: 'string',
+          enum: ['available', 'unavailable'],
+          description: 'available = an open slot the therapist (or user) offered; unavailable = an explicit block / holiday / out-of-office.',
+        },
+        source: {
+          type: 'string',
+          enum: ['therapist', 'user'],
+          description: 'Who said it. Usually \'therapist\', but the user can also note their own absences.',
+        },
+        quote: {
+          type: 'string',
+          description: 'The original phrase from the email, verbatim. Helps later turns and admins verify your date resolution. Maximum 280 characters.',
+        },
+      },
+      required: ['starts_at', 'ends_at', 'status', 'source', 'quote'],
+    },
+  },
 ];
 
 /** Tools whose execution produces external side effects (DB mutations, emails).

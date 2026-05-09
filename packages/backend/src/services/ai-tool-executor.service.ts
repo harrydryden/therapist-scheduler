@@ -46,8 +46,9 @@ import {
   recommendCancelMatchInputSchema,
   issueVoucherCodeInputSchema,
   rememberInputSchema,
+  recordAvailabilityWindowInputSchema,
 } from '../schemas/tool-inputs';
-import { addNote } from './agent-memory.service';
+import { addNote, addAvailabilityWindow } from './agent-memory.service';
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
 
@@ -540,6 +541,58 @@ export class AIToolExecutorService {
               ? `Note recorded (category: ${parsed.data.category}, id: ${result.noteId}). Total notes: ${result.memory.notes.length}.`
               : `Note already present (id: ${result.noteId}). Skipped duplicate.`,
           };
+        }
+
+        case 'record_availability_window': {
+          const parsed = recordAvailabilityWindowInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Invalid record_availability_window input: ${parsed.error.message}`,
+            };
+          }
+          const startMs = Date.parse(parsed.data.starts_at);
+          const endMs = Date.parse(parsed.data.ends_at);
+          if (endMs <= startMs) {
+            return {
+              success: false,
+              toolName: name,
+              error: 'ends_at must be strictly after starts_at',
+            };
+          }
+          // Reject windows that have already passed entirely. The agent
+          // sometimes resolves "Friday" to the wrong Friday — a window
+          // ending in the past is almost always a date-resolution bug
+          // and storing it would mislead later turns.
+          if (endMs <= Date.now()) {
+            return {
+              success: false,
+              toolName: name,
+              error:
+                'ends_at is already in the past — this window has no future value. ' +
+                'If you intended to record a future window, re-check the date you computed (perhaps "next Friday" needed +7 days).',
+            };
+          }
+          try {
+            const result = await addAvailabilityWindow(context.appointmentRequestId, {
+              startsAt: parsed.data.starts_at,
+              endsAt: parsed.data.ends_at,
+              status: parsed.data.status,
+              source: parsed.data.source,
+              quote: parsed.data.quote,
+            });
+            return {
+              success: true,
+              toolName: name,
+              resultMessage: result.added
+                ? `Availability window recorded (id: ${result.windowId}, status: ${parsed.data.status}, source: ${parsed.data.source}). Total active windows: ${result.memory.availabilityWindows.length}.`
+                : `Availability window already present (id: ${result.windowId}). Skipped duplicate.`,
+            };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return { success: false, toolName: name, error: msg };
+          }
         }
 
         default:
