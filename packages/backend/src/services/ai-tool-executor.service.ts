@@ -45,7 +45,9 @@ import {
   initiateRescheduleInputSchema,
   recommendCancelMatchInputSchema,
   issueVoucherCodeInputSchema,
+  rememberInputSchema,
 } from '../schemas/tool-inputs';
+import { addNote } from './agent-memory.service';
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
 
@@ -512,6 +514,32 @@ export class AIToolExecutorService {
           });
           // No checkpoint action - human review is a pause, not a progression
           break;
+        }
+
+        case 'remember': {
+          const parsed = rememberInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return { success: false, toolName: name, error: `Invalid remember input: ${parsed.error.message}` };
+          }
+          // Strictly scoped to context.appointmentRequestId — addNote
+          // takes that single ID and writes via primary-key update.
+          // The agent has no path to write a note for any other
+          // appointment, even if it tries to.
+          const result = await addNote(
+            context.appointmentRequestId,
+            parsed.data.category,
+            parsed.data.note,
+          );
+          // No checkpoint action — `remember` is informational, doesn't
+          // advance the FSM. Returning a clear result message helps the
+          // agent know whether the note was new or already present.
+          return {
+            success: true,
+            toolName: name,
+            resultMessage: result.added
+              ? `Note recorded (category: ${parsed.data.category}, id: ${result.noteId}). Total notes: ${result.memory.notes.length}.`
+              : `Note already present (id: ${result.noteId}). Skipped duplicate.`,
+          };
         }
 
         default:

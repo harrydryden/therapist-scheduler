@@ -38,3 +38,8 @@ export const initiateRescheduleInputSchema = z.object({
 export const issueVoucherCodeInputSchema = z.object({
   email: z.string().email().max(255),
 });
+
+export const rememberInputSchema = z.object({
+  note: z.string().min(1).max(280),
+  category: z.enum(['preference', 'constraint', 'context', 'decision']),
+});

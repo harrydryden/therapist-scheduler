@@ -144,6 +144,12 @@ model AppointmentRequest {
   // in list queries. Updated whenever conversationState is written.
   messageCount          Int       @default(0) @map("message_count")
   checkpointStage       String?   @map("checkpoint_stage")
+  // Agent-curated thread memory (Layer B in the agent memory design).
+  // Free-form observations the agent retains via the `remember` tool —
+  // preferences, constraints, prior decisions, situational context the
+  // regex-based fact extractor doesn't catch. Strictly per-appointment;
+  // see agent-memory.service.ts for the read/write contract.
+  memory                Json?
   confirmedAt           DateTime? @map("confirmed_at")
   confirmedDateTime     String?   @map("confirmed_date_time") // The actual scheduled appointment date/time
   notes                 String?

@@ -177,6 +177,26 @@ export const schedulingTools: Anthropic.Tool[] = [
       required: ['reason'],
     },
   },
+  {
+    name: 'remember',
+    description:
+      'Record an observation about this conversation that you would want a colleague taking it over to know. Use sparingly: only for things that are NOT already obvious from the message log and are NOT scheduling primitives like proposed times or blockers (those are auto-extracted). Good examples: a stated communication preference ("user prefers single-line emails"), a recurring constraint ("therapist responds before 10am UK"), situational context ("user mentioned a job interview Friday"), or an explicit decision ("agreed to switch to weekly Mondays"). The system retains up to 20 notes per conversation and evicts the oldest. Re-call this tool with a corrected note if a previous one is wrong or stale — duplicate text on the same conversation is silently deduped. Do NOT include therapy-clinical content; this is for scheduling continuity only.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        note: {
+          type: 'string',
+          description: 'The observation to retain. One sentence is ideal. Maximum 280 characters.',
+        },
+        category: {
+          type: 'string',
+          enum: ['preference', 'constraint', 'context', 'decision'],
+          description: 'preference = stated style or preference; constraint = recurring fixed obligation; context = situational background; decision = an agreement made.',
+        },
+      },
+      required: ['note', 'category'],
+    },
+  },
 ];
 
 /** Tools whose execution produces external side effects (DB mutations, emails).
