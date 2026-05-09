@@ -890,69 +890,81 @@ class AppointmentLifecycleService {
       },
     } as const;
 
-    // Use atomic update (updateMany) when atomic options provided
-    // This prevents race conditions where two processes try to confirm simultaneously
-    if (atomic) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const whereClause: any = {
-        id: appointmentId,
-        status: { in: atomic.requireStatuses },
-        ...notAlreadyAtTarget,
-      };
+    // Atomic update with preconditions — Prisma 5's `update` accepts
+    // non-unique filters in `where`, so we can express the source-status
+    // and "not already at target" guards in the same query that performs
+    // the write. This lets us atomically capture the post-update
+    // transitionGeneration in `updated.transitionGeneration`, which we
+    // need below for side-effect-tracker idempotency keys. The previous
+    // shape (updateMany + read-side `appointment.transitionGeneration + 1`)
+    // had a race: a concurrent confirmation could bump generation between
+    // our read and our notification dispatch, causing our idempotency
+    // keys to collide with the concurrent transition's already-completed
+    // rows and silently drop our notifications.
+    const allowedStatuses = atomic ? atomic.requireStatuses : validFromStatuses;
+    const whereClause: Prisma.AppointmentRequestWhereUniqueInput = {
+      id: appointmentId,
+      status: { in: allowedStatuses },
+      ...notAlreadyAtTarget,
+      ...(atomic?.requireHumanControlDisabled ? { humanControlEnabled: false } : {}),
+    };
 
-      if (atomic.requireHumanControlDisabled) {
-        whereClause.humanControlEnabled = false;
-      }
-
-      const updateResult = await prisma.appointmentRequest.updateMany({
+    let postUpdateGeneration: number;
+    try {
+      const updated = await prisma.appointmentRequest.update({
         where: whereClause,
         data: updateData,
+        select: { transitionGeneration: true },
+      });
+      postUpdateGeneration = updated.transitionGeneration;
+      logger.info({ ...logContext, atomic: !!atomic }, 'Appointment confirmed atomically');
+    } catch (err) {
+      // Prisma throws P2025 (RecordNotFound) when the where preconditions
+      // don't match — i.e. status drifted, human control flipped on, or
+      // a concurrent caller already wrote our exact target datetime.
+      // Re-fetch to attribute the failure precisely.
+      if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2025') {
+        throw err;
+      }
+
+      const current = await prisma.appointmentRequest.findUnique({
+        where: { id: appointmentId },
+        select: { status: true, humanControlEnabled: true, confirmedDateTime: true },
       });
 
-      // If no rows updated, another process already confirmed or conditions not met
-      if (updateResult.count === 0) {
-        // Re-fetch to determine why it failed
-        const current = await prisma.appointmentRequest.findUnique({
-          where: { id: appointmentId },
-          select: { status: true, humanControlEnabled: true, confirmedDateTime: true },
-        });
+      if (atomic?.requireHumanControlDisabled && current?.humanControlEnabled) {
+        logger.info(
+          { ...logContext },
+          'Human control enabled between check and update - atomic confirmation skipped'
+        );
+        return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true };
+      }
 
-        if (current?.humanControlEnabled && atomic.requireHumanControlDisabled) {
-          logger.info(
-            { ...logContext },
-            'Human control enabled between check and update - atomic confirmation skipped'
-          );
-          return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true };
-        }
+      if (
+        current?.status === APPOINTMENT_STATUS.CONFIRMED &&
+        current?.confirmedDateTime === confirmedDateTime
+      ) {
+        logger.info(
+          { ...logContext, confirmedDateTime },
+          'Concurrent confirmation already wrote target datetime — treating as idempotent skip',
+        );
+        return {
+          success: true,
+          previousStatus,
+          newStatus: APPOINTMENT_STATUS.CONFIRMED,
+          skipped: true,
+        };
+      }
 
-        // "Already at the same target" — a concurrent caller won the race
-        // with the SAME datetime. Functionally equivalent to our intent;
-        // return an idempotent skip rather than atomicSkipped so callers
-        // don't retry/log this as a failure.
-        if (
-          current?.status === APPOINTMENT_STATUS.CONFIRMED &&
-          current.confirmedDateTime === confirmedDateTime
-        ) {
-          logger.info(
-            { ...logContext, confirmedDateTime },
-            'Concurrent confirmation already wrote target datetime — treating as idempotent skip',
-          );
-          return {
-            success: true,
-            previousStatus,
-            newStatus: APPOINTMENT_STATUS.CONFIRMED,
-            skipped: true,
-          };
-        }
+      if (atomic && current?.status === APPOINTMENT_STATUS.CONFIRMED) {
+        logger.info(
+          { ...logContext, existingDateTime: current?.confirmedDateTime, attemptedDateTime: confirmedDateTime },
+          'Appointment already confirmed by another process (concurrent confirmation prevented)'
+        );
+        return { success: false, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED, atomicSkipped: true };
+      }
 
-        if (current?.status === APPOINTMENT_STATUS.CONFIRMED) {
-          logger.info(
-            { ...logContext, existingDateTime: current.confirmedDateTime, attemptedDateTime: confirmedDateTime },
-            'Appointment already confirmed by another process (concurrent confirmation prevented)'
-          );
-          return { success: false, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED, atomicSkipped: true };
-        }
-
+      if (atomic) {
         logger.warn(
           { ...logContext, currentStatus: current?.status },
           'Atomic confirmation failed - status changed unexpectedly'
@@ -960,50 +972,11 @@ class AppointmentLifecycleService {
         return { success: false, previousStatus, newStatus: previousStatus, atomicSkipped: true };
       }
 
-      logger.info({ ...logContext }, 'Appointment confirmed atomically');
-    } else {
-      // Non-atomic update with status precondition for consistency
-      const updateResult = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointmentId,
-          status: { in: validFromStatuses },
-          ...notAlreadyAtTarget,
-        },
-        data: updateData,
-      });
-
-      if (updateResult.count === 0) {
-        // count=0 means either (a) the row drifted to an invalid source
-        // status between our read and write, or (b) a concurrent caller
-        // already wrote the same target datetime (the notAlreadyAtTarget
-        // guard tripped). Re-read to distinguish.
-        const current = await prisma.appointmentRequest.findUnique({
-          where: { id: appointmentId },
-          select: { status: true, confirmedDateTime: true },
-        });
-
-        if (
-          current?.status === APPOINTMENT_STATUS.CONFIRMED &&
-          current.confirmedDateTime === confirmedDateTime
-        ) {
-          logger.info(
-            { ...logContext, confirmedDateTime },
-            'Concurrent confirmation already wrote target datetime — treating as idempotent skip',
-          );
-          return {
-            success: true,
-            previousStatus,
-            newStatus: APPOINTMENT_STATUS.CONFIRMED,
-            skipped: true,
-          };
-        }
-
-        logger.warn(
-          { ...logContext, currentStatus: current?.status, readStatus: previousStatus },
-          'Confirmation failed - status changed between read and write'
-        );
-        throw new InvalidTransitionError(current?.status || previousStatus, 'confirmed');
-      }
+      logger.warn(
+        { ...logContext, currentStatus: current?.status, readStatus: previousStatus },
+        'Confirmation failed - status changed between read and write'
+      );
+      throw new InvalidTransitionError(current?.status || previousStatus, 'confirmed');
     }
 
     // Add audit trail (conversation-state JSON message + status_change audit event row).
@@ -1057,12 +1030,12 @@ class AppointmentLifecycleService {
     );
 
     // Send Slack + email notifications (delegated to notifications service).
-    // Pass the post-update generation so side-effect-tracker idempotency
-    // keys are unique across re-confirmations (cancel → re-confirm cycles).
-    // The atomic updateMany above incremented generation by 1; reading
-    // appointment.transitionGeneration + 1 here is correct because the
-    // updateMany's precondition matched.
-    const newGeneration = appointment.transitionGeneration + 1;
+    // We use the post-update generation captured atomically by the update
+    // RETURNING above. The previous read-time `+1` had a race where a
+    // concurrent transition could bump generation between read and write,
+    // causing our idempotency keys to collide with the other transition's
+    // already-completed entries and silently dropping notifications.
+    const newGeneration = postUpdateGeneration;
     this.fireAndForget(
       appointmentNotificationsService.notifyConfirmed({
         appointmentId,

@@ -225,6 +225,28 @@ export class AIToolExecutorService {
         }
 
         case 'update_therapist_availability': {
+          // SECURITY: Persisting therapist availability mutates a record
+          // that drives every future booking for this therapist. We only
+          // honour the call when the inbound email was sent BY the
+          // therapist — otherwise a client could prompt-inject "update
+          // your availability to nothing" and DoS the therapist's
+          // bookings. startScheduling (no inbound sender) is also
+          // blocked: there is nothing for the therapist to have said yet.
+          if (context.inboundSender !== 'therapist') {
+            const errorMsg =
+              `update_therapist_availability is only allowed when the inbound email was from the therapist. ` +
+              `Current inbound sender: ${context.inboundSender ?? 'none'}. ` +
+              `If the client mentioned the therapist's availability, ask the therapist to confirm directly.`;
+            logger.warn(
+              {
+                traceId: this.traceId,
+                appointmentRequestId: context.appointmentRequestId,
+                inboundSender: context.inboundSender,
+              },
+              'Blocked update_therapist_availability — inbound was not from therapist',
+            );
+            return { success: false, toolName: name, error: errorMsg };
+          }
           const parsed = updateAvailabilityInputSchema.safeParse(input);
           if (!parsed.success) {
             const errorMsg = `Invalid update_therapist_availability input: ${parsed.error.message}`;
@@ -356,7 +378,25 @@ export class AIToolExecutorService {
           if (!parsed.success) {
             return { success: false, toolName: name, error: `Invalid input: ${parsed.error.message}` };
           }
-          const emailLower = parsed.data.email.toLowerCase();
+          // SECURITY: Bind voucher issuance to the conversation's user, not
+          // the agent's chosen `email` argument. A user could otherwise
+          // prompt-inject the agent into issuing a valid voucher to an
+          // arbitrary attacker-controlled address, bypassing the
+          // `voucher.required` gate at booking time.
+          const requestedLower = parsed.data.email.toLowerCase().trim();
+          const userLower = context.userEmail.toLowerCase().trim();
+          if (requestedLower !== userLower) {
+            logger.warn(
+              {
+                traceId: this.traceId,
+                appointmentRequestId: context.appointmentRequestId,
+                attemptedEmail: requestedLower,
+                contextUserEmail: userLower,
+              },
+              'Agent attempted to issue voucher to non-context email — overriding to context.userEmail',
+            );
+          }
+          const emailLower = userLower;
           const expiryDays = await getSettingValue<number>('voucher.expiryDays');
           const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
           const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);

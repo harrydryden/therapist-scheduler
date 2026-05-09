@@ -143,13 +143,19 @@ class BookingValidatorService {
     } catch (error) {
       logger.error(
         { ...logContext, error },
-        'Booking validation error'
+        'Booking validation error - failing closed to avoid bypassing therapist freeze'
       );
-      // On error, fail open but log it (prefer availability over false rejections)
-      // In production, you might want to fail closed instead
+      // SECURITY: fail closed. The previous fail-open posture meant a
+      // Postgres degradation opened a window where any therapist —
+      // including frozen ones — could be booked, undermining the freeze
+      // logic that prevents over-booking and double-matching. The
+      // downstream serializable transaction in appointments.routes.ts
+      // is also Postgres-dependent; if validation here can't reach the
+      // DB, that transaction can't either, so refusing the booking is
+      // the safer default.
       return {
-        valid: true, // Fail open
-        reason: 'Validation check encountered an error, proceeding with caution',
+        valid: false,
+        reason: 'Booking validation is temporarily unavailable. Please try again in a moment.',
       };
     }
   }

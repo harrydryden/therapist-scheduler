@@ -56,6 +56,14 @@ export interface SchedulingContext {
   userCountry: string;
   /** Country code where the therapist is based. Defaults to "UK". */
   therapistCountry: string;
+  /**
+   * Which party sent the inbound email that triggered this tool loop.
+   * Undefined for startScheduling (no inbound — kicked off by the booking
+   * form). Used to gate sender-attributable tools like
+   * update_therapist_availability so a user cannot prompt-inject a
+   * schedule overwrite.
+   */
+  inboundSender?: 'user' | 'therapist';
 }
 
 export interface ConversationMessage {

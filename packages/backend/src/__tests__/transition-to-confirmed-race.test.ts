@@ -2,18 +2,24 @@
  * Tests for the concurrent-reschedule race fix in
  * `appointmentLifecycleService.transitionToConfirmed`.
  *
- * The hardening: each updateMany now carries a "NOT (status=CONFIRMED AND
- * confirmedDateTime = target)" precondition so two concurrent calls that
- * both pass the read-time idempotent skip can't both write — only the
- * first lands. The loser sees count=0 and the post-write re-fetch
- * detects "already at target" and returns an idempotent skip rather than
- * re-firing audit + notifications + SSE.
+ * The hardening is in two layers:
+ *   1. The Prisma `update` call carries a "NOT (status=CONFIRMED AND
+ *      confirmedDateTime = target)" precondition. Two concurrent calls
+ *      that both pass the read-time idempotent skip can't both write —
+ *      only the first lands; the loser sees Prisma's P2025
+ *      (RecordNotFound) and the post-throw re-fetch decides the next
+ *      step.
+ *   2. The new generation is captured atomically from `update().select`
+ *      so notifications use the post-write transitionGeneration. The
+ *      previous read-time `+1` had a race that let two concurrent
+ *      transitions land on the same generation and dedupe each other's
+ *      side-effect rows away.
  *
  * What we're locking down:
- *   - non-atomic path: count=0 + re-fetch shows target state →
+ *   - non-atomic path: P2025 + re-fetch shows target state →
  *     { success: true, skipped: true }, no side effects fired
  *   - atomic path: same outcome (was previously atomicSkipped)
- *   - pre-existing behaviour preserved: count=0 + re-fetch shows a
+ *   - pre-existing behaviour preserved: P2025 + re-fetch shows a
  *     DIFFERENT state → InvalidTransitionError (non-atomic) or
  *     atomicSkipped (atomic)
  */
@@ -35,14 +41,14 @@ jest.mock('../utils/redis', () => ({
 }));
 
 const mockFindUnique = jest.fn();
-const mockUpdateMany = jest.fn();
+const mockUpdate = jest.fn();
 const mockExecuteRaw = jest.fn();
 
 jest.mock('../utils/database', () => ({
   prisma: {
     appointmentRequest: {
       findUnique: (...a: unknown[]) => mockFindUnique(...a),
-      updateMany: (...a: unknown[]) => mockUpdateMany(...a),
+      update: (...a: unknown[]) => mockUpdate(...a),
     },
     $executeRaw: (...a: unknown[]) => mockExecuteRaw(...a),
   },
@@ -98,6 +104,7 @@ jest.mock('../services/slack-notification.service', () => ({
   },
 }));
 
+import { Prisma } from '@prisma/client';
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { InvalidTransitionError } from '../errors';
 
@@ -114,7 +121,19 @@ const baseRow = {
   therapistHandle: 'therapist-notion',
   confirmedDateTime: PREVIOUS,
   humanControlEnabled: false,
+  transitionGeneration: 5,
 };
+
+/**
+ * Build a P2025 (RecordNotFound) error matching what Prisma emits when
+ * an `update` call's where-clause preconditions don't match any row.
+ */
+function p2025(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError(
+    'No record was found for an update.',
+    { code: 'P2025', clientVersion: 'test' },
+  );
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -142,11 +161,11 @@ function expectNoAuditWrites() {
 
 describe('transitionToConfirmed concurrent reschedule race', () => {
   describe('non-atomic path', () => {
-    it('returns idempotent skip when count=0 and re-fetch shows target datetime', async () => {
+    it('returns idempotent skip when update throws P2025 and re-fetch shows target datetime', async () => {
       // Initial read: row at CONFIRMED@PREVIOUS, our target is TARGET → not idempotent
       mockFindUnique.mockResolvedValueOnce(baseRow);
-      // updateMany trips the notAlreadyAtTarget guard (concurrent caller already wrote)
-      mockUpdateMany.mockResolvedValueOnce({ count: 0 });
+      // update trips the notAlreadyAtTarget guard (concurrent caller already wrote)
+      mockUpdate.mockRejectedValueOnce(p2025());
       // Re-fetch: row now at CONFIRMED@TARGET → idempotent skip
       mockFindUnique.mockResolvedValueOnce({
         status: 'confirmed',
@@ -170,9 +189,9 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
       expectNoAuditWrites();
     });
 
-    it('throws InvalidTransitionError when count=0 and re-fetch shows a non-target state', async () => {
+    it('throws InvalidTransitionError when update throws P2025 and re-fetch shows a non-target state', async () => {
       mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null });
-      mockUpdateMany.mockResolvedValueOnce({ count: 0 });
+      mockUpdate.mockRejectedValueOnce(p2025());
       // Status drifted to cancelled between read and write → real invalid transition
       mockFindUnique.mockResolvedValueOnce({
         status: 'cancelled',
@@ -193,9 +212,9 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
   });
 
   describe('atomic path', () => {
-    it('returns idempotent skip when count=0 and re-fetch shows target datetime', async () => {
+    it('returns idempotent skip when update throws P2025 and re-fetch shows target datetime', async () => {
       mockFindUnique.mockResolvedValueOnce(baseRow);
-      mockUpdateMany.mockResolvedValueOnce({ count: 0 });
+      mockUpdate.mockRejectedValueOnce(p2025());
       mockFindUnique.mockResolvedValueOnce({
         status: 'confirmed',
         humanControlEnabled: false,
@@ -220,9 +239,9 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
       expectNoAuditWrites();
     });
 
-    it('returns atomicSkipped when count=0 and re-fetch shows confirmed at a DIFFERENT datetime', async () => {
+    it('returns atomicSkipped when update throws P2025 and re-fetch shows confirmed at a DIFFERENT datetime', async () => {
       mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null });
-      mockUpdateMany.mockResolvedValueOnce({ count: 0 });
+      mockUpdate.mockRejectedValueOnce(p2025());
       // Concurrent caller confirmed for a different datetime
       mockFindUnique.mockResolvedValueOnce({
         status: 'confirmed',
@@ -249,7 +268,7 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
 
     it('returns atomicSkipped when humanControlEnabled flipped on between read and write', async () => {
       mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null });
-      mockUpdateMany.mockResolvedValueOnce({ count: 0 });
+      mockUpdate.mockRejectedValueOnce(p2025());
       mockFindUnique.mockResolvedValueOnce({
         status: 'negotiating',
         humanControlEnabled: true,
@@ -273,9 +292,9 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
     });
   });
 
-  it('passes the notAlreadyAtTarget guard into updateMany', async () => {
+  it('passes the notAlreadyAtTarget guard into update', async () => {
     mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null });
-    mockUpdateMany.mockResolvedValueOnce({ count: 1 });
+    mockUpdate.mockResolvedValueOnce({ transitionGeneration: 6 });
 
     await appointmentLifecycleService.transitionToConfirmed({
       appointmentId: 'apt-1',
@@ -288,12 +307,31 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
     // concurrent same-datetime confirmation can't double-fire side effects.
     // Pinning this assertion stops a future refactor from quietly removing
     // the guard.
-    expect(mockUpdateMany).toHaveBeenCalledWith(
+    expect(mockUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           NOT: { status: 'confirmed', confirmedDateTime: TARGET },
         }),
       }),
+    );
+  });
+
+  it('uses the post-update transitionGeneration for notifications, not the read-time value', async () => {
+    // Read: gen=5. The post-update value (atomic from update RETURNING)
+    // is 9 — e.g. several concurrent transitions advanced generation
+    // before/along with ours. Our notifications must use 9, not 5+1=6.
+    mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null, transitionGeneration: 5 });
+    mockUpdate.mockResolvedValueOnce({ transitionGeneration: 9 });
+
+    await appointmentLifecycleService.transitionToConfirmed({
+      appointmentId: 'apt-1',
+      confirmedDateTime: TARGET,
+      source: 'admin',
+      adminId: 'admin-7',
+    });
+
+    expect(mockNotifyConfirmed).toHaveBeenCalledWith(
+      expect.objectContaining({ transitionGeneration: 9 }),
     );
   });
 });

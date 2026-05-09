@@ -173,40 +173,41 @@ export async function handleBounce(
   };
 
   try {
-    // Find the appointment request by bounced email or thread ID
-    let appointment = null;
-
-    if (originalEmail?.threadId) {
-      // Check both client and therapist thread IDs
-      appointment = await prisma.appointmentRequest.findFirst({
-        where: {
-          OR: [
-            { gmailThreadId: originalEmail.threadId },
-            { therapistGmailThreadId: originalEmail.threadId },
-          ],
-          status: { notIn: ['cancelled', 'confirmed'] },
-        },
-        select: { id: true, therapistHandle: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
-      });
+    // SECURITY: Auto-cancellation requires the bounce to arrive in a Gmail
+    // thread we own (gmailThreadId or therapistGmailThreadId). The threadId
+    // proves that the bounce relates to one of our outbound messages —
+    // without it, an attacker could craft a fake bounce email naming any
+    // victim's address in the body and silently cancel their appointment.
+    //
+    // The body-extracted `originalRecipient` is attacker-controlled and is
+    // therefore no longer used to find appointments. It's still surfaced in
+    // logs and Slack alerts as low-confidence context.
+    if (!originalEmail?.threadId) {
+      logger.warn(
+        { traceId, recipient: bounceInfo.originalRecipient },
+        'Bounce detected but no threadId — refusing to auto-cancel (admin review required)'
+      );
+      result.error = 'No threadId on bounce — admin review required';
+      return result;
     }
 
-    if (!appointment && bounceInfo.originalRecipient) {
-      appointment = await prisma.appointmentRequest.findFirst({
-        where: {
-          userEmail: bounceInfo.originalRecipient.toLowerCase(),
-          status: { notIn: ['cancelled', 'confirmed'] },
-        },
-        orderBy: { createdAt: 'desc' },
-        select: { id: true, therapistHandle: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true },
-      });
-    }
+    const appointment = await prisma.appointmentRequest.findFirst({
+      where: {
+        OR: [
+          { gmailThreadId: originalEmail.threadId },
+          { therapistGmailThreadId: originalEmail.threadId },
+        ],
+        status: { notIn: ['cancelled', 'confirmed'] },
+      },
+      select: { id: true, therapistHandle: true, userName: true, userEmail: true, therapistName: true, therapistEmail: true, gmailThreadId: true, therapistGmailThreadId: true },
+    });
 
     if (!appointment) {
       logger.warn(
-        { traceId, recipient: bounceInfo.originalRecipient },
-        'No matching appointment found for bounce'
+        { traceId, threadId: originalEmail.threadId },
+        'Bounce detected on unknown thread — refusing to auto-cancel'
       );
-      result.error = 'No matching appointment found';
+      result.error = 'No matching appointment found for bounce thread';
       return result;
     }
 
@@ -299,11 +300,11 @@ export async function handleBounce(
       `Appointment cancelled due to email bounce - therapist unfrozen`
     );
 
-    // Send Slack notification for email bounce. Determine which role
-    // bounced so the alert says "Client (Maria)" or "Therapist (X)" —
-    // never the bounced email itself (PII).
+    // Send Slack notification for email bounce. Derive the bounced role
+    // from which thread matched (therapistGmailThreadId vs gmailThreadId)
+    // rather than the attacker-controlled body-extracted recipient.
     const bouncedRole: 'client' | 'therapist' =
-      bounceInfo.originalRecipient?.toLowerCase() === appointment.therapistEmail.toLowerCase()
+      appointment.therapistGmailThreadId === originalEmail.threadId
         ? 'therapist'
         : 'client';
     await slackNotificationService.notifyEmailBounce(
@@ -356,6 +357,29 @@ export async function processPotentialBounce(email: {
     threadId: email.threadId,
     messageId: email.messageId,
   });
+
+  // If the bounce regex matched but we declined to auto-cancel (no threadId,
+  // or threadId didn't map to a tracked appointment), surface it to admins
+  // so a real bounce isn't silently dropped. Fire-and-forget — failure to
+  // alert shouldn't block ingest. Returning false lets the caller continue
+  // normal processing (e.g. the email may not actually be a bounce).
+  if (!result.handled) {
+    slackNotificationService.sendAlert({
+      title: 'Bounce-shaped email — manual review',
+      severity: 'medium',
+      details:
+        `An inbound email matched bounce-detection patterns but could not be ` +
+        `auto-actioned (${result.error ?? 'unknown reason'}). ` +
+        `If this is a real bounce, the appointment must be cancelled manually.`,
+      additionalFields: {
+        'Detection method': bounceInfo.detectionMethod ?? 'unknown',
+        'Subject': email.subject.slice(0, 100),
+        'Reason': bounceInfo.reason ?? 'unspecified',
+      },
+    }).catch((err) => {
+      logger.warn({ err }, 'Failed to send Slack alert for unactioned bounce');
+    });
+  }
 
   return result.handled;
 }
