@@ -37,6 +37,7 @@ import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from './recipient-timezone.service';
 import { auditEventService } from './audit-event.service';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
+import { generateFeedbackToken } from '../utils/feedback-token';
 
 // Processing constants — imported from centralized constants
 const {
@@ -890,7 +891,11 @@ class PostBookingFollowupService extends PeriodicService {
 
     const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
     const baseUrl = webAppUrl.replace(/\/$/, '');
-    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}`;
+    // Embed an HMAC-signed token bound to this appointment ID. The submit
+    // endpoint requires it before transitioning to `completed`, blocking
+    // tracking-code enumeration attacks.
+    const feedbackToken = generateFeedbackToken(appointment.id);
+    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}?fk=${encodeURIComponent(feedbackToken)}`;
 
     const subject = await getEmailSubject('feedbackForm', {
       therapistName: therapistFirstName,
@@ -1097,7 +1102,8 @@ class PostBookingFollowupService extends PeriodicService {
 
     const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
     const baseUrl = webAppUrl.replace(/\/$/, '');
-    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}`;
+    const feedbackToken = generateFeedbackToken(appointment.id);
+    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}?fk=${encodeURIComponent(feedbackToken)}`;
 
     const subject = await getEmailSubject('feedbackReminder', {
       therapistName: therapistFirstName,

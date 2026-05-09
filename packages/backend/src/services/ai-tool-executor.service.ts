@@ -51,6 +51,28 @@ import {
 
 const TOOL_EXECUTION_PREFIX = TOOL_EXECUTION.PREFIX;
 const TOOL_EXECUTION_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
+const TOOL_COUNT_PREFIX = TOOL_EXECUTION.COUNT_PREFIX;
+const TOOL_COUNT_TTL_SECONDS = TOOL_EXECUTION.COUNT_TTL_SECONDS;
+const PER_APPOINTMENT_LIMIT = TOOL_EXECUTION.PER_APPOINTMENT_LIMIT;
+
+/**
+ * Increment the per-appointment tool-call counter and return the new
+ * value. Redis-unavailable falls open (returns 0) so a Redis flap
+ * doesn't paralyse the agent — the per-turn cap still bounds the loop.
+ */
+async function incrementAppointmentToolCount(appointmentId: string): Promise<number> {
+  try {
+    const key = `${TOOL_COUNT_PREFIX}${appointmentId}`;
+    const count = await redis.incr(key);
+    // EXPIRE on every INCR is cheap; ensures the TTL never lapses for
+    // a long-running appointment and ages out for archived ones.
+    await redis.expire(key, TOOL_COUNT_TTL_SECONDS);
+    return count;
+  } catch (err) {
+    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count');
+    return 0;
+  }
+}
 
 /**
  * Generate a deterministic hash for a tool call to enable idempotency checking
@@ -145,6 +167,49 @@ export class AIToolExecutorService {
       return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
     }
 
+    // SECURITY: Per-appointment hard ceiling on tool calls. The per-turn
+    // cap (MAX_TOOL_ITERATIONS) bounds runaway loops within a single
+    // inbound email; this counter bounds total agent activity across an
+    // entire appointment. A prompt-injecting back-and-forth can't keep
+    // driving the agent past the ceiling. When exceeded we flip into
+    // human control via flag_for_human_review and return a skip.
+    const appointmentToolCount = await incrementAppointmentToolCount(context.appointmentRequestId);
+    if (appointmentToolCount > PER_APPOINTMENT_LIMIT) {
+      logger.warn(
+        {
+          traceId: this.traceId,
+          tool: name,
+          appointmentRequestId: context.appointmentRequestId,
+          count: appointmentToolCount,
+          limit: PER_APPOINTMENT_LIMIT,
+        },
+        'Per-appointment tool ceiling reached — flagging for human review',
+      );
+      try {
+        await this.flagForHumanReview(context, {
+          reason:
+            `Tool execution ceiling reached (${appointmentToolCount}/${PER_APPOINTMENT_LIMIT}). ` +
+            `The agent has performed an unusually high number of tool calls on this conversation; ` +
+            `pausing automation pending admin review.`,
+        });
+      } catch (flagErr) {
+        // If flagging itself fails, log and proceed with the skip — the
+        // appointment will still be paused on the next iteration because
+        // we return skipped here.
+        logger.error(
+          { traceId: this.traceId, err: flagErr, appointmentRequestId: context.appointmentRequestId },
+          'Failed to flag appointment for review at tool ceiling',
+        );
+      }
+      auditEventService.logToolExecuted(context.appointmentRequestId, {
+        traceId: this.traceId,
+        toolName: name,
+        result: 'skipped',
+        skipReason: 'human_control',
+      });
+      return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
+    }
+
     // FIX J1/J2: Check idempotency before executing
     // This prevents duplicate emails, double-confirmations, etc. on retries
     const toolHash = hashToolCall(context.appointmentRequestId, name, input);
@@ -225,6 +290,28 @@ export class AIToolExecutorService {
         }
 
         case 'update_therapist_availability': {
+          // SECURITY: Persisting therapist availability mutates a record
+          // that drives every future booking for this therapist. We only
+          // honour the call when the inbound email was sent BY the
+          // therapist — otherwise a client could prompt-inject "update
+          // your availability to nothing" and DoS the therapist's
+          // bookings. startScheduling (no inbound sender) is also
+          // blocked: there is nothing for the therapist to have said yet.
+          if (context.inboundSender !== 'therapist') {
+            const errorMsg =
+              `update_therapist_availability is only allowed when the inbound email was from the therapist. ` +
+              `Current inbound sender: ${context.inboundSender ?? 'none'}. ` +
+              `If the client mentioned the therapist's availability, ask the therapist to confirm directly.`;
+            logger.warn(
+              {
+                traceId: this.traceId,
+                appointmentRequestId: context.appointmentRequestId,
+                inboundSender: context.inboundSender,
+              },
+              'Blocked update_therapist_availability — inbound was not from therapist',
+            );
+            return { success: false, toolName: name, error: errorMsg };
+          }
           const parsed = updateAvailabilityInputSchema.safeParse(input);
           if (!parsed.success) {
             const errorMsg = `Invalid update_therapist_availability input: ${parsed.error.message}`;
@@ -356,7 +443,25 @@ export class AIToolExecutorService {
           if (!parsed.success) {
             return { success: false, toolName: name, error: `Invalid input: ${parsed.error.message}` };
           }
-          const emailLower = parsed.data.email.toLowerCase();
+          // SECURITY: Bind voucher issuance to the conversation's user, not
+          // the agent's chosen `email` argument. A user could otherwise
+          // prompt-inject the agent into issuing a valid voucher to an
+          // arbitrary attacker-controlled address, bypassing the
+          // `voucher.required` gate at booking time.
+          const requestedLower = parsed.data.email.toLowerCase().trim();
+          const userLower = context.userEmail.toLowerCase().trim();
+          if (requestedLower !== userLower) {
+            logger.warn(
+              {
+                traceId: this.traceId,
+                appointmentRequestId: context.appointmentRequestId,
+                attemptedEmail: requestedLower,
+                contextUserEmail: userLower,
+              },
+              'Agent attempted to issue voucher to non-context email — overriding to context.userEmail',
+            );
+          }
+          const emailLower = userLower;
           const expiryDays = await getSettingValue<number>('voucher.expiryDays');
           const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
           const voucherResult = generateVoucherUrl(emailLower, webAppUrl, expiryDays);

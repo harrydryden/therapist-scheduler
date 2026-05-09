@@ -465,7 +465,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           where: { id },
           data: {
             humanControlEnabled: false,
-            // Keep history: don't clear humanControlTakenBy/At
+            // Keep history: don't clear humanControlTakenBy/At so the audit
+            // trail of who took over and when remains intact.
+            // Re-arm the stall-detection / auto-escalation paths so a
+            // resolved-then-restalled conversation can escalate again.
+            // Without this, autoEscalatedAt stays pinned forever and the
+            // stale-check refuses to escalate the second incident.
+            autoEscalatedAt: null,
+            conversationStallAlertAt: null,
+            conversationStallAcknowledged: false,
           },
           select: { id: true },
         });

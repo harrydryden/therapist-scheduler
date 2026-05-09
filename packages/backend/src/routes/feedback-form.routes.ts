@@ -22,6 +22,7 @@ import { firstName } from '../utils/first-name';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { RATE_LIMITS } from '../constants';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
+import { validateFeedbackToken } from '../utils/feedback-token';
 import type { FormConfig } from '@therapist-scheduler/shared/types/feedback';
 import { parseFormQuestions, validateResponses, buildFeedbackDataForSlack } from '@therapist-scheduler/shared/utils/form-utils';
 
@@ -39,6 +40,11 @@ interface PrefilledData {
 
 const submitFeedbackSchema = z.object({
   trackingCode: z.string().optional(),
+  // HMAC-signed proof that the submitter received our feedback email.
+  // Required to transition the appointment to `completed`; without it,
+  // the feedback row is still stored anonymously but the lifecycle
+  // transition is skipped (and admin is alerted).
+  feedbackToken: z.string().max(500).optional(),
   // therapistName may be empty for non-SPL submissions where no prefilled data
   // is available. The fallback chain at storage time resolves it:
   // submitted value → appointment.therapistName → 'Unknown'.
@@ -86,7 +92,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
    * Get the feedback form configuration with pre-filled data from SPL code
    */
   // FIX #2: Rate-limit SPL code lookups to prevent brute-force enumeration
-  fastify.get<{ Params: { splCode: string } }>(
+  // SECURITY: Pre-fill data (user/therapist names) is only returned when
+  // the request includes a valid HMAC-signed feedback token (`?fk=...`).
+  // Without a token, the SPL code on its own is treated as untrusted and
+  // we return the form config alone — the SPL is no longer a status oracle.
+  fastify.get<{ Params: { splCode: string }; Querystring: { fk?: string } }>(
     '/api/feedback/form/:splCode',
     {
       config: {
@@ -101,31 +111,13 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
     },
     async (request, reply) => {
       const { splCode } = request.params;
+      const { fk: feedbackToken } = request.query;
 
       try {
         const config = await getOrCreateFeedbackFormConfig();
         if (!config || !config.isActive) {
           return sendError(reply, 404, 'Feedback form not available');
         }
-
-        // Look up appointment by tracking code
-        // Find the most recent completed/confirmed appointment with this tracking code
-        const appointment = await prisma.appointmentRequest.findFirst({
-          where: {
-            trackingCode: splCode.toUpperCase(),
-            status: {
-              in: ['confirmed', 'session_held', 'feedback_requested', 'completed'],
-            },
-          },
-          orderBy: { confirmedAt: 'desc' },
-          select: {
-            id: true,
-            userName: true,
-            userEmail: true,
-            therapistName: true,
-            trackingCode: true,
-          },
-        });
 
         const formConfig: FormConfig = {
           formName: config.formName,
@@ -139,39 +131,54 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           requireExplanationFor: (config.requireExplanationFor as string[]) ?? ['No', 'Unsure'],
         };
 
-        // If no appointment found, return form without prefilled data
-        if (!appointment) {
-          logger.warn({ splCode }, 'No appointment found for SPL code');
-          return sendSuccess(reply, {
-            form: formConfig,
-            prefilled: null,
-            warning: 'Could not find appointment for this code',
-          });
+        // Without a valid token, return form-only — never reveal whether
+        // the SPL code exists or which appointment it points at.
+        const tokenPayload = feedbackToken ? validateFeedbackToken(feedbackToken) : null;
+        if (!tokenPayload || tokenPayload.expired) {
+          return sendSuccess(reply, { form: formConfig, prefilled: null });
         }
 
-        // Check if feedback already submitted for this appointment
+        // Look up appointment by ID from the verified token, then verify
+        // the SPL code in the URL matches. Both must check out.
+        const appointment = await prisma.appointmentRequest.findFirst({
+          where: {
+            id: tokenPayload.appointmentId,
+            trackingCode: splCode.toUpperCase(),
+            status: {
+              in: ['confirmed', 'session_held', 'feedback_requested', 'completed'],
+            },
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            trackingCode: true,
+          },
+        });
+
+        if (!appointment) {
+          logger.warn(
+            { splCode, tokenAppointmentId: tokenPayload.appointmentId },
+            'Feedback token did not match SPL code or appointment not eligible'
+          );
+          return sendSuccess(reply, { form: formConfig, prefilled: null });
+        }
+
         const existingFeedback = await prisma.feedbackSubmission.findFirst({
           where: { appointmentRequestId: appointment.id },
         });
-
         if (existingFeedback) {
           return Errors.badRequest(reply, 'Feedback already submitted');
         }
 
-        // FIX #2: Redact PII from prefilled data to prevent leaking via SPL code brute-force.
-        // Only return what the feedback form needs: tracking code and therapist first name.
         const prefilled: PrefilledData = {
           trackingCode: appointment.trackingCode || splCode,
           userName: appointment.userName ? firstName(appointment.userName) : null,
-          userEmail: '', // Redacted - not needed for form display
+          userEmail: '',
           therapistName: firstName(appointment.therapistName),
           appointmentId: appointment.id,
         };
-
-        logger.info(
-          { splCode, appointmentId: appointment.id },
-          'Loaded feedback form with prefilled data'
-        );
 
         return sendSuccess(reply, { form: formConfig, prefilled });
       } catch (error) {
@@ -204,7 +211,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         return Errors.badRequest(reply, 'Invalid form data', validation.error.issues);
       }
 
-      const { trackingCode, therapistName: rawTherapistName, responses: rawResponses } = validation.data;
+      const { trackingCode, feedbackToken, therapistName: rawTherapistName, responses: rawResponses } = validation.data;
 
       // Sanitize user inputs to prevent XSS and other injection attacks
       const therapistName = sanitizeName(rawTherapistName);
@@ -231,20 +238,31 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         }
       }
 
+      // SECURITY: Tracking codes have low entropy and arrive in user-clickable
+      // emails — anyone who guesses one can submit feedback. Tying the
+      // appointment-completion side effect to a verified HMAC token means
+      // guessing alone can't drive the appointment to a terminal state or
+      // produce a fake admin Slack alert with attacker-supplied content.
+      const tokenPayload = feedbackToken ? validateFeedbackToken(feedbackToken) : null;
+      const tokenIsValid = !!tokenPayload && !tokenPayload.expired;
+
       // FIX: Use transaction to prevent TOCTOU race condition
       // Wrap appointment lookup, duplicate check, and create in a single transaction
       const result = await prisma.$transaction(async (tx) => {
-        // Look up appointment if tracking code provided
+        // Look up appointment only when the token is valid AND its
+        // appointment ID matches the submitted tracking code. Without
+        // both, the submission is stored anonymously (no appointment
+        // linkage, no lifecycle transition).
         let appointment = null;
-        if (trackingCode) {
+        if (tokenIsValid && trackingCode) {
           appointment = await tx.appointmentRequest.findFirst({
             where: {
+              id: tokenPayload!.appointmentId,
               trackingCode: trackingCode.toUpperCase(),
               status: {
                 in: ['confirmed', 'session_held', 'feedback_requested', 'completed'],
               },
             },
-            orderBy: { confirmedAt: 'desc' },
             select: {
               id: true,
               userName: true,
@@ -299,6 +317,35 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
       // Post-processing (feedbackData building, lifecycle transition, Slack)
       // must not affect the client response.
       sendSuccess(reply, { submissionId: submission.id }, { statusCode: 201, message: 'Thank you for your feedback!' });
+
+      // Audit: flag submissions that supplied a tracking code but no valid
+      // token. These are either legitimate users on stale emails (issued
+      // before we added tokens) or attempted enumeration attacks. The
+      // submission is preserved for review but the appointment isn't moved.
+      if (trackingCode && !tokenIsValid) {
+        logger.warn(
+          { submissionId: submission.id, trackingCode, hadToken: !!feedbackToken },
+          'Feedback submitted with tracking code but missing/invalid token — admin review'
+        );
+        runBackgroundTask(
+          () => slackNotificationService.sendAlert({
+            title: 'Feedback submitted without valid token',
+            severity: 'low',
+            details:
+              `A feedback submission referenced a tracking code but no valid HMAC token. ` +
+              `Submission stored anonymously; appointment was NOT auto-completed.`,
+            additionalFields: {
+              'Submission ID': submission.id,
+              'Tracking code': trackingCode,
+              'Had token': feedbackToken ? 'yes (invalid/expired)' : 'no',
+            },
+          }),
+          {
+            name: 'slack-feedback-token-missing',
+            context: { submissionId: submission.id },
+          },
+        );
+      }
 
       // Post-processing: build Slack data, transition appointment.
       // The lifecycle service fires the Slack notification (now persistently

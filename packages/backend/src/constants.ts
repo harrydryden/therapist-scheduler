@@ -35,6 +35,19 @@ export const RATE_LIMITS = {
     max: 60, // 60 webhook calls per minute (Gmail push notifications)
     timeWindowMs: 60000,
   },
+  /**
+   * Per-email cap on public booking submissions across a 24h window.
+   * The IP-level limiter handles burst control; this caps total
+   * submissions for any single (potentially attacker-spoofed) email
+   * regardless of source IP, to bound platform-mediated harassment of
+   * a single victim. Both pending and cancelled requests count —
+   * harassers tend to cancel-and-recreate to keep the active-thread
+   * limit from kicking in.
+   */
+  PUBLIC_APPOINTMENT_REQUEST_PER_EMAIL: {
+    max: 8,
+    timeWindowMs: 24 * 60 * 60 * 1000, // 24h
+  },
   DEFAULT: {
     max: 100,
     timeWindowMs: 60000,
@@ -388,6 +401,19 @@ export const TOOL_EXECUTION = {
   PREFIX: 'tool:executed:',
   /** TTL for idempotency keys (seconds) */
   TTL_SECONDS: 3600, // 1 hour
+  /** Redis key prefix for per-appointment tool-call count */
+  COUNT_PREFIX: 'tool:count:',
+  /** TTL for per-appointment counters (seconds): 30 days. Long enough to
+   *  cover an appointment's full lifecycle (creation → confirmation →
+   *  session → feedback) without piling up keys for archived ones. */
+  COUNT_TTL_SECONDS: 30 * 24 * 60 * 60,
+  /** Hard ceiling on tool calls per appointment. The per-turn cap
+   *  (MAX_TOOL_ITERATIONS = 5) bounds runaway loops within one inbound
+   *  email; this ceiling bounds total agent activity across an entire
+   *  appointment, so a prompt-injecting back-and-forth can't keep
+   *  driving the agent indefinitely. When exceeded we flip the
+   *  appointment into human control and Slack-alert. */
+  PER_APPOINTMENT_LIMIT: 50,
 } as const;
 
 // Slack notification settings

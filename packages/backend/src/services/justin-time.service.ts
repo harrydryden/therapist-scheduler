@@ -47,6 +47,7 @@ import { runToolLoop } from './agent-tool-loop';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from './ai-tool-executor.service';
 import { ConcurrentModificationError } from '../errors';
+import { emailEquals } from '../utils/email-equals';
 import {
   buildSchedulingContext,
   type SchedulingContext,
@@ -318,7 +319,7 @@ export class JustinTimeService {
       }
 
       // Track therapist response time if this is from the therapist
-      const isFromTherapist = fromEmail.toLowerCase() === appointmentRequest.therapistEmail.toLowerCase();
+      const isFromTherapist = emailEquals(fromEmail, appointmentRequest.therapistEmail);
       if (isFromTherapist) {
         await this.trackTherapistResponseTime(appointmentRequestId, appointmentRequest.therapistEmail);
       }
@@ -338,8 +339,13 @@ export class JustinTimeService {
         const pausedConversationState = await this.aiConversation.getConversationState(appointmentRequestId);
         if (pausedConversationState) {
           const { _version, ...stateWithoutVersion } = pausedConversationState;
+          // Sender attribution must be case-insensitive — `From:` headers
+          // arrive in arbitrary case and the appointment record stores
+          // whatever was submitted at booking time. emailEquals normalises
+          // both sides via the single util in utils/email-equals.ts so
+          // we can't drift from the bounce/freeze check on line 321.
           const senderType =
-            fromEmail === appointmentRequest.userEmail ? 'user' : 'therapist';
+            emailEquals(fromEmail, appointmentRequest.userEmail) ? 'user' : 'therapist';
           stateWithoutVersion.messages.push({
             role: 'user',
             content: `[Received while paused] Email from ${senderType} (${fromEmail}):\n\n${emailContent}`,
@@ -367,9 +373,11 @@ export class JustinTimeService {
       const checkpoint = conversationState.checkpoint;
       const existingFacts = conversationState.facts;
 
-      // Build the new message with thread context if available
+      // Build the new message with thread context if available.
+      // Case-insensitive comparison via the shared util — see the
+      // identical check in the human-control-paused branch above.
       const senderType =
-        fromEmail === appointmentRequest.userEmail ? 'user' : 'therapist';
+        emailEquals(fromEmail, appointmentRequest.userEmail) ? 'user' : 'therapist';
 
       // Check for prompt injection attempts in email content
       const injectionCheck = checkForInjection(emailContent, `email from ${fromEmail}`);
@@ -431,8 +439,13 @@ ${formatClassificationForPrompt(emailClassification)}`;
       // Large email content (50KB+) is truncated to prevent memory exhaustion
       conversationState.messages.push({ role: 'user', content: truncateMessageContent(newMessage) });
 
-      // Build scheduling context from appointment record
-      const context = buildSchedulingContext(appointmentRequest);
+      // Build scheduling context from appointment record. Thread the
+      // resolved senderType through so the tool executor can gate
+      // sender-attributable tools (e.g. update_therapist_availability).
+      const context: SchedulingContext = {
+        ...buildSchedulingContext(appointmentRequest),
+        inboundSender: senderType,
+      };
 
       // Update conversation facts with the new email (OpenClaw-inspired memory layering)
       const updatedFacts = updateFacts(existingFacts, emailContent, isFromTherapist);
