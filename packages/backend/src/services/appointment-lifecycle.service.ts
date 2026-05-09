@@ -34,6 +34,7 @@ import { transitionSideEffectsService } from './transition-side-effects.service'
 import { recordAppointmentEvent } from './appointment-event.service';
 import { auditEventService, type AuditActor } from './audit-event.service';
 import { aiConversationService, inferRestoredStage } from './ai-conversation.service';
+import { areDatetimesEqual } from '../utils/date';
 
 // ============================================
 // Lifecycle status ordering (for detecting backwards transitions)
@@ -820,10 +821,16 @@ class AppointmentLifecycleService {
 
     const previousStatus = appointment.status as AppointmentStatus;
 
-    // Check if already confirmed with same datetime (idempotent)
+    // Check if already confirmed with same datetime (idempotent).
+    // Use semantic comparison so a re-confirm with a slightly different
+    // rendering ("Mon 3 Feb at 10:00 AM" vs "Monday 3rd February at
+    // 10am") is correctly treated as a no-op rather than a reschedule.
+    // Without this, a benign agent-emitted variant of the same datetime
+    // would flip wasConfirmed/isReschedule, fire a reschedule audit
+    // narrative, and reset follow-up sentinels.
     if (
       appointment.status === APPOINTMENT_STATUS.CONFIRMED &&
-      appointment.confirmedDateTime === confirmedDateTime
+      areDatetimesEqual(appointment.confirmedDateTime, confirmedDateTime)
     ) {
       logger.debug(logContext, 'Appointment already confirmed with same datetime - skipping');
       return { success: true, previousStatus, newStatus: APPOINTMENT_STATUS.CONFIRMED, skipped: true };
@@ -839,7 +846,10 @@ class AppointmentLifecycleService {
     }
 
     const wasConfirmed = appointment.status === APPOINTMENT_STATUS.CONFIRMED;
-    const isReschedule = wasConfirmed && appointment.confirmedDateTime !== confirmedDateTime;
+    // Semantic compare so two different renderings of the same time
+    // ("Mon 3rd Feb 10am" vs "Monday 3rd February at 10:00am") aren't
+    // mistaken for a reschedule.
+    const isReschedule = wasConfirmed && !areDatetimesEqual(appointment.confirmedDateTime, confirmedDateTime);
     const reschedule = params.reschedule;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1089,20 +1099,35 @@ class AppointmentLifecycleService {
   }
 
   /**
-   * Transition: session_held | confirmed → feedback_requested
+   * Transition: session_held → feedback_requested (admin override allows
+   * confirmed → feedback_requested for back-fill of legacy/admin-created
+   * appointments that skipped the session_held window).
    *
    * Called when the feedback form email is sent.
-   * Accepts confirmed as a source status for admin-created appointments
-   * that skip directly to the feedback stage.
+   *
+   * Rationale for the source-gated allowlist:
+   * - System path (post-booking-followup tick): MUST come from
+   *   session_held. Allowing confirmed here would race the lifecycle
+   *   tick (which advances confirmed → session_held when the session
+   *   datetime passes) and produce timing-dependent skips of the
+   *   session_held audit event.
+   * - Admin path: occasionally needs to back-fill feedback for an
+   *   appointment that was confirmed but never auto-advanced (e.g. an
+   *   external session that didn't have a parsed datetime). Admin
+   *   keeps the wider allowlist.
    */
   async transitionToFeedbackRequested(params: TransitionToFeedbackRequestedParams): Promise<TransitionResult> {
     const { appointmentId, source, adminId } = params;
+    const validFromStatuses =
+      source === 'admin'
+        ? [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED]
+        : [APPOINTMENT_STATUS.SESSION_HELD];
     return this.applyLightTransition({
       appointmentId,
       source,
       adminId,
       targetStatus: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-      validFromStatuses: [APPOINTMENT_STATUS.SESSION_HELD, APPOINTMENT_STATUS.CONFIRMED],
+      validFromStatuses,
       extraData: { feedbackFormSentAt: new Date() },
       buildAuditMessage: (prev) => `Status changed: ${prev} → feedback_requested`,
       onAfterUpdate: (prev, apt) =>

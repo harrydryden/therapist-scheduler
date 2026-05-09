@@ -106,7 +106,25 @@ const configSchema = z.object({
     },
     { message: 'FRONTEND_URL must be set to a non-localhost URL in production' }
   ).default('http://localhost:5173'),
-});
+})
+  // SECURITY: requirePubsubAuth is a load-bearing flag — it gates the
+  // unauthenticated Gmail push webhook. The default is true and we
+  // refuse to start in production with it explicitly disabled, so a
+  // misconfigured `REQUIRE_PUBSUB_AUTH=false` env var doesn't silently
+  // open the inbound-email pipeline (and through it: bounce, cancel,
+  // reschedule paths) to forged Pub/Sub posts.
+  .superRefine((cfg, ctx) => {
+    if (cfg.env === 'production' && cfg.requirePubsubAuth === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['requirePubsubAuth'],
+        message:
+          'REQUIRE_PUBSUB_AUTH=false is not permitted in production. ' +
+          'Configure GOOGLE_PUBSUB_AUDIENCE and remove the override, ' +
+          'or set NODE_ENV to development/test if this really is local.',
+      });
+    }
+  });
 
 function loadConfig() {
   const rawConfig = {

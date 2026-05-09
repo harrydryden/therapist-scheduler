@@ -92,10 +92,20 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
       // Generate or use provided idempotency key
       const idempotencyKey = providedKey || generateIdempotencyKey(userEmail, therapistHandle);
 
-      // Check for duplicate request within idempotency window (fast path)
+      // SECURITY: Scope the idempotency lookup by userEmail so a third
+      // party who can guess or compute the deterministic key (it's a
+      // SHA-256 of email:therapist:floor(time/5min), all of which an
+      // attacker can manufacture) can't use the dedup endpoint as an
+      // oracle for whether a victim has an active appointment.
+      // Legitimate retries always come from the same client, so this
+      // scoping doesn't affect the intended behaviour. Case-insensitive
+      // match because we don't currently lowercase emails on storage,
+      // and we don't want a casing change to break the legitimate
+      // retry path.
       const existingByIdempotency = await prisma.appointmentRequest.findFirst({
         where: {
           idempotencyKey,
+          userEmail: { equals: userEmail, mode: 'insensitive' },
           createdAt: { gte: new Date(Date.now() - IDEMPOTENCY_WINDOW_MS) }
         },
         select: {
@@ -118,6 +128,34 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             message: 'Appointment request already submitted.',
           },
           deduplicated: true,
+        });
+      }
+
+      // SECURITY: Per-email submission cap across a 24h window. The IP
+      // limiter handles burst floods, but it doesn't prevent a botnet
+      // (or a NAT-shared client) from submitting the same victim's
+      // email repeatedly across many IPs. This counter caps the total
+      // platform-mediated email volume any single recipient can be
+      // subjected to, regardless of source IP. Cancelled rows are
+      // counted intentionally — harassers cancel-and-recreate to keep
+      // active-thread caps from triggering.
+      const perEmailWindow = new Date(Date.now() - RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST_PER_EMAIL.timeWindowMs);
+      const perEmailCount = await prisma.appointmentRequest.count({
+        where: {
+          userEmail: { equals: userEmail, mode: 'insensitive' },
+          createdAt: { gte: perEmailWindow },
+        },
+      });
+      if (perEmailCount >= RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST_PER_EMAIL.max) {
+        logger.warn(
+          { requestId, userEmail, perEmailCount, limit: RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST_PER_EMAIL.max },
+          'Per-email booking rate limit exceeded',
+        );
+        return reply.status(429).send({
+          success: false,
+          error:
+            'Too many booking requests for this email address in the past 24 hours. ' +
+            'Please email scheduling@spill.chat if you need help.',
         });
       }
 
