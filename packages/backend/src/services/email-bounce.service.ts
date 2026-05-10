@@ -36,14 +36,34 @@ const BOUNCE_SUBJECT_PATTERNS = [
 ];
 
 /**
- * Sender envelopes that signal a bounce.
+ * Sender envelopes that signal a real delivery-status notification.
+ *
+ * Anchored to the local-part of the address (`mailer-daemon@…`,
+ * `postmaster@…`, etc.) so unrelated senders that happen to contain
+ * one of these substrings (e.g. mailing-list `bounces+abc@list.com`,
+ * `do-not-reply-postmaster-news@somecorp.com`) don't false-positive
+ * into the admin-review alert. Real bounces from major providers
+ * (Google, Microsoft, AWS SES, SendGrid) all use one of these
+ * canonical envelopes.
+ *
+ * The previous broad `/bounce/i` pattern matched any address with
+ * "bounce" anywhere in it, which produced operational noise from
+ * mailing-list bounce-handler addresses that are NOT actual NDRs.
+ * After C1 the false positives are bounded — they hit the
+ * "Bounce-shaped email — manual review" Slack alert rather than
+ * cancelling appointments — but tightening here keeps that alert
+ * volume meaningful.
  */
 const BOUNCE_SENDER_PATTERNS = [
-  /mailer-daemon/i,
-  /postmaster/i,
-  /mail.*delivery.*subsystem/i,
-  /bounce/i,
-  /noreply.*google/i,
+  /(?:^|<)mailer-daemon@/i,
+  /(?:^|<)postmaster@/i,
+  /(?:^|<)mail.*delivery.*subsystem@/i,
+  /(?:^|<)noreply.*google.*@/i,
+  // List-bounce envelope local-parts (`bounce@`, `bounces@`,
+  // `bounces+xxx@`). This is narrower than the prior `/bounce/i`:
+  // it requires the local-part to START with `bounce` rather than
+  // contain it anywhere.
+  /(?:^|<)bounces?(?:\+[^@]*)?@/i,
 ];
 
 /**
