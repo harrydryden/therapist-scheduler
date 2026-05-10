@@ -70,7 +70,15 @@ export async function getOrCreateTrackingCode(
   const userLast4 = getLast4Digits(user?.odId);
   const therapistLast4 = getLast4Digits(therapist?.odId);
 
-  // Find existing appointments with this user/therapist combination to determine sequence
+  // Find existing appointments with this user/therapist combination so we
+  // can pick the next sequence number. We DELIBERATELY don't `orderBy
+  // { trackingCode: 'desc' }` here — Postgres orders strings
+  // lexicographically, so for sequences ≥ 10 the "highest" code in lex
+  // order isn't the highest by sequence ("...-9" sorts after "...-10").
+  // The for-loop below scans every match and computes the actual max
+  // numerically; relying on the DB sort would silently allocate
+  // colliding sequence numbers if anyone later optimises this path
+  // with `take: 1`.
   const existingAppointments = await db.appointmentRequest.findMany({
     where: {
       trackingCode: {
@@ -78,7 +86,6 @@ export async function getOrCreateTrackingCode(
       },
     },
     select: { trackingCode: true },
-    orderBy: { trackingCode: 'desc' },
   });
 
   // Determine the next sequence number
