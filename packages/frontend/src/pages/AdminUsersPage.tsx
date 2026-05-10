@@ -7,6 +7,7 @@ import type { UserListItem, UserDetail, UserFilters } from '../api/users';
 import { getErrorMessage } from '../api/core';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
+import AgentProfilePanel from '../components/AgentProfilePanel';
 
 function formatDate(value: string | null): string {
   if (!value) return '—';
@@ -263,6 +264,9 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
           </dl>
         </div>
       )}
+
+      {/* Agent profile (Layer C cross-appointment notes) */}
+      <AgentProfilePanel entity="user" id={data.id} />
 
       {/* Appointments */}
       <div>

@@ -16,6 +16,7 @@ import type {
 import { getErrorMessage } from '../api/core';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
+import AgentProfilePanel from '../components/AgentProfilePanel';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
@@ -432,6 +433,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
           )}
         </div>
       )}
+
+      {/* Agent profile (Layer C cross-appointment notes) */}
+      <AgentProfilePanel entity="therapist" id={data.id} />
 
       {/* Appointments */}
       <div>
