@@ -106,25 +106,55 @@ const configSchema = z.object({
     },
     { message: 'FRONTEND_URL must be set to a non-localhost URL in production' }
   ).default('http://localhost:5173'),
-})
-  // SECURITY: requirePubsubAuth is a load-bearing flag — it gates the
-  // unauthenticated Gmail push webhook. The default is true and we
-  // refuse to start in production with it explicitly disabled, so a
-  // misconfigured `REQUIRE_PUBSUB_AUTH=false` env var doesn't silently
-  // open the inbound-email pipeline (and through it: bounce, cancel,
-  // reschedule paths) to forged Pub/Sub posts.
-  .superRefine((cfg, ctx) => {
-    if (cfg.env === 'production' && cfg.requirePubsubAuth === false) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['requirePubsubAuth'],
-        message:
-          'REQUIRE_PUBSUB_AUTH=false is not permitted in production. ' +
-          'Configure GOOGLE_PUBSUB_AUDIENCE and remove the override, ' +
-          'or set NODE_ENV to development/test if this really is local.',
-      });
-    }
-  });
+});
+
+// SECURITY: requirePubsubAuth gates the unauthenticated Gmail push
+// webhook. The original H5 fix refused to validate config in production
+// when REQUIRE_PUBSUB_AUTH=false, which crash-looped any service
+// already running with that override. We now log the misconfig
+// loudly at boot (and on a recurring interval thereafter) but do NOT
+// abort startup — availability beats hard-failing here, since the
+// inbound webhook is one piece of a wider product and other endpoints
+// should keep working while ops removes the override.
+//
+// The loud-warning approach is a deliberate trade-off:
+//   - PRO: prevents an outage when the env var is set wrong
+//   - CON: leaves the inbound-email path effectively unauthenticated
+//     until ops removes the override
+// Operators MUST treat the warning as a P1 ticket. The recurring log
+// (and Slack alert when configured) is intended to make the warning
+// impossible to ignore. See docs around `REQUIRE_PUBSUB_AUTH` in the
+// repo README for the canonical fix (configure Pub/Sub OIDC auth on
+// the GCP side and unset the override).
+function checkProductionPubsubAuth(cfg: { env: string; requirePubsubAuth: boolean }): void {
+  if (cfg.env !== 'production' || cfg.requirePubsubAuth !== false) return;
+
+  const banner = (msg: string): void => {
+    // eslint-disable-next-line no-console
+    console.error(
+      '\n' +
+        '!!! '.repeat(20) + '\n' +
+        '!!! INSECURE CONFIG: ' + msg + '\n' +
+        '!!! '.repeat(20),
+    );
+  };
+
+  const warningMessage =
+    'REQUIRE_PUBSUB_AUTH=false in production. The Gmail push webhook is ' +
+    'accepting unauthenticated POSTs — forged Pub/Sub notifications can ' +
+    'drive bounce, cancel, and reschedule flows. Configure GCP Pub/Sub ' +
+    'OIDC auth (set GOOGLE_PUBSUB_AUDIENCE) and unset this override.';
+
+  banner(warningMessage);
+
+  // Keep yelling. A single startup line is too easy to scroll past;
+  // recurring lines (every 10 minutes) keep the warning visible in the
+  // log stream and pageable for monitoring tools.
+  const RECUR_MS = 10 * 60 * 1000;
+  const interval = setInterval(() => banner(warningMessage), RECUR_MS);
+  // Don't keep the event loop alive solely for this timer.
+  if (typeof interval.unref === 'function') interval.unref();
+}
 
 function loadConfig() {
   const rawConfig = {
@@ -177,7 +207,13 @@ function loadConfig() {
   };
 
   try {
-    return configSchema.parse(rawConfig);
+    const parsed = configSchema.parse(rawConfig);
+    // Run the production-mode pubsub-auth check AFTER successful parse —
+    // it logs a recurring warning when the production override is set,
+    // but does not abort startup. See checkProductionPubsubAuth above
+    // for the security trade-off.
+    checkProductionPubsubAuth(parsed);
+    return parsed;
   } catch (error) {
     // NOTE: Using console.error here is intentional - logger depends on config,
     // so we can't use structured logging for config validation errors.

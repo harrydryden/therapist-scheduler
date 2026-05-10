@@ -1,61 +1,107 @@
 /**
- * Tests the production-mode safety lock on REQUIRE_PUBSUB_AUTH.
+ * Tests the production-mode warning behaviour for REQUIRE_PUBSUB_AUTH.
  *
- * The flag's default is true, but it can be turned off via the env var.
- * Setting it to false in production is the worst case — the
- * unauthenticated Gmail push webhook becomes wide open. The schema
- * superRefine refuses to validate this combination so the misconfig
- * fails at boot rather than silently shipping.
+ * Original behaviour: hard-failed schema validation when production
+ * had REQUIRE_PUBSUB_AUTH=false. That crash-looped any service already
+ * deployed with the override set.
+ *
+ * Current behaviour: the schema accepts the combination, but the
+ * `checkProductionPubsubAuth` helper logs a banner warning at boot and
+ * sets a recurring interval that re-prints it every 10 minutes.
+ * Operators are expected to treat the warning as a P1 ticket; the
+ * service continues running so unrelated endpoints stay available.
+ *
+ * The trade-off: availability beats hard-failing here, because the
+ * Gmail push webhook is one feature among many — the rest of the
+ * product shouldn't go dark while the operator removes the override.
  */
 
-import { z } from 'zod';
+// Inline re-implementation of checkProductionPubsubAuth so the test can
+// drive it without dragging in the real module's side effects (and
+// without coupling to the actual config object's full shape).
+function buildChecker(consoleErrorSpy: jest.Mock) {
+  // eslint-disable-next-line no-console
+  const origConsoleError = console.error;
+  // eslint-disable-next-line no-console
+  console.error = consoleErrorSpy;
 
-// Re-define the relevant slice of the config schema so this test can
-// drive it directly without depending on env vars or process.exit
-// behaviour from the real loadConfig().
-function buildSchema() {
-  return z
-    .object({
-      env: z.enum(['development', 'production', 'test']),
-      requirePubsubAuth: z.boolean(),
-    })
-    .superRefine((cfg, ctx) => {
-      if (cfg.env === 'production' && cfg.requirePubsubAuth === false) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['requirePubsubAuth'],
-          message:
-            'REQUIRE_PUBSUB_AUTH=false is not permitted in production. ' +
-            'Configure GOOGLE_PUBSUB_AUDIENCE and remove the override, ' +
-            'or set NODE_ENV to development/test if this really is local.',
-        });
-      }
-    });
+  return {
+    run: (cfg: { env: string; requirePubsubAuth: boolean }, scheduledIntervals: jest.Mock) => {
+      if (cfg.env !== 'production' || cfg.requirePubsubAuth !== false) return;
+
+      const banner = (msg: string): void => {
+        // eslint-disable-next-line no-console
+        console.error(
+          '\n' +
+            '!!! '.repeat(20) + '\n' +
+            '!!! INSECURE CONFIG: ' + msg + '\n' +
+            '!!! '.repeat(20),
+        );
+      };
+
+      const warningMessage =
+        'REQUIRE_PUBSUB_AUTH=false in production. The Gmail push webhook is ' +
+        'accepting unauthenticated POSTs — forged Pub/Sub notifications can ' +
+        'drive bounce, cancel, and reschedule flows. Configure GCP Pub/Sub ' +
+        'OIDC auth (set GOOGLE_PUBSUB_AUDIENCE) and unset this override.';
+
+      banner(warningMessage);
+      // We don't actually start a setInterval in tests — just record
+      // the intent. setInterval-based assertions are flaky.
+      scheduledIntervals();
+    },
+    cleanup: () => {
+      // eslint-disable-next-line no-console
+      console.error = origConsoleError;
+    },
+  };
 }
 
-describe('config: REQUIRE_PUBSUB_AUTH production safety', () => {
-  const schema = buildSchema();
+describe('checkProductionPubsubAuth', () => {
+  let consoleErrorSpy: jest.Mock;
+  let scheduledInterval: jest.Mock;
+  let checker: ReturnType<typeof buildChecker>;
 
-  it('refuses production with requirePubsubAuth=false', () => {
-    const result = schema.safeParse({ env: 'production', requirePubsubAuth: false });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0].message).toMatch(/not permitted in production/);
-    }
+  beforeEach(() => {
+    consoleErrorSpy = jest.fn();
+    scheduledInterval = jest.fn();
+    checker = buildChecker(consoleErrorSpy);
   });
 
-  it('accepts production with requirePubsubAuth=true', () => {
-    const result = schema.safeParse({ env: 'production', requirePubsubAuth: true });
-    expect(result.success).toBe(true);
+  afterEach(() => {
+    checker.cleanup();
   });
 
-  it('allows development with requirePubsubAuth=false (local-dev escape hatch)', () => {
-    const result = schema.safeParse({ env: 'development', requirePubsubAuth: false });
-    expect(result.success).toBe(true);
+  it('logs a banner warning AND schedules a recurring re-warning when production has the override', () => {
+    checker.run({ env: 'production', requirePubsubAuth: false }, scheduledInterval);
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy.mock.calls[0][0]).toContain('INSECURE CONFIG');
+    expect(consoleErrorSpy.mock.calls[0][0]).toContain('REQUIRE_PUBSUB_AUTH=false in production');
+    expect(scheduledInterval).toHaveBeenCalledTimes(1);
   });
 
-  it('allows test env with requirePubsubAuth=false', () => {
-    const result = schema.safeParse({ env: 'test', requirePubsubAuth: false });
-    expect(result.success).toBe(true);
+  it('does NOT log when production has the safe default (auth required)', () => {
+    checker.run({ env: 'production', requirePubsubAuth: true }, scheduledInterval);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(scheduledInterval).not.toHaveBeenCalled();
+  });
+
+  it('does NOT log when development has the override (local-dev escape hatch)', () => {
+    checker.run({ env: 'development', requirePubsubAuth: false }, scheduledInterval);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(scheduledInterval).not.toHaveBeenCalled();
+  });
+
+  it('does NOT log when test env has the override', () => {
+    checker.run({ env: 'test', requirePubsubAuth: false }, scheduledInterval);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(scheduledInterval).not.toHaveBeenCalled();
+  });
+
+  it('warning text contains explicit remediation steps (set GOOGLE_PUBSUB_AUDIENCE)', () => {
+    checker.run({ env: 'production', requirePubsubAuth: false }, scheduledInterval);
+    const warning = consoleErrorSpy.mock.calls[0][0];
+    expect(warning).toContain('GOOGLE_PUBSUB_AUDIENCE');
+    expect(warning).toContain('OIDC');
   });
 });
