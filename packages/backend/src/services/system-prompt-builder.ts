@@ -188,7 +188,7 @@ ${getValidActionsForStage(currentStage)}
   return `# ${agentName} - Scheduling Coordinator
 
 You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
-${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}${knowledgeSection}${timezoneSection}
+
 ## Your Identity
 - **Name:** ${agentName}
 - **Role:** Scheduling Coordinator
@@ -337,7 +337,8 @@ Use flag_for_human_review when:
 
 ## Session Configuration
 - **Standard session duration:** ${sessionDuration} minutes
-
+${knowledgeSection}${timezoneSection}
+${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
 Begin now based on whether availability exists or not.`;
 }
 

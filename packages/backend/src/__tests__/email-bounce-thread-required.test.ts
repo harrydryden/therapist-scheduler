@@ -186,4 +186,71 @@ describe('processPotentialBounce — admin alert when un-actioned', () => {
 
     expect(mockSendAlert).not.toHaveBeenCalled();
   });
+
+  describe('sender envelope anchoring (false-positive prevention)', () => {
+    // The sender pattern was previously /bounce/i — anything containing
+    // "bounce" anywhere matched. After the tightening, only canonical
+    // bounce envelopes (anchored to the start of the local-part) match.
+    // These cases pin the new boundary.
+
+    it('does NOT classify "do-not-reply-postmaster-news@example.com" as a bounce', async () => {
+      // "postmaster" is in the address but not as the local-part — this
+      // is a real corporate newsletter pattern, not a bounce envelope.
+      await processPotentialBounce({
+        from: 'do-not-reply-postmaster-news@somecorp.example',
+        subject: 'Newsletter from us',
+        body: 'No bounces here, just news.',
+        messageId: 'msg-1',
+      });
+      expect(mockSendAlert).not.toHaveBeenCalled();
+      expect(mockTransitionToCancelled).not.toHaveBeenCalled();
+    });
+
+    it('does NOT classify "marketing-bounce-handler@list.example" as a bounce', async () => {
+      // Mailing-list bounce-handler addresses contain "bounce" but
+      // aren't NDRs — they're senders we shouldn't act on.
+      await processPotentialBounce({
+        from: 'marketing-bounce-handler@list.example',
+        subject: 'Latest news',
+        body: 'Newsletter content.',
+        messageId: 'msg-2',
+      });
+      expect(mockSendAlert).not.toHaveBeenCalled();
+      expect(mockTransitionToCancelled).not.toHaveBeenCalled();
+    });
+
+    it('still recognises mailer-daemon@ envelopes', async () => {
+      // The canonical bounce envelope MUST still trigger detection,
+      // otherwise the tightening would silently kill real bounces.
+      await processPotentialBounce({
+        from: 'mailer-daemon@googlemail.com',
+        subject: 'Delivery Status Notification (Failure)',
+        body: '550 user unknown',
+        messageId: 'msg-3',
+      });
+      expect(mockSendAlert).toHaveBeenCalled();
+    });
+
+    it('still recognises postmaster@ envelopes', async () => {
+      await processPotentialBounce({
+        from: 'postmaster@hotmail.com',
+        subject: 'Undeliverable: your message',
+        body: '550 mailbox not found',
+        messageId: 'msg-4',
+      });
+      expect(mockSendAlert).toHaveBeenCalled();
+    });
+
+    it('recognises VERP-style bounces+xxx@ envelopes', async () => {
+      // Mailing-list VERP encodes the original recipient in the
+      // local-part — these are real NDRs we want to detect.
+      await processPotentialBounce({
+        from: 'bounces+abc123@mailing-list.example',
+        subject: 'Returned mail',
+        body: '554 delivery error',
+        messageId: 'msg-5',
+      });
+      expect(mockSendAlert).toHaveBeenCalled();
+    });
+  });
 });
