@@ -177,6 +177,59 @@ export const schedulingTools: Anthropic.Tool[] = [
       required: ['reason'],
     },
   },
+  {
+    name: 'remember',
+    description:
+      'Record an observation about this conversation that you would want a colleague taking it over to know. Use sparingly: only for things that are NOT already obvious from the message log and are NOT scheduling primitives like proposed times or blockers (those are auto-extracted). Good examples: a stated communication preference ("user prefers single-line emails"), a recurring constraint ("therapist responds before 10am UK"), situational context ("user mentioned a job interview Friday"), or an explicit decision ("agreed to switch to weekly Mondays"). The system retains up to 20 notes per conversation and evicts the oldest. Re-call this tool with a corrected note if a previous one is wrong or stale — duplicate text on the same conversation is silently deduped. Do NOT include therapy-clinical content; this is for scheduling continuity only.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        note: {
+          type: 'string',
+          description: 'The observation to retain. One sentence is ideal. Maximum 280 characters.',
+        },
+        category: {
+          type: 'string',
+          enum: ['preference', 'constraint', 'context', 'decision'],
+          description: 'preference = stated style or preference; constraint = recurring fixed obligation; context = situational background; decision = an agreement made.',
+        },
+      },
+      required: ['note', 'category'],
+    },
+  },
+  {
+    name: 'record_availability_window',
+    description:
+      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. The quote field captures the original phrasing for traceability.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        starts_at: {
+          type: 'string',
+          description: 'Absolute start of the window in ISO 8601 with offset, e.g. "2026-02-03T10:00:00+00:00". Compute this from the relative phrasing using today\'s date.',
+        },
+        ends_at: {
+          type: 'string',
+          description: 'Absolute end of the window in ISO 8601 with offset. Must be strictly after starts_at and not entirely in the past.',
+        },
+        status: {
+          type: 'string',
+          enum: ['available', 'unavailable'],
+          description: 'available = an open slot the therapist (or user) offered; unavailable = an explicit block / holiday / out-of-office.',
+        },
+        source: {
+          type: 'string',
+          enum: ['therapist', 'user'],
+          description: 'Who said it. Usually \'therapist\', but the user can also note their own absences.',
+        },
+        quote: {
+          type: 'string',
+          description: 'The original phrase from the email, verbatim. Helps later turns and admins verify your date resolution. Maximum 280 characters.',
+        },
+      },
+      required: ['starts_at', 'ends_at', 'status', 'source', 'quote'],
+    },
+  },
 ];
 
 /** Tools whose execution produces external side effects (DB mutations, emails).

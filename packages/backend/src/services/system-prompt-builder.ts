@@ -32,6 +32,11 @@ import {
   type ConversationFacts,
   formatFactsForPrompt,
 } from '../utils/conversation-facts';
+import {
+  getThreadMemory,
+  formatMemoryForPrompt,
+  formatAvailabilityWindowsForPrompt,
+} from './agent-memory.service';
 import type { SchedulingContext } from './scheduling-context.service';
 import { buildTimezoneSection } from './timezone-section';
 
@@ -172,10 +177,18 @@ ${getValidActionsForStage(currentStage)}
 `;
   const factsSection = facts ? formatFactsForPrompt(facts) : '';
 
+  // Agent-curated thread notes (Layer B). Read by primary key so the
+  // notes and availability windows shown can ONLY belong to this
+  // appointment — there's no cross-thread query path.
+  const memory = await getThreadMemory(context.appointmentRequestId);
+  const memorySection = formatMemoryForPrompt(memory);
+  // Future-only filter: past windows would mislead the agent.
+  const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(memory);
+
   return `# ${agentName} - Scheduling Coordinator
 
 You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
-${factsSection}${stageGuidance}${knowledgeSection}${timezoneSection}
+${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}${knowledgeSection}${timezoneSection}
 ## Your Identity
 - **Name:** ${agentName}
 - **Role:** Scheduling Coordinator
@@ -298,6 +311,8 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 - recommend_cancel_match: Recommend the admin cancel this match when the user has declined the therapist (e.g. due to availability not working, preference, or any reason they don't want to proceed) but hasn't explicitly said "cancel". This alerts the admin and pauses agent processing.
 - issue_voucher_code: Issue a session voucher code for a user who needs one to book. Use this when a user contacts you saying they don't have a session code or their code has expired. The tool generates a personal code and booking link for their email address. Share both the display code and the booking URL in your reply.
 - flag_for_human_review: Flag this conversation for admin review when you are uncertain how to proceed. **Use this proactively** rather than stalling or guessing incorrectly.
+- remember: Record an observation about THIS conversation that you'd want a colleague taking it over to know — preferences, recurring constraints, situational context, decisions made. Use sparingly: only for things not already obvious from the message log and not already captured by the auto-extracted facts above. Do NOT include therapy-clinical content; this is for scheduling continuity only. Re-call with a corrected note if a previous one is wrong; identical notes are silently deduped.
+- record_availability_window: Capture a one-off availability window someone mentioned — e.g. "I can do Mondays for the next two weeks", "I'm free this Friday afternoon", "I'm out the week of the 15th". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself, using today's date. status="available" for offered slots, status="unavailable" for explicit blocks. Past windows are dropped automatically. Use this in addition to (not instead of) update_therapist_availability — that tool is for the recurring weekly schedule; this one is for episodic mentions.
 
 ## When to Recommend Cancelling the Match
 
