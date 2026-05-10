@@ -15,14 +15,14 @@ datasource db {
 // Represents a client/user who books appointments
 // Each user has a unique 10-digit ID (odId) for easy reference
 model User {
-  id        String   @id @default(uuid())
-  odId      String   @unique @map("od_id") // Unique 10-digit ID (e.g., "1234567890")
-  email     String   @unique
-  name      String?
+  id      String  @id @default(uuid())
+  odId    String  @unique @map("od_id") // Unique 10-digit ID (e.g., "1234567890")
+  email   String  @unique
+  name    String?
   // Country code (ISO-like short code: UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA)
   // Used to determine timezone for agent communications. Database appointment
   // times remain in UK time; this controls how times are presented to the user.
-  country   String   @default("UK")
+  country String  @default("UK")
 
   // Mailing list opt-in. Mirrors the Notion `Subscribed` checkbox while the
   // Notion users database is still authoritative; reads switch to this column
@@ -34,13 +34,19 @@ model User {
   // deployment owner has confirmed those users gave consent at the time.
   // Nullable on the booking flow (booking doesn't yet require these), so a
   // null value means the user has only ever booked, never signed up.
-  priorTherapy           Boolean?  @map("prior_therapy")
-  acknowledgedRealSession Boolean? @map("acknowledged_real_session")
-  agreedToFeedback       Boolean?  @map("agreed_to_feedback")
-  consentGivenAt         DateTime? @map("consent_given_at")
+  priorTherapy            Boolean?  @map("prior_therapy")
+  acknowledgedRealSession Boolean?  @map("acknowledged_real_session")
+  agreedToFeedback        Boolean?  @map("agreed_to_feedback")
+  consentGivenAt          DateTime? @map("consent_given_at")
   // 'signup_form' | 'booking' | 'admin' | 'legacy'. Helps distinguish data
   // provenance once the booking and signup paths both write here.
-  signupSource           String?   @map("signup_source")
+  signupSource            String?   @map("signup_source")
+
+  // Agent profile (Layer C in the agent memory design). Cross-appointment
+  // observations about this user that help the scheduling agent start
+  // warm on subsequent bookings. Strictly scoped per User.id; see
+  // agent-profile.service.ts for the read/write contract.
+  agentNotes Json? @map("agent_notes")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -57,20 +63,20 @@ model User {
 // Represents a therapist who provides sessions
 // Each therapist has a unique 10-digit ID (odId) for easy reference
 model Therapist {
-  id         String    @id @default(uuid())
-  odId       String    @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
+  id           String  @id @default(uuid())
+  odId         String  @unique @map("od_id") // Unique 10-digit ID (e.g., "9876543210")
   // Public-facing identifier used by the frontend, booking endpoints, and the
   // ATS integration as the therapist's stable handle. Originally seeded with
   // the Notion page ID for therapists ingested while Notion was authoritative;
   // for new ingestions a uuid is generated. Nullable to permit therapists
   // whose Notion record has been deleted; rows without a notionId are matched
   // by their Postgres `id` instead.
-  notionId   String?   @unique @map("notion_id")
-  email      String    @unique
-  name       String
+  notionId     String? @unique @map("notion_id")
+  email        String  @unique
+  name         String
   // Country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA). Drives timezone
   // for agent communication and the flag emoji on the public therapist card.
-  country    String    @default("UK")
+  country      String  @default("UK")
   // Therapist's recurring availability. Source of truth — Notion is no longer
   // read or written for availability. Shape: { timezone: string, slots:
   // [{day, start, end}], exceptions?: [{date, available}] }. May be null until
@@ -80,23 +86,30 @@ model Therapist {
   // Profile fields. Originally mirrored the Notion therapists database via a
   // one-shot Notion→Postgres backfill; Postgres is now the source of truth
   // and these columns are written directly by the ingestion pipeline.
-  bio           String?  @db.Text
+  bio          String?  @db.Text
   // Multi-select category tags. Postgres String[] arrays so we can index/query
   // without JSON unwrapping. Empty array on rows that haven't been backfilled.
-  approach      String[] @default([])
-  style         String[] @default([])
-  areasOfFocus  String[] @default([]) @map("areas_of_focus")
-  profileImage  String?  @map("profile_image")
-  bookingLink   String?  @map("booking_link")
+  approach     String[] @default([])
+  style        String[] @default([])
+  areasOfFocus String[] @default([]) @map("areas_of_focus")
+  profileImage String?  @map("profile_image")
+  bookingLink  String?  @map("booking_link")
   // Whether the therapist is accepting bookings at all. Default true so
   // legacy unbackfilled rows don't disappear from any Postgres-backed read.
-  active        Boolean  @default(true)
+  active       Boolean  @default(true)
 
-  ingestedAt DateTime? @map("ingested_at") // When the therapist was added to the platform
-  lastNudgeAt DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
-  lastNudgeThreadId String? @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt @map("updated_at")
+  ingestedAt        DateTime? @map("ingested_at") // When the therapist was added to the platform
+  lastNudgeAt       DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
+  lastNudgeThreadId String?   @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)
+
+  // Agent profile (Layer C in the agent memory design). Cross-appointment
+  // observations about this therapist's scheduling style. Strictly
+  // scoped per Therapist.id; see agent-profile.service.ts for the
+  // read/write contract.
+  agentNotes Json? @map("agent_notes")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
   appointments AppointmentRequest[]
@@ -115,46 +128,46 @@ model Therapist {
 // Using String (not enum) for compatibility with prisma db push on existing databases
 
 model AppointmentRequest {
-  id                    String    @id @default(uuid())
-  userName              String?   @map("user_name")
-  userEmail             String    @map("user_email")
-  therapistHandle       String    @map("therapist_handle")
-  therapistEmail        String    @map("therapist_email")
-  therapistName         String    @map("therapist_name")
-  therapistAvailability Json?     @map("therapist_availability")
-  status                String @default("pending")
+  id                    String  @id @default(uuid())
+  userName              String? @map("user_name")
+  userEmail             String  @map("user_email")
+  therapistHandle       String  @map("therapist_handle")
+  therapistEmail        String  @map("therapist_email")
+  therapistName         String  @map("therapist_name")
+  therapistAvailability Json?   @map("therapist_availability")
+  status                String  @default("pending")
 
   // Bumped inside the atomic update of every status transition (see
   // appointment-lifecycle.service). Included in side-effect-tracker
   // idempotency keys so that re-entering the same status (e.g. cancel
   // → re-confirm) doesn't dedupe against the previous generation's
   // already-completed Slack/email side-effect rows.
-  transitionGeneration  Int       @default(0) @map("transition_generation")
+  transitionGeneration Int @default(0) @map("transition_generation")
 
   // Links to User and Therapist entities (for data management)
   // NOTE: Optional for backwards compatibility with records created before User/Therapist
   // entities existed. All new appointments set these via getOrCreateUser/getOrCreateTherapist.
   // Orphaned records (null userId/therapistId) are logged during retention cleanup.
-  userId      String? @map("user_id")
-  therapistId String? @map("therapist_id")
-  user        User?      @relation(fields: [userId], references: [id])
-  therapist   Therapist? @relation(fields: [therapistId], references: [id])
-  conversationState     Json?     @map("conversation_state")
+  userId            String?    @map("user_id")
+  therapistId       String?    @map("therapist_id")
+  user              User?      @relation(fields: [userId], references: [id])
+  therapist         Therapist? @relation(fields: [therapistId], references: [id])
+  conversationState Json?      @map("conversation_state")
   // FIX #21: Denormalized columns to avoid loading full conversationState blob (up to 500KB)
   // in list queries. Updated whenever conversationState is written.
-  messageCount          Int       @default(0) @map("message_count")
-  checkpointStage       String?   @map("checkpoint_stage")
+  messageCount      Int        @default(0) @map("message_count")
+  checkpointStage   String?    @map("checkpoint_stage")
   // Agent-curated thread memory (Layer B in the agent memory design).
   // Free-form observations the agent retains via the `remember` tool —
   // preferences, constraints, prior decisions, situational context the
   // regex-based fact extractor doesn't catch. Strictly per-appointment;
   // see agent-memory.service.ts for the read/write contract.
-  memory                Json?
-  confirmedAt           DateTime? @map("confirmed_at")
-  confirmedDateTime     String?   @map("confirmed_date_time") // The actual scheduled appointment date/time
-  notes                 String?
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
+  memory            Json?
+  confirmedAt       DateTime?  @map("confirmed_at")
+  confirmedDateTime String?    @map("confirmed_date_time") // The actual scheduled appointment date/time
+  notes             String?
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
 
   // Email thread tracking for deterministic matching
   // Separate threads for client and therapist conversations
@@ -191,10 +204,10 @@ model AppointmentRequest {
   isStale        Boolean  @default(false) @map("is_stale")
 
   // Post-booking follow-up tracking
-  meetingLinkCheckSentAt    DateTime? @map("meeting_link_check_sent_at")
-  feedbackFormSentAt        DateTime? @map("feedback_form_sent_at")
-  feedbackReminderSentAt    DateTime? @map("feedback_reminder_sent_at")
-  confirmedDateTimeParsed   DateTime? @map("confirmed_date_time_parsed")
+  meetingLinkCheckSentAt  DateTime? @map("meeting_link_check_sent_at")
+  feedbackFormSentAt      DateTime? @map("feedback_form_sent_at")
+  feedbackReminderSentAt  DateTime? @map("feedback_reminder_sent_at")
+  confirmedDateTimeParsed DateTime? @map("confirmed_date_time_parsed")
 
   // Rescheduling support
   reschedulingInProgress    Boolean @default(false) @map("rescheduling_in_progress")
@@ -223,9 +236,9 @@ model AppointmentRequest {
 
   // Chase follow-up tracking (Thread Lifecycle)
   // Agent sends one chase email to the non-responding party before recommending closure
-  chaseSentAt        DateTime? @map("chase_sent_at")        // When the chase email was sent
-  chaseSentTo        String?   @map("chase_sent_to")        // 'user' or 'therapist'
-  chaseTargetEmail   String?   @map("chase_target_email")   // Email address chased
+  chaseSentAt      DateTime? @map("chase_sent_at") // When the chase email was sent
+  chaseSentTo      String?   @map("chase_sent_to") // 'user' or 'therapist'
+  chaseTargetEmail String?   @map("chase_target_email") // Email address chased
 
   // Closure recommendation tracking
   // After chase goes unanswered, system recommends admin close the thread
@@ -450,7 +463,7 @@ model WeeklyMailingInquiry {
   userName            String?  @map("user_name")
   gmailThreadId       String?  @map("gmail_thread_id")
   conversationState   Json?    @map("conversation_state")
-  status              String @default("active")
+  status              String   @default("active")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   humanControlEnabled Boolean  @default(false) @map("human_control_enabled")
@@ -547,15 +560,15 @@ model SideEffectLog {
   transition String // e.g., 'confirmed', 'cancelled', 'completed'
 
   // Status tracking
-  status    String    @default("pending") // pending, completed, failed, abandoned
-  attempts  Int       @default(0)
-  errorLog  String?   @map("error_log") @db.Text
+  status   String  @default("pending") // pending, completed, failed, abandoned
+  attempts Int     @default(0)
+  errorLog String? @map("error_log") @db.Text
 
   // Rendered payload captured at registration time so retries can replay the
   // exact original outbound (e.g. localised email subject/body, slack args).
   // Optional — some effects (e.g. slack notify) don't need a payload because
   // their retry path re-fetches state from the DB.
-  payload   Json?     @map("payload")
+  payload Json? @map("payload")
 
   // Timing
   createdAt   DateTime  @default(now()) @map("created_at")
@@ -584,7 +597,7 @@ model SideEffectLog {
 // Each report summarises agent activity since the previous report.
 // Monday reports cover Fri 9am → Mon 9am (including the weekend).
 model WorkReport {
-  id        String   @id @default(uuid())
+  id String @id @default(uuid())
 
   // Time window covered by this report
   periodStart DateTime @map("period_start")
@@ -607,10 +620,10 @@ model WorkReport {
   closureRecommendations    Int @default(0) @map("closure_recommendations")
 
   // Current pipeline snapshot at report time
-  pipelinePending      Int @default(0) @map("pipeline_pending")
-  pipelineContacted    Int @default(0) @map("pipeline_contacted")
-  pipelineNegotiating  Int @default(0) @map("pipeline_negotiating")
-  pipelineConfirmed    Int @default(0) @map("pipeline_confirmed")
+  pipelinePending     Int @default(0) @map("pipeline_pending")
+  pipelineContacted   Int @default(0) @map("pipeline_contacted")
+  pipelineNegotiating Int @default(0) @map("pipeline_negotiating")
+  pipelineConfirmed   Int @default(0) @map("pipeline_confirmed")
 
   // Feedback received in period
   feedbackSubmissions Int @default(0) @map("feedback_submissions")
@@ -636,15 +649,15 @@ model WorkReport {
 // Each user (keyed by email) has at most one active voucher at a time.
 // Strike counting drives auto-unsubscribe after consecutive expired vouchers.
 model VoucherTracking {
-  id                 String    @id                                         // User email (lowercase)
-  strikeCount        Int       @default(0) @map("strike_count")            // Consecutive expired vouchers
-  lastVoucherSentAt  DateTime? @map("last_voucher_sent_at")                // When current voucher was issued
-  lastVoucherToken   String?   @map("last_voucher_token") @db.Text         // Full HMAC token (reused in reminder emails)
-  lastVoucherUsedAt  DateTime? @map("last_voucher_used_at")                // When user last booked with a voucher
-  reminderSentAt     DateTime? @map("reminder_sent_at")                    // When mid-cycle reminder was sent
-  unsubscribedAt     DateTime? @map("unsubscribed_at")                     // When auto-unsubscribed (audit)
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  id                String    @id // User email (lowercase)
+  strikeCount       Int       @default(0) @map("strike_count") // Consecutive expired vouchers
+  lastVoucherSentAt DateTime? @map("last_voucher_sent_at") // When current voucher was issued
+  lastVoucherToken  String?   @map("last_voucher_token") @db.Text // Full HMAC token (reused in reminder emails)
+  lastVoucherUsedAt DateTime? @map("last_voucher_used_at") // When user last booked with a voucher
+  reminderSentAt    DateTime? @map("reminder_sent_at") // When mid-cycle reminder was sent
+  unsubscribedAt    DateTime? @map("unsubscribed_at") // When auto-unsubscribed (audit)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
   @@index([strikeCount])
   @@index([lastVoucherSentAt])
@@ -662,30 +675,30 @@ model VoucherTracking {
 // (admin) | passively expired (expiresAt < now). Rows are kept indefinitely
 // for audit; "delete" is not a state.
 model SignupInvitation {
-  id          String    @id @default(uuid())
+  id             String    @id @default(uuid())
   // Lowercased email of the invitee. NOT @unique — once a row is accepted or
   // revoked, the same email can be re-invited (the service auto-revokes any
   // pending invitation for that email before creating a new one).
-  email       String
+  email          String
   // Optional name the admin wants to pre-fill on the signup form.
-  name        String?
+  name           String?
   // SHA-256 hex digest of the raw token. The raw token is only ever in the
   // emailed URL; if the DB leaks, leaked rows can't be redeemed.
-  tokenHash   String    @unique @map("token_hash")
+  tokenHash      String    @unique @map("token_hash")
   // Who issued it (admin secret can't carry an identity, so this is the
   // human-readable label the admin enters or 'admin' fallback).
-  invitedBy   String    @map("invited_by")
-  expiresAt   DateTime  @map("expires_at")
-  acceptedAt  DateTime? @map("accepted_at")
+  invitedBy      String    @map("invited_by")
+  expiresAt      DateTime  @map("expires_at")
+  acceptedAt     DateTime? @map("accepted_at")
   // Postgres User row created from this invite, linked at acceptance time
   // for conversion reporting. Optional — older rows pre-link were not
   // preserved.
-  acceptedUserId String? @map("accepted_user_id")
-  revokedAt   DateTime? @map("revoked_at")
+  acceptedUserId String?   @map("accepted_user_id")
+  revokedAt      DateTime? @map("revoked_at")
   // Last time the admin re-sent the email (counter is implicit: how many
   // sends happened since createdAt; admin-only, not displayed publicly).
-  lastSentAt  DateTime  @default(now()) @map("last_sent_at")
-  sendCount   Int       @default(1) @map("send_count")
+  lastSentAt     DateTime  @default(now()) @map("last_sent_at")
+  sendCount      Int       @default(1) @map("send_count")
   // When the pre-expiry reminder was sent. Null means "no reminder sent yet";
   // the background tick uses this to make sure each invite gets at most one
   // reminder regardless of how many cycles it sees.
@@ -693,9 +706,9 @@ model SignupInvitation {
   // When this row was archived (deleted-but-soft) by the cleanup job. Set
   // for old expired/revoked rows so they fall out of the default admin
   // listing without losing the audit trail.
-  archivedAt  DateTime? @map("archived_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  archivedAt     DateTime? @map("archived_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   @@index([email])
   @@index([acceptedAt])

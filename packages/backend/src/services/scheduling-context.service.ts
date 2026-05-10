@@ -64,6 +64,19 @@ export interface SchedulingContext {
    * schedule overwrite.
    */
   inboundSender?: 'user' | 'therapist';
+  /**
+   * Primary keys of the User / Therapist rows linked to this appointment.
+   * Optional because legacy appointment rows pre-date the User/Therapist
+   * entities and may have null userId/therapistId. The system prompt
+   * builder uses these to look up cross-appointment profile notes
+   * (Layer C); when absent, no profile section renders.
+   *
+   * Reads against User.agentNotes / Therapist.agentNotes MUST go through
+   * these primary keys — never via email or any other identifier — so the
+   * cross-thread isolation contract holds.
+   */
+  userId?: string;
+  therapistId?: string;
 }
 
 export interface ConversationMessage {
@@ -87,8 +100,10 @@ export function buildSchedulingContext(
     id: string;
     userName: string | null;
     userEmail: string;
+    userId?: string | null;
     therapistEmail: string;
     therapistName: string;
+    therapistId?: string | null;
     therapistAvailability: unknown;
     bookingMethod?: string;
     user?: { country: string } | null;
@@ -102,8 +117,10 @@ export function buildSchedulingContext(
     // tool calls render "Hi John," not "Hi John Smith,".
     userName: firstName(appointmentRequest.userName),
     userEmail: appointmentRequest.userEmail,
+    userId: appointmentRequest.userId ?? undefined,
     therapistEmail: appointmentRequest.therapistEmail,
     therapistName: firstName(appointmentRequest.therapistName),
+    therapistId: appointmentRequest.therapistId ?? undefined,
     therapistAvailability: appointmentRequest.therapistAvailability as Record<string, unknown> | null,
     bookingMethod: (appointmentRequest.bookingMethod as BookingMethod) || 'agent_negotiated',
     userCountry: appointmentRequest.user?.country || 'UK',

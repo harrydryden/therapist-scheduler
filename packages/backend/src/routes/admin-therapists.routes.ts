@@ -25,6 +25,17 @@ import {
   VALID_STYLE_TYPES,
   VALID_AREAS_OF_FOCUS_TYPES,
 } from '../config/therapist-categories';
+import {
+  getTherapistProfile,
+  addTherapistProfileNote,
+  clearTherapistProfile,
+  MAX_PROFILE_NOTE_LENGTH,
+} from '../services/agent-profile.service';
+
+const addTherapistProfileNoteSchema = z.object({
+  category: z.enum(['communication', 'scheduling', 'context']),
+  text: z.string().trim().min(1).max(MAX_PROFILE_NOTE_LENGTH),
+});
 
 const listTherapistsSchema = z.object({
   search: z.string().trim().max(255).optional(),
@@ -410,6 +421,111 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, therapistId: id }, 'Failed to unfreeze therapist');
         return Errors.internal(reply, 'Failed to unfreeze therapist');
+      }
+    },
+  );
+
+  /**
+   * GET /api/admin/therapists/:id/agent-profile — Layer C profile. See
+   * agent-profile.service.ts for the privacy contract.
+   */
+  fastify.get<{ Params: { id: string } }>(
+    '/api/admin/therapists/:id/agent-profile',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_ENDPOINTS.max,
+          timeWindow: RATE_LIMITS.ADMIN_ENDPOINTS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      try {
+        const profile = await getTherapistProfile(id);
+        return sendSuccess(reply, profile);
+      } catch (err) {
+        logger.error({ err, therapistId: id }, 'Failed to read therapist agent profile');
+        return Errors.internal(reply, 'Failed to read therapist agent profile');
+      }
+    },
+  );
+
+  /**
+   * POST /api/admin/therapists/:id/agent-profile/notes — append an admin
+   * note. Same shape as the user variant; deliberately kept as parallel
+   * code paths so per-entity scoping cannot collapse in a future refactor.
+   */
+  fastify.post<{
+    Params: { id: string };
+    Body: z.infer<typeof addTherapistProfileNoteSchema>;
+  }>(
+    '/api/admin/therapists/:id/agent-profile/notes',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const parsed = addTherapistProfileNoteSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return Errors.validationFailed(reply, parsed.error.errors);
+      }
+
+      const exists = await prisma.therapist.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) {
+        return Errors.notFound(reply, 'Therapist');
+      }
+
+      try {
+        const result = await addTherapistProfileNote(id, {
+          category: parsed.data.category,
+          text: parsed.data.text,
+          source: 'admin',
+        });
+        logger.info(
+          { therapistId: id, category: parsed.data.category, added: result.added },
+          'Admin added therapist agent-profile note',
+        );
+        return sendSuccess(reply, result);
+      } catch (err) {
+        logger.error({ err, therapistId: id }, 'Failed to add therapist agent-profile note');
+        return Errors.internal(reply, 'Failed to add therapist agent-profile note');
+      }
+    },
+  );
+
+  /**
+   * DELETE /api/admin/therapists/:id/agent-profile — wipe the profile.
+   */
+  fastify.delete<{ Params: { id: string } }>(
+    '/api/admin/therapists/:id/agent-profile',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const exists = await prisma.therapist.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) {
+        return Errors.notFound(reply, 'Therapist');
+      }
+
+      try {
+        await clearTherapistProfile(id);
+        logger.info({ therapistId: id }, 'Admin cleared therapist agent profile');
+        return sendSuccess(reply, { cleared: true });
+      } catch (err) {
+        logger.error({ err, therapistId: id }, 'Failed to clear therapist agent profile');
+        return Errors.internal(reply, 'Failed to clear therapist agent profile');
       }
     },
   );

@@ -37,6 +37,12 @@ import {
   formatMemoryForPrompt,
   formatAvailabilityWindowsForPrompt,
 } from './agent-memory.service';
+import {
+  getUserProfile,
+  getTherapistProfile,
+  formatUserProfileForPrompt,
+  formatTherapistProfileForPrompt,
+} from './agent-profile.service';
 import type { SchedulingContext } from './scheduling-context.service';
 import { buildTimezoneSection } from './timezone-section';
 
@@ -184,6 +190,17 @@ ${getValidActionsForStage(currentStage)}
   const memorySection = formatMemoryForPrompt(memory);
   // Future-only filter: past windows would mislead the agent.
   const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(memory);
+
+  // Cross-appointment profiles (Layer C). Read by primary key so the
+  // profile shown can ONLY belong to this user / therapist — same
+  // cross-thread isolation contract as Layer B but spanning appointments.
+  // When userId / therapistId are absent (legacy rows), no section renders.
+  const [userProfile, therapistProfile] = await Promise.all([
+    context.userId ? getUserProfile(context.userId) : Promise.resolve(null),
+    context.therapistId ? getTherapistProfile(context.therapistId) : Promise.resolve(null),
+  ]);
+  const userProfileSection = userProfile ? formatUserProfileForPrompt(userProfile) : '';
+  const therapistProfileSection = therapistProfile ? formatTherapistProfileForPrompt(therapistProfile) : '';
 
   return `# ${agentName} - Scheduling Coordinator
 
@@ -337,7 +354,7 @@ Use flag_for_human_review when:
 
 ## Session Configuration
 - **Standard session duration:** ${sessionDuration} minutes
-${knowledgeSection}${timezoneSection}
+${knowledgeSection}${timezoneSection}${userProfileSection}${therapistProfileSection}
 ${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
 Begin now based on whether availability exists or not.`;
 }
