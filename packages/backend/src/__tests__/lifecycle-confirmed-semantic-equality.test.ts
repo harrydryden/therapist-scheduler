@@ -13,13 +13,13 @@
  * occurred. After the fix we use areDatetimesEqual (semantic compare).
  */
 
-jest.mock('../utils/logger', () => require('./_lifecycle-mocks').loggerMock());
-jest.mock('../config', () => require('./_lifecycle-mocks').configMock());
-jest.mock('../utils/redis', () => require('./_lifecycle-mocks').redisMock());
-jest.mock('../services/audit-event.service', () => require('./_lifecycle-mocks').auditEventMock());
-jest.mock('../services/appointment-event.service', () => require('./_lifecycle-mocks').appointmentEventMock());
-jest.mock('../services/ai-conversation.service', () => require('./_lifecycle-mocks').aiConversationMock());
-jest.mock('../services/slack-notification.service', () => require('./_lifecycle-mocks').slackNotificationMock());
+jest.mock('../utils/logger', () => require('./_global-mocks').loggerMock());
+jest.mock('../config', () => require('./_global-mocks').configMock());
+jest.mock('../utils/redis', () => require('./_global-mocks').redisMock());
+jest.mock('../services/audit-event.service', () => require('./_global-mocks').auditEventMock());
+jest.mock('../services/appointment-event.service', () => require('./_global-mocks').appointmentEventMock());
+jest.mock('../services/ai-conversation.service', () => require('./_global-mocks').aiConversationMock());
+jest.mock('../services/slack-notification.service', () => require('./_global-mocks').slackNotificationMock());
 
 const mockFindUnique = jest.fn();
 const mockUpdate = jest.fn();
