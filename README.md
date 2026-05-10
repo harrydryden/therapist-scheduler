@@ -156,6 +156,68 @@ docker-compose up -d
 
 See `docs/PRODUCTION_DEPLOYMENT.md` for the full deployment and operations guide.
 
+### Production env-var safety matrix
+
+A handful of environment variables are load-bearing in production and the
+service either refuses to start or logs a loud `INSECURE CONFIG` banner
+when they're misconfigured. Before deploying, audit your production env
+against this table.
+
+| Variable | Default | Required in prod | What goes wrong if misconfigured |
+|----------|---------|------------------|----------------------------------|
+| `NODE_ENV` | `development` | must be `production` | Production-mode safety checks (below) only fire when this is `production`. Forgetting it silently disables them. |
+| `BACKEND_URL` | `http://localhost:3000` | required, non-localhost | Schema rejects localhost in prod. Unsubscribe links, voucher URLs, and feedback URLs all derive from this — wrong host means broken links. |
+| `FRONTEND_URL` | `http://localhost:5173` | required, non-localhost | Same shape as above; signup invitation links 404 if wrong. |
+| `CORS_ORIGIN` | unset | required (comma-separated origins) | Without this, CORS rejects every cross-origin request in prod (admin dashboard goes blank). |
+| `REQUIRE_PUBSUB_AUTH` | `true` | leave unset (or explicitly `true`) | **Setting to `false` in prod triggers the recurring `INSECURE CONFIG` boot banner.** The Gmail push webhook then accepts unauthenticated POSTs — forged Pub/Sub notifications can drive bounce, cancel, and reschedule flows. Configure GCP Pub/Sub OIDC auth instead of using this override (see below). |
+| `GOOGLE_PUBSUB_AUDIENCE` | unset | should be set to the audience configured on the GCP push subscription | When unset, the webhook still verifies the token came from a Google service account but **skips the audience claim check** — a token minted for any GCP push subscription pointing at this host would verify. Triggers an `INSECURE CONFIG` warning at boot. Set to your webhook URL (e.g. `https://<host>/api/webhooks/gmail/push`) or the custom audience string configured on the subscription. |
+| `GOOGLE_PUBSUB_TOPIC` | unset | required for Gmail push | Without this, Gmail push isn't set up and inbound email falls back to the 3-minute backup poll path. Functional but slower and burns more Gmail API quota. Format: `projects/<project>/topics/<topic>`. |
+| `JWT_SECRET` | unset | required | All HMAC-derived tokens (unsubscribe, voucher, feedback) sign with keys derived from this. Rotation: set the new value in `JWT_SECRET` and the old value(s) in `HMAC_KEYS_OLD` (comma-separated) so previously-issued tokens keep verifying. |
+| `HMAC_KEYS_OLD` | unset | optional, used during rotation | Comma-separated previous `JWT_SECRET` values. Tokens signed with any listed key still verify. Drop entries once their tokens have aged past their validity window. |
+| `WEBHOOK_SECRET` | unset | required | Validates inbound Notion / external webhooks. |
+| `ANTHROPIC_API_KEY` | unset | required | The agent stops working without it. No banner — the failure is at first agent call. |
+| `DATABASE_URL` | unset | required | Service won't start. |
+| `REDIS_URL` | `redis://localhost:6379` | required, non-localhost in prod | Tool idempotency and lock primitives need Redis. Local default falls open with warnings. |
+
+#### Pre-deploy checklist
+
+Whenever a security-tightening change ships, check production env vars
+for any overrides that opt into the previously-permissive behaviour
+**before** deploying. The H5 incident (May 2026) was a deploy that
+shipped a stricter Pub/Sub-auth check while production still had
+`REQUIRE_PUBSUB_AUTH=false` set — the service crash-looped because the
+new code refused to validate that combination. The lesson:
+
+1. Read the security PR description for any **"production env vars to
+   audit before deploy"** section.
+2. Cross-check those against your live env-var dashboard.
+3. If a tightening would refuse a current setting, fix the env var
+   first, then deploy the code.
+
+#### Configuring Pub/Sub OIDC auth (the canonical fix for `REQUIRE_PUBSUB_AUTH=false`)
+
+The webhook expects each push to include an `Authorization: Bearer <oidc_jwt>`
+header signed by a Google service account. Setup, in brief:
+
+1. **Create a service account** in your GCP project — e.g.
+   `pubsub-gmail-pusher@<project>.iam.gserviceaccount.com`. No
+   project-level roles needed.
+2. **Grant `roles/iam.serviceAccountTokenCreator`** to the Google-managed
+   Pub/Sub service agent (`service-<project-number>@gcp-sa-pubsub.iam.gserviceaccount.com`)
+   *on* the service account from step 1.
+3. **Edit the push subscription** that delivers Gmail notifications to
+   your webhook. Enable Authentication, set the service account from
+   step 1, and set the audience to your webhook URL (or a stable custom
+   string).
+4. **Set `GOOGLE_PUBSUB_AUDIENCE`** on Railway/your env to match the
+   audience from step 3.
+5. **Unset `REQUIRE_PUBSUB_AUTH`** (default `true` re-engages auth
+   enforcement). The boot banner stops on the next deploy.
+
+Verify with `gcloud pubsub subscriptions describe <name>` — the output
+should show `pushConfig.oidcToken.serviceAccountEmail` and
+`pushConfig.oidcToken.audience`.
+
 ## Documentation
 
 - [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) — Deployment, monitoring, and operations guide

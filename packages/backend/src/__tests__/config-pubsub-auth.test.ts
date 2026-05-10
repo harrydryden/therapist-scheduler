@@ -1,107 +1,139 @@
 /**
- * Tests the production-mode warning behaviour for REQUIRE_PUBSUB_AUTH.
+ * Tests the production-mode warning behaviour for the two Pub/Sub
+ * misconfig signals:
  *
- * Original behaviour: hard-failed schema validation when production
- * had REQUIRE_PUBSUB_AUTH=false. That crash-looped any service already
- * deployed with the override set.
+ *   1. REQUIRE_PUBSUB_AUTH=false — webhook accepts unauthenticated
+ *      POSTs (originally H5 / hotfix #195).
+ *   2. GOOGLE_PUBSUB_AUDIENCE unset — webhook still verifies the token
+ *      but skips the audience claim check, accepting tokens minted for
+ *      other audiences. Less catastrophic than (1) but still a silent
+ *      degradation worth alerting on.
  *
- * Current behaviour: the schema accepts the combination, but the
- * `checkProductionPubsubAuth` helper logs a banner warning at boot and
- * sets a recurring interval that re-prints it every 10 minutes.
- * Operators are expected to treat the warning as a P1 ticket; the
- * service continues running so unrelated endpoints stay available.
+ * Both warnings share the same `INSECURE CONFIG` banner shape so log
+ * monitoring tools can match a single string and page on either.
  *
- * The trade-off: availability beats hard-failing here, because the
- * Gmail push webhook is one feature among many — the rest of the
- * product shouldn't go dark while the operator removes the override.
+ * The recurring `setInterval` is module-level guarded so the warning
+ * fires exactly once per process lifecycle even if the check runs
+ * twice (which can happen in some hot-reload setups).
+ *
+ * The helpers live in `config/pubsub-warnings.ts` rather than
+ * `config/index.ts` so this test can import them without triggering
+ * `loadConfig()` (which requires every prod env var to be set).
  */
 
-// Inline re-implementation of checkProductionPubsubAuth so the test can
-// drive it without dragging in the real module's side effects (and
-// without coupling to the actual config object's full shape).
-function buildChecker(consoleErrorSpy: jest.Mock) {
-  // eslint-disable-next-line no-console
-  const origConsoleError = console.error;
-  // eslint-disable-next-line no-console
-  console.error = consoleErrorSpy;
+import {
+  checkProductionPubsubAuth,
+  checkProductionPubsubAudience,
+  _resetPubsubWarningGuardsForTesting as resetGuards,
+} from '../config/pubsub-warnings';
 
-  return {
-    run: (cfg: { env: string; requirePubsubAuth: boolean }, scheduledIntervals: jest.Mock) => {
-      if (cfg.env !== 'production' || cfg.requirePubsubAuth !== false) return;
+let consoleErrorSpy: jest.SpyInstance;
 
-      const banner = (msg: string): void => {
-        // eslint-disable-next-line no-console
-        console.error(
-          '\n' +
-            '!!! '.repeat(20) + '\n' +
-            '!!! INSECURE CONFIG: ' + msg + '\n' +
-            '!!! '.repeat(20),
-        );
-      };
+beforeEach(() => {
+  consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  resetGuards();
+});
 
-      const warningMessage =
-        'REQUIRE_PUBSUB_AUTH=false in production. The Gmail push webhook is ' +
-        'accepting unauthenticated POSTs — forged Pub/Sub notifications can ' +
-        'drive bounce, cancel, and reschedule flows. Configure GCP Pub/Sub ' +
-        'OIDC auth (set GOOGLE_PUBSUB_AUDIENCE) and unset this override.';
-
-      banner(warningMessage);
-      // We don't actually start a setInterval in tests — just record
-      // the intent. setInterval-based assertions are flaky.
-      scheduledIntervals();
-    },
-    cleanup: () => {
-      // eslint-disable-next-line no-console
-      console.error = origConsoleError;
-    },
-  };
-}
+afterEach(() => {
+  consoleErrorSpy.mockRestore();
+});
 
 describe('checkProductionPubsubAuth', () => {
-  let consoleErrorSpy: jest.Mock;
-  let scheduledInterval: jest.Mock;
-  let checker: ReturnType<typeof buildChecker>;
-
-  beforeEach(() => {
-    consoleErrorSpy = jest.fn();
-    scheduledInterval = jest.fn();
-    checker = buildChecker(consoleErrorSpy);
-  });
-
-  afterEach(() => {
-    checker.cleanup();
-  });
-
-  it('logs a banner warning AND schedules a recurring re-warning when production has the override', () => {
-    checker.run({ env: 'production', requirePubsubAuth: false }, scheduledInterval);
+  it('emits a banner and arms the recurring warning when production has REQUIRE_PUBSUB_AUTH=false', () => {
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     expect(consoleErrorSpy.mock.calls[0][0]).toContain('INSECURE CONFIG');
     expect(consoleErrorSpy.mock.calls[0][0]).toContain('REQUIRE_PUBSUB_AUTH=false in production');
-    expect(scheduledInterval).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT log when production has the safe default (auth required)', () => {
-    checker.run({ env: 'production', requirePubsubAuth: true }, scheduledInterval);
+  it('does NOT emit when production has the safe default (auth required)', () => {
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: true });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
-    expect(scheduledInterval).not.toHaveBeenCalled();
   });
 
-  it('does NOT log when development has the override (local-dev escape hatch)', () => {
-    checker.run({ env: 'development', requirePubsubAuth: false }, scheduledInterval);
+  it('does NOT emit in development (local-dev escape hatch)', () => {
+    checkProductionPubsubAuth({ env: 'development', requirePubsubAuth: false });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
-    expect(scheduledInterval).not.toHaveBeenCalled();
   });
 
-  it('does NOT log when test env has the override', () => {
-    checker.run({ env: 'test', requirePubsubAuth: false }, scheduledInterval);
+  it('does NOT emit in test env', () => {
+    checkProductionPubsubAuth({ env: 'test', requirePubsubAuth: false });
     expect(consoleErrorSpy).not.toHaveBeenCalled();
-    expect(scheduledInterval).not.toHaveBeenCalled();
   });
 
-  it('warning text contains explicit remediation steps (set GOOGLE_PUBSUB_AUDIENCE)', () => {
-    checker.run({ env: 'production', requirePubsubAuth: false }, scheduledInterval);
+  it('warning text contains explicit remediation steps', () => {
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
     const warning = consoleErrorSpy.mock.calls[0][0];
     expect(warning).toContain('GOOGLE_PUBSUB_AUDIENCE');
     expect(warning).toContain('OIDC');
+  });
+
+  it('only emits once per process lifecycle (idempotent against re-invocation)', () => {
+    // Without the module-level guard, anything that re-imports config
+    // could leak intervals and re-emit banners. The guard caps it at
+    // one banner + one interval per process, ever.
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('checkProductionPubsubAudience', () => {
+  it('emits a banner when production has no GOOGLE_PUBSUB_AUDIENCE set', () => {
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: undefined });
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+    expect(consoleErrorSpy.mock.calls[0][0]).toContain('INSECURE CONFIG');
+    expect(consoleErrorSpy.mock.calls[0][0]).toContain('GOOGLE_PUBSUB_AUDIENCE is unset');
+  });
+
+  it('emits a banner when production has GOOGLE_PUBSUB_AUDIENCE set to empty string', () => {
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: '' });
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT emit when production has GOOGLE_PUBSUB_AUDIENCE set', () => {
+    checkProductionPubsubAudience({
+      env: 'production',
+      googlePubsubAudience: 'https://app.example.com/api/webhooks/gmail/push',
+    });
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT emit in development even with audience unset (local-dev expectation)', () => {
+    checkProductionPubsubAudience({ env: 'development', googlePubsubAudience: undefined });
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it('does NOT emit in test env', () => {
+    checkProductionPubsubAudience({ env: 'test', googlePubsubAudience: undefined });
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it('warning text describes what the missing audience means for security', () => {
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: undefined });
+    const warning = consoleErrorSpy.mock.calls[0][0];
+    expect(warning).toContain('audience claim');
+    expect(warning).toContain('webhook URL');
+  });
+
+  it('only emits once per process lifecycle (idempotent against re-invocation)', () => {
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: undefined });
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: undefined });
+    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the two checks share the same INSECURE CONFIG banner shape', () => {
+  // Log monitoring tools alert on the literal "INSECURE CONFIG" string,
+  // so both warnings must include it. This pins the contract.
+  it('auth warning contains INSECURE CONFIG marker', () => {
+    checkProductionPubsubAuth({ env: 'production', requirePubsubAuth: false });
+    expect(consoleErrorSpy.mock.calls[0][0]).toMatch(/INSECURE CONFIG/);
+  });
+
+  it('audience warning contains INSECURE CONFIG marker', () => {
+    checkProductionPubsubAudience({ env: 'production', googlePubsubAudience: undefined });
+    expect(consoleErrorSpy.mock.calls[0][0]).toMatch(/INSECURE CONFIG/);
   });
 });
