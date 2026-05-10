@@ -92,6 +92,14 @@ jest.mock('../utils/database', () => ({
     appointmentRequest: {
       findUnique: jest.fn().mockResolvedValue({ memory: null }),
     },
+    // Layer C profile lookups. Default: no row (returns null), which the
+    // service maps to an empty profile that renders nothing.
+    user: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
+    therapist: {
+      findUnique: jest.fn().mockResolvedValue(null),
+    },
   },
 }));
 
@@ -346,6 +354,96 @@ describe('buildSystemPrompt — memory wiring', () => {
         where: { id: 'apt-test-1' },
       }),
     );
+  });
+});
+
+describe('buildSystemPrompt — Layer C profile wiring', () => {
+  it('omits both profile sections when userId/therapistId are absent (legacy rows)', async () => {
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.user.findUnique.mockClear();
+    prismaMock.prisma.therapist.findUnique.mockClear();
+
+    const prompt = await buildSystemPrompt(baseContext);
+
+    expect(prompt).not.toContain('What we know about this client from prior bookings');
+    expect(prompt).not.toContain('What we know about this therapist from prior bookings');
+    // No lookup at all when ids absent — saves a DB roundtrip.
+    expect(prismaMock.prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prismaMock.prisma.therapist.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('renders the user profile section when userId is set and the user has notes', async () => {
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.user.findUnique.mockResolvedValueOnce({
+      agentNotes: {
+        notes: [
+          {
+            id: 'u1',
+            category: 'communication',
+            text: 'TEST_USER_PROFILE_NOTE',
+            source: 'admin',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        updatedAt: '2026-01-01T00:00:00Z',
+        version: 'v1',
+      },
+    });
+
+    const prompt = await buildSystemPrompt({ ...baseContext, userId: 'user-1' });
+    expect(prompt).toContain('## What we know about this client from prior bookings');
+    expect(prompt).toContain('TEST_USER_PROFILE_NOTE');
+  });
+
+  it('renders the therapist profile section when therapistId is set and notes exist', async () => {
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.therapist.findUnique.mockResolvedValueOnce({
+      agentNotes: {
+        notes: [
+          {
+            id: 't1',
+            category: 'scheduling',
+            text: 'TEST_THERAPIST_PROFILE_NOTE',
+            source: 'admin',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        updatedAt: '2026-01-01T00:00:00Z',
+        version: 'v1',
+      },
+    });
+
+    const prompt = await buildSystemPrompt({ ...baseContext, therapistId: 'thx-1' });
+    expect(prompt).toContain('## What we know about this therapist from prior bookings');
+    expect(prompt).toContain('TEST_THERAPIST_PROFILE_NOTE');
+  });
+
+  it('reads profile STRICTLY by primary key — never via email or other fields', async () => {
+    // The cross-thread isolation guarantee for Layer C, mirrored from
+    // Layer B's equivalent test. If anyone replaces findUnique with
+    // findFirst or adds a fallback query path, this test fails.
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.user.findUnique.mockClear();
+    prismaMock.prisma.therapist.findUnique.mockClear();
+
+    await buildSystemPrompt({ ...baseContext, userId: 'user-1', therapistId: 'thx-1' });
+
+    expect(prismaMock.prisma.user.findUnique).toHaveBeenCalledTimes(1);
+    expect(prismaMock.prisma.user.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'user-1' } }),
+    );
+    expect(prismaMock.prisma.therapist.findUnique).toHaveBeenCalledTimes(1);
+    expect(prismaMock.prisma.therapist.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'thx-1' } }),
+    );
+  });
+
+  it('omits a profile section when the row exists but has no notes', async () => {
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.user.findUnique.mockResolvedValueOnce({ agentNotes: null });
+
+    const prompt = await buildSystemPrompt({ ...baseContext, userId: 'user-1' });
+    expect(prompt).not.toContain('What we know about this client from prior bookings');
   });
 });
 

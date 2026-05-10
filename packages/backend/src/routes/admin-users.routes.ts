@@ -15,6 +15,12 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, APPOINTMENT_STATUS } from '../constants';
+import {
+  getUserProfile,
+  addUserProfileNote,
+  clearUserProfile,
+  MAX_PROFILE_NOTE_LENGTH,
+} from '../services/agent-profile.service';
 
 const listUsersSchema = z.object({
   search: z.string().trim().max(255).optional(),
@@ -30,6 +36,11 @@ const updateUserSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   country: z.string().trim().min(2).max(4).optional(),
   subscribed: z.boolean().optional(),
+});
+
+const addProfileNoteSchema = z.object({
+  category: z.enum(['communication', 'scheduling', 'context']),
+  text: z.string().trim().min(1).max(MAX_PROFILE_NOTE_LENGTH),
 });
 
 function buildUserWhere(query: z.infer<typeof listUsersSchema>): Prisma.UserWhereInput {
@@ -276,6 +287,115 @@ export async function adminUserRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, userId: id }, 'Failed to update user');
         return Errors.internal(reply, 'Failed to update user');
+      }
+    },
+  );
+
+  /**
+   * GET /api/admin/users/:id/agent-profile — the Layer C profile (cross-
+   * appointment observations) for this user. Strictly scoped by primary
+   * key. Returns the empty profile shape when the user has no notes yet
+   * or the user doesn't exist; callers can treat the response uniformly.
+   */
+  fastify.get<{ Params: { id: string } }>(
+    '/api/admin/users/:id/agent-profile',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_ENDPOINTS.max,
+          timeWindow: RATE_LIMITS.ADMIN_ENDPOINTS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      try {
+        const profile = await getUserProfile(id);
+        return sendSuccess(reply, profile);
+      } catch (err) {
+        logger.error({ err, userId: id }, 'Failed to read user agent profile');
+        return Errors.internal(reply, 'Failed to read user agent profile');
+      }
+    },
+  );
+
+  /**
+   * POST /api/admin/users/:id/agent-profile/notes — append an admin-
+   * authored note to the profile. Phase 1 only supports admin-authored
+   * notes; Phase 2 will add LLM-distilled notes via a separate path.
+   *
+   * Dedup + FIFO are handled by the service. Same (category, normalized
+   * text) is a no-op; profile beyond MAX_PROFILE_NOTES drops its oldest
+   * entry.
+   */
+  fastify.post<{ Params: { id: string }; Body: z.infer<typeof addProfileNoteSchema> }>(
+    '/api/admin/users/:id/agent-profile/notes',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const parsed = addProfileNoteSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return Errors.validationFailed(reply, parsed.error.errors);
+      }
+
+      const exists = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) {
+        return Errors.notFound(reply, 'User');
+      }
+
+      try {
+        const result = await addUserProfileNote(id, {
+          category: parsed.data.category,
+          text: parsed.data.text,
+          source: 'admin',
+        });
+        logger.info(
+          { userId: id, category: parsed.data.category, added: result.added },
+          'Admin added user agent-profile note',
+        );
+        return sendSuccess(reply, result);
+      } catch (err) {
+        logger.error({ err, userId: id }, 'Failed to add user agent-profile note');
+        return Errors.internal(reply, 'Failed to add user agent-profile note');
+      }
+    },
+  );
+
+  /**
+   * DELETE /api/admin/users/:id/agent-profile — wipe the profile (right-
+   * to-be-forgotten / admin reset). The column goes back to NULL.
+   */
+  fastify.delete<{ Params: { id: string } }>(
+    '/api/admin/users/:id/agent-profile',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+      const exists = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+      if (!exists) {
+        return Errors.notFound(reply, 'User');
+      }
+
+      try {
+        await clearUserProfile(id);
+        logger.info({ userId: id }, 'Admin cleared user agent profile');
+        return sendSuccess(reply, { cleared: true });
+      } catch (err) {
+        logger.error({ err, userId: id }, 'Failed to clear user agent profile');
+        return Errors.internal(reply, 'Failed to clear user agent profile');
       }
     },
   );
