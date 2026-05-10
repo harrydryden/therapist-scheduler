@@ -31,6 +31,7 @@ import {
   clearTherapistProfile,
   MAX_PROFILE_NOTE_LENGTH,
 } from '../services/agent-profile.service';
+import { parseTherapistAvailability } from '../utils/json-parser';
 
 const addTherapistProfileNoteSchema = z.object({
   category: z.enum(['communication', 'scheduling', 'context']),
@@ -343,7 +344,19 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         if (updates.style !== undefined) data.style = updates.style;
         if (updates.areasOfFocus !== undefined) data.areasOfFocus = updates.areasOfFocus;
         if (updates.availability !== undefined) {
-          data.availability = updates.availability as Prisma.InputJsonValue;
+          // Run admin-supplied availability through the strict parser. This
+          // drops malformed slots ("flexible", "Not specified", missing
+          // start/end) before they reach the DB, so the public site can't
+          // render garbage on the therapist card. An entirely-malformed blob
+          // is rejected with 400 rather than silently stored.
+          const validated = parseTherapistAvailability(updates.availability);
+          if (validated === null) {
+            return Errors.badRequest(
+              reply,
+              'availability must include a timezone and slots with full weekday names and HH:MM start/end times',
+            );
+          }
+          data.availability = validated as unknown as Prisma.InputJsonValue;
         }
 
         const updated = await prisma.therapist.update({ where: { id }, data });

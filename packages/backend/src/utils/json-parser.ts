@@ -30,10 +30,25 @@ const conversationStateSchema = z.object({
   messages: z.array(conversationMessageSchema),
 });
 
+/**
+ * A slot is only considered "display-quality" when it has a full
+ * weekday name and HH:MM start/end times. Anything looser — "flexible",
+ * "Not specified", "null", three-letter abbreviations — used to slip
+ * through the old loose schema and surface as garbage strings ("Mon:
+ * flexible-flexible") on the public therapist cards.
+ *
+ * We enforce the contract here at the parser so every read path
+ * (public listing, admin dashboard, agent prompt builder, ATS export)
+ * sees the same tight shape. Bad slots are filtered out further down;
+ * the rest of the record (timezone, exceptions, valid slots) is kept.
+ */
+const VALID_DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const;
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 const therapistAvailabilitySlotSchema = z.object({
-  day: z.string(),
-  start: z.string(),
-  end: z.string(),
+  day: z.enum(VALID_DAY_NAMES),
+  start: z.string().regex(TIME_PATTERN, 'expected HH:MM'),
+  end: z.string().regex(TIME_PATTERN, 'expected HH:MM'),
 });
 
 const therapistAvailabilityExceptionSchema = z.object({
@@ -233,29 +248,31 @@ export function parseTherapistAvailability(
     'Therapist availability failed schema validation'
   );
 
-  // Fallback: try to salvage partial data with loose validation
+  // Fallback: salvage individual slots that pass the strict schema, while
+  // dropping any that don't. Historically this fallback coerced
+  // {day: null, start: null} to {day: "null", start: "null"} so the
+  // frontend would render "null: null-null" — bug fixed by enforcing
+  // the per-slot schema here instead of String()-coercing nulls.
   if (typeof parsed === 'object' && parsed !== null) {
     const avail = parsed as Record<string, unknown>;
     if (typeof avail.timezone === 'string' && Array.isArray(avail.slots)) {
+      const validSlots: TherapistAvailability['slots'] = [];
+      for (const candidate of avail.slots) {
+        const slotResult = therapistAvailabilitySlotSchema.safeParse(candidate);
+        if (slotResult.success) {
+          validSlots.push(slotResult.data);
+        }
+      }
+      const exceptions = Array.isArray(avail.exceptions)
+        ? avail.exceptions
+            .map((e) => therapistAvailabilityExceptionSchema.safeParse(e))
+            .filter((r): r is { success: true; data: { date: string; available: boolean } } => r.success)
+            .map((r) => r.data)
+        : undefined;
       return {
         timezone: avail.timezone,
-        slots: avail.slots.map((s: unknown) => {
-          const slot = s as Record<string, unknown>;
-          return {
-            day: String(slot.day || ''),
-            start: String(slot.start || ''),
-            end: String(slot.end || ''),
-          };
-        }),
-        exceptions: Array.isArray(avail.exceptions)
-          ? avail.exceptions.map((e: unknown) => {
-              const exc = e as Record<string, unknown>;
-              return {
-                date: String(exc.date || ''),
-                available: Boolean(exc.available),
-              };
-            })
-          : undefined,
+        slots: validSlots,
+        ...(exceptions !== undefined ? { exceptions } : {}),
       };
     }
   }
