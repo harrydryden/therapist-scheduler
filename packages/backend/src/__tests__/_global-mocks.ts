@@ -1,19 +1,28 @@
 /**
- * Shared mock factories and helpers for lifecycle/appointment tests.
+ * Shared mock factories for the unit-test suite.
  *
  * Jest hoists `jest.mock(...)` calls to the top of each test file, so
  * this module can't call them itself — the imports wouldn't have run
  * yet. Instead each test file does:
  *
- *   jest.mock('../utils/logger', () => require('./_lifecycle-mocks').loggerMock());
+ *   jest.mock('../utils/logger', () => require('./_global-mocks').loggerMock());
  *
  * `require` inside the factory is lazy: it runs when the mock is
  * actually instantiated, after the module graph is settled.
  *
- * The factories cover dependencies tests don't typically assert call
- * counts on (logger, config, redis, audit, ai-conversation, slack).
- * Mocks the test DOES assert on (notifyConfirmed, applyLightTransition,
- * findUnique/update) stay file-local so per-test references work.
+ * The factories here cover the dependencies tests don't typically
+ * assert call counts on (logger, config, redis, audit, ai-conversation,
+ * slack, settings). Mocks the test DOES assert on stay file-local so
+ * per-test references work.
+ *
+ * Adding a new factory? Two rules:
+ *   1. Must be a plain function that returns a fresh object on each
+ *      call (so per-test isolation is preserved when Jest re-evaluates
+ *      the factory).
+ *   2. Must shape the returned object the same way the real module
+ *      exports — service-name-as-property for class-style services
+ *      (e.g. `{ slackNotificationService: ... }`), bare functions for
+ *      module-level exports (e.g. `{ getSettingValue }`).
  */
 
 import { Prisma } from '@prisma/client';
@@ -31,11 +40,22 @@ export const configMock = () => ({
 });
 
 export const redisMock = () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redis: {
+    get: jest.fn(),
+    set: jest.fn(),
+    del: jest.fn(),
+    incr: jest.fn(),
+    expire: jest.fn(),
+  },
 });
 
 export const auditEventMock = () => ({
-  auditEventService: { log: jest.fn() },
+  auditEventService: {
+    log: jest.fn(),
+    logToolExecuted: jest.fn(),
+    logToolFailed: jest.fn(),
+    logFactsExtracted: jest.fn(),
+  },
 });
 
 export const appointmentEventMock = () => ({
@@ -53,7 +73,20 @@ export const slackNotificationMock = () => ({
     notifyAppointmentConfirmed: jest.fn(),
     notifyAppointmentCancelled: jest.fn(),
     notifyAppointmentCompleted: jest.fn(),
+    notifyHumanReviewFlagged: jest.fn(),
+    notifyCancelMatchRecommended: jest.fn(),
   },
+});
+
+/**
+ * Settings service mock. Tests that need specific settings should
+ * write their own factory and pass typed values; this default returns
+ * `undefined` for every key, which is the right shape for tests that
+ * don't depend on settings content.
+ */
+export const settingsServiceMock = () => ({
+  getSettingValue: jest.fn().mockResolvedValue(undefined),
+  getSettingValues: jest.fn().mockResolvedValue(new Map()),
 });
 
 /**

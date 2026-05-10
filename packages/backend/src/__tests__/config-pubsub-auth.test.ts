@@ -35,6 +35,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // resetGuards also clears any setInterval handles scheduled during
+  // the test, which silences Jest's "worker did not exit gracefully"
+  // warning that surfaces when unref'd intervals are still pending.
+  resetGuards();
   consoleErrorSpy.mockRestore();
 });
 

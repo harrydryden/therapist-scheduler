@@ -37,6 +37,13 @@ const RECUR_MS = 10 * 60 * 1000;
 let pubsubAuthWarningArmed = false;
 let pubsubAudienceWarningArmed = false;
 
+// Track scheduled intervals so test setup can clear them between
+// cases. unref() alone makes the interval not block process exit, but
+// Jest's "worker did not exit gracefully" check still sees them as
+// pending handles. Clearing them on teardown silences that warning
+// and unmasks any actual leaks.
+const scheduledIntervals: NodeJS.Timeout[] = [];
+
 function emitInsecureConfigBanner(message: string): void {
   // eslint-disable-next-line no-console
   console.error(
@@ -51,6 +58,7 @@ function emitInsecureConfigBanner(message: string): void {
 function scheduleRecurring(message: string): void {
   const interval = setInterval(() => emitInsecureConfigBanner(message), RECUR_MS);
   if (typeof interval.unref === 'function') interval.unref();
+  scheduledIntervals.push(interval);
 }
 
 /** Warn loudly if the Pub/Sub auth check is disabled in production. */
@@ -93,9 +101,13 @@ export function checkProductionPubsubAudience(
   scheduleRecurring(message);
 }
 
-/** Test-only helper to reset the once-per-process guards. Not part of
- *  the public API; only the test file imports this. */
+/** Test-only helper to reset the once-per-process guards AND clear
+ *  any scheduled recurring intervals from prior test cases. Not part
+ *  of the public API; only the test file imports this. Calling it in
+ *  `afterEach` keeps Jest from complaining about unstopped handles. */
 export function _resetPubsubWarningGuardsForTesting(): void {
   pubsubAuthWarningArmed = false;
   pubsubAudienceWarningArmed = false;
+  for (const id of scheduledIntervals) clearInterval(id);
+  scheduledIntervals.length = 0;
 }

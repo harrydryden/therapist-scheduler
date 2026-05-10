@@ -24,15 +24,15 @@
  *     atomicSkipped (atomic)
  */
 
-jest.mock('../utils/logger', () => require('./_lifecycle-mocks').loggerMock());
-jest.mock('../config', () => require('./_lifecycle-mocks').configMock());
-jest.mock('../utils/redis', () => require('./_lifecycle-mocks').redisMock());
+jest.mock('../utils/logger', () => require('./_global-mocks').loggerMock());
+jest.mock('../config', () => require('./_global-mocks').configMock());
+jest.mock('../utils/redis', () => require('./_global-mocks').redisMock());
 jest.mock('../services/audit-event.service', () => ({
   auditEventService: { log: (...a: unknown[]) => mockAuditLog(...a) },
 }));
-jest.mock('../services/appointment-event.service', () => require('./_lifecycle-mocks').appointmentEventMock());
-jest.mock('../services/ai-conversation.service', () => require('./_lifecycle-mocks').aiConversationMock());
-jest.mock('../services/slack-notification.service', () => require('./_lifecycle-mocks').slackNotificationMock());
+jest.mock('../services/appointment-event.service', () => require('./_global-mocks').appointmentEventMock());
+jest.mock('../services/ai-conversation.service', () => require('./_global-mocks').aiConversationMock());
+jest.mock('../services/slack-notification.service', () => require('./_global-mocks').slackNotificationMock());
 
 const mockFindUnique = jest.fn();
 const mockUpdate = jest.fn();
@@ -74,7 +74,7 @@ jest.mock('../services/appointment-notifications.service', () => ({
 
 import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
 import { InvalidTransitionError } from '../errors';
-import { p2025 } from './_lifecycle-mocks';
+import { p2025 } from './_global-mocks';
 
 const TARGET = '2026-06-01T10:00:00.000Z';
 const PREVIOUS = '2026-05-15T10:00:00.000Z';
