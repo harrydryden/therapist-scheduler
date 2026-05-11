@@ -85,6 +85,18 @@ export const availabilityRecordWindowInputSchema = z.object({
 });
 
 /**
+ * Slim send_email used by the availability-collection agent. The
+ * booking-side `sendEmailInputSchema` accepts a `to` field because the
+ * agent picks the recipient (client vs therapist); here the recipient
+ * is hardcoded to the therapist in the executor, so the schema only
+ * carries subject + body.
+ */
+export const availabilitySendEmailInputSchema = z.object({
+  subject: z.string().min(1).max(1000),
+  body: z.string().min(1).max(50000),
+});
+
+/**
  * Slim mark_complete used by the availability-collection agent. The
  * booking side has a richer `mark_scheduling_complete` (datetime,
  * notes) because it finalises an actual appointment; here the agent

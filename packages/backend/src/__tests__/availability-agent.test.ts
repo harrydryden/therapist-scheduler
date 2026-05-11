@@ -124,12 +124,24 @@ const conversationUpdateMany = jest.fn(
     where,
     data,
   }: {
-    where: { id: string; status?: string };
+    where: {
+      id: string;
+      status?: string;
+      humanControlEnabled?: boolean;
+      gmailThreadId?: string | null;
+    };
     data: Partial<ConversationRow>;
   }) => {
     const row = conversations[where.id];
     if (!row) return { count: 0 };
-    if (where.status && row.status !== where.status) return { count: 0 };
+    if (where.status !== undefined && row.status !== where.status) return { count: 0 };
+    if (
+      where.humanControlEnabled !== undefined &&
+      row.humanControlEnabled !== where.humanControlEnabled
+    )
+      return { count: 0 };
+    if (where.gmailThreadId !== undefined && row.gmailThreadId !== where.gmailThreadId)
+      return { count: 0 };
     conversations[where.id] = { ...row, ...data };
     return { count: 1 };
   },
@@ -179,7 +191,9 @@ const messagesCreate = jest.fn(async () => {
 
 jest.mock('../utils/anthropic-client', () => ({
   anthropicClient: {
-    messages: { create: (...a: unknown[]) => messagesCreate(...a) },
+    // Mock ignores args (scripted-response queue drives output), so no
+    // need to forward — keeps TS happy without a typed Parameters<…>.
+    messages: { create: () => messagesCreate() },
   },
   isTransientError: () => false,
 }));
@@ -219,6 +233,20 @@ jest.mock('../services/settings.service', () => ({
 // the module with just that helper.
 jest.mock('../services/ai-conversation.service', () => ({
   truncateMessageContent: (s: string) => s,
+}));
+
+// Outbound email mock for the send_email tool path.
+const mockSendEmail = jest.fn(async () => ({
+  threadId: 'thread-default',
+  messageId: 'msg-default',
+}));
+jest.mock('../services/email-processing.service', () => ({
+  emailProcessingService: {
+    sendEmail: (...a: unknown[]) =>
+      (mockSendEmail as (...x: unknown[]) => Promise<{ threadId: string; messageId: string }>)(
+        ...a,
+      ),
+  },
 }));
 
 import { AvailabilityAgentService } from '../services/availability-agent.service';
@@ -294,12 +322,21 @@ beforeEach(() => {
   for (const k of Object.keys(redisStore)) delete redisStore[k];
   scriptedResponses = [];
   nextConversationId = 1;
+  mockSendEmail.mockResolvedValue({ threadId: 'thread-default', messageId: 'msg-default' });
 });
 
 describe('AvailabilityAgentService.startCollection', () => {
-  it('creates a TherapistConversation row and persists the first agent turn', async () => {
+  it('creates a TherapistConversation row, fires send_email, and persists the thread ID', async () => {
     seedTherapist();
-    scriptedResponses = [textOnlyResponse("Hi Alex, just checking in about your upcoming availability.")];
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-onboarding', messageId: 'msg-1' });
+    // Script: agent calls send_email for the introductory email, then exits.
+    scriptedResponses = [
+      toolUseResponse('send_email', {
+        subject: 'Welcome to Spill',
+        body: 'Hi Alex, when are you free over the next few weeks?',
+      }),
+      textOnlyResponse("I've sent the introductory email."),
+    ];
 
     const service = new AvailabilityAgentService('trace-1');
     const result = await service.startCollection({ therapistId: 'tx-1', kind: 'onboarding' });
@@ -309,13 +346,32 @@ describe('AvailabilityAgentService.startCollection', () => {
     expect(conversations['convo-1']).toBeDefined();
     expect(conversations['convo-1'].status).toBe('active');
     expect(conversations['convo-1'].kind).toBe('onboarding');
+    // Email was actually sent — recipient is the therapist's email from
+    // the row, never anything the model could have supplied.
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    const emailCall = mockSendEmail.mock.calls[0][0] as { to: string; subject: string };
+    expect(emailCall.to).toBe('alex@example.com');
+    expect(emailCall.subject).toContain('Spill');
+    // Gmail thread is now stashed back so phase-4 inbound dispatch can
+    // match the therapist's reply to this conversation.
+    expect(conversations['convo-1'].gmailThreadId).toBe('thread-onboarding');
+    expect(conversations['convo-1'].initialMessageId).toBe('msg-1');
+  });
 
-    const state = conversations['convo-1'].conversationState as { messages: Array<{ role: string; content: string }> };
-    // Initial user message + agent's text response
-    expect(state.messages.length).toBeGreaterThanOrEqual(2);
-    expect(state.messages[0].role).toBe('user');
-    expect(state.messages[state.messages.length - 1].role).toBe('assistant');
-    expect(state.messages[state.messages.length - 1].content).toMatch(/Alex/);
+  it('still creates the row when the agent exits with text only (no send_email)', async () => {
+    seedTherapist();
+    // Some prompt configurations may produce a text-only turn before
+    // committing to an outbound — the row should still exist and be
+    // resumable. Pins that startCollection doesn't require an outbound.
+    scriptedResponses = [textOnlyResponse("Drafting your introductory message...")];
+
+    const service = new AvailabilityAgentService('trace-1');
+    const result = await service.startCollection({ therapistId: 'tx-1', kind: 'onboarding' });
+
+    expect(result.success).toBe(true);
+    expect(conversations['convo-1']).toBeDefined();
+    expect(conversations['convo-1'].gmailThreadId).toBeNull();
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 
   it('persists the gmailThreadId when supplied', async () => {

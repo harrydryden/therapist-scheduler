@@ -22,6 +22,34 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
+// email-processing.service transitively validates the env-loaded
+// config at module load. Stub the config + the email module itself
+// so the executor's `send_email` handler import doesn't trip config
+// validation.
+jest.mock('../config', () => ({
+  config: {
+    timezone: 'Europe/London',
+    anthropicApiKey: 'test-key',
+    nodeEnv: 'test',
+    jwtSecret: 'test-secret',
+    backendUrl: 'https://backend.test',
+    frontendUrl: 'https://frontend.test',
+  },
+}));
+
+const mockSendEmail = jest.fn(async () => ({
+  threadId: 'thread-default',
+  messageId: 'msg-default',
+}));
+jest.mock('../services/email-processing.service', () => ({
+  emailProcessingService: {
+    sendEmail: (...a: unknown[]) =>
+      (mockSendEmail as (...x: unknown[]) => Promise<{ threadId: string; messageId: string }>)(
+        ...a,
+      ),
+  },
+}));
+
 // In-memory stores keyed by primary key — mirrors agent-memory.test.ts.
 type TherapistRow = {
   id: string;
@@ -44,6 +72,9 @@ type ConversationRow = {
   memory: unknown;
   conversationState: unknown;
   lastActivityAt: Date;
+  lastToolExecutedAt: Date | null;
+  gmailThreadId: string | null;
+  initialMessageId: string | null;
 };
 
 const therapists: Record<string, TherapistRow> = {};
@@ -73,12 +104,24 @@ const conversationUpdateMany = jest.fn(
     where,
     data,
   }: {
-    where: { id: string; status?: string };
+    where: {
+      id: string;
+      status?: string;
+      humanControlEnabled?: boolean;
+      gmailThreadId?: string | null;
+    };
     data: Partial<ConversationRow>;
   }) => {
     const row = conversations[where.id];
     if (!row) return { count: 0 };
-    if (where.status && row.status !== where.status) return { count: 0 };
+    if (where.status !== undefined && row.status !== where.status) return { count: 0 };
+    if (
+      where.humanControlEnabled !== undefined &&
+      row.humanControlEnabled !== where.humanControlEnabled
+    )
+      return { count: 0 };
+    if (where.gmailThreadId !== undefined && row.gmailThreadId !== where.gmailThreadId)
+      return { count: 0 };
     conversations[where.id] = { ...row, ...data };
     return { count: 1 };
   },
@@ -157,6 +200,9 @@ function seedConversation(id = 'convo-1', therapistId = 'tx-1', overrides: Parti
     memory: null,
     conversationState: null,
     lastActivityAt: new Date(),
+    lastToolExecutedAt: null,
+    gmailThreadId: null,
+    initialMessageId: null,
     ...overrides,
   };
 }
@@ -172,6 +218,7 @@ beforeEach(() => {
   for (const k of Object.keys(therapists)) delete therapists[k];
   for (const k of Object.keys(conversations)) delete conversations[k];
   for (const k of Object.keys(redisStore)) delete redisStore[k];
+  mockSendEmail.mockResolvedValue({ threadId: 'thread-default', messageId: 'msg-default' });
 });
 
 describe('AvailabilityToolExecutor — pre-flight gates', () => {
@@ -438,6 +485,178 @@ describe('AvailabilityToolExecutor — flag_for_human_review', () => {
     expect(conversations['convo-1'].humanControlTakenBy).toBe('agent_self_flag');
     expect(conversations['convo-1'].humanControlReason).toContain('therapist asked about pricing');
     expect(conversations['convo-1'].humanControlReason).toContain('have admin reply');
+  });
+});
+
+describe('AvailabilityToolExecutor — send_email', () => {
+  it('sends to the therapist email from context (model never supplies "to")', async () => {
+    seedTherapist();
+    seedConversation();
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-abc', messageId: 'msg-abc' });
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('send_email', {
+        subject: 'Welcome to Spill',
+        body: 'Hi Alex, when are you free over the next few weeks?',
+      }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBeFalsy();
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    const call = mockSendEmail.mock.calls[0][0] as {
+      to: string;
+      subject: string;
+      body: string;
+      threadId?: string;
+    };
+    // Critical safety guarantee: recipient is the therapist's email from
+    // context, not anything the model could have supplied.
+    expect(call.to).toBe('alex@example.com');
+    expect(call.subject).toContain('Spill');
+    expect(call.threadId).toBeUndefined(); // first send opens a new thread
+  });
+
+  it('prepends "Spill" to subjects that lack it', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('send_email', {
+        subject: 'A quick question about availability',
+        body: 'body text',
+      }),
+      makeContext(),
+    );
+
+    const call = mockSendEmail.mock.calls[0][0] as { subject: string };
+    expect(call.subject).toBe('Spill - A quick question about availability');
+  });
+
+  it('keeps subjects that already contain "Spill" unchanged', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('send_email', {
+        subject: 'Welcome to Spill - sharing your availability',
+        body: 'body',
+      }),
+      makeContext(),
+    );
+
+    const call = mockSendEmail.mock.calls[0][0] as { subject: string };
+    expect(call.subject).toBe('Welcome to Spill - sharing your availability');
+  });
+
+  it('persists the Gmail thread+message ID back to the conversation row on first send', async () => {
+    seedTherapist();
+    seedConversation();
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-xyz', messageId: 'msg-xyz' });
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('send_email', { subject: 'Subject', body: 'Body' }),
+      makeContext(),
+    );
+
+    expect(conversations['convo-1'].gmailThreadId).toBe('thread-xyz');
+    expect(conversations['convo-1'].initialMessageId).toBe('msg-xyz');
+  });
+
+  it('reuses the stored threadId on subsequent sends and does NOT overwrite the initialMessageId', async () => {
+    seedTherapist();
+    seedConversation('convo-1', 'tx-1', {
+      gmailThreadId: 'thread-existing',
+      initialMessageId: 'msg-original',
+    });
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-existing', messageId: 'msg-second' });
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('send_email', { subject: 'Follow-up', body: 'Body' }),
+      makeContext(),
+    );
+
+    const call = mockSendEmail.mock.calls[0][0] as { threadId?: string };
+    expect(call.threadId).toBe('thread-existing');
+    // The original message ID should still be the FIRST send's; phase 3
+    // only ever sets initialMessageId on the first send (atomic
+    // conditional update on gmailThreadId IS NULL).
+    expect(conversations['convo-1'].initialMessageId).toBe('msg-original');
+  });
+
+  it('returns an error when emailProcessingService throws', async () => {
+    seedTherapist();
+    seedConversation();
+    mockSendEmail.mockRejectedValueOnce(new Error('Gmail API 503'));
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('send_email', { subject: 'Subject', body: 'Body' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Gmail API 503/);
+    expect(conversations['convo-1'].gmailThreadId).toBeNull();
+  });
+
+  it('rejects empty subject via Zod validation', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('send_email', { subject: '', body: 'body' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid input/i);
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('AvailabilityToolExecutor — atomic human-control gate', () => {
+  it('does NOT execute any tool when humanControl flips between check and run (TOCTOU pin)', async () => {
+    seedTherapist();
+    seedConversation('convo-1', 'tx-1', { humanControlEnabled: true });
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    // send_email is the most dangerous TOCTOU target because it's the
+    // only irreversible side effect. Pin the contract: gate blocks the
+    // dispatch, send is never called.
+    const result = await exec.executeToolCall(
+      makeToolCall('send_email', { subject: 'Subject', body: 'Body' }),
+      makeContext(),
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(result.skipReason).toBe('human_control');
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('updates lastToolExecutedAt + lastActivityAt only when the gate passes', async () => {
+    seedTherapist();
+    seedConversation();
+    const initialActivity = conversations['convo-1'].lastActivityAt;
+    // Force a small clock gap so we can verify the bump actually happened.
+    await new Promise((r) => setTimeout(r, 5));
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('remember', { note: 'test', category: 'context' }),
+      makeContext(),
+    );
+
+    const updated = conversations['convo-1'];
+    expect(updated.lastActivityAt.getTime()).toBeGreaterThan(initialActivity.getTime());
+    expect(updated.lastToolExecutedAt).toBeInstanceOf(Date);
   });
 });
 

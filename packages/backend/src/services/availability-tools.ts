@@ -1,41 +1,68 @@
 /**
  * Tool surface for the availability-collection agent.
  *
- * Distinct from `schedulingTools` in agent-tool-loop.ts — the booking
- * agent has a richer surface (send_email, cancel_appointment,
- * mark_scheduling_complete, …) because it's mediating a bilateral
- * negotiation between client and therapist. This agent only ever
- * speaks to the therapist about THEIR availability, so the tool set
- * is intentionally smaller:
+ * The agent's role is narrow: it collects upcoming availability from
+ * therapists and writes it to the platform. It does NOT propose
+ * specific session times, NOT confirm bookings, and NOT negotiate
+ * slots — those are strictly the booking agent's responsibilities,
+ * which runs separately and reads from what this agent collects.
  *
- *   - record_availability_window: capture a one-off window the
- *     therapist mentioned. Same input shape as the booking agent's
- *     tool of the same name (`recordAvailabilityWindowInputSchema`),
- *     but the executor writes to `Therapist.upcomingAvailability` —
- *     per-therapist storage — instead of per-appointment memory.
- *   - remember: soft observations the agent wants to retain across
- *     turns (e.g. "therapist asked us to email at 9am their time").
- *     Storage layer is the same agent-memory module the booking
- *     agent uses, just scoped to the TherapistConversation.
- *   - mark_complete: terminate the conversation when the agent has
- *     captured enough availability info — sets the conversation
- *     status to `completed` and stops the loop.
+ *   - send_email: outbound email to the therapist. Recipient is
+ *     hardcoded inside the executor (always therapist.email — never
+ *     accepts a `to` field from the model) so the agent can't
+ *     accidentally email anyone else. Body normalization (line
+ *     breaks, agent-name substitution) mirrors the booking agent's
+ *     sendEmail. First successful send stashes Gmail thread + initial
+ *     message ID back onto the TherapistConversation row so future
+ *     inbound replies can be matched to this conversation.
+ *   - record_availability_window: capture a one-off window. Shape
+ *     mirrors agent-memory.service.ts's per-appointment windows but
+ *     the executor writes to `Therapist.upcomingAvailability` —
+ *     per-therapist storage that the booking agent reads later.
+ *   - remember: soft observations the agent retains across turns
+ *     (e.g. "therapist asked us to email at 9am their time").
+ *     Stored on `TherapistConversation.memory`.
+ *   - mark_complete: terminate the conversation when enough
+ *     availability is captured — sets status='completed' and stops
+ *     the loop.
  *   - flag_for_human_review: escalate to admin and pause automation.
  *
- * Phase 2 deliberately ships NO email tool. The agent can decide
- * what it wants to do (record windows, mark complete, escalate),
- * but the actual outbound send_email path lands in phase 3 when the
- * onboarding & nudge flows wire up. Until then, the agent's text
- * output is captured into conversationState but not transmitted.
+ * Anything booking-related — proposing times, confirming slots,
+ * coordinating between parties — is out of scope for this agent.
+ * If the therapist tries to drive the conversation that way ("when
+ * works for you?"), the agent explains another part of the system
+ * will follow up with a specific proposal once availability is on
+ * file.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 
 export const availabilityTools: Anthropic.Tool[] = [
   {
+    name: 'send_email',
+    description:
+      'Send an email to the therapist. The recipient is fixed — you do NOT supply a "to" field. Use this for the introductory outbound, for replies that need to acknowledge something the therapist said, or for clarifying questions about availability. Keep emails short (one or two paragraphs) and direct. Do NOT propose specific session times in the email — that\'s the booking agent\'s job, not yours. If the therapist asks you to pick a time, tell them another part of the system will follow up with a specific proposal once their availability is on file. Sign off as "Justin" on a separate line.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        subject: {
+          type: 'string',
+          description:
+            'Subject line. The executor will prepend "Spill" if not already present, so you don\'t need to include it yourself.',
+        },
+        body: {
+          type: 'string',
+          description:
+            'Plain text body. Write each paragraph as a single continuous line — do NOT insert line breaks within paragraphs. Use blank lines between paragraphs. Email clients handle wrapping.',
+        },
+      },
+      required: ['subject', 'body'],
+    },
+  },
+  {
     name: 'record_availability_window',
     description:
-      'Capture an upcoming availability window the therapist has shared. Use this whenever they mention specific times they can offer for client sessions, e.g. "I can take new clients Tuesday and Thursday afternoons", "I have openings the week of the 22nd", or "I\'m out the first week of August so don\'t book me then". Resolve relative phrasing ("next week", "the week of the 15th") to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. Past windows are filtered automatically; do NOT submit windows whose endsAt is already in the past. The quote field captures the original phrasing so an admin can verify your date resolution.',
+      'Capture an upcoming availability window the therapist has shared. Use this whenever they mention specific times they\'re free, e.g. "I\'m free Tuesday and Thursday afternoons", "I have openings the week of the 22nd", or "I\'m out the first week of August so don\'t schedule me then". Resolve relative phrasing ("next week", "the week of the 15th") to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. Past windows are filtered automatically; do NOT submit windows whose endsAt is already in the past. The quote field captures the original phrasing so an admin can verify your date resolution.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -128,12 +155,19 @@ export const availabilityTools: Anthropic.Tool[] = [
  * conversation row before executing any of these so a crash mid-execution
  * doesn't lose progress.
  *
+ * `send_email` is here because outbound mail is the most irreversible
+ * side effect on the surface — we want the conversation state persisted
+ * before we send so that if the send succeeds but the subsequent state
+ * update fails, the agent's intent (subject/body it chose) is still
+ * recoverable from the last checkpoint.
+ *
  * `flag_for_human_review` is here because flipping `humanControlEnabled`
  * is a meaningful state change that future inbound emails will gate on;
  * we want the conversation row to reflect that flip even if the rest of
  * the loop crashes.
  */
 export const AVAILABILITY_SIDE_EFFECT_TOOLS = new Set([
+  'send_email',
   'record_availability_window',
   'mark_complete',
   'flag_for_human_review',

@@ -547,6 +547,30 @@ Justin`,
     valueType: 'string',
     defaultValue: 'Please confirm: Session on {selectedDateTime}',
   },
+  'email.availabilityOnboardingSubject': {
+    category: 'emailTemplates',
+    label: 'Availability Onboarding - Subject',
+    description:
+      "Subject for the availability-collection agent's outbound onboarding email, sent after a therapist is added to the platform. The agent may adapt it for context but should keep the core meaning.",
+    valueType: 'string',
+    defaultValue: 'Welcome to Spill - sharing your availability',
+  },
+  'email.availabilityOnboardingBody': {
+    category: 'emailTemplates',
+    label: 'Availability Onboarding - Body',
+    description:
+      "Recommended baseline body for the availability-collection agent's outbound onboarding email. Frames the recruitment-session context and asks for upcoming availability without proposing specific times (that's the booking agent's job). Variables: {therapistFirstName}.",
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Welcome to Spill - you've been added to our platform as part of our therapist recruitment process. The next step is a single trial session, which we'll arrange with you shortly.
+
+So that we can find a time that works, could you let me know what days and times you're free over the next two or three weeks? A few options is plenty - mornings, afternoons, specific days, whatever fits your schedule. Don't worry about exact times yet; once your availability is on file, the booking system will follow up with a specific proposal.
+
+Best wishes,
+
+Justin`,
+  },
   'email.slotConfirmationToTherapistBody': {
     category: 'emailTemplates',
     label: 'Slot Confirmation Request - Body',

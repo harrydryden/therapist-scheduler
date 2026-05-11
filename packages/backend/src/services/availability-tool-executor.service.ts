@@ -1,19 +1,21 @@
 /**
  * Tool dispatcher for the availability-collection agent.
  *
- * Parallel to ai-tool-executor.service.ts but for the slim
- * 4-tool surface of the availability agent (record_availability_window,
- * remember, mark_complete, flag_for_human_review). Phase 2 has no
- * external side effects (no emails, no Slack, no lifecycle transitions)
- * — every tool either writes to a JSON column on TherapistConversation
- * or on the Therapist row. The booking executor's heavier mechanism
- * (atomic human-control updateMany, per-appointment tool ceiling,
- * audit-event service) is deliberately deferred:
+ * Parallel to ai-tool-executor.service.ts but scoped to the agent's
+ * narrow surface (send_email, record_availability_window, remember,
+ * mark_complete, flag_for_human_review). All five tools route to
+ * methods on this class; pre-flight checks happen once at the top of
+ * executeToolCall so each handler can focus on its specific work.
  *
- *   - Atomic human-control check: phase 2 has no irreversible side
- *     effects, so the (small) race window between the read here and
- *     a concurrent human-control flip is benign. Phase 3 (which wires
- *     the email tool) should add the atomic check.
+ * Pre-flight is now ATOMIC (phase 3): a single `updateMany` against
+ * therapist_conversations with `id = X, status = 'active',
+ * humanControlEnabled = false` as predicate and `lastActivityAt +
+ * lastToolExecutedAt` as data fields. If 0 rows match, no tool call
+ * proceeds — same TOCTOU-safe pattern that ai-tool-executor.service.ts
+ * uses on appointment_requests. A follow-up findUnique disambiguates
+ * the failure for logging only; it doesn't gate execution.
+ *
+ * What's still deferred (intentionally, not oversights):
  *   - Audit events: AppointmentAuditEvent is FK'd to AppointmentRequest;
  *     extending it to also reference TherapistConversation is a schema
  *     change worth its own PR.
@@ -36,11 +38,13 @@ import { TOOL_EXECUTION } from '../constants';
 import {
   availabilityRecordWindowInputSchema,
   availabilityMarkCompleteInputSchema,
+  availabilitySendEmailInputSchema,
   flagForHumanReviewInputSchema,
   rememberInputSchema,
 } from '../schemas/tool-inputs';
 import { addUpcomingAvailability } from './therapist-availability.service';
 import { addConversationNote } from './therapist-conversation-memory.service';
+import { emailProcessingService } from './email-processing.service';
 import type { ToolExecutionResult } from './scheduling-context.service';
 import type { AvailabilityAgentContext } from './agent-tool-loop';
 
@@ -95,15 +99,18 @@ export class AvailabilityToolExecutorService {
   /**
    * Dispatch a Claude tool call to the matching handler.
    *
-   * Preflight (in order):
-   *   1. Read the conversation row. Missing → error result.
-   *   2. Skip if humanControlEnabled is true (admin has taken over).
-   *   3. Skip if status is not 'active' (completed / superseded /
-   *      abandoned — agent shouldn't act on terminal rows).
-   *   4. Idempotency check via Redis hash. Already-seen → skip.
+   * Pre-flight is one atomic step: an `updateMany` against the
+   * conversation row keyed on `id + status='active' +
+   * humanControlEnabled=false`. If 0 rows match, the tool call is
+   * skipped — no other code path reaches the handler. We then do a
+   * (non-atomic) findUnique purely to disambiguate WHY the gate
+   * failed, so the returned skipReason and the log line are accurate.
    *
-   * On a successful, non-skipped execution we mark the hash so a
-   * retry of the same call within the TTL is a no-op.
+   * After the gate passes:
+   *   - Redis hash dedup. Same toolName + input on the same
+   *     conversation within the TTL → silent skip.
+   *   - Dispatch to the handler.
+   *   - Mark hash on success (non-skip) so a retry no-ops.
    */
   async executeToolCall(
     toolCall: Anthropic.ToolUseBlock,
@@ -111,29 +118,48 @@ export class AvailabilityToolExecutorService {
   ): Promise<ToolExecutionResult> {
     const { name, input } = toolCall;
 
-    const convo = await prisma.therapistConversation.findUnique({
-      where: { id: context.conversationId },
-      select: { humanControlEnabled: true, status: true },
+    // Atomic gate. updateMany returns count=0 when ANY predicate fails
+    // (row missing, status≠active, or humanControl=true). One round-trip,
+    // no TOCTOU window. The lastActivityAt + lastToolExecutedAt bumps
+    // double as the gate's "data" payload.
+    const lockResult = await prisma.therapistConversation.updateMany({
+      where: {
+        id: context.conversationId,
+        status: 'active',
+        humanControlEnabled: false,
+      },
+      data: {
+        lastActivityAt: new Date(),
+        lastToolExecutedAt: new Date(),
+      },
     });
-    if (!convo) {
-      logger.warn(
-        { traceId: this.traceId, conversationId: context.conversationId, tool: name },
-        'availability-tool-executor: conversation row not found',
-      );
-      return {
-        success: false,
-        toolName: name,
-        error: `Conversation ${context.conversationId} not found`,
-      };
-    }
-    if (convo.humanControlEnabled) {
-      logger.info(
-        { traceId: this.traceId, conversationId: context.conversationId, tool: name },
-        'availability-tool-executor: skipping — human control enabled',
-      );
-      return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
-    }
-    if (convo.status !== 'active') {
+
+    if (lockResult.count === 0) {
+      // Gate failed. Read the row once to disambiguate for logging +
+      // skipReason. The read is non-atomic, but the GATE was atomic —
+      // we're just labelling the failure, not gating on this read.
+      const convo = await prisma.therapistConversation.findUnique({
+        where: { id: context.conversationId },
+        select: { humanControlEnabled: true, status: true },
+      });
+      if (!convo) {
+        logger.warn(
+          { traceId: this.traceId, conversationId: context.conversationId, tool: name },
+          'availability-tool-executor: conversation row not found',
+        );
+        return {
+          success: false,
+          toolName: name,
+          error: `Conversation ${context.conversationId} not found`,
+        };
+      }
+      if (convo.humanControlEnabled) {
+        logger.info(
+          { traceId: this.traceId, conversationId: context.conversationId, tool: name },
+          'availability-tool-executor: skipping — human control enabled',
+        );
+        return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
+      }
       logger.info(
         { traceId: this.traceId, conversationId: context.conversationId, tool: name, status: convo.status },
         'availability-tool-executor: skipping — conversation no longer active',
@@ -145,14 +171,6 @@ export class AvailabilityToolExecutorService {
         skipReason: 'conversation_inactive',
       };
     }
-
-    // Bump lastActivityAt so stale-check scans don't reap an actively
-    // working conversation. Best-effort; non-atomic — see file header.
-    await prisma.therapistConversation.update({
-      where: { id: context.conversationId },
-      data: { lastActivityAt: new Date() },
-      select: { id: true },
-    });
 
     const hash = hashToolCall(context.conversationId, name, input);
     if (await wasToolExecuted(hash)) {
@@ -166,6 +184,9 @@ export class AvailabilityToolExecutorService {
     let result: ToolExecutionResult;
     try {
       switch (name) {
+        case 'send_email':
+          result = await this.sendEmail(input, context);
+          break;
         case 'record_availability_window':
           result = await this.recordAvailabilityWindow(input, context);
           break;
@@ -202,6 +223,104 @@ export class AvailabilityToolExecutorService {
     }
 
     return result;
+  }
+
+  // ─── send_email handler ─────────────────────────────────────────────
+
+  /**
+   * Send an outbound email to the therapist.
+   *
+   * Recipient is hardcoded to `context.therapistEmail` — the agent
+   * never supplies a `to` field. This is the load-bearing safety
+   * guarantee for the tool: even if the model is prompt-injected
+   * with "email this address instead", the executor ignores any
+   * recipient hint and always sends to the therapist on this
+   * conversation.
+   *
+   * Subject normalisation: "Spill" prefix is added if absent, mirroring
+   * the booking agent's pattern.
+   *
+   * Thread continuity: on first successful send, the returned Gmail
+   * thread ID and message ID are stashed back onto the conversation
+   * row (atomic conditional update — only sets if currently NULL).
+   * Subsequent sends reuse the stored threadId.
+   */
+  private async sendEmail(
+    rawInput: unknown,
+    context: AvailabilityAgentContext,
+  ): Promise<ToolExecutionResult> {
+    const parsed = availabilitySendEmailInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      return {
+        success: false,
+        toolName: 'send_email',
+        error: `Invalid input: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
+      };
+    }
+
+    const subject = parsed.data.subject.toLowerCase().includes('spill')
+      ? parsed.data.subject
+      : `Spill - ${parsed.data.subject}`;
+    const body = parsed.data.body;
+
+    // Reuse the existing thread ID if we already have one (continuation
+    // turns); first send leaves this null so a new thread is opened.
+    const row = await prisma.therapistConversation.findUnique({
+      where: { id: context.conversationId },
+      select: { gmailThreadId: true },
+    });
+    const existingThreadId = row?.gmailThreadId || undefined;
+
+    let result: { threadId: string; messageId: string };
+    try {
+      result = await emailProcessingService.sendEmail({
+        to: context.therapistEmail,
+        subject,
+        body,
+        threadId: existingThreadId,
+      });
+    } catch (err) {
+      logger.error(
+        { traceId: this.traceId, conversationId: context.conversationId, err },
+        'availability-tool-executor: outbound email failed',
+      );
+      return {
+        success: false,
+        toolName: 'send_email',
+        error: err instanceof Error ? err.message : 'email send failed',
+      };
+    }
+
+    logger.info(
+      {
+        traceId: this.traceId,
+        conversationId: context.conversationId,
+        to: context.therapistEmail,
+        threadId: result.threadId,
+        messageId: result.messageId,
+        reused: !!existingThreadId,
+      },
+      'availability-tool-executor: email sent',
+    );
+
+    // First send: persist thread + initial message ID. Atomic
+    // conditional update so a concurrent send (unlikely, but) doesn't
+    // race two different thread IDs into the same row.
+    if (!existingThreadId && result.threadId) {
+      await prisma.therapistConversation.updateMany({
+        where: { id: context.conversationId, gmailThreadId: null },
+        data: {
+          gmailThreadId: result.threadId,
+          initialMessageId: result.messageId,
+        },
+      });
+    }
+
+    return {
+      success: true,
+      toolName: 'send_email',
+      resultMessage: `Email sent to ${context.therapistEmail} (thread ${result.threadId}).`,
+    };
   }
 
   // ─── Tool handlers ──────────────────────────────────────────────────

@@ -307,13 +307,19 @@ model AppointmentRequest {
 // Distinct from AppointmentRequest, which is always anchored to a specific
 // user↔therapist booking and runs the full booking lifecycle. A
 // TherapistConversation has no user counterpart — it exists to collect
-// availability from the therapist (and only the therapist) so the booking
-// agent has fresher data the next time a client request comes in.
+// availability from the therapist (and only the therapist) so that when a
+// booking is later needed, the booking agent has fresh data to negotiate
+// against. The availability agent NEVER proposes specific times, confirms
+// bookings, or creates AppointmentRequest rows — those are strictly the
+// booking agent's responsibilities.
 //
 // Two creation paths:
 //   - `kind = 'onboarding'`: outbound first-contact email sent after the
-//     therapist is ingested (PDF onboarding) or after a signup invitation
-//     is accepted. The agent asks the therapist when they're available.
+//     therapist is added to the platform via PDF ingestion. The therapist
+//     is being recruited; the immediate downstream use of their
+//     availability is a single trial session, but the booking of that
+//     session happens through the standard booking agent (with a Spill
+//     team member as the user), not here.
 //   - `kind = 'nudge_reply'`: the existing "still looking" nudge email
 //     now includes an availability ask, and replies route here instead
 //     of landing in the unmatched-email queue.
@@ -368,6 +374,13 @@ model TherapistConversation {
   supersededAt              DateTime? @map("superseded_at")
   supersededByAppointmentId String?   @map("superseded_by_appointment_id")
   supersededAckSent         Boolean   @default(false) @map("superseded_ack_sent")
+
+  // Atomic-lock anchor for the tool executor's human-control gate. The
+  // executor does an `updateMany` with `humanControlEnabled: false +
+  // status: 'active'` as predicate and this timestamp as the data field;
+  // if 0 rows match, the tool call is skipped. Same pattern as the
+  // booking executor uses on AppointmentRequest.lastToolExecutedAt.
+  lastToolExecutedAt DateTime? @map("last_tool_executed_at")
 
   completedAt DateTime? @map("completed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
