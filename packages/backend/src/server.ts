@@ -62,6 +62,36 @@ import { therapistNudgeService } from './services/therapist-nudge.service';
 import { missedMessageScannerService } from './services/missed-message-scanner.service';
 import { verifyWebhookSecret } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
+import { withTimeout, TimeoutError } from './utils/timeout';
+
+// Liveness probes must answer quickly even if the underlying connection
+// is wedged — the orchestrator can't tell "probe hung" apart from "pod
+// hung", so we set a tight ceiling and report a degraded-but-fast check
+// instead of letting the request hang forever.
+const HEALTH_PROBE_TIMEOUT_MS = 2000;
+
+// Process-wide tally of `unhandledRejection` events. The handler logs
+// each one but deliberately doesn't crash; the count is surfaced in
+// /health/full so an outside monitor can alert on rejections piling up
+// even when individual log lines slip past.
+const UNHANDLED_REJECTION_SAMPLE_SIZE = 5;
+let unhandledRejectionCount = 0;
+const recentUnhandledRejections: Array<{ at: string; reason: string }> = [];
+
+function recordUnhandledRejection(reason: unknown): void {
+  unhandledRejectionCount++;
+  const text = reason instanceof Error
+    ? `${reason.name}: ${reason.message}`
+    : String(reason);
+  recentUnhandledRejections.push({ at: new Date().toISOString(), reason: text.slice(0, 500) });
+  if (recentUnhandledRejections.length > UNHANDLED_REJECTION_SAMPLE_SIZE) {
+    recentUnhandledRejections.shift();
+  }
+}
+
+function getUnhandledRejectionStats(): { count: number; recent: Array<{ at: string; reason: string }> } {
+  return { count: unhandledRejectionCount, recent: [...recentUnhandledRejections] };
+}
 
 const logger = pino({
   level: config.logLevel,
@@ -160,35 +190,47 @@ async function buildServer() {
   });
 
   // /health/ready - Readiness probe (can we serve traffic?)
-  // Checks database and Redis connectivity
+  // Checks database and Redis connectivity, each behind a hard timeout
+  // so the probe can never block longer than HEALTH_PROBE_TIMEOUT_MS.
   fastify.get('/health/ready', async (request, reply) => {
     const checks: Record<string, { ok: boolean; latencyMs?: number; error?: string }> = {};
     let allHealthy = true;
 
-    // Check database
-    const dbHealth = await checkDatabaseHealth();
-    checks.database = {
-      ok: dbHealth.connected,
-      latencyMs: dbHealth.latencyMs,
-      error: dbHealth.error,
-    };
-    if (!dbHealth.connected) allHealthy = false;
-
-    // Check Redis (optional - graceful if unavailable)
+    // Database — required.
     try {
-      const redisHealth = await redis.checkHealth();
+      const dbHealth = await withTimeout(
+        checkDatabaseHealth(),
+        HEALTH_PROBE_TIMEOUT_MS,
+        'health.database',
+      );
+      checks.database = {
+        ok: dbHealth.connected,
+        latencyMs: dbHealth.latencyMs,
+        error: dbHealth.error,
+      };
+      if (!dbHealth.connected) allHealthy = false;
+    } catch (err) {
+      checks.database = { ok: false, error: err instanceof TimeoutError ? 'timeout' : 'check failed' };
+      allHealthy = false;
+    }
+
+    // Redis — optional. Failure logs a warning but doesn't fail readiness.
+    try {
+      const redisHealth = await withTimeout(
+        redis.checkHealth(),
+        HEALTH_PROBE_TIMEOUT_MS,
+        'health.redis',
+      );
       checks.redis = {
         ok: redisHealth.connected,
         latencyMs: redisHealth.latencyMs,
         error: redisHealth.error,
       };
-      // Redis is optional - don't fail readiness if unavailable
-      // But log warning if it's down
       if (!redisHealth.connected) {
         logger.warn('Redis unavailable - distributed locking disabled');
       }
     } catch (err) {
-      checks.redis = { ok: false, error: 'Redis check failed' };
+      checks.redis = { ok: false, error: err instanceof TimeoutError ? 'timeout' : 'check failed' };
     }
 
     const status = allHealthy ? 'ready' : 'not_ready';
@@ -257,23 +299,48 @@ async function buildServer() {
   fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async () => {
     const checks: Record<string, unknown> = {};
 
-    // Database
-    const dbHealth = await checkDatabaseHealth();
-    checks.database = {
-      status: dbHealth.connected ? 'ok' : 'error',
-      latencyMs: dbHealth.latencyMs,
-      error: dbHealth.error,
-    };
+    // Database — timeout-bounded so a wedged connection doesn't hang the probe.
+    let dbConnected = false;
+    try {
+      const dbHealth = await withTimeout(
+        checkDatabaseHealth(),
+        HEALTH_PROBE_TIMEOUT_MS,
+        'health.database',
+      );
+      dbConnected = dbHealth.connected;
+      checks.database = {
+        status: dbHealth.connected ? 'ok' : 'error',
+        latencyMs: dbHealth.latencyMs,
+        error: dbHealth.error,
+      };
+    } catch (err) {
+      checks.database = {
+        status: 'error',
+        error: err instanceof TimeoutError ? 'timeout' : 'check failed',
+      };
+    }
 
-    // Redis
-    const redisHealth = await redis.checkHealth();
+    // Redis — same treatment, but probe failure is degraded (not error).
     const redisState = redis.getHealthState();
-    checks.redis = {
-      status: redisHealth.connected ? 'ok' : 'degraded',
-      latencyMs: redisHealth.latencyMs,
-      backpressure: redisState.backpressureLevel,
-      error: redisHealth.error,
-    };
+    try {
+      const redisHealth = await withTimeout(
+        redis.checkHealth(),
+        HEALTH_PROBE_TIMEOUT_MS,
+        'health.redis',
+      );
+      checks.redis = {
+        status: redisHealth.connected ? 'ok' : 'degraded',
+        latencyMs: redisHealth.latencyMs,
+        backpressure: redisState.backpressureLevel,
+        error: redisHealth.error,
+      };
+    } catch (err) {
+      checks.redis = {
+        status: 'degraded',
+        backpressure: redisState.backpressureLevel,
+        error: err instanceof TimeoutError ? 'timeout' : 'check failed',
+      };
+    }
 
     // Circuit breakers
     const circuitStats = circuitBreakerRegistry.getAllStats();
@@ -310,12 +377,23 @@ async function buildServer() {
       ...scannerStatus,
     };
 
+    // Unhandled rejections — the process keeps running on these, so we
+    // surface the count + a recent sample here. Any non-zero count is
+    // degraded; the recent sample helps locate the leaking promise.
+    const rejectionStats = getUnhandledRejectionStats();
+    checks.unhandledRejections = {
+      status: rejectionStats.count === 0 ? 'ok' : 'degraded',
+      count: rejectionStats.count,
+      recent: rejectionStats.recent,
+    };
+
     // Overall status
-    const overallStatus = dbHealth.connected &&
+    const overallStatus = dbConnected &&
       openCircuits.length === 0 &&
       taskHealth.healthy &&
       timeoutStats.recentCount < 10 &&
-      scannerStatus.healthy
+      scannerStatus.healthy &&
+      rejectionStats.count === 0
       ? 'ok' : 'degraded';
 
     return {
@@ -477,14 +555,18 @@ async function start() {
     }
   }
 
-  // Unhandled rejection handler - log and continue (don't crash)
+  // Unhandled rejection handler — log and continue (don't crash). The
+  // count + last few reasons are surfaced in /health/full so an outside
+  // monitor can detect the silent-failure pattern this handler would
+  // otherwise mask. The right long-term fix is to find and catch the
+  // rejecting promises explicitly; the counter makes them visible in
+  // the meantime.
   process.on('unhandledRejection', (reason, promise) => {
+    recordUnhandledRejection(reason);
     logger.error(
-      { reason, promise: String(promise) },
+      { reason, promise: String(promise), unhandledRejectionCount: getUnhandledRejectionStats().count },
       'Unhandled promise rejection - logging but not crashing'
     );
-    // In production, we log but don't crash to maintain uptime
-    // Critical errors should be caught and handled explicitly
   });
 
   // Uncaught exception handler - log, cleanup, and exit

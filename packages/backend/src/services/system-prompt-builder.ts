@@ -73,6 +73,23 @@ async function withTimeout<T>(
 }
 
 /**
+ * Pull a required setting out of the batched settings map. Throws a
+ * descriptive error if the row is missing — replaces the previous
+ * `settingsMap.get(key)!` pattern that crashed with a bare
+ * `TypeError: Cannot read properties of undefined` and gave no hint as
+ * to which setting was missing. A missing key here usually means a
+ * migration didn't land or a key was renamed in `setting-definitions`
+ * but not in the caller, both of which we want to surface loudly.
+ */
+function requireSetting<T>(settingsMap: Map<string, T>, key: string): T {
+  const value = settingsMap.get(key);
+  if (value === undefined || value === null) {
+    throw new Error(`Required setting missing: '${key}'. Check setting-definitions.ts and run db push.`);
+  }
+  return value;
+}
+
+/**
  * Build the complete system prompt for the Justin Time scheduling agent.
  *
  * @param context - Current scheduling context (client, therapist, availability)
@@ -118,23 +135,23 @@ export async function buildSystemPrompt(
     'agent.maxTotalSlots',
     'general.timezone',
   ]);
-  const initialClientSubject = settingsMap.get('email.initialClientWithAvailabilitySubject')!;
-  const initialClientBody = settingsMap.get('email.initialClientWithAvailabilityBody')!;
-  const initialTherapistWithAvailSubject = settingsMap.get('email.initialTherapistWithAvailabilitySubject')!;
-  const initialTherapistWithAvailBody = settingsMap.get('email.initialTherapistWithAvailabilityBody')!;
-  const initialTherapistSubject = settingsMap.get('email.initialTherapistNoAvailabilitySubject')!;
-  const initialTherapistBody = settingsMap.get('email.initialTherapistNoAvailabilityBody')!;
-  const slotConfirmSubject = settingsMap.get('email.slotConfirmationToTherapistSubject')!;
-  const slotConfirmBody = settingsMap.get('email.slotConfirmationToTherapistBody')!;
-  const languageStyle = settingsMap.get('agent.languageStyle')!;
-  const toneStyle = settingsMap.get('agent.toneStyle')!;
+  const initialClientSubject = requireSetting(settingsMap, 'email.initialClientWithAvailabilitySubject');
+  const initialClientBody = requireSetting(settingsMap, 'email.initialClientWithAvailabilityBody');
+  const initialTherapistWithAvailSubject = requireSetting(settingsMap, 'email.initialTherapistWithAvailabilitySubject');
+  const initialTherapistWithAvailBody = requireSetting(settingsMap, 'email.initialTherapistWithAvailabilityBody');
+  const initialTherapistSubject = requireSetting(settingsMap, 'email.initialTherapistNoAvailabilitySubject');
+  const initialTherapistBody = requireSetting(settingsMap, 'email.initialTherapistNoAvailabilityBody');
+  const slotConfirmSubject = requireSetting(settingsMap, 'email.slotConfirmationToTherapistSubject');
+  const slotConfirmBody = requireSetting(settingsMap, 'email.slotConfirmationToTherapistBody');
+  const languageStyle = requireSetting(settingsMap, 'agent.languageStyle');
+  const toneStyle = requireSetting(settingsMap, 'agent.toneStyle');
   const toneGuidance = getToneGuidance(toneStyle as string);
-  const agentName = settingsMap.get('agent.fromName')! as string;
+  const agentName = requireSetting(settingsMap, 'agent.fromName') as string;
   const agentFirstName = firstName(agentName);
-  const sessionDuration = settingsMap.get('agent.sessionDurationMinutes')! as unknown as number;
-  const maxSlotsPerGroup = settingsMap.get('agent.maxSlotsPerGroup')! as unknown as number;
-  const maxTotalSlots = settingsMap.get('agent.maxTotalSlots')! as unknown as number;
-  const timezone = settingsMap.get('general.timezone')! as string;
+  const sessionDuration = requireSetting(settingsMap, 'agent.sessionDurationMinutes') as unknown as number;
+  const maxSlotsPerGroup = requireSetting(settingsMap, 'agent.maxSlotsPerGroup') as unknown as number;
+  const maxTotalSlots = requireSetting(settingsMap, 'agent.maxTotalSlots') as unknown as number;
+  const timezone = requireSetting(settingsMap, 'general.timezone') as string;
 
   const hasAvailability = context.therapistAvailability &&
     (context.therapistAvailability as any).slots &&
