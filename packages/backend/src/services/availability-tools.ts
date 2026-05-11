@@ -60,6 +60,22 @@ export const availabilityTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'record_booking_link',
+    description:
+      "Record the therapist's direct booking link (Calendly, Acuity, YouCanBook.me, SavvyCal, or any other scheduling tool URL they use). Use this whenever they share a link in their reply, e.g. 'You can book me at calendly.com/...', 'My scheduling page is https://...', or similar. The link is the richest form of availability we can capture — once it's on file, the booking agent can use it directly when a session needs to be scheduled, and we don't need to keep collecting fine-grained time windows. Overwrites any existing link on file (most recent intent wins). If the therapist tells you the link they previously shared is no longer valid, record the new one and they should be set. After capturing a link, you can usually mark_complete sooner — the link covers what individual windows would have.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description:
+            'The full booking-link URL exactly as the therapist shared it, including the scheme (https://). Do not modify or shorten — the executor stores it verbatim and validates it is a parseable URL.',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'record_availability_window',
     description:
       'Capture an upcoming availability window the therapist has shared. Use this whenever they mention specific times they\'re free, e.g. "I\'m free Tuesday and Thursday afternoons", "I have openings the week of the 22nd", or "I\'m out the first week of August so don\'t schedule me then". Resolve relative phrasing ("next week", "the week of the 15th") to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. Past windows are filtered automatically; do NOT submit windows whose endsAt is already in the past. The quote field captures the original phrasing so an admin can verify your date resolution.',
@@ -169,6 +185,7 @@ export const availabilityTools: Anthropic.Tool[] = [
 export const AVAILABILITY_SIDE_EFFECT_TOOLS = new Set([
   'send_email',
   'record_availability_window',
+  'record_booking_link',
   'mark_complete',
   'flag_for_human_review',
 ]);

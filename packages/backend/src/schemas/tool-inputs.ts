@@ -85,6 +85,21 @@ export const availabilityRecordWindowInputSchema = z.object({
 });
 
 /**
+ * Booking-link capture for the availability-collection agent. Just a
+ * URL string; the executor stores it verbatim on Therapist.bookingLink.
+ * Validation is "is a parseable URL" only — no domain allowlist,
+ * because therapists use many scheduling tools and gating bookings on
+ * a hardcoded list of providers would create false negatives.
+ */
+export const recordBookingLinkInputSchema = z.object({
+  url: z
+    .string()
+    .min(1)
+    .max(2048)
+    .url('url must be a parseable URL with a scheme (e.g. "https://calendly.com/...")'),
+});
+
+/**
  * Slim send_email used by the availability-collection agent. The
  * booking-side `sendEmailInputSchema` accepts a `to` field because the
  * agent picks the recipient (client vs therapist); here the recipient

@@ -47,6 +47,7 @@ type TherapistRow = {
   country: string;
   availability: unknown;
   upcomingAvailability: unknown;
+  bookingLink: string | null;
 };
 type ConversationRow = {
   id: string;
@@ -347,6 +348,7 @@ function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
     country: 'UK',
     availability: null,
     upcomingAvailability: null,
+    bookingLink: null,
     ...overrides,
   };
   therapists[row.id] = row;

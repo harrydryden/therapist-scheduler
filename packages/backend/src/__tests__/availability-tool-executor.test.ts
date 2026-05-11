@@ -63,6 +63,7 @@ type TherapistRow = {
   country: string;
   availability: unknown;
   upcomingAvailability: unknown;
+  bookingLink: string | null;
 };
 type ConversationRow = {
   id: string;
@@ -181,7 +182,7 @@ function makeToolCall(name: string, input: unknown, id = `tu-${name}`): Anthropi
   return { type: 'tool_use', id, name, input } as Anthropic.ToolUseBlock;
 }
 
-function seedTherapist(id = 'tx-1') {
+function seedTherapist(id = 'tx-1', overrides: Partial<TherapistRow> = {}) {
   therapists[id] = {
     id,
     name: 'Alex Therapist',
@@ -189,6 +190,8 @@ function seedTherapist(id = 'tx-1') {
     country: 'UK',
     availability: null,
     upcomingAvailability: null,
+    bookingLink: null,
+    ...overrides,
   };
 }
 function seedConversation(id = 'convo-1', therapistId = 'tx-1', overrides: Partial<ConversationRow> = {}) {
@@ -399,6 +402,98 @@ describe('AvailabilityToolExecutor — record_availability_window', () => {
     expect(second.resultMessage).toMatch(/deduplicated/i);
     // Only one window persisted on the therapist row.
     expect((therapists['tx-1'].upcomingAvailability as unknown[]).length).toBe(1);
+  });
+});
+
+describe('AvailabilityToolExecutor — record_booking_link', () => {
+  it('writes the URL to Therapist.bookingLink keyed on the context therapistId', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: 'https://calendly.com/alex-therapist/50min' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.skipped).toBeFalsy();
+    expect(therapists['tx-1'].bookingLink).toBe('https://calendly.com/alex-therapist/50min');
+  });
+
+  it('overwrites an existing link (most-recent-share wins)', async () => {
+    seedTherapist('tx-1', { bookingLink: 'https://old-link.example.com/abc' });
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: 'https://acuityscheduling.com/schedule.php?owner=12345' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(therapists['tx-1'].bookingLink).toBe('https://acuityscheduling.com/schedule.php?owner=12345');
+  });
+
+  it('rejects non-URL strings via Zod', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: 'calendly.com/no-scheme' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/parseable URL/i);
+    expect(therapists['tx-1'].bookingLink).toBeNull();
+  });
+
+  it('rejects empty url', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    const result = await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: '' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid input/i);
+  });
+
+  it('accepts common scheduling-tool URLs without a domain allowlist', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    // A custom-domain self-hosted Cal.com instance — exactly the case
+    // a domain allowlist would over-restrict.
+    const result = await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: 'https://book.alex-therapy.co.uk/intro' }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(therapists['tx-1'].bookingLink).toBe('https://book.alex-therapy.co.uk/intro');
+  });
+
+  it('uses the strict per-therapist scoping: writes only to the context therapist', async () => {
+    seedTherapist('tx-1');
+    seedTherapist('tx-2');
+    seedConversation('convo-1', 'tx-1');
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    await exec.executeToolCall(
+      makeToolCall('record_booking_link', { url: 'https://calendly.com/tx-1-link' }),
+      makeContext({ therapistId: 'tx-1' }),
+    );
+
+    expect(therapists['tx-1'].bookingLink).toBe('https://calendly.com/tx-1-link');
+    // Other therapist row must not have been touched.
+    expect(therapists['tx-2'].bookingLink).toBeNull();
   });
 });
 

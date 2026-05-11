@@ -40,6 +40,7 @@ import {
   availabilityMarkCompleteInputSchema,
   availabilitySendEmailInputSchema,
   flagForHumanReviewInputSchema,
+  recordBookingLinkInputSchema,
   rememberInputSchema,
 } from '../schemas/tool-inputs';
 import { addUpcomingAvailability } from './therapist-availability.service';
@@ -189,6 +190,9 @@ export class AvailabilityToolExecutorService {
           break;
         case 'record_availability_window':
           result = await this.recordAvailabilityWindow(input, context);
+          break;
+        case 'record_booking_link':
+          result = await this.recordBookingLink(input, context);
           break;
         case 'remember':
           result = await this.remember(input, context);
@@ -381,6 +385,55 @@ export class AvailabilityToolExecutorService {
       resultMessage: writeResult.added
         ? `Recorded ${status} window ${starts_at} → ${ends_at}.`
         : `Window already recorded (deduplicated).`,
+    };
+  }
+
+  /**
+   * Store the therapist's booking link on Therapist.bookingLink.
+   *
+   * Always overwrites — most recent share wins, matching how the booking
+   * agent already treats freshly-shared links as authoritative over the
+   * existing record. Admin can still edit via the therapist UI; the
+   * executor doesn't try to reconcile when a different link is on file.
+   *
+   * Validation is URL-only (Zod's `.url()`). No domain allowlist:
+   * therapists use Calendly, Acuity, YouCanBook.me, SavvyCal, custom
+   * Cal.com instances, and various other tools — a strict list would
+   * produce false negatives.
+   */
+  private async recordBookingLink(
+    rawInput: unknown,
+    context: AvailabilityAgentContext,
+  ): Promise<ToolExecutionResult> {
+    const parsed = recordBookingLinkInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      return {
+        success: false,
+        toolName: 'record_booking_link',
+        error: `Invalid input: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
+      };
+    }
+
+    const { url } = parsed.data;
+
+    // STRICT per-therapist scoping: write keyed on Therapist.id from
+    // context only. No findFirst, no email lookup — same contract as
+    // therapist-availability.service.ts.
+    await prisma.therapist.update({
+      where: { id: context.therapistId },
+      data: { bookingLink: url },
+      select: { id: true },
+    });
+
+    logger.info(
+      { traceId: this.traceId, therapistId: context.therapistId, url },
+      'availability-tool-executor: booking link recorded',
+    );
+
+    return {
+      success: true,
+      toolName: 'record_booking_link',
+      resultMessage: `Booking link recorded: ${url}`,
     };
   }
 

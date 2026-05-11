@@ -567,6 +567,8 @@ Welcome to Spill - you've been added to our platform as part of our therapist re
 
 So that we can find a time that works, could you let me know what days and times you're free over the next two or three weeks? A few options is plenty - mornings, afternoons, specific days, whatever fits your schedule. Don't worry about exact times yet; once your availability is on file, the booking system will follow up with a specific proposal.
 
+If you use a scheduling tool (Calendly, Acuity, YouCanBook.me, anything similar), feel free to share that link instead and we'll use it directly - saves you spelling out individual times.
+
 Best wishes,
 
 Justin`,
