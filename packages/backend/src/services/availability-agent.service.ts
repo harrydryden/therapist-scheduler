@@ -697,12 +697,10 @@ If the therapist hints they want to update this link, capture the new one via re
 No booking link on file. If the therapist mentions one in their reply (Calendly, Acuity, YouCanBook.me, any scheduling URL), capture it with record_booking_link — that's the richest form of availability we can store.`;
 
   const memory = await getConversationMemory(context.conversationId);
-  const memorySection = formatMemoryForPrompt(
-    // formatMemoryForPrompt expects the booking-shaped memory with
-    // availabilityWindows; we only carry notes, but pad an empty array
-    // so the type matches — the renderer ignores it.
-    { notes: memory.notes, availabilityWindows: [] },
-  );
+  // The shared renderer now takes a bare notes array — both the
+  // booking-side memory and this slim store pass their notes through
+  // the same path.
+  const memorySection = formatMemoryForPrompt(memory.notes);
 
   // Fetch the onboarding email template for inlining into the prompt.
   // The agent reads this as a strong baseline and substitutes

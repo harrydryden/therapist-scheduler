@@ -21,73 +21,47 @@
  * the system prompt builder pulls notes for the appointment whose
  * SchedulingContext is being rendered.
  *
+ * Refactored: the pure list-manipulation pieces (hashing, parsing,
+ * FIFO eviction, prompt rendering) now live in
+ * `agent-notes-store.ts` and `agent-availability-windows-store.ts`,
+ * shared with the therapist-side stores. This file retains the
+ * appointment-specific DB I/O and combined-blob handling.
+ *
  * Layer C (cross-appointment user/therapist profile) is intentionally
  * NOT implemented here. It deserves its own privacy review.
  */
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import crypto from 'crypto';
+import {
+  MAX_NOTES_PER_THREAD,
+  MAX_NOTE_LENGTH,
+  type AgentNoteCategory,
+  type AgentMemoryNote,
+  parseNotes,
+  appendNoteToList,
+  formatNotesForPrompt,
+} from './agent-notes-store';
+import {
+  MAX_WINDOW_QUOTE_LENGTH,
+  type AvailabilityWindow,
+  parseWindows,
+  appendWindowToList,
+  getActiveWindows as getActiveWindowsShared,
+  formatWindowsForPrompt,
+} from './agent-availability-windows-store';
 
-/**
- * Cap on how many notes we keep per thread. The agent is asked to
- * refine existing notes by re-calling `remember` rather than spam new
- * ones; the cap is a hard backstop in case it doesn't.
- */
-export const MAX_NOTES_PER_THREAD = 20;
-
-/**
- * Maximum length per note. Long enough for a useful sentence,
- * short enough that 20 notes fit comfortably in the system prompt.
- */
-export const MAX_NOTE_LENGTH = 280;
+// Re-export so external callers continue to import these from
+// agent-memory.service.ts (where they've lived since launch).
+export {
+  MAX_NOTES_PER_THREAD,
+  MAX_NOTE_LENGTH,
+  MAX_WINDOW_QUOTE_LENGTH,
+};
+export type { AgentNoteCategory, AgentMemoryNote, AvailabilityWindow };
 
 /** Cap on availability windows. Same FIFO eviction model as notes. */
 export const MAX_WINDOWS_PER_THREAD = 30;
-
-/** Cap on the quote string captured from the original message. */
-export const MAX_WINDOW_QUOTE_LENGTH = 280;
-
-export type AgentNoteCategory = 'preference' | 'constraint' | 'context' | 'decision';
-
-export interface AgentMemoryNote {
-  /** Stable per-note id; deterministic hash of (text, category) so the
-   *  same observation written twice in the same turn dedupes safely. */
-  id: string;
-  category: AgentNoteCategory;
-  text: string;
-  createdAt: string;
-}
-
-/**
- * An ad-hoc / episodic availability window mentioned in conversation.
- *
- * Distinct from the recurring weekly base availability stored on the
- * Therapist row: windows are one-off, time-bounded, and naturally
- * expire when their endsAt passes.
- *
- * Both startsAt and endsAt are absolute ISO 8601 timestamps with
- * offset — the agent resolves relative phrasings ("next Friday", "the
- * week of the 15th") to absolute instants at capture time, so the
- * meaning doesn't drift if the conversation continues for days.
- */
-export interface AvailabilityWindow {
-  id: string;
-  /** ISO 8601 with offset. */
-  startsAt: string;
-  /** ISO 8601 with offset. */
-  endsAt: string;
-  /** 'available' = an open slot; 'unavailable' = a known block. */
-  status: 'available' | 'unavailable';
-  /** Who said it. Usually 'therapist' but the user can also note absences. */
-  source: 'therapist' | 'user';
-  /** Original phrase from the email. Audit trail + helps admins verify
-   *  the agent's date resolution (e.g. that "next Friday" became the
-   *  expected ISO). */
-  quote: string;
-  /** Wall-clock at the moment of capture, used for FIFO ordering. */
-  recordedAt: string;
-}
 
 export interface AgentThreadMemory {
   notes: AgentMemoryNote[];
@@ -97,71 +71,19 @@ export interface AgentThreadMemory {
 const EMPTY_MEMORY: AgentThreadMemory = { notes: [], availabilityWindows: [] };
 
 /**
- * Hash a note's text + category to a short id. Used both for dedup
- * (re-writing the same observation in the same turn doesn't grow the
- * notes array) and for stable note references in logs.
- */
-function noteId(text: string, category: AgentNoteCategory): string {
-  return crypto
-    .createHash('sha256')
-    .update(`${category}:${text.trim().toLowerCase()}`)
-    .digest('hex')
-    .substring(0, 16);
-}
-
-/**
  * Validate a memory blob coming back from the database. Returns a safe
  * empty memory if the shape is wrong — never throws, since a corrupted
  * column shouldn't break the agent loop. Each sub-array (notes,
- * availabilityWindows) is parsed defensively so a malformed entry
- * drops without taking out its siblings.
+ * availabilityWindows) is parsed defensively via the shared parsers
+ * so a malformed entry drops without taking out its siblings.
  */
 function parseMemory(raw: unknown): AgentThreadMemory {
   if (!raw || typeof raw !== 'object') return EMPTY_MEMORY;
   const obj = raw as { notes?: unknown; availabilityWindows?: unknown };
-
-  const notes: AgentMemoryNote[] = [];
-  if (Array.isArray(obj.notes)) {
-    for (const item of obj.notes) {
-      if (!item || typeof item !== 'object') continue;
-      const n = item as Partial<AgentMemoryNote>;
-      if (typeof n.id !== 'string' || typeof n.text !== 'string' || typeof n.createdAt !== 'string') continue;
-      if (n.category !== 'preference' && n.category !== 'constraint' && n.category !== 'context' && n.category !== 'decision') continue;
-      notes.push({ id: n.id, category: n.category, text: n.text, createdAt: n.createdAt });
-    }
-  }
-
-  const availabilityWindows: AvailabilityWindow[] = [];
-  if (Array.isArray(obj.availabilityWindows)) {
-    for (const item of obj.availabilityWindows) {
-      if (!item || typeof item !== 'object') continue;
-      const w = item as Partial<AvailabilityWindow>;
-      if (
-        typeof w.id !== 'string' ||
-        typeof w.startsAt !== 'string' ||
-        typeof w.endsAt !== 'string' ||
-        typeof w.quote !== 'string' ||
-        typeof w.recordedAt !== 'string'
-      )
-        continue;
-      if (w.status !== 'available' && w.status !== 'unavailable') continue;
-      if (w.source !== 'therapist' && w.source !== 'user') continue;
-      // Reject malformed timestamps — easier to drop than to render
-      // garbage in the prompt.
-      if (isNaN(Date.parse(w.startsAt)) || isNaN(Date.parse(w.endsAt))) continue;
-      availabilityWindows.push({
-        id: w.id,
-        startsAt: w.startsAt,
-        endsAt: w.endsAt,
-        status: w.status,
-        source: w.source,
-        quote: w.quote,
-        recordedAt: w.recordedAt,
-      });
-    }
-  }
-
-  return { notes, availabilityWindows };
+  return {
+    notes: parseNotes(obj.notes),
+    availabilityWindows: parseWindows(obj.availabilityWindows),
+  };
 }
 
 /**
@@ -216,33 +138,19 @@ export async function addNote(
   category: AgentNoteCategory,
   rawText: string,
 ): Promise<AddNoteResult> {
-  const text = rawText.trim().slice(0, MAX_NOTE_LENGTH);
-  const id = noteId(text, category);
-
   const current = await getThreadMemory(appointmentId);
+  const result = appendNoteToList(current.notes, category, rawText);
 
-  if (current.notes.some((n) => n.id === id)) {
+  if (!result.added) {
     logger.debug(
-      { appointmentId, noteId: id, category },
+      { appointmentId, noteId: result.noteId, category },
       'agent-memory: note already present, skipping (idempotent remember)',
     );
-    return { added: false, memory: current, noteId: id };
+    return { added: false, memory: current, noteId: result.noteId };
   }
 
-  const next: AgentMemoryNote = {
-    id,
-    category,
-    text,
-    createdAt: new Date().toISOString(),
-  };
-
-  // FIFO eviction: keep the most recent MAX_NOTES_PER_THREAD - 1 then
-  // append the new one. The newest sits at the end so the prompt
-  // renders chronological context naturally. availabilityWindows are
-  // preserved verbatim — note writes don't touch them.
-  const trimmed = current.notes.slice(-(MAX_NOTES_PER_THREAD - 1));
   const updated: AgentThreadMemory = {
-    notes: [...trimmed, next],
+    notes: result.notes,
     availabilityWindows: current.availabilityWindows,
   };
 
@@ -253,30 +161,17 @@ export async function addNote(
   });
 
   logger.info(
-    { appointmentId, noteId: id, category, totalNotes: updated.notes.length },
+    { appointmentId, noteId: result.noteId, category, totalNotes: updated.notes.length },
     'agent-memory: note added',
   );
 
-  return { added: true, memory: updated, noteId: id };
+  return { added: true, memory: updated, noteId: result.noteId };
 }
 
 export interface AddWindowResult {
   added: boolean;
   memory: AgentThreadMemory;
   windowId: string;
-}
-
-/**
- * Hash a window's defining fields. Same (startsAt, endsAt, status,
- * source) on the same appointment dedupes — useful when the agent
- * paraphrases the same statement twice in one turn.
- */
-function windowId(starts: string, ends: string, status: string, source: string): string {
-  return crypto
-    .createHash('sha256')
-    .update(`${status}:${source}:${starts}:${ends}`)
-    .digest('hex')
-    .substring(0, 16);
 }
 
 /**
@@ -302,45 +197,26 @@ export async function addAvailabilityWindow(
     quote: string;
   },
 ): Promise<AddWindowResult> {
-  const startsAt = params.startsAt;
-  const endsAt = params.endsAt;
-  const startMs = Date.parse(startsAt);
-  const endMs = Date.parse(endsAt);
-
-  if (isNaN(startMs) || isNaN(endMs)) {
-    throw new Error('addAvailabilityWindow: startsAt and endsAt must be parseable ISO 8601 datetimes');
-  }
-  if (endMs <= startMs) {
-    throw new Error('addAvailabilityWindow: endsAt must be strictly after startsAt');
-  }
-
-  const id = windowId(startsAt, endsAt, params.status, params.source);
-  const quote = params.quote.trim().slice(0, MAX_WINDOW_QUOTE_LENGTH);
-
   const current = await getThreadMemory(appointmentId);
+  // Per-appointment lists are short-lived (one booking thread); no
+  // need to compact past windows on every write here, unlike the
+  // per-therapist store.
+  const result = appendWindowToList(current.availabilityWindows, params, {
+    maxSize: MAX_WINDOWS_PER_THREAD,
+    compactPast: false,
+  });
 
-  if (current.availabilityWindows.some((w) => w.id === id)) {
+  if (!result.added) {
     logger.debug(
-      { appointmentId, windowId: id, status: params.status },
+      { appointmentId, windowId: result.windowId, status: params.status },
       'agent-memory: availability window already present, skipping (idempotent)',
     );
-    return { added: false, memory: current, windowId: id };
+    return { added: false, memory: current, windowId: result.windowId };
   }
 
-  const next: AvailabilityWindow = {
-    id,
-    startsAt,
-    endsAt,
-    status: params.status,
-    source: params.source,
-    quote,
-    recordedAt: new Date().toISOString(),
-  };
-
-  const trimmed = current.availabilityWindows.slice(-(MAX_WINDOWS_PER_THREAD - 1));
   const updated: AgentThreadMemory = {
     notes: current.notes,
-    availabilityWindows: [...trimmed, next],
+    availabilityWindows: result.windows,
   };
 
   await prisma.appointmentRequest.update({
@@ -352,32 +228,33 @@ export async function addAvailabilityWindow(
   logger.info(
     {
       appointmentId,
-      windowId: id,
+      windowId: result.windowId,
       status: params.status,
       source: params.source,
-      startsAt,
-      endsAt,
+      startsAt: params.startsAt,
+      endsAt: params.endsAt,
       totalWindows: updated.availabilityWindows.length,
     },
     'agent-memory: availability window added',
   );
 
-  return { added: true, memory: updated, windowId: id };
+  return { added: true, memory: updated, windowId: result.windowId };
 }
 
 /**
- * Filter to windows whose endsAt is still in the future, sorted by
- * startsAt ascending. Past windows have no value to the agent and
- * shouldn't pollute the prompt.
+ * Future-only view, sorted by start. Past windows are filtered out;
+ * showing them to the agent or merging them into the booking-side
+ * formatter would only mislead.
+ *
+ * Wraps the shared `getActiveWindows` so callers can pass the whole
+ * `AgentThreadMemory` (the historical signature) rather than a bare
+ * array.
  */
 export function getActiveWindows(
   memory: AgentThreadMemory,
   now: Date = new Date(),
 ): AvailabilityWindow[] {
-  const cutoff = now.getTime();
-  return memory.availabilityWindows
-    .filter((w) => Date.parse(w.endsAt) > cutoff)
-    .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt));
+  return getActiveWindowsShared(memory.availabilityWindows, now);
 }
 
 /**
@@ -385,41 +262,11 @@ export function getActiveWindows(
  * Returns an empty string when there are no notes so the prompt
  * builder can drop the section entirely.
  *
- * Notes are grouped by category in a stable order (preference,
- * constraint, context, decision) so the agent sees the same shape
- * across turns and prompt caching is preserved.
+ * Delegates to the shared renderer (`formatNotesForPrompt`); kept here
+ * as a thin wrapper so callers' import sites don't have to change.
  */
 export function formatMemoryForPrompt(memory: AgentThreadMemory): string {
-  if (memory.notes.length === 0) return '';
-
-  const groups: Record<AgentNoteCategory, string[]> = {
-    preference: [],
-    constraint: [],
-    context: [],
-    decision: [],
-  };
-  for (const note of memory.notes) {
-    groups[note.category].push(`- ${note.text}`);
-  }
-
-  const sections: string[] = [];
-  const labels: Record<AgentNoteCategory, string> = {
-    preference: 'Preferences',
-    constraint: 'Constraints',
-    context: 'Context',
-    decision: 'Decisions',
-  };
-  for (const cat of ['preference', 'constraint', 'context', 'decision'] as const) {
-    if (groups[cat].length > 0) {
-      sections.push(`**${labels[cat]}:**\n${groups[cat].join('\n')}`);
-    }
-  }
-
-  return `## Notes from earlier in this conversation
-These are observations you've recorded via the \`remember\` tool. Use them to stay consistent with prior decisions and respect stated preferences.
-
-${sections.join('\n\n')}
-`;
+  return formatNotesForPrompt(memory.notes);
 }
 
 /**
@@ -429,37 +276,25 @@ ${sections.join('\n\n')}
  *
  * Empty string when there are no future windows so the prompt builder
  * can drop the whole section.
+ *
+ * Uses the per-appointment framing ("Ad-hoc availability mentioned in
+ * this conversation"); the per-therapist formatter in
+ * `therapist-availability.service.ts` uses a different header that
+ * makes clear those windows came from a previous conversation.
  */
 export function formatAvailabilityWindowsForPrompt(
   memory: AgentThreadMemory,
   now: Date = new Date(),
 ): string {
-  const active = getActiveWindows(memory, now);
-  if (active.length === 0) return '';
-
-  const available = active.filter((w) => w.status === 'available');
-  const unavailable = active.filter((w) => w.status === 'unavailable');
-
-  const fmt = (w: AvailabilityWindow): string => {
-    // ISO with offset is unambiguous; the agent reads it directly and
-    // can convert for display per recipient. We don't pre-format here
-    // because the agent already knows how to render dates per recipient
-    // timezone via the timezone-section guidance.
-    const sourceLabel = w.source === 'therapist' ? 'Therapist' : 'Client';
-    return `- ${w.startsAt} → ${w.endsAt} (recorded from ${sourceLabel}: "${w.quote}")`;
-  };
-
-  const sections: string[] = [];
-  if (available.length > 0) {
-    sections.push(`**Mentioned available windows:**\n${available.map(fmt).join('\n')}`);
-  }
-  if (unavailable.length > 0) {
-    sections.push(`**Mentioned unavailable windows:**\n${unavailable.map(fmt).join('\n')}`);
-  }
-
-  return `## Ad-hoc availability mentioned in this conversation
-These are episodic windows the parties have mentioned in addition to the therapist's base availability above. Times are absolute (ISO 8601 with offset) — render them in the recipient's local timezone when proposing slots. Past windows have already been filtered out.
-
-${sections.join('\n\n')}
-`;
+  return formatWindowsForPrompt(
+    memory.availabilityWindows,
+    {
+      sectionHeader: '## Ad-hoc availability mentioned in this conversation',
+      sectionIntro:
+        "These are episodic windows the parties have mentioned in addition to the therapist's base availability above. Times are absolute (ISO 8601 with offset) — render them in the recipient's local timezone when proposing slots. Past windows have already been filtered out.",
+      availableLabel: 'Mentioned available windows',
+      unavailableLabel: 'Mentioned unavailable windows',
+    },
+    now,
+  );
 }
