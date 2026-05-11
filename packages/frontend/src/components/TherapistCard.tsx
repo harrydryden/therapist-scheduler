@@ -7,7 +7,7 @@ import { UI } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
 import type { VoucherState } from '../hooks/useVoucher';
 import { CategorySection } from './badges/CategorySection';
-import { formatAvailability } from '../utils/availability';
+import { formatAvailability, getDisplayableSlots } from '../utils/availability';
 import type { TherapistAvailability } from '../types';
 import { getCountryFlag, getCountryLabel } from '@therapist-scheduler/shared';
 
@@ -47,7 +47,11 @@ interface AvailabilityDisplayProps {
 }
 
 function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, onBookNowClick }: AvailabilityDisplayProps) {
-  const hasAvailability = availability && availability.slots && availability.slots.length > 0;
+  // Only count display-quality slots (valid weekday + HH:MM-HH:MM). When the
+  // agent or an upstream ingestion writes freeform garbage like "flexible"
+  // or "Not specified", we want the card to fall through to "Available on
+  // request" rather than render "Mon: flexible-flexible".
+  const hasAvailability = availability && getDisplayableSlots(availability).length > 0;
 
   const bookNowButton = bookingLink && (
     <button

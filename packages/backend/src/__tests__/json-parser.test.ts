@@ -211,15 +211,70 @@ describe('parseTherapistAvailability', () => {
     expect(result!.exceptions).toBeUndefined();
   });
 
-  it('salvages partial data with loose validation', () => {
+  it('drops slots with missing start/end rather than coercing to empty strings', () => {
+    // Used to "salvage" {day: "Mon"} → {day: "Mon", start: "", end: ""} which
+    // the frontend formatter rendered as "Mon: -". Now we drop the slot.
     const partial = {
       timezone: 'UTC',
-      slots: [{ day: 'Mon' }], // Missing start/end
+      slots: [{ day: 'Mon' }],
     };
     const result = parseTherapistAvailability(partial);
     expect(result).not.toBeNull();
-    expect(result!.slots[0].day).toBe('Mon');
-    expect(result!.slots[0].start).toBe('');
+    expect(result!.slots).toHaveLength(0);
+  });
+
+  it('drops slots whose day is freeform garbage like "flexible timings"', () => {
+    // The exact shape that produced "Fle: flexible timings-flexible timings"
+    // on the public therapist card. After the fix, the slot is filtered
+    // and the public site falls back to "Available on request".
+    const garbage = {
+      timezone: 'Europe/London',
+      slots: [
+        { day: 'flexible timings', start: 'flexible timings', end: 'flexible timings' },
+        { day: 'Not specified', start: 'Not specified', end: 'Not specified' },
+        { day: 'Monday', start: '09:00', end: '12:00' },
+      ],
+    };
+    const result = parseTherapistAvailability(garbage);
+    expect(result).not.toBeNull();
+    // Only the well-formed Monday slot survives.
+    expect(result!.slots).toEqual([{ day: 'Monday', start: '09:00', end: '12:00' }]);
+  });
+
+  it('drops slots with null start/end (formerly stringified to "null")', () => {
+    const withNulls = {
+      timezone: 'Europe/London',
+      slots: [
+        { day: 'Thursday', start: null, end: null },
+        { day: 'Friday', start: null, end: null },
+      ],
+    };
+    const result = parseTherapistAvailability(withNulls);
+    expect(result).not.toBeNull();
+    expect(result!.slots).toHaveLength(0);
+  });
+
+  it('rejects HH:MM strings that look right but are out of range', () => {
+    const bad = {
+      timezone: 'UTC',
+      slots: [
+        { day: 'Monday', start: '25:00', end: '26:00' },
+        { day: 'Tuesday', start: '09:60', end: '10:00' },
+      ],
+    };
+    const result = parseTherapistAvailability(bad);
+    expect(result).not.toBeNull();
+    expect(result!.slots).toHaveLength(0);
+  });
+
+  it('rejects three-letter day abbreviations (must be full weekday name)', () => {
+    const abbreviated = {
+      timezone: 'UTC',
+      slots: [{ day: 'Mon', start: '09:00', end: '12:00' }],
+    };
+    const result = parseTherapistAvailability(abbreviated);
+    expect(result).not.toBeNull();
+    expect(result!.slots).toHaveLength(0);
   });
 
   it('rejects oversized availability strings', () => {
