@@ -527,9 +527,26 @@ export class EmailMessageProcessorService {
         return false;
       }
 
+      // Phase 5: TherapistConversation match (onboarding or nudge_reply).
+      // Runs BEFORE the legacy lastNudgeThreadId slack-alert path so post-
+      // phase-5 nudge replies — which now have a TherapistConversation row
+      // — route to the availability agent rather than triggering an admin
+      // alert. Pre-phase-5 nudges (no row) still fall through to the
+      // legacy path below.
+      //
+      // Same matcher serves both onboarding replies (kind='onboarding')
+      // and nudge replies (kind='nudge_reply'); the dispatcher branches
+      // on the row's status, not on its kind. See routeToAvailabilityAgent.
+      const earlyConvoMatch = await findMatchingTherapistConversation(email);
+      if (earlyConvoMatch) {
+        const handled = await this.routeToAvailabilityAgent(email, earlyConvoMatch, messageId, traceId);
+        if (handled) return true;
+      }
+
       // Check if this is a reply to a therapist nudge email ("still looking for a client").
-      // Nudge replies must be intercepted BEFORE the appointment matcher to prevent
-      // them from being incorrectly routed to an old or unrelated appointment thread.
+      // Pre-phase-5 nudges have no TherapistConversation row so the check above misses;
+      // this legacy path catches them and routes to admin notification instead of an
+      // appointment thread. Once the legacy nudges age out, this branch can be removed.
       if (email.threadId) {
         const nudgeTherapist = await prisma.therapist.findFirst({
           where: { lastNudgeThreadId: email.threadId },
@@ -574,19 +591,10 @@ export class EmailMessageProcessorService {
       const appointmentRequest = await findMatchingAppointmentRequest(email);
 
       if (!appointmentRequest) {
-        // Phase 4: try the availability-collection agent's conversations
-        // before falling through to the unmatched-email path. A reply on
-        // a TherapistConversation thread belongs to the availability
-        // agent (or, if that conversation has been superseded by a
-        // booking, the dispatcher fires a one-shot ack here and then
-        // goes silent). Done BEFORE the legacy nudge-sender fallback
-        // because deterministic thread matching is always preferred
-        // over heuristics.
-        const convoMatch = await findMatchingTherapistConversation(email);
-        if (convoMatch) {
-          const handled = await this.routeToAvailabilityAgent(email, convoMatch, messageId, traceId);
-          if (handled) return true;
-        }
+        // Note: TherapistConversation matching now happens earlier in the
+        // pipeline (before the legacy nudge slack-alert check) so it can
+        // pre-empt the slack-alert path for post-phase-5 nudge replies.
+        // See the `earlyConvoMatch` block near the top of processMessage.
 
         // Sender-based nudge reply fallback:
         // The primary threadId-based nudge detection (above) can fail when Gmail

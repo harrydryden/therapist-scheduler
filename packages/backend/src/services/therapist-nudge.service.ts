@@ -216,26 +216,65 @@ class TherapistNudgeService {
         const subject = renderTemplate(subjectTemplate, variables);
         const body = renderTemplate(bodyTemplate, variables);
 
-        const { threadId } = await emailProcessingService.sendEmail({
+        const { threadId, messageId } = await emailProcessingService.sendEmail({
           to: therapist.email,
           subject,
           body,
         });
 
-        // Mark as nudged and store the Gmail thread ID so replies can be
-        // identified as nudge responses (not routed to an appointment).
-        await prisma.therapist.update({
-          where: { id: therapist.id },
-          data: {
-            lastNudgeAt: new Date(),
-            lastNudgeThreadId: threadId || null,
-          },
+        // Two state mutations bundled in a transaction:
+        //   1. Stamp Therapist.lastNudgeAt + lastNudgeThreadId (preserved
+        //      as a fallback path for the pre-phase-5 nudge slack-alert
+        //      dispatcher branch — see email-message-processor).
+        //   2. Abandon any prior active nudge_reply conversation for this
+        //      therapist, then create a fresh one. Each nudge supersedes
+        //      the previous one's untouched ask. Seeding the new row's
+        //      conversationState with the outbound body as an 'assistant'
+        //      message means when the therapist replies, the availability
+        //      agent's processReply sees a coherent [assistant, user]
+        //      history rather than processing an orphaned inbound.
+        await prisma.$transaction(async (tx) => {
+          await tx.therapist.update({
+            where: { id: therapist.id },
+            data: {
+              lastNudgeAt: new Date(),
+              lastNudgeThreadId: threadId || null,
+            },
+          });
+
+          await tx.therapistConversation.updateMany({
+            where: {
+              therapistId: therapist.id,
+              kind: 'nudge_reply',
+              status: 'active',
+            },
+            data: { status: 'abandoned' },
+          });
+
+          await tx.therapistConversation.create({
+            data: {
+              therapistId: therapist.id,
+              kind: 'nudge_reply',
+              status: 'active',
+              gmailThreadId: threadId || null,
+              initialMessageId: messageId || null,
+              conversationState: {
+                messages: [
+                  // The outbound nudge body, recorded as an assistant
+                  // turn so the agent's first response sees the full
+                  // back-and-forth on inbound.
+                  { role: 'assistant', content: body },
+                ],
+              } as unknown as object,
+              messageCount: 1,
+            },
+          });
         });
 
         sent++;
         logger.info(
-          { therapistId: therapist.id, name: therapist.name },
-          'Sent therapist nudge email'
+          { therapistId: therapist.id, name: therapist.name, threadId },
+          'Sent therapist nudge email + opened availability conversation',
         );
       } catch (err) {
         failed++;

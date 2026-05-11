@@ -998,13 +998,16 @@ Justin`,
   'email.therapistNudgeBody': {
     category: 'emailTemplates',
     label: 'Therapist Nudge - Body',
-    description: 'Email body for the periodic nudge email sent to unmatched therapists. Variables: {therapistFirstName}, {agentFirstName}',
+    description:
+      "Email body for the periodic nudge email sent to unmatched therapists. Should include an availability ask — phase 5 onwards, replies route to the availability-collection agent, which uses what's shared to refresh Therapist.upcomingAvailability. Variables: {therapistFirstName}, {agentFirstName}",
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 
-Just a quick note to let you know we haven't forgotten about you! We're still actively looking for a client to match with you for a session.
+Just a quick note to let you know we haven't forgotten about you - we're still actively looking for a client to match with you.
 
-We really appreciate your patience — as soon as we have someone, we'll be in touch to get things booked in.
+While we keep searching, it would really help to have your latest availability on file so we can move quickly once we find someone. Could you let me know what days and times work for you over the next few weeks? Even a rough sketch is plenty - mornings, afternoons, specific days, whatever fits your schedule.
+
+If anything has changed (you're paused, taking on work elsewhere, no longer wanting to take Spill clients) just let me know and I'll update our records.
 
 Best wishes
 
