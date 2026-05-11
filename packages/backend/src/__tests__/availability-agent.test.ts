@@ -63,6 +63,10 @@ type ConversationRow = {
   conversationState: unknown;
   messageCount: number;
   lastActivityAt: Date;
+  // Optimistic-lock version. Real Prisma manages this via @updatedAt;
+  // the mock bumps it on every update so the agent's
+  // persistStateWithLock predicate can detect concurrent writes.
+  updatedAt: Date;
   gmailThreadId: string | null;
   initialMessageId: string | null;
   supersededAckSent: boolean;
@@ -86,6 +90,7 @@ const therapistUpdate = jest.fn(async ({ where, data }: { where: { id: string };
 
 const conversationCreate = jest.fn(async ({ data }: { data: Partial<ConversationRow> & { therapistId: string } }) => {
   const id = `convo-${nextConversationId++}`;
+  const now = new Date();
   const row: ConversationRow = {
     id,
     therapistId: data.therapistId,
@@ -99,7 +104,8 @@ const conversationCreate = jest.fn(async ({ data }: { data: Partial<Conversation
     memory: null,
     conversationState: data.conversationState ?? null,
     messageCount: data.messageCount ?? 0,
-    lastActivityAt: new Date(),
+    lastActivityAt: now,
+    updatedAt: now,
     gmailThreadId: data.gmailThreadId ?? null,
     initialMessageId: data.initialMessageId ?? null,
     supersededAckSent: false,
@@ -145,12 +151,15 @@ const conversationUpdateMany = jest.fn(
     data,
   }: {
     where: {
-      id: string;
+      id?: string;
       status?: string;
       humanControlEnabled?: boolean;
       gmailThreadId?: string | null;
       supersededAckSent?: boolean;
       therapistId?: string;
+      kind?: string;
+      // Optimistic-lock predicate used by persistStateWithLock.
+      updatedAt?: Date;
     };
     data: Partial<ConversationRow>;
   }) => {
@@ -173,30 +182,72 @@ const conversationUpdateMany = jest.fn(
       )
         continue;
       if (where.therapistId !== undefined && row.therapistId !== where.therapistId) continue;
-      conversations[row.id] = { ...row, ...data };
+      if (where.kind !== undefined && row.kind !== where.kind) continue;
+      // Optimistic-lock check: predicate must match the row's current
+      // updatedAt exactly. Real Prisma compares Date instances by
+      // getTime so we match that here.
+      if (
+        where.updatedAt !== undefined &&
+        row.updatedAt.getTime() !== where.updatedAt.getTime()
+      )
+        continue;
+      // Real Prisma bumps `updatedAt` automatically on any write via
+      // the @updatedAt directive; replicate that here so subsequent
+      // lock predicates see a fresh timestamp.
+      conversations[row.id] = { ...row, ...data, updatedAt: data.updatedAt ?? new Date() };
       matched++;
     }
     return { count: matched };
   },
 );
 
-jest.mock('../utils/database', () => ({
-  prisma: {
+// $transaction forwards through to the same mocks so the assertions
+// can observe writes regardless of whether they go through the
+// direct prisma client or the transactional one. Defined inside the
+// factory (rather than as a top-level const + spread) because
+// jest.mock is hoisted above module-scope `const`s — a hoisted
+// reference would fire before the const is initialised.
+jest.mock('../utils/database', () => {
+  const client = {
     therapist: {
       findUnique: (...a: unknown[]) => therapistFindUnique(...(a as [{ where: { id: string } }])),
-      update: (...a: unknown[]) => therapistUpdate(...(a as [{ where: { id: string }; data: Partial<TherapistRow> }])),
+      update: (...a: unknown[]) =>
+        therapistUpdate(...(a as [{ where: { id: string }; data: Partial<TherapistRow> }])),
     },
     therapistConversation: {
-      create: (...a: unknown[]) => conversationCreate(...(a as [{ data: Partial<ConversationRow> & { therapistId: string } }])),
+      create: (...a: unknown[]) =>
+        conversationCreate(
+          ...(a as [{ data: Partial<ConversationRow> & { therapistId: string } }]),
+        ),
       findUnique: (...a: unknown[]) =>
-        conversationFindUnique(...(a as [{ where: { id: string }; include?: { therapist?: unknown } }])),
+        conversationFindUnique(
+          ...(a as [
+            {
+              where: { id: string };
+              include?: { therapist?: unknown };
+              select?: { therapist?: unknown };
+            },
+          ]),
+        ),
       update: (...a: unknown[]) =>
-        conversationUpdate(...(a as [{ where: { id: string }; data: Partial<ConversationRow> }])),
+        conversationUpdate(
+          ...(a as [{ where: { id: string }; data: Partial<ConversationRow> }]),
+        ),
       updateMany: (...a: unknown[]) =>
-        conversationUpdateMany(...(a as [{ where: { id: string; status?: string }; data: Partial<ConversationRow> }])),
+        conversationUpdateMany(
+          ...(a as [
+            { where: { id?: string; status?: string }; data: Partial<ConversationRow> },
+          ]),
+        ),
     },
-  },
-}));
+  };
+  return {
+    prisma: {
+      ...client,
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(client)),
+    },
+  };
+});
 
 const redisStore: Record<string, string> = {};
 jest.mock('../utils/redis', () => ({
@@ -414,6 +465,49 @@ describe('AvailabilityAgentService.startCollection', () => {
     expect(mockSendEmail).not.toHaveBeenCalled();
   });
 
+  it('abandons any prior active onboarding row for the therapist before creating a new one', async () => {
+    seedTherapist();
+    // Pre-existing active onboarding (simulates a retry or duplicate
+    // ingestion). Phase-6 robustness pins that startCollection
+    // enforces the same single-active-row invariant the nudge service
+    // does — without this, two onboarding rows would both match
+    // future inbound replies by therapistId and create ambiguity.
+    conversations['old-onboarding'] = {
+      id: 'old-onboarding',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'active',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: null,
+      memory: null,
+      conversationState: { messages: [] },
+      messageCount: 0,
+      lastActivityAt: new Date(),
+      updatedAt: new Date(),
+      gmailThreadId: 'thread-old',
+      initialMessageId: 'msg-old',
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
+    };
+    scriptedResponses = [textOnlyResponse('first turn')];
+
+    const service = new AvailabilityAgentService('trace-1');
+    await service.startCollection({ therapistId: 'tx-1', kind: 'onboarding' });
+
+    // Old row abandoned, not deleted — audit preserved.
+    expect(conversations['old-onboarding'].status).toBe('abandoned');
+    // Exactly one active row remains.
+    const active = Object.values(conversations).filter(
+      (c) => c.therapistId === 'tx-1' && c.status === 'active',
+    );
+    expect(active).toHaveLength(1);
+    expect(active[0].id).not.toBe('old-onboarding');
+  });
+
   it('persists the gmailThreadId when supplied', async () => {
     seedTherapist();
     scriptedResponses = [textOnlyResponse('Hi!')];
@@ -449,6 +543,7 @@ describe('AvailabilityAgentService.processReply', () => {
       conversationState: { messages: [{ role: 'assistant', content: 'Hi Alex!' }] },
       messageCount: 1,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
       supersededAckSent: false,
@@ -506,6 +601,7 @@ describe('AvailabilityAgentService.processReply', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
       supersededAckSent: false,
@@ -542,6 +638,7 @@ describe('AvailabilityAgentService.processReply', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
       supersededAckSent: false,
@@ -572,6 +669,69 @@ describe('AvailabilityAgentService.processReply', () => {
     expect(typeof new AvailabilityAgentService('trace-1').sendSupersessionAck).toBe('function');
   });
 
+  it('detects a concurrent state write via optimistic locking and surfaces the conflict in the result', async () => {
+    seedTherapist();
+    conversations['convo-pre'] = {
+      id: 'convo-pre',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'active',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: null,
+      memory: null,
+      conversationState: { messages: [] },
+      messageCount: 0,
+      lastActivityAt: new Date(),
+      updatedAt: new Date('2026-05-11T10:00:00Z'),
+      gmailThreadId: 'thread-1',
+      initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
+    };
+    // Agent's reply with no tool calls — easiest case, we still get
+    // to the final persistStateWithLock call where the lock check
+    // matters.
+    scriptedResponses = [textOnlyResponse('thanks for the info')];
+
+    // Simulate a concurrent write happening BEFORE the final persist:
+    // bump updatedAt on the row directly so the optimistic-lock
+    // predicate fails when processReply tries to save.
+    const originalCb = (conversationUpdateMany as jest.Mock).getMockImplementation()!;
+    let agentCalled = false;
+    (conversationUpdateMany as jest.Mock).mockImplementation(async (arg: unknown) => {
+      // Right before the final update fires, mutate the row out from
+      // under it so the predicate doesn't match. We detect "the agent's
+      // final save attempt" by checking for the conversationState data
+      // payload.
+      const a = arg as { where: { id?: string; updatedAt?: Date }; data: { conversationState?: unknown } };
+      if (a.data.conversationState && a.where.updatedAt && !agentCalled) {
+        agentCalled = true;
+        // Drift the row's updatedAt so the predicate misses
+        conversations['convo-pre'].updatedAt = new Date('2026-05-11T11:00:00Z');
+      }
+      return originalCb(arg);
+    });
+
+    const service = new AvailabilityAgentService('trace-1');
+    const result = await service.processReply({
+      conversationId: 'convo-pre',
+      emailContent: 'I am free Tuesdays',
+      fromEmail: 'alex@example.com',
+    });
+
+    // Conflict detected and surfaced — tools (if any) still fired,
+    // but the state save lost the race.
+    expect(result.success).toBe(true);
+    expect(result.message).toMatch(/state save conflicted/i);
+
+    // Restore for other tests
+    (conversationUpdateMany as jest.Mock).mockImplementation(originalCb);
+  });
+
   it('flags for human review when the agent escalates', async () => {
     seedTherapist();
     conversations['convo-pre'] = {
@@ -588,6 +748,7 @@ describe('AvailabilityAgentService.processReply', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
       supersededAckSent: false,
@@ -632,6 +793,7 @@ describe('AvailabilityAgentService.sendSupersessionAck', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: 'thread-old',
       initialMessageId: 'msg-old',
       supersededAckSent: false,
@@ -758,6 +920,7 @@ describe('supersedeActiveTherapistConversationInTx', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: 'thread-a',
       initialMessageId: null,
       supersededAckSent: false,
@@ -789,6 +952,7 @@ describe('supersedeActiveTherapistConversationInTx', () => {
       conversationState: { messages: [] },
       messageCount: 0,
       lastActivityAt: new Date(),
+      updatedAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
       supersededAckSent: false,

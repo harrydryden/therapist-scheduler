@@ -1133,11 +1133,40 @@ export class EmailMessageProcessorService {
     const agent = new AvailabilityAgentService(traceId);
 
     if (convoMatch.status === 'active') {
+      // Fetch the complete Gmail thread history so the availability
+      // agent's processReply sees the full back-and-forth, not just the
+      // latest inbound. Mirrors the booking-side pattern at line ~910.
+      // For the availability agent the only counterparty is the
+      // therapist, so we pass an empty userEmail to the formatter —
+      // any other sender will surface as "Unknown" which is the right
+      // visible signal if someone unexpected joined the thread.
+      let threadContext: string | undefined;
+      if (email.threadId) {
+        try {
+          const thread = await threadFetchingService.fetchThreadById(email.threadId, traceId);
+          if (thread && thread.messages.length > 0) {
+            threadContext = threadFetchingService.formatThreadForAgent(
+              thread,
+              '', // no client counterpart on availability conversations
+              convoMatch.therapistEmail,
+            );
+          }
+        } catch (threadErr) {
+          // Don't fail the route — process with the single inbound if
+          // thread fetch fails. Same fallback as the booking dispatcher.
+          logger.warn(
+            { traceId, messageId, threadId: email.threadId, err: threadErr },
+            'availability-agent: failed to fetch thread history — processing with single email only',
+          );
+        }
+      }
+
       try {
         await agent.processReply({
           conversationId: convoMatch.id,
           emailContent: email.body,
           fromEmail: email.from,
+          threadContext,
         });
         await markMessageProcessed(messageId, traceId, 'availability-agent-active');
         return true;

@@ -108,6 +108,29 @@ export async function getUpcomingAvailability(
   return parseUpcomingWindows(row.upcomingAvailability);
 }
 
+/**
+ * Combined read used by the booking agent's system-prompt builder:
+ * fetches both the upcoming windows AND the booking link in a single
+ * Therapist row query. Saves a round-trip vs. calling
+ * `getUpcomingAvailability` + a separate findUnique for bookingLink.
+ *
+ * STRICT per-therapist scoping: same primary-key contract as
+ * `getUpcomingAvailability` — `findUnique` only, no fallbacks.
+ */
+export async function getTherapistSchedulingDataForPrompt(
+  therapistId: string,
+): Promise<{ windows: AvailabilityWindow[]; bookingLink: string | null }> {
+  const row = await prisma.therapist.findUnique({
+    where: { id: therapistId },
+    select: { upcomingAvailability: true, bookingLink: true },
+  });
+  if (!row) return { windows: EMPTY, bookingLink: null };
+  return {
+    windows: parseUpcomingWindows(row.upcomingAvailability),
+    bookingLink: row.bookingLink,
+  };
+}
+
 export interface AddUpcomingWindowResult {
   /** True for a new row; false when an identical (status,source,starts,ends)
    *  combination was already present and we skipped the write. */

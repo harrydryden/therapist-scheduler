@@ -9,22 +9,23 @@
  *
  *   - send_email: outbound email to the therapist. Recipient is
  *     hardcoded inside the executor (always therapist.email — never
- *     accepts a `to` field from the model) so the agent can't
- *     accidentally email anyone else. Body normalization (line
- *     breaks, agent-name substitution) mirrors the booking agent's
- *     sendEmail. First successful send stashes Gmail thread + initial
- *     message ID back onto the TherapistConversation row so future
- *     inbound replies can be matched to this conversation.
+ *     accepts a `to` field from the model). First successful send
+ *     stashes Gmail thread + initial message ID back onto the
+ *     TherapistConversation row so future inbound replies can be
+ *     matched to this conversation.
  *   - record_availability_window: capture a one-off window. Shape
  *     mirrors agent-memory.service.ts's per-appointment windows but
  *     the executor writes to `Therapist.upcomingAvailability` —
- *     per-therapist storage that the booking agent reads later.
+ *     per-therapist storage that the booking agent reads when
+ *     building its system prompt (see system-prompt-builder.ts).
+ *   - record_booking_link: capture the therapist's scheduling-tool
+ *     URL (Calendly, Acuity, ...). Writes to `Therapist.bookingLink`,
+ *     also read by the booking agent's prompt.
  *   - remember: soft observations the agent retains across turns
- *     (e.g. "therapist asked us to email at 9am their time").
- *     Stored on `TherapistConversation.memory`.
+ *     (e.g. "therapist asked us to email at 9am their time"). Stored
+ *     on `TherapistConversation.memory`.
  *   - mark_complete: terminate the conversation when enough
- *     availability is captured — sets status='completed' and stops
- *     the loop.
+ *     availability is captured — sets status='completed'.
  *   - flag_for_human_review: escalate to admin and pause automation.
  *
  * Anything booking-related — proposing times, confirming slots,

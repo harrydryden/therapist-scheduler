@@ -38,6 +38,10 @@ import {
   formatAvailabilityWindowsForPrompt,
 } from './agent-memory.service';
 import {
+  getTherapistSchedulingDataForPrompt,
+  formatUpcomingAvailabilityForPrompt,
+} from './therapist-availability.service';
+import {
   getUserProfile,
   getTherapistProfile,
   formatUserProfileForPrompt,
@@ -190,6 +194,32 @@ ${getValidActionsForStage(currentStage)}
   const memorySection = formatMemoryForPrompt(memory);
   // Future-only filter: past windows would mislead the agent.
   const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(memory);
+
+  // Per-therapist data populated by the availability-collection agent.
+  // upcomingAvailability complements the recurring schedule with one-off
+  // windows the therapist has shared (e.g. via the onboarding/nudge
+  // conversations). bookingLink is a direct scheduling URL the therapist
+  // has provided — when present the booking agent should offer it as the
+  // fastest path to a confirmed session, rather than negotiating windows.
+  //
+  // Both are fetched fresh on every turn (not snapshotted on the
+  // appointment row) so the booking agent sees the most recent data the
+  // availability agent has captured. Legacy appointments without a
+  // therapistId render an empty section.
+  let perTherapistUpcomingSection = '';
+  let bookingLinkSection = '';
+  if (context.therapistId) {
+    const { windows, bookingLink } = await getTherapistSchedulingDataForPrompt(context.therapistId);
+    perTherapistUpcomingSection = formatUpcomingAvailabilityForPrompt(windows);
+    if (bookingLink) {
+      bookingLinkSection = `## Therapist's direct booking link
+
+The therapist has a scheduling-tool link on file: **${bookingLink}**
+
+This is often the fastest path to a confirmed session. When proposing options to the client, offer the link as an alternative to suggesting specific times — the client can book directly through the therapist's page. If the client uses it, ask them to confirm the date/time they picked and then use mark_scheduling_complete with that time.
+`;
+    }
+  }
 
   // Cross-appointment profiles (Layer C). Read by primary key so the
   // profile shown can ONLY belong to this user / therapist — same
@@ -355,7 +385,7 @@ Use flag_for_human_review when:
 ## Session Configuration
 - **Standard session duration:** ${sessionDuration} minutes
 ${knowledgeSection}${timezoneSection}${userProfileSection}${therapistProfileSection}
-${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
+${bookingLinkSection}${perTherapistUpcomingSection}${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
 Begin now based on whether availability exists or not.`;
 }
 

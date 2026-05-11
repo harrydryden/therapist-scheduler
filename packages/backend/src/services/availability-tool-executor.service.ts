@@ -2,12 +2,13 @@
  * Tool dispatcher for the availability-collection agent.
  *
  * Parallel to ai-tool-executor.service.ts but scoped to the agent's
- * narrow surface (send_email, record_availability_window, remember,
- * mark_complete, flag_for_human_review). All five tools route to
- * methods on this class; pre-flight checks happen once at the top of
- * executeToolCall so each handler can focus on its specific work.
+ * narrow surface (send_email, record_availability_window,
+ * record_booking_link, remember, mark_complete, flag_for_human_review).
+ * All six tools route to methods on this class; pre-flight checks
+ * happen once at the top of executeToolCall so each handler can focus
+ * on its specific work.
  *
- * Pre-flight is now ATOMIC (phase 3): a single `updateMany` against
+ * Pre-flight is ATOMIC: a single `updateMany` against
  * therapist_conversations with `id = X, status = 'active',
  * humanControlEnabled = false` as predicate and `lastActivityAt +
  * lastToolExecutedAt` as data fields. If 0 rows match, no tool call

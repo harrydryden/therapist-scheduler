@@ -4,31 +4,33 @@
  * Parallel to justin-time.service.ts for therapist-only conversations
  * that don't involve a client. Two entry points:
  *
- *   - startCollection(therapistId, kind, …): create a TherapistConversation
- *     row and run the agent's first turn. Used by phase 3's outbound
- *     onboarding path (kind='onboarding') and by the nudge-reply path
- *     (kind='nudge_reply' — though in practice the nudge flow lands in
- *     processReply once a row already exists from the outbound nudge).
- *   - processReply(conversationId, emailContent, fromEmail): the
- *     therapist replied to an existing conversation. Append to state,
- *     run the loop, persist.
+ *   - startCollection({ therapistId, kind, ... }): create a fresh
+ *     TherapistConversation row and run the agent's first turn. Used
+ *     by the PDF-ingestion path (kind='onboarding'). The nudge_reply
+ *     row is created by therapist-nudge.service.ts directly, so
+ *     startCollection is in practice only called with 'onboarding'
+ *     today — the kind parameter remains in case a future caller
+ *     wants to seed a nudge_reply via the agent's first turn.
+ *   - processReply(conversationId, emailContent, fromEmail, …): the
+ *     therapist replied to an existing conversation. Validate the
+ *     row is still active, append the inbound, run the loop, persist.
  *
- * Phase 2 has no send_email tool, so the agent's text output is
- * captured into conversationState.messages but not transmitted to the
- * therapist. Phase 3 will wire the email path (likely via a new
- * `send_email` entry on availabilityTools).
- *
- * Concurrency model is best-effort for phase 2 — last-write-wins on
- * conversationState. Booking's optimistic-lock pattern via updatedAt
- * is heavier than the availability agent currently needs because no
- * external side effects can race here. Phase 3 should add it when
- * email and Slack land.
+ * Concurrency: processReply uses optimistic locking on
+ * TherapistConversation.updatedAt. The row's updatedAt is captured
+ * after the initial read and any state write checks it via updateMany
+ * predicate; a lost race throws ConcurrentModificationError, which
+ * the caller handles (paused-branch logs and accepts the loss; the
+ * main path logs and returns success because tools have already
+ * fired). startCollection wraps its writes in $transaction so the
+ * "abandon prior active + create new" invariant holds even under
+ * concurrent ingestion retries.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
+import { ConcurrentModificationError } from '../errors';
 import { emailProcessingService } from './email-processing.service';
 import { runAvailabilityToolLoop, type AvailabilityAgentContext } from './agent-tool-loop';
 import { AvailabilityToolExecutorService } from './availability-tool-executor.service';
@@ -45,7 +47,7 @@ import {
 import { formatDateLong } from '../utils/date';
 import { getSettingValues } from './settings.service';
 import { firstName } from '../utils/first-name';
-import type { Therapist, TherapistConversation } from '@prisma/client';
+import type { Therapist } from '@prisma/client';
 
 /**
  * Slim conversation state JSON shape on TherapistConversation.
@@ -107,16 +109,34 @@ export class AvailabilityAgentService {
       throw new Error(`Therapist ${params.therapistId} not found`);
     }
 
-    const conversation = await prisma.therapistConversation.create({
-      data: {
-        therapistId: therapist.id,
-        kind: params.kind,
-        status: 'active',
-        gmailThreadId: params.gmailThreadId,
-        initialMessageId: params.initialMessageId,
-        conversationState: { messages: [] } as unknown as object,
-        messageCount: 0,
-      },
+    // Abandon any prior active conversations of the same kind for this
+    // therapist before creating a fresh one, then create. Both writes
+    // inside a transaction so a race between two startCollection calls
+    // for the same therapist (e.g. PDF re-ingestion or retry) doesn't
+    // leave the row count above one — same invariant the nudge service
+    // enforces. Without this, a duplicate ingestion path would create
+    // two active onboarding rows, both matching by therapistId on later
+    // queries.
+    const conversation = await prisma.$transaction(async (tx) => {
+      await tx.therapistConversation.updateMany({
+        where: {
+          therapistId: therapist.id,
+          kind: params.kind,
+          status: 'active',
+        },
+        data: { status: 'abandoned' },
+      });
+      return tx.therapistConversation.create({
+        data: {
+          therapistId: therapist.id,
+          kind: params.kind,
+          status: 'active',
+          gmailThreadId: params.gmailThreadId,
+          initialMessageId: params.initialMessageId,
+          conversationState: { messages: [] } as unknown as object,
+          messageCount: 0,
+        },
+      });
     });
 
     logger.info(
@@ -139,7 +159,7 @@ export class AvailabilityAgentService {
     };
 
     const systemPrompt = await buildAvailabilitySystemPrompt(therapist, context);
-    const initialMessage = buildInitialUserMessage(therapist, params.kind);
+    const initialMessage = buildInitialUserMessage(therapist);
 
     const state: AvailabilityConversationStateJson = {
       messages: [{ role: 'user', content: truncateMessageContent(initialMessage) }],
@@ -316,6 +336,13 @@ export class AvailabilityAgentService {
       throw new Error(`Conversation ${params.conversationId} not found`);
     }
 
+    // Capture the row's updatedAt as the optimistic-lock version. Any
+    // concurrent writer (admin manually editing the row, another inbound
+    // racing this one, supersession trigger) bumps updatedAt; our writes
+    // below use updateMany predicates on this captured value so we
+    // detect and surface the conflict rather than clobber.
+    let currentVersion: Date = conversation.updatedAt;
+
     // Terminal states short-circuit. Superseded specifically is the
     // one-shot-ack case: the dispatcher (phase 4) is responsible for
     // the ack — here we just record the inbound message for audit and
@@ -345,7 +372,22 @@ export class AvailabilityAgentService {
         role: 'user',
         content: `[Received while paused] Reply from therapist (${params.fromEmail}):\n\n${params.emailContent}`,
       });
-      await this.persistState(conversation.id, existingState);
+      // Best-effort persist — a concurrent admin edit is the most
+      // likely losing race here; the admin's edit wins and our log
+      // append is lost. The inbound is still visible in Gmail so the
+      // admin doesn't lose information overall.
+      try {
+        await this.persistStateWithLock(conversation.id, existingState, currentVersion);
+      } catch (err) {
+        if (err instanceof ConcurrentModificationError) {
+          logger.warn(
+            { traceId: this.traceId, conversationId: conversation.id },
+            'availability-agent: paused-branch state save lost the optimistic-lock race — admin write wins',
+          );
+        } else {
+          throw err;
+        }
+      }
       return {
         success: true,
         skipped: true,
@@ -416,31 +458,69 @@ ${safeContent}`;
       context,
       {
         executeToolCall: (tc, ctx) => this.executor.executeToolCall(tc, ctx),
-        checkpointBeforeSideEffects: () => this.persistState(conversation.id, state),
+        // Checkpoint state before each side-effecting tool, with
+        // optimistic locking on updatedAt. If the lock fails we log
+        // and re-throw — the loop will surface the error in the
+        // outer catch and the caller can decide what to do.
+        checkpointBeforeSideEffects: async () => {
+          try {
+            currentVersion = await this.persistStateWithLock(conversation.id, state, currentVersion);
+          } catch (err) {
+            if (err instanceof ConcurrentModificationError) {
+              logger.warn(
+                { traceId: this.traceId, conversationId: conversation.id },
+                'availability-agent: checkpoint state save lost the optimistic-lock race',
+              );
+            }
+            throw err;
+          }
+        },
       },
       this.traceId,
       'processReply',
     );
 
-    await this.persistState(conversation.id, state);
+    // Final save. Same optimistic-lock pattern, but conflicts here
+    // are non-fatal — the tools have already executed (including any
+    // outbound emails). Losing the state-save race means our turn's
+    // conversation log is overwritten by whoever won; the inbound
+    // message it would have included is still visible in Gmail.
+    let stateConflictDetected = false;
+    try {
+      currentVersion = await this.persistStateWithLock(conversation.id, state, currentVersion);
+    } catch (err) {
+      if (err instanceof ConcurrentModificationError) {
+        stateConflictDetected = true;
+        logger.warn(
+          { traceId: this.traceId, conversationId: conversation.id },
+          'availability-agent: final state save lost the optimistic-lock race — tools already executed, log may be partial',
+        );
+      } else {
+        throw err;
+      }
+    }
 
     return {
       success: true,
       message:
         result.totalToolErrors > 0
           ? `Reply processed with ${result.totalToolErrors} tool error(s)`
-          : result.markedComplete
-            ? 'Reply processed; conversation marked complete'
-            : result.flaggedForHumanReview
-              ? 'Reply processed; flagged for human review'
-              : 'Reply processed',
+          : stateConflictDetected
+            ? 'Reply processed; state save conflicted with concurrent write'
+            : result.markedComplete
+              ? 'Reply processed; conversation marked complete'
+              : result.flaggedForHumanReview
+                ? 'Reply processed; flagged for human review'
+                : 'Reply processed',
     };
   }
 
   /**
-   * Persist conversation state + denormalized messageCount. Plain
-   * last-write-wins for phase 2 — see file header for the upgrade
-   * path when external side effects land.
+   * Persist conversation state + denormalized messageCount.
+   *
+   * No version check — used only at conversation-creation time when
+   * no concurrent writer can exist yet. processReply uses the locked
+   * variant below.
    */
   private async persistState(
     conversationId: string,
@@ -455,6 +535,38 @@ ${safeContent}`;
       },
       select: { id: true },
     });
+  }
+
+  /**
+   * Persist conversation state with optimistic locking on updatedAt.
+   * Returns the row's NEW updatedAt so the caller can chain subsequent
+   * locked writes within the same processReply call.
+   *
+   * Throws ConcurrentModificationError when the row's updatedAt has
+   * moved since the caller captured it — meaning another writer
+   * (admin edit, supersession trigger, or another inbound race)
+   * has touched the row in between. Callers decide whether to retry,
+   * surface the conflict, or accept the loss.
+   */
+  private async persistStateWithLock(
+    conversationId: string,
+    state: AvailabilityConversationStateJson,
+    expectedUpdatedAt: Date,
+  ): Promise<Date> {
+    const now = new Date();
+    const result = await prisma.therapistConversation.updateMany({
+      where: { id: conversationId, updatedAt: expectedUpdatedAt },
+      data: {
+        conversationState: state as unknown as object,
+        messageCount: state.messages.length,
+        lastActivityAt: now,
+        updatedAt: now,
+      },
+    });
+    if (result.count === 0) {
+      throw new ConcurrentModificationError(conversationId);
+    }
+    return now;
   }
 }
 
@@ -527,18 +639,18 @@ function parseConversationState(raw: unknown): AvailabilityConversationStateJson
   return { messages };
 }
 
-function buildInitialUserMessage(
-  therapist: { name: string },
-  kind: 'onboarding' | 'nudge_reply',
-): string {
-  if (kind === 'onboarding') {
-    return `Therapist ${therapist.name} has just been added to the Spill platform as part of our therapist recruitment process. As part of joining, they'll have a single trial session (which will be scheduled separately by the booking agent — not by you).
+function buildInitialUserMessage(therapist: { name: string }): string {
+  // In production only `kind='onboarding'` reaches startCollection
+  // (nudge_reply rows are seeded directly by therapist-nudge.service
+  // with the outbound body, not through the agent's first turn). If a
+  // future caller invokes startCollection with kind='nudge_reply' this
+  // same intro reads correctly enough — the kind-specific framing is
+  // applied in the system prompt via kindGuidance.
+  return `Therapist ${therapist.name} has just been added to the Spill platform as part of our therapist recruitment process. As part of joining, they'll have a single trial session (which will be scheduled separately by the booking agent — not by you).
 
 Your job here is to email them via send_email: introduce yourself, briefly mention they've joined Spill and will have a trial session as part of joining, and ask what days/times they're free over the next few weeks. Keep it short and friendly. After sending, end your turn — the next user message will be their reply.
 
 You don't propose specific session times, you don't confirm bookings, and you don't schedule the trial session. You only collect availability so it's on file when the booking agent runs later.`;
-  }
-  return `A new nudge-reply availability-collection conversation has been initiated for therapist ${therapist.name}. Wait for their reply before taking further action.`;
 }
 
 /**
