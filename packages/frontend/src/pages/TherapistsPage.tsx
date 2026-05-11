@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import { getTherapists, getFrontendSettings } from '../api/client';
 import TherapistCard from '../components/TherapistCard';
 import FilterBar from '../components/FilterBar';
+import HoldingPage from '../components/HoldingPage';
 import { useVoucher } from '../hooks/useVoucher';
 
 export default function TherapistsPage() {
@@ -135,7 +136,16 @@ export default function TherapistsPage() {
       )}
 
       {/* Therapist Grid */}
-      {filteredTherapists.length === 0 ? (
+      {activeTherapists.length === 0 ? (
+        // Directory is completely empty — no therapists currently
+        // accepting bookings. Show the full holding page, not the
+        // compact "no results for filter" empty state.
+        <HoldingPage />
+      ) : filteredTherapists.length === 0 ? (
+        // Active therapists exist, but the current filter has narrowed
+        // the list to zero. Keep the compact empty state with a
+        // "Clear filter" affordance — the visitor's next move is to
+        // broaden the filter, not give up.
         <div className="text-center py-16">
           <div className="inline-flex items-center justify-center w-16 h-16 bg-slate-100 rounded-full mb-4">
             <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -144,20 +154,16 @@ export default function TherapistsPage() {
           </div>
           <h2 className="text-lg font-semibold text-slate-900 mb-2">No therapists found</h2>
           <p className="text-slate-600">
-            {selectedCategory
-              ? `No therapists available for "${selectedCategory}". Try a different filter.`
-              : 'No therapists are currently available. Please check back soon.'}
+            No therapists available for &ldquo;{selectedCategory}&rdquo;. Try a different filter.
           </p>
-          {selectedCategory && (
-            <button
-              type="button"
-              onClick={() => setSelectedCategory(null)}
-              aria-label={`Clear filter for ${selectedCategory}`}
-              className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400"
-            >
-              Clear filter
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setSelectedCategory(null)}
+            aria-label={`Clear filter for ${selectedCategory}`}
+            className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400"
+          >
+            Clear filter
+          </button>
         </div>
       ) : (
         <>
