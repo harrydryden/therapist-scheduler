@@ -47,8 +47,13 @@ import {
   issueVoucherCodeInputSchema,
   rememberInputSchema,
   recordAvailabilityWindowInputSchema,
+  recordBookingLinkInputSchema,
 } from '../schemas/tool-inputs';
 import { addNote, addAvailabilityWindow } from './agent-memory.service';
+import {
+  addUpcomingAvailability,
+  recordTherapistBookingLink,
+} from './therapist-availability.service';
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
 
@@ -575,6 +580,35 @@ export class AIToolExecutorService {
             };
           }
           try {
+            // ROUTING: therapist-source windows go to the
+            // per-therapist `Therapist.upcomingAvailability` column so
+            // future bookings see them too — the booking agent's
+            // system prompt (system-prompt-builder.ts) reads this
+            // store. User-source windows stay per-appointment because
+            // a user's "I'm out next week" only applies to THIS
+            // booking, not the user's other bookings.
+            //
+            // Legacy appointments missing context.therapistId fall
+            // back to per-appointment for both sources — the per-
+            // therapist write would have no primary key to scope on.
+            const isTherapistSource =
+              parsed.data.source === 'therapist' && !!context.therapistId;
+            if (isTherapistSource) {
+              const result = await addUpcomingAvailability(context.therapistId!, {
+                startsAt: parsed.data.starts_at,
+                endsAt: parsed.data.ends_at,
+                status: parsed.data.status,
+                source: 'therapist',
+                quote: parsed.data.quote,
+              });
+              return {
+                success: true,
+                toolName: name,
+                resultMessage: result.added
+                  ? `Therapist availability window recorded on permanent record (id: ${result.windowId}, status: ${parsed.data.status}). Total upcoming windows: ${result.windows.length}.`
+                  : `Therapist availability window already present (id: ${result.windowId}). Skipped duplicate.`,
+              };
+            }
             const result = await addAvailabilityWindow(context.appointmentRequestId, {
               startsAt: parsed.data.starts_at,
               endsAt: parsed.data.ends_at,
@@ -586,8 +620,41 @@ export class AIToolExecutorService {
               success: true,
               toolName: name,
               resultMessage: result.added
-                ? `Availability window recorded (id: ${result.windowId}, status: ${parsed.data.status}, source: ${parsed.data.source}). Total active windows: ${result.memory.availabilityWindows.length}.`
+                ? `Availability window recorded for this booking (id: ${result.windowId}, status: ${parsed.data.status}, source: ${parsed.data.source}). Total active windows: ${result.memory.availabilityWindows.length}.`
                 : `Availability window already present (id: ${result.windowId}). Skipped duplicate.`,
+            };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return { success: false, toolName: name, error: msg };
+          }
+        }
+
+        case 'record_booking_link': {
+          const parsed = recordBookingLinkInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Invalid record_booking_link input: ${parsed.error.message}`,
+            };
+          }
+          if (!context.therapistId) {
+            // Legacy appointment without a therapistId — no primary
+            // key to scope the write on. Forward to the client
+            // (existing email flow handles that) but don't persist.
+            return {
+              success: true,
+              toolName: name,
+              resultMessage:
+                'Booking link noted but not persisted (legacy appointment without a linked therapist row).',
+            };
+          }
+          try {
+            await recordTherapistBookingLink(context.therapistId, parsed.data.url);
+            return {
+              success: true,
+              toolName: name,
+              resultMessage: `Booking link recorded on therapist record: ${parsed.data.url}`,
             };
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

@@ -203,9 +203,25 @@ export const schedulingTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'record_booking_link',
+    description:
+      "Record the therapist's direct booking link (Calendly, Acuity, YouCanBook.me, SavvyCal, or any other scheduling-tool URL) when they share one during the conversation. Use this whenever they mention a link like 'You can book me at calendly.com/...', 'My scheduling page is https://...', or similar. The link is the richest form of availability we can capture — once it's on file, future bookings will see it automatically. Always overwrites the existing link if there is one (most recent intent wins). After capturing the link, still forward it to the client (per the booking-link workflow above) so they can use it directly.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description:
+            'The full booking-link URL exactly as the therapist shared it, including the scheme (https://). The executor stores it verbatim and validates it is a parseable URL.',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'record_availability_window',
     description:
-      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. The quote field captures the original phrasing for traceability.',
+      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. ROUTING: source="therapist" windows are stored on the therapist\'s permanent record so future bookings see them too; source="user" windows are scoped to THIS booking only (a user\'s "I\'m out next week" doesn\'t apply to other bookings).',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -248,6 +264,7 @@ const SIDE_EFFECT_TOOLS = new Set([
   'cancel_appointment',
   'initiate_reschedule',
   'update_therapist_availability',
+  'record_booking_link',
   'issue_voucher_code',
 ]);
 

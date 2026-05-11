@@ -260,10 +260,11 @@ ${context.bookingMethod === 'direct_link' ? buildDirectBookingInstructions(conte
 
 If at any point during the conversation the therapist shares a direct booking link (e.g. Calendly, Acuity, YouCanBook.me, or any URL that appears to be a scheduling/booking page), you should:
 
-1. **Forward the link to the client**: Email the client with the booking link, letting them know they can book directly through the therapist's page.
-2. **Ask both parties for confirmation**: After a reasonable time (or in the same message to the client), ask them to reply with the date and time they've booked so you can confirm it in the system.
-3. **Follow up with the therapist**: Email the therapist asking them to confirm the date and time once the client has booked.
-4. **Either party confirming is sufficient**: If either the client or the therapist confirms the date and time, you can proceed to mark the booking as complete using mark_scheduling_complete.
+1. **Persist the link**: Call \`record_booking_link\` with the URL exactly as they shared it. This stores it on the therapist's permanent record so future bookings see it automatically — the same store the availability-collection agent writes to. Always do this BEFORE forwarding to the client so future bookings benefit even if the current conversation goes sideways.
+2. **Forward the link to the client**: Email the client with the booking link, letting them know they can book directly through the therapist's page.
+3. **Ask both parties for confirmation**: After a reasonable time (or in the same message to the client), ask them to reply with the date and time they've booked so you can confirm it in the system.
+4. **Follow up with the therapist**: Email the therapist asking them to confirm the date and time once the client has booked.
+5. **Either party confirming is sufficient**: If either the client or the therapist confirms the date and time, you can proceed to mark the booking as complete using mark_scheduling_complete.
 
 ## Availability Context
 
@@ -271,6 +272,8 @@ If at any point during the conversation the therapist shares a direct booking li
 
 - If the therapist shares NEW or UPDATED availability in their emails, use that information
 - The most recent availability mentioned in the thread takes precedence over database availability
+- For ad-hoc windows the therapist mentions, call \`record_availability_window\` with \`source="therapist"\` — this writes to the therapist's permanent record (the single source of truth shared with the availability-collection agent), so future bookings see it too.
+- For ad-hoc windows the CLIENT mentions about their own schedule, call \`record_availability_window\` with \`source="user"\` — those stay scoped to THIS booking only.
 - You don't need to save one-off availability to the database - just use it for this booking
 - Only use update_therapist_availability if the therapist provides their REGULAR recurring schedule
 

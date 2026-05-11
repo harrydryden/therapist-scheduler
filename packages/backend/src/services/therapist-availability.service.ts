@@ -156,6 +156,32 @@ export async function addUpcomingAvailability(
 }
 
 /**
+ * Persist a booking-link URL on the therapist row. The single
+ * writeable surface for `Therapist.bookingLink` from agents — both
+ * the availability-collection agent (via record_booking_link) and
+ * the booking agent (via record_booking_link, added in the
+ * one-source-of-truth follow-up) route here. Admins still write
+ * directly to the column via the therapist edit UI; that path stays
+ * separate.
+ *
+ * STRICT per-therapist scoping: update keyed on Therapist.id only.
+ * URL validation is the caller's responsibility — the Zod schema at
+ * the tool boundary rejects non-URL strings before reaching this
+ * helper.
+ */
+export async function recordTherapistBookingLink(
+  therapistId: string,
+  url: string,
+): Promise<void> {
+  await prisma.therapist.update({
+    where: { id: therapistId },
+    data: { bookingLink: url },
+    select: { id: true },
+  });
+  logger.info({ therapistId, url }, 'therapist-availability: booking link recorded');
+}
+
+/**
  * Future-only view, sorted by start. Re-exposed here for callers that
  * already imported it from this module; delegates to the shared
  * implementation.

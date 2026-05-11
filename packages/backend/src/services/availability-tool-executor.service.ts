@@ -44,7 +44,7 @@ import {
   recordBookingLinkInputSchema,
   rememberInputSchema,
 } from '../schemas/tool-inputs';
-import { addUpcomingAvailability } from './therapist-availability.service';
+import { addUpcomingAvailability, recordTherapistBookingLink } from './therapist-availability.service';
 import { addConversationNote } from './therapist-conversation-memory.service';
 import { emailProcessingService } from './email-processing.service';
 import type { ToolExecutionResult } from './scheduling-context.service';
@@ -417,19 +417,10 @@ export class AvailabilityToolExecutorService {
 
     const { url } = parsed.data;
 
-    // STRICT per-therapist scoping: write keyed on Therapist.id from
-    // context only. No findFirst, no email lookup — same contract as
-    // therapist-availability.service.ts.
-    await prisma.therapist.update({
-      where: { id: context.therapistId },
-      data: { bookingLink: url },
-      select: { id: true },
-    });
-
-    logger.info(
-      { traceId: this.traceId, therapistId: context.therapistId, url },
-      'availability-tool-executor: booking link recorded',
-    );
+    // Delegate to the shared writer so the booking agent's
+    // record_booking_link tool (added in the one-source-of-truth
+    // follow-up) routes through the same primary-key-scoped update.
+    await recordTherapistBookingLink(context.therapistId, url);
 
     return {
       success: true,

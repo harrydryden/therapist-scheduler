@@ -699,7 +699,10 @@ describe('AvailabilityAgentService.processReply', () => {
 
     // Simulate a concurrent write happening BEFORE the final persist:
     // bump updatedAt on the row directly so the optimistic-lock
-    // predicate fails when processReply tries to save.
+    // predicate fails when processReply tries to save. The
+    // try/finally restores the default implementation so the swap
+    // doesn't leak into other tests (jest.clearAllMocks clears
+    // call history but NOT mockImplementation).
     const originalCb = (conversationUpdateMany as jest.Mock).getMockImplementation()!;
     let agentCalled = false;
     (conversationUpdateMany as jest.Mock).mockImplementation(async (arg: unknown) => {
@@ -716,20 +719,21 @@ describe('AvailabilityAgentService.processReply', () => {
       return originalCb(arg);
     });
 
-    const service = new AvailabilityAgentService('trace-1');
-    const result = await service.processReply({
-      conversationId: 'convo-pre',
-      emailContent: 'I am free Tuesdays',
-      fromEmail: 'alex@example.com',
-    });
+    try {
+      const service = new AvailabilityAgentService('trace-1');
+      const result = await service.processReply({
+        conversationId: 'convo-pre',
+        emailContent: 'I am free Tuesdays',
+        fromEmail: 'alex@example.com',
+      });
 
-    // Conflict detected and surfaced — tools (if any) still fired,
-    // but the state save lost the race.
-    expect(result.success).toBe(true);
-    expect(result.message).toMatch(/state save conflicted/i);
-
-    // Restore for other tests
-    (conversationUpdateMany as jest.Mock).mockImplementation(originalCb);
+      // Conflict detected and surfaced — tools (if any) still fired,
+      // but the state save lost the race.
+      expect(result.success).toBe(true);
+      expect(result.message).toMatch(/state save conflicted/i);
+    } finally {
+      (conversationUpdateMany as jest.Mock).mockImplementation(originalCb);
+    }
   });
 
   it('flags for human review when the agent escalates', async () => {
