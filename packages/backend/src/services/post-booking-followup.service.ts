@@ -495,6 +495,13 @@ class PostBookingFollowupService extends PeriodicService {
   private async processMeetingLinkChecks(checkId: string): Promise<void> {
     const now = new Date();
 
+    // Fetched once per tick so the inner loop doesn't hit settings per-appointment.
+    // Used below to skip the meeting-link check when the session-reminder window
+    // is already open — in that case the reminder is the better channel for "your
+    // session is approaching" and we don't want both emails landing within minutes.
+    const sessionReminderHoursBefore = await getSettingValue<number>('postBooking.sessionReminderHoursBefore');
+    const sessionReminderWindowMs = sessionReminderHoursBefore * 60 * 60 * 1000;
+
     // Find confirmed appointments that:
     // - Have a parsed datetime
     // - Haven't had meeting link check sent
@@ -552,6 +559,23 @@ class PostBookingFollowupService extends PeriodicService {
         logger.debug(
           { checkId, appointmentId: appointment.id },
           'Skipping meeting link check - appointment already passed'
+        );
+        skipped++;
+        continue;
+      }
+
+      // Defer to the session reminder when we're already inside its window.
+      // Short-notice bookings (confirmed <4h before the slot) would otherwise
+      // produce both the meeting-link nudge and the session reminder within
+      // the same 15-minute tick. The reminder covers the "session is soon"
+      // beat for the user; the meeting-link nudge is the wrong tool when the
+      // session is imminent anyway. The candidate filter
+      // (`confirmedDateTimeParsed > now`) ages this appointment out naturally
+      // once the slot passes, so leaving the sentinel as null is fine.
+      if (appointment.confirmedDateTimeParsed.getTime() - now.getTime() <= sessionReminderWindowMs) {
+        logger.debug(
+          { checkId, appointmentId: appointment.id },
+          'Skipping meeting link check — session reminder window already open',
         );
         skipped++;
         continue;
