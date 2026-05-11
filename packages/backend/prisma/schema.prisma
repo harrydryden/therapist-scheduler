@@ -83,6 +83,15 @@ model Therapist {
   // the therapist provides availability (or the agent records what they share).
   availability Json?   @map("availability")
 
+  // Episodic upcoming availability — one-off windows the therapist has shared
+  // (typically captured by the availability-collection agent during onboarding
+  // or as part of a nudge reply) that complement the recurring `availability`
+  // schedule above. Shape: AvailabilityWindow[] from agent-memory.service.ts —
+  // [{id, startsAt, endsAt, status, source, quote, recordedAt}] with ISO 8601
+  // timestamps with offset. Past windows are filtered at read time and the
+  // collection agent compacts the column on write so it doesn't grow forever.
+  upcomingAvailability Json? @map("upcoming_availability")
+
   // Profile fields. Originally mirrored the Notion therapists database via a
   // one-shot Notion→Postgres backfill; Postgres is now the source of truth
   // and these columns are written directly by the ingestion pipeline.
@@ -112,7 +121,8 @@ model Therapist {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  appointments AppointmentRequest[]
+  appointments  AppointmentRequest[]
+  conversations TherapistConversation[]
 
   @@index([odId])
   @@index([notionId])
@@ -290,6 +300,85 @@ model AppointmentRequest {
   @@index([status, chaseSentAt]) // For chase follow-up queries
   @@index([closureRecommendedAt]) // For closure recommendation dashboard
   @@map("appointment_requests")
+}
+
+// Therapist-only conversations handled by the availability-collection agent.
+//
+// Distinct from AppointmentRequest, which is always anchored to a specific
+// user↔therapist booking and runs the full booking lifecycle. A
+// TherapistConversation has no user counterpart — it exists to collect
+// availability from the therapist (and only the therapist) so the booking
+// agent has fresher data the next time a client request comes in.
+//
+// Two creation paths:
+//   - `kind = 'onboarding'`: outbound first-contact email sent after the
+//     therapist is ingested (PDF onboarding) or after a signup invitation
+//     is accepted. The agent asks the therapist when they're available.
+//   - `kind = 'nudge_reply'`: the existing "still looking" nudge email
+//     now includes an availability ask, and replies route here instead
+//     of landing in the unmatched-email queue.
+//
+// Supersession: if a client booking request lands for this therapist while
+// a conversation here is active, the booking agent takes over the
+// relationship. We mark `superseded_at` + `superseded_by_appointment_id`,
+// and the email dispatcher captures any future reply on this thread
+// silently — except for the very first one, which gets a one-shot ack
+// (`superseded_ack_sent`) explaining we've moved the conversation.
+model TherapistConversation {
+  id          String    @id @default(uuid())
+  therapistId String    @map("therapist_id")
+  therapist   Therapist @relation(fields: [therapistId], references: [id], onDelete: Cascade)
+
+  // 'onboarding' | 'nudge_reply'. Drives which prompt + tools the
+  // availability agent loads. Immutable after creation.
+  kind   String
+  // 'active' | 'completed' | 'superseded' | 'abandoned'. Lifecycle is
+  // intentionally simpler than AppointmentRequest's because there's no
+  // bilateral booking flow to coordinate — the agent collects info and
+  // marks complete (or supersedes/abandons).
+  status String @default("active")
+
+  // Gmail thread tracking. Mirrors AppointmentRequest.therapistGmailThreadId
+  // semantics — the deterministic match key the inbound thread-matcher
+  // uses to route the therapist's replies back to this conversation.
+  gmailThreadId    String? @map("gmail_thread_id")
+  initialMessageId String? @map("initial_message_id")
+
+  // Agent state. Same shape contract as AppointmentRequest.conversationState
+  // / .memory so the availability agent can reuse the agent-tool-loop +
+  // agent-memory plumbing without divergent type guards.
+  conversationState Json? @map("conversation_state")
+  memory            Json?
+  messageCount      Int   @default(0) @map("message_count")
+
+  lastActivityAt DateTime @default(now()) @map("last_activity_at")
+  isStale        Boolean  @default(false) @map("is_stale")
+
+  // Human takeover — same fields as AppointmentRequest so the admin UI
+  // can render therapist conversations alongside appointment threads.
+  humanControlEnabled Boolean   @default(false) @map("human_control_enabled")
+  humanControlTakenBy String?   @map("human_control_taken_by")
+  humanControlTakenAt DateTime? @map("human_control_taken_at")
+  humanControlReason  String?   @map("human_control_reason")
+
+  // Supersession. Set atomically when a booking request comes in for this
+  // therapist while this conversation is active. `superseded_ack_sent`
+  // guards the one-shot "we've moved this conversation" reply so we
+  // don't ack repeatedly if the therapist keeps replying.
+  supersededAt              DateTime? @map("superseded_at")
+  supersededByAppointmentId String?   @map("superseded_by_appointment_id")
+  supersededAckSent         Boolean   @default(false) @map("superseded_ack_sent")
+
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([therapistId])
+  @@index([gmailThreadId]) // Inbound thread-matcher lookup
+  @@index([status])
+  @@index([kind, status]) // For admin listings filtered by both
+  @@index([status, lastActivityAt]) // Stale-check scans
+  @@map("therapist_conversations")
 }
 
 model PendingEmail {
