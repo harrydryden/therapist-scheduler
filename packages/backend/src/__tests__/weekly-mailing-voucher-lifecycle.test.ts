@@ -45,6 +45,7 @@ jest.mock('../utils/database', () => ({
     },
     therapist: {
       findMany: jest.fn(),
+      count: jest.fn(),
     },
     appointmentRequest: {
       findMany: jest.fn(),
@@ -424,48 +425,22 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     expect(emailCall.body).toContain('new personal booking link');
   });
 
-  // ---- New therapists section ----
+  // ---- {newTherapistsSection} back-compat — renders empty so custom
+  //      templates that still reference it don't blow up. ----
 
-  it('includes new therapists section when new therapists are available', async () => {
-    // No known therapists in Redis → all therapists are "new"
+  it('renders the legacy {newTherapistsSection} variable as empty', async () => {
+    setupSettings({
+      'email.weeklyMailingBody':
+        'Hi {userName},\n[NTS_START]{newTherapistsSection}[NTS_END]\n{voucherSection}\n\n[Book]({webAppUrl})\n[Unsub]({unsubscribeUrl})',
+    });
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
 
     await weeklyMailingListService.forceSend(true);
 
     const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
-    expect(emailCall.body).toContain('new therapists available');
-    expect(emailCall.body).toContain('Dr');
-    expect(emailCall.body).toContain('anxiety');
-  });
-
-  it('omits new therapists section when all therapists are known', async () => {
-    // Pre-populate Redis with known therapist IDs
-    testRedis.__store.set(
-      'weekly-mailing:known-therapist-ids',
-      JSON.stringify(['therapist-1', 'therapist-2']),
-    );
-    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
-
-    await weeklyMailingListService.forceSend(true);
-
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
-    expect(emailCall.body).not.toContain('new therapists available');
-  });
-
-  it('only includes genuinely new therapists in the section', async () => {
-    // therapist-1 is known, therapist-2 is new
-    testRedis.__store.set(
-      'weekly-mailing:known-therapist-ids',
-      JSON.stringify(['therapist-1']),
-    );
-    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
-
-    await weeklyMailingListService.forceSend(true);
-
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
-    expect(emailCall.body).toContain('new therapists available');
-    // Should contain Dr Jones (new) but not Dr Smith (known)
-    expect(emailCall.body).toContain('Jones');
-    expect(emailCall.body).not.toContain('Smith');
+    // The marker bookends should appear adjacent (no content between them)
+    // and the literal `{newTherapistsSection}` token must not survive.
+    expect(emailCall.body).not.toContain('{newTherapistsSection}');
+    expect(emailCall.body).toMatch(/\[NTS_START\]\s*\[NTS_END\]/);
   });
 });

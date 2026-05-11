@@ -290,10 +290,17 @@ export const WEEKLY_MAILING = {
   LOCK_TTL_SECONDS: 600,
   // Lock renewal interval: every 2 minutes
   RENEWAL_INTERVAL_MS: 120 * 1000,
-  // Key to track last send date
+  // Key holding the ISO timestamp of the last successful send.
+  // Used both to enforce the once-per-7-days ceiling AND as the cutoff for
+  // the "any new therapists since last send?" event-trigger check, so its
+  // TTL is generous (90 days) — if the service stays quiet for weeks the
+  // timestamp must still be there to anchor the next event trigger.
   LAST_SEND_KEY: 'weekly-mailing:last-send-date',
-  // Key to track known therapist IDs (for detecting new therapists)
-  KNOWN_THERAPISTS_KEY: 'weekly-mailing:known-therapist-ids',
+  LAST_SEND_TTL_SECONDS: 90 * 24 * 60 * 60,
+  // Minimum gap between sends. Both the periodic check and admin-triggered
+  // sends honour this — pass `skipAlreadySentCheck` to forceSend() only
+  // when an internal caller explicitly needs to override it.
+  MIN_INTERVAL_DAYS: 7,
 } as const;
 
 // Daily work report settings

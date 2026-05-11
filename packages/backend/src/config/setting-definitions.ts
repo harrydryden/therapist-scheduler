@@ -640,23 +640,14 @@ All you need to do is select a therapist below. Enter your first name and email 
     valueType: 'boolean',
     defaultValue: false,
   },
-  'weeklyMailing.sendDay': {
+  'weeklyMailing.availableThreshold': {
     category: 'weeklyMailing',
-    label: 'Send Day',
-    description: 'Day of the week to send weekly emails (0=Sunday, 1=Monday, ...6=Saturday)',
+    label: 'Available Therapist Threshold',
+    description: 'Minimum number of bookable therapists required to send a routine weekly email. The event-triggered fast lane (any new therapist added since the last send) always fires regardless of this threshold; this gate only controls the steady-state weekly cadence.',
     valueType: 'number',
-    minValue: 0,
-    maxValue: 6,
-    defaultValue: 1,
-  },
-  'weeklyMailing.sendHour': {
-    category: 'weeklyMailing',
-    label: 'Send Hour (24h format)',
-    description: 'Hour of the day to send weekly emails (0-23 in configured timezone)',
-    valueType: 'number',
-    minValue: 0,
-    maxValue: 23,
-    defaultValue: 9,
+    minValue: 1,
+    maxValue: 999,
+    defaultValue: 5,
   },
   'weeklyMailing.webAppUrl': {
     category: 'weeklyMailing',
@@ -675,12 +666,11 @@ All you need to do is select a therapist below. Enter your first name and email 
   'email.weeklyMailingBody': {
     category: 'emailTemplates',
     label: 'Weekly Mailing - Body',
-    description: 'Email body for weekly promotional email. Variables: {userName}, {newTherapistsSection}, {voucherSection}, {webAppUrl}, {unsubscribeUrl}. Supports markdown links: [text](url)',
+    description: 'Email body for the promotional email. Variables: {userName}, {voucherSection}, {webAppUrl}, {unsubscribeUrl}. {newTherapistsSection} is accepted for back-compatibility and renders empty. Supports markdown links: [text](url)',
     valueType: 'string',
     defaultValue: `Hi {userName},
 
-Here's your weekly update from Spill.
-{newTherapistsSection}
+We have therapists available to take on free sessions — come and book in.
 {voucherSection}
 
 [Book your free session]({webAppUrl})

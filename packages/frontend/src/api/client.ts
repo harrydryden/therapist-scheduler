@@ -25,3 +25,4 @@ export * from './users';
 export * from './admin-therapists';
 export * from './signup';
 export * from './invitations';
+export * from './weekly-mailing';

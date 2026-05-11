@@ -189,8 +189,40 @@ export async function adminRoutes(fastify: FastifyInstance) {
   );
 
   /**
+   * GET /api/admin/weekly-mailing/preview
+   * Preview the next "send to users" email: recipient count + rendered
+   * subject/body. Read-only — used by the admin button confirm dialog
+   * so the operator sees exactly what they're about to send before
+   * pulling the trigger.
+   */
+  fastify.get(
+    '/api/admin/weekly-mailing/preview',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_ENDPOINTS.max,
+          timeWindow: RATE_LIMITS.ADMIN_ENDPOINTS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      try {
+        const { weeklyMailingListService } = await import('../services/weekly-mailing-list.service');
+        const preview = await weeklyMailingListService.previewSend();
+        return sendSuccess(reply, preview);
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to build weekly mailing preview');
+        return Errors.internal(reply, 'Failed to build preview');
+      }
+    }
+  );
+
+  /**
    * POST /api/admin/weekly-mailing/trigger
-   * Manually trigger sending the weekly mailing to all eligible users
+   * Manually send the weekly mailing to all eligible users now. Respects
+   * the enabled flag and the once-per-7-days ceiling. Rate-limited to
+   * 1/hour as a safety net behind the UI confirm dialog.
    */
   fastify.post(
     '/api/admin/weekly-mailing/trigger',
@@ -207,16 +239,20 @@ export async function adminRoutes(fastify: FastifyInstance) {
       logger.info({ requestId }, 'Manual trigger of weekly mailing requested');
 
       try {
-        // Import the service
         const { weeklyMailingListService } = await import('../services/weekly-mailing-list.service');
 
-        // Force send (bypasses day/time check but still respects enabled flag and already-sent check)
-        await weeklyMailingListService.forceSend();
+        const result = await weeklyMailingListService.forceSend();
 
         return sendSuccess(reply, {
           message: 'Weekly mailing triggered successfully',
+          ...result,
         });
       } catch (err) {
+        // Surface user-actionable errors (disabled, already-sent) as 400s
+        // so the UI can show the message; everything else is a 500.
+        if (err instanceof Error && /disabled|already sent/i.test(err.message)) {
+          return Errors.badRequest(reply, err.message);
+        }
         logger.error({ err, requestId }, 'Failed to trigger weekly mailing');
         return Errors.internal(reply, 'Failed to trigger weekly mailing');
       }
