@@ -21,6 +21,7 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
+import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -529,6 +530,11 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             await therapistBookingStatusService.recordNewRequest(
               therapistHandle, therapistName, userEmail, tx
             );
+
+            // Supersede any active availability-collection conversation for
+            // this therapist — the booking takes precedence. See
+            // availability-agent.service.ts for the contract.
+            await supersedeActiveTherapistConversationInTx(tx, therapistEntity.id, newRequest.id);
 
             return newRequest;
           },

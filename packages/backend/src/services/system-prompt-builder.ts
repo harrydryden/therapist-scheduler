@@ -38,6 +38,10 @@ import {
   formatAvailabilityWindowsForPrompt,
 } from './agent-memory.service';
 import {
+  getTherapistSchedulingDataForPrompt,
+  formatUpcomingAvailabilityForPrompt,
+} from './therapist-availability.service';
+import {
   getUserProfile,
   getTherapistProfile,
   formatUserProfileForPrompt,
@@ -191,6 +195,32 @@ ${getValidActionsForStage(currentStage)}
   // Future-only filter: past windows would mislead the agent.
   const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(memory);
 
+  // Per-therapist data populated by the availability-collection agent.
+  // upcomingAvailability complements the recurring schedule with one-off
+  // windows the therapist has shared (e.g. via the onboarding/nudge
+  // conversations). bookingLink is a direct scheduling URL the therapist
+  // has provided — when present the booking agent should offer it as the
+  // fastest path to a confirmed session, rather than negotiating windows.
+  //
+  // Both are fetched fresh on every turn (not snapshotted on the
+  // appointment row) so the booking agent sees the most recent data the
+  // availability agent has captured. Legacy appointments without a
+  // therapistId render an empty section.
+  let perTherapistUpcomingSection = '';
+  let bookingLinkSection = '';
+  if (context.therapistId) {
+    const { windows, bookingLink } = await getTherapistSchedulingDataForPrompt(context.therapistId);
+    perTherapistUpcomingSection = formatUpcomingAvailabilityForPrompt(windows);
+    if (bookingLink) {
+      bookingLinkSection = `## Therapist's direct booking link
+
+The therapist has a scheduling-tool link on file: **${bookingLink}**
+
+This is often the fastest path to a confirmed session. When proposing options to the client, offer the link as an alternative to suggesting specific times — the client can book directly through the therapist's page. If the client uses it, ask them to confirm the date/time they picked and then use mark_scheduling_complete with that time.
+`;
+    }
+  }
+
   // Cross-appointment profiles (Layer C). Read by primary key so the
   // profile shown can ONLY belong to this user / therapist — same
   // cross-thread isolation contract as Layer B but spanning appointments.
@@ -230,21 +260,23 @@ ${context.bookingMethod === 'direct_link' ? buildDirectBookingInstructions(conte
 
 If at any point during the conversation the therapist shares a direct booking link (e.g. Calendly, Acuity, YouCanBook.me, or any URL that appears to be a scheduling/booking page), you should:
 
-1. **Forward the link to the client**: Email the client with the booking link, letting them know they can book directly through the therapist's page.
-2. **Ask both parties for confirmation**: After a reasonable time (or in the same message to the client), ask them to reply with the date and time they've booked so you can confirm it in the system.
-3. **Follow up with the therapist**: Email the therapist asking them to confirm the date and time once the client has booked.
-4. **Either party confirming is sufficient**: If either the client or the therapist confirms the date and time, you can proceed to mark the booking as complete using mark_scheduling_complete.
+1. **Persist the link**: Call \`record_booking_link\` with the URL exactly as they shared it. This stores it on the therapist's permanent record so future bookings see it automatically — the same store the availability-collection agent writes to. Always do this BEFORE forwarding to the client so future bookings benefit even if the current conversation goes sideways.
+2. **Forward the link to the client**: Email the client with the booking link, letting them know they can book directly through the therapist's page.
+3. **Ask both parties for confirmation**: After a reasonable time (or in the same message to the client), ask them to reply with the date and time they've booked so you can confirm it in the system.
+4. **Follow up with the therapist**: Email the therapist asking them to confirm the date and time once the client has booked.
+5. **Either party confirming is sufficient**: If either the client or the therapist confirms the date and time, you can proceed to mark the booking as complete using mark_scheduling_complete.
 
 ## Availability Context
 
-**Initial availability** from the database is shown above. However, availability may change during the conversation:
+**Initial availability** from the database is shown above. However, availability may change during the conversation. Two tools, two distinct stores — pick the right one:
 
-- If the therapist shares NEW or UPDATED availability in their emails, use that information
-- The most recent availability mentioned in the thread takes precedence over database availability
-- You don't need to save one-off availability to the database - just use it for this booking
-- Only use update_therapist_availability if the therapist provides their REGULAR recurring schedule
+- **\`update_therapist_availability\`** — the therapist's REGULAR weekly pattern ("I work Mondays and Wednesdays 9-5"). Overwrites the recurring schedule on the therapist record. Use this only when the therapist describes their general working week, not a one-off date.
+- **\`record_availability_window\` with \`source="therapist"\`** — a one-off window the therapist mentions ("I'm free next Friday 2-4pm", "I'm out the week of the 15th"). Writes to the therapist's permanent upcoming-availability record (the same store the availability-collection agent uses), so future bookings see it too.
+- **\`record_availability_window\` with \`source="user"\`** — a one-off the CLIENT mentions about their own schedule ("I can't do next Tuesday"). Scoped to THIS booking only — a user's "I'm out next week" doesn't generalise across their other bookings.
 
-**Example:** If the database shows "Tuesday 12pm-4pm" but the therapist emails "I can also do Friday 2-4pm this week", offer both options to the user.
+Across all three: the most recent thing the therapist (or user) said in the thread takes precedence over what was on file when this booking started.
+
+**Example:** If the database shows "Tuesday 12pm-4pm" but the therapist emails "I can also do Friday 2-4pm this week", record the Friday window via \`record_availability_window\` (source=therapist) and offer both options to the user.
 
 ## Important Guidelines
 
@@ -321,7 +353,9 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 ## Available Tools
 
 - send_email: Send emails to client or therapist
-- update_therapist_availability: Save therapist's availability to database (use when therapist first provides their times)
+- update_therapist_availability: Save the therapist's REGULAR weekly pattern to their record (overwrites the recurring schedule). Use only when the therapist describes their general working week. For one-off dates, use record_availability_window instead.
+- record_availability_window: Capture a one-off availability window someone mentioned — e.g. "I can do Mondays for the next two weeks", "I'm free this Friday afternoon", "I'm out the week of the 15th". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself, using today's date. status="available" for offered slots, status="unavailable" for explicit blocks. Past windows are dropped automatically. ROUTING: source="therapist" goes to the therapist's permanent upcoming-availability record (visible to future bookings too); source="user" stays scoped to THIS booking only.
+- record_booking_link: Persist the therapist's direct scheduling-tool URL (Calendly, Acuity, YouCanBook.me, SavvyCal, anything similar) when they share one in the conversation. Writes to the therapist's permanent record so future bookings see it. Always call this BEFORE forwarding the link to the client — that way the URL is captured even if this conversation goes sideways. See the "Detecting Booking Links in Emails" section above.
 - mark_scheduling_complete: Mark done AFTER therapist confirms they'll send the meeting link. This also sends final confirmation emails to both parties.
 - initiate_reschedule: Signal that a reschedule is needed. Call this FIRST when either party requests a time change on a confirmed appointment, BEFORE sending any coordination emails.
 - cancel_appointment: Cancel the appointment if either party **explicitly** asks to cancel. This frees the therapist for other bookings.
@@ -329,7 +363,6 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 - issue_voucher_code: Issue a session voucher code for a user who needs one to book. Use this when a user contacts you saying they don't have a session code or their code has expired. The tool generates a personal code and booking link for their email address. Share both the display code and the booking URL in your reply.
 - flag_for_human_review: Flag this conversation for admin review when you are uncertain how to proceed. **Use this proactively** rather than stalling or guessing incorrectly.
 - remember: Record an observation about THIS conversation that you'd want a colleague taking it over to know — preferences, recurring constraints, situational context, decisions made. Use sparingly: only for things not already obvious from the message log and not already captured by the auto-extracted facts above. Do NOT include therapy-clinical content; this is for scheduling continuity only. Re-call with a corrected note if a previous one is wrong; identical notes are silently deduped.
-- record_availability_window: Capture a one-off availability window someone mentioned — e.g. "I can do Mondays for the next two weeks", "I'm free this Friday afternoon", "I'm out the week of the 15th". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself, using today's date. status="available" for offered slots, status="unavailable" for explicit blocks. Past windows are dropped automatically. Use this in addition to (not instead of) update_therapist_availability — that tool is for the recurring weekly schedule; this one is for episodic mentions.
 
 ## When to Recommend Cancelling the Match
 
@@ -355,7 +388,7 @@ Use flag_for_human_review when:
 ## Session Configuration
 - **Standard session duration:** ${sessionDuration} minutes
 ${knowledgeSection}${timezoneSection}${userProfileSection}${therapistProfileSection}
-${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
+${bookingLinkSection}${perTherapistUpcomingSection}${factsSection}${memorySection}${availabilityWindowsSection}${stageGuidance}
 Begin now based on whether availability exists or not.`;
 }
 

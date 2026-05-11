@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { Errors, sendError } from '../utils/response';
 import { JustinTimeService } from '../services/justin-time.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
+import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -454,6 +455,11 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
               userEmail,
               tx // Pass transaction client
             );
+
+            // Supersede any active availability-collection conversation for
+            // this therapist — the booking takes precedence. See
+            // availability-agent.service.ts for the contract.
+            await supersedeActiveTherapistConversationInTx(tx, therapistEntity.id, newRequest.id);
 
             // Outbox: register the JustinTime kickoff inside the same tx so
             // the row is committed atomically with the appointment. If the

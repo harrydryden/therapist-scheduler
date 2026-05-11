@@ -36,6 +36,11 @@ import {
 import { truncateMessageContent } from './ai-conversation.service';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
+import {
+  availabilityTools,
+  AVAILABILITY_SIDE_EFFECT_TOOLS,
+  AVAILABILITY_TERMINAL_TOOLS,
+} from './availability-tools';
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -198,9 +203,25 @@ export const schedulingTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'record_booking_link',
+    description:
+      "Record the therapist's direct booking link (Calendly, Acuity, YouCanBook.me, SavvyCal, or any other scheduling-tool URL) when they share one during the conversation. Use this whenever they mention a link like 'You can book me at calendly.com/...', 'My scheduling page is https://...', or similar. The link is the richest form of availability we can capture — once it's on file, future bookings will see it automatically. Always overwrites the existing link if there is one (most recent intent wins). After capturing the link, still forward it to the client (per the booking-link workflow above) so they can use it directly.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description:
+            'The full booking-link URL exactly as the therapist shared it, including the scheme (https://). The executor stores it verbatim and validates it is a parseable URL.',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
     name: 'record_availability_window',
     description:
-      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. The quote field captures the original phrasing for traceability.',
+      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. ROUTING: source="therapist" windows are stored on the therapist\'s permanent record so future bookings see them too; source="user" windows are scoped to THIS booking only (a user\'s "I\'m out next week" doesn\'t apply to other bookings).',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -243,6 +264,7 @@ const SIDE_EFFECT_TOOLS = new Set([
   'cancel_appointment',
   'initiate_reschedule',
   'update_therapist_availability',
+  'record_booking_link',
   'issue_voucher_code',
 ]);
 
@@ -520,6 +542,250 @@ export async function runToolLoop(
       totalToolErrors,
       executedTools,
       flaggedForHumanReview,
+      hitMaxIterations: iteration >= MAX_TOOL_ITERATIONS,
+    },
+  };
+}
+
+// ─── Availability-Collection Agent Loop ─────────────────────────────────────
+//
+// Parallel to runToolLoop but for the slim availability-collection agent.
+// Sibling rather than generalisation: the booking loop has scheduling-FSM
+// regression checks and a richer side-effect surface (emails, lifecycle
+// transitions) that don't apply here. Keeping them as two focused
+// functions is easier to reason about than one branching generalisation.
+// Adds prompt caching that the booking loop doesn't currently use — the
+// system prompt + tool definitions are stable across a conversation, so
+// caching them at the last system block cuts cost on every iteration
+// after the first.
+
+/** Context for the availability-collection agent. Slim by design: no
+ *  client counterpart exists, so no userName / userEmail. */
+export interface AvailabilityAgentContext {
+  /** TherapistConversation.id. The conversation row is the canonical
+   *  state container — same role as appointmentRequestId for the
+   *  booking agent. */
+  conversationId: string;
+  therapistId: string;
+  therapistName: string;
+  therapistEmail: string;
+  therapistCountry: string;
+  /** Why this conversation exists; drives prompt phrasing. */
+  kind: 'onboarding' | 'nudge_reply';
+}
+
+export interface AvailabilityToolLoopCallbacks {
+  executeToolCall: (
+    toolCall: Anthropic.ToolUseBlock,
+    context: AvailabilityAgentContext,
+  ) => Promise<ToolExecutionResult>;
+  /** Checkpoint conversationState to the DB before any side-effecting
+   *  tool runs. Same role as in runToolLoop — protects against losing
+   *  the agent's prior work if a write crashes mid-execution. */
+  checkpointBeforeSideEffects?: () => Promise<void>;
+}
+
+export interface AvailabilityToolLoopResult {
+  iterations: number;
+  totalToolErrors: number;
+  executedTools: ExecutedTool[];
+  /** True if flag_for_human_review fired — agent paused for admin. */
+  flaggedForHumanReview: boolean;
+  /** True if mark_complete fired — conversation reached natural end. */
+  markedComplete: boolean;
+  hitMaxIterations: boolean;
+}
+
+/**
+ * Minimal mutable state passed into the availability loop. The loop
+ * appends assistant messages to `messages` in-place so the orchestrator
+ * can persist the final state without us needing to return the array.
+ * Mirrors the booking loop's relationship with ConversationState.
+ */
+export interface AvailabilityConversationState {
+  messages: Array<{ role: 'user' | 'assistant' | 'admin'; content: string }>;
+}
+
+/**
+ * Run the availability-collection tool loop.
+ *
+ * Iterates up to MAX_TOOL_ITERATIONS, calling Claude with the supplied
+ * messages plus the static `availabilityTools` set. Stops early on
+ * mark_complete or flag_for_human_review (both terminal for the
+ * conversation), or when Claude returns no further tool calls.
+ *
+ * `conversationState.messages` is mutated in place as assistant turns
+ * accumulate; the orchestrator persists it after the loop returns.
+ */
+export async function runAvailabilityToolLoop(
+  systemPrompt: string,
+  initialMessages: Anthropic.MessageParam[],
+  conversationState: AvailabilityConversationState,
+  context: AvailabilityAgentContext,
+  callbacks: AvailabilityToolLoopCallbacks,
+  traceId: string,
+  logContext: string,
+): Promise<{ messages: Anthropic.MessageParam[]; result: AvailabilityToolLoopResult }> {
+  let messagesForClaude = [...initialMessages];
+  let iteration = 0;
+  let totalToolErrors = 0;
+  const executedTools: ExecutedTool[] = [];
+  let flaggedForHumanReview = false;
+  let markedComplete = false;
+
+  // cache_control on the system block caches both tool definitions and
+  // system prompt (tools render before system in the request prefix).
+  // Both are stable for the lifetime of one conversation, so every
+  // iteration after the first reads from the cache at ~0.1x cost.
+  const systemBlocks: Anthropic.TextBlockParam[] = [
+    {
+      type: 'text',
+      text: systemPrompt,
+      cache_control: { type: 'ephemeral' },
+    },
+  ];
+
+  while (iteration < MAX_TOOL_ITERATIONS) {
+    iteration++;
+    logger.debug(
+      { traceId, conversationId: context.conversationId, iteration },
+      `${logContext} - availability agent Claude API call iteration`,
+    );
+
+    const response = await resilientCall(
+      () =>
+        anthropicClient.messages.create({
+          model: CLAUDE_MODELS.AGENT,
+          max_tokens: MODEL_CONFIG.agent.maxTokens,
+          system: systemBlocks,
+          tools: availabilityTools,
+          messages: messagesForClaude,
+        }),
+      { context: logContext, traceId, circuitBreaker: claudeCircuitBreaker },
+    );
+
+    const toolCalls = response.content.filter(
+      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
+    );
+    const textBlocks = response.content.filter(
+      (block): block is Anthropic.TextBlock => block.type === 'text',
+    );
+    const assistantText = textBlocks.map((b) => b.text).join('\n');
+
+    if (assistantText) {
+      conversationState.messages.push({
+        role: 'assistant',
+        content: truncateMessageContent(assistantText),
+      });
+    }
+
+    if (toolCalls.length === 0) {
+      logger.info(
+        { traceId, conversationId: context.conversationId, iterations: iteration },
+        `${logContext} - availability agent finished responding (no more tool calls)`,
+      );
+      break;
+    }
+
+    const hasSideEffects = toolCalls.some((tc) => AVAILABILITY_SIDE_EFFECT_TOOLS.has(tc.name));
+    if (hasSideEffects && callbacks.checkpointBeforeSideEffects) {
+      await callbacks.checkpointBeforeSideEffects();
+    }
+
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    let stopLoop = false;
+
+    for (const toolCall of toolCalls) {
+      const result = await callbacks.executeToolCall(toolCall, context);
+      let toolResult: string;
+      let isError = false;
+
+      if (result.success) {
+        if (result.skipped) {
+          toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
+        } else {
+          toolResult = result.resultMessage || `Tool ${result.toolName} executed successfully.`;
+          executedTools.push({
+            toolName: result.toolName,
+            emailSentTo: result.emailSentTo,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        if (!result.skipped && AVAILABILITY_TERMINAL_TOOLS.has(toolCall.name)) {
+          if (toolCall.name === 'flag_for_human_review') {
+            flaggedForHumanReview = true;
+            conversationState.messages.push({
+              role: 'admin',
+              content: '[System: Conversation flagged for human review. Agent processing paused.]',
+            });
+          } else if (toolCall.name === 'mark_complete') {
+            markedComplete = true;
+            conversationState.messages.push({
+              role: 'admin',
+              content: '[System: Availability-collection conversation marked complete by agent.]',
+            });
+          }
+          logger.info(
+            { traceId, conversationId: context.conversationId, tool: toolCall.name },
+            `${logContext} - terminal tool fired, stopping availability loop`,
+          );
+          stopLoop = true;
+        }
+      } else {
+        toolResult = `Error: ${result.error}`;
+        isError = true;
+        totalToolErrors++;
+        logger.error(
+          { traceId, tool: result.toolName, error: result.error },
+          `${logContext} - availability tool execution failed`,
+        );
+      }
+
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: toolCall.id,
+        content: toolResult,
+        is_error: isError,
+      });
+
+      if (stopLoop) break;
+    }
+
+    if (stopLoop) break;
+
+    messagesForClaude = [
+      ...messagesForClaude,
+      { role: 'assistant' as const, content: response.content },
+      { role: 'user' as const, content: toolResults },
+    ];
+
+    logger.info(
+      {
+        traceId,
+        conversationId: context.conversationId,
+        toolCount: toolCalls.length,
+        iteration,
+      },
+      `${logContext} - availability tools executed, continuing`,
+    );
+  }
+
+  if (iteration >= MAX_TOOL_ITERATIONS && !flaggedForHumanReview && !markedComplete) {
+    logger.warn(
+      { traceId, conversationId: context.conversationId, iterations: iteration },
+      `${logContext} - availability agent hit max tool iterations`,
+    );
+  }
+
+  return {
+    messages: messagesForClaude,
+    result: {
+      iterations: iteration,
+      totalToolErrors,
+      executedTools,
+      flaggedForHumanReview,
+      markedComplete,
       hitMaxIterations: iteration >= MAX_TOOL_ITERATIONS,
     },
   };

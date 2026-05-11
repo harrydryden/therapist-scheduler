@@ -397,21 +397,39 @@ describe('buildSystemPrompt — Layer C profile wiring', () => {
 
   it('renders the therapist profile section when therapistId is set and notes exist', async () => {
     const prismaMock = jest.requireMock('../utils/database');
-    prismaMock.prisma.therapist.findUnique.mockResolvedValueOnce({
-      agentNotes: {
-        notes: [
-          {
-            id: 't1',
-            category: 'scheduling',
-            text: 'TEST_THERAPIST_PROFILE_NOTE',
-            source: 'admin',
-            createdAt: '2026-01-01T00:00:00Z',
-          },
-        ],
-        updatedAt: '2026-01-01T00:00:00Z',
-        version: 'v1',
+    // The prompt builder now makes TWO therapist.findUnique calls when
+    // therapistId is set:
+    //   (1) getTherapistProfile (Layer C agent notes)
+    //   (2) getTherapistSchedulingDataForPrompt (upcomingAvailability +
+    //       bookingLink — populated by the availability-collection
+    //       agent). Both go through findUnique with primary-key where.
+    // Use mockImplementation so either-order resolution returns the
+    // right shape for each select.
+    prismaMock.prisma.therapist.findUnique.mockImplementation(
+      ({ select }: { select?: Record<string, unknown> }) => {
+        if (select?.agentNotes) {
+          return Promise.resolve({
+            agentNotes: {
+              notes: [
+                {
+                  id: 't1',
+                  category: 'scheduling',
+                  text: 'TEST_THERAPIST_PROFILE_NOTE',
+                  source: 'admin',
+                  createdAt: '2026-01-01T00:00:00Z',
+                },
+              ],
+              updatedAt: '2026-01-01T00:00:00Z',
+              version: 'v1',
+            },
+          });
+        }
+        if (select?.upcomingAvailability || select?.bookingLink) {
+          return Promise.resolve({ upcomingAvailability: null, bookingLink: null });
+        }
+        return Promise.resolve(null);
       },
-    });
+    );
 
     const prompt = await buildSystemPrompt({ ...baseContext, therapistId: 'thx-1' });
     expect(prompt).toContain('## What we know about this therapist from prior bookings');
@@ -422,6 +440,13 @@ describe('buildSystemPrompt — Layer C profile wiring', () => {
     // The cross-thread isolation guarantee for Layer C, mirrored from
     // Layer B's equivalent test. If anyone replaces findUnique with
     // findFirst or adds a fallback query path, this test fails.
+    //
+    // After phase-6 booking-side wiring, therapist.findUnique is called
+    // TWICE per prompt build: once for Layer C agent notes, once for
+    // the per-therapist upcomingAvailability + bookingLink. Both use a
+    // primary-key where clause; the strict-scoping intent is preserved
+    // — every call goes through `where: { id: X }`, never findFirst,
+    // never email or any other identifier.
     const prismaMock = jest.requireMock('../utils/database');
     prismaMock.prisma.user.findUnique.mockClear();
     prismaMock.prisma.therapist.findUnique.mockClear();
@@ -432,10 +457,11 @@ describe('buildSystemPrompt — Layer C profile wiring', () => {
     expect(prismaMock.prisma.user.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'user-1' } }),
     );
-    expect(prismaMock.prisma.therapist.findUnique).toHaveBeenCalledTimes(1);
-    expect(prismaMock.prisma.therapist.findUnique).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'thx-1' } }),
-    );
+    expect(prismaMock.prisma.therapist.findUnique).toHaveBeenCalledTimes(2);
+    // Every call to therapist.findUnique must use a primary-key where.
+    for (const call of prismaMock.prisma.therapist.findUnique.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({ where: { id: 'thx-1' } }));
+    }
   });
 
   it('omits a profile section when the row exists but has no notes', async () => {

@@ -12,6 +12,8 @@ import { prisma } from '../utils/database';
 import { generateUniqueTherapistId } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { parseJsonFromLLMResponse } from '../utils/json-parser';
+import { runBackgroundTask } from '../utils/background-task';
+import { AvailabilityAgentService } from './availability-agent.service';
 import { getDefaultTimezone, getCountryLabel } from '@therapist-scheduler/shared';
 import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
 
@@ -425,6 +427,24 @@ class PDFIngestionService {
           'Admin notes captured during ingestion (review and add to bio if needed)',
         );
       }
+
+      // Kick off the availability-collection agent in the background.
+      // The agent will email the therapist asking for upcoming availability;
+      // failures don't block ingestion (admin can re-trigger manually if
+      // needed). The actual booking of the trial recruitment session happens
+      // separately via the booking agent — this call only writes a
+      // TherapistConversation row and runs the agent's first turn.
+      runBackgroundTask(
+        () =>
+          AvailabilityAgentService.instance(traceId).startCollection({
+            therapistId: therapist.id,
+            kind: 'onboarding',
+          }),
+        {
+          name: 'availability-onboarding-start',
+          context: { therapistId: therapist.id, traceId },
+        },
+      );
 
       return {
         success: true,

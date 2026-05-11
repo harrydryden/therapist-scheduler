@@ -63,3 +63,70 @@ export const recordAvailabilityWindowInputSchema = z.object({
   source: z.enum(['therapist', 'user']),
   quote: z.string().min(1).max(280),
 });
+
+/**
+ * Availability-collection variant of record_availability_window. Same
+ * shape as the booking-side schema minus the `source` field — this
+ * agent only ever talks to the therapist, so the source is always
+ * 'therapist' and is hardcoded in the executor rather than asked of
+ * the model.
+ */
+export const availabilityRecordWindowInputSchema = z.object({
+  starts_at: z.string().min(1).max(50).refine(
+    (s) => !isNaN(Date.parse(s)),
+    'starts_at must be a parseable ISO 8601 datetime (e.g. "2026-05-19T14:00:00+01:00")',
+  ),
+  ends_at: z.string().min(1).max(50).refine(
+    (s) => !isNaN(Date.parse(s)),
+    'ends_at must be a parseable ISO 8601 datetime',
+  ),
+  status: z.enum(['available', 'unavailable']),
+  quote: z.string().min(1).max(280),
+});
+
+/**
+ * Booking-link capture for the availability-collection agent. Just a
+ * URL string; the executor stores it verbatim on Therapist.bookingLink.
+ * Validation is "is a parseable URL" only — no domain allowlist,
+ * because therapists use many scheduling tools and gating bookings on
+ * a hardcoded list of providers would create false negatives.
+ */
+export const recordBookingLinkInputSchema = z.object({
+  url: z
+    .string()
+    .min(1)
+    .max(2048)
+    .url('url must be a parseable URL with a scheme (e.g. "https://calendly.com/...")'),
+});
+
+/**
+ * Slim send_email used by the availability-collection agent. The
+ * booking-side `sendEmailInputSchema` accepts a `to` field because the
+ * agent picks the recipient (client vs therapist); here the recipient
+ * is hardcoded to the therapist in the executor, so the schema only
+ * carries subject + body.
+ */
+export const availabilitySendEmailInputSchema = z.object({
+  subject: z.string().min(1).max(1000),
+  body: z.string().min(1).max(50000),
+});
+
+/**
+ * Slim mark_complete used by the availability-collection agent. The
+ * booking side has a richer `mark_scheduling_complete` (datetime,
+ * notes) because it finalises an actual appointment; here the agent
+ * is just declaring it has captured enough info to stop talking.
+ */
+export const availabilityMarkCompleteInputSchema = z.object({
+  summary: z.string().min(1).max(500),
+});
+
+/**
+ * Shared schema for flag_for_human_review. Both agents (booking and
+ * availability-collection) take the same shape, so we keep one
+ * definition rather than two near-identical copies.
+ */
+export const flagForHumanReviewInputSchema = z.object({
+  reason: z.string().min(1).max(500),
+  suggested_action: z.string().max(500).optional(),
+});

@@ -547,6 +547,56 @@ Justin`,
     valueType: 'string',
     defaultValue: 'Please confirm: Session on {selectedDateTime}',
   },
+  'email.availabilityOnboardingSubject': {
+    category: 'emailTemplates',
+    label: 'Availability Onboarding - Subject',
+    description:
+      "Subject for the availability-collection agent's outbound onboarding email, sent after a therapist is added to the platform. The agent may adapt it for context but should keep the core meaning.",
+    valueType: 'string',
+    defaultValue: 'Welcome to Spill - sharing your availability',
+  },
+  'email.availabilityOnboardingBody': {
+    category: 'emailTemplates',
+    label: 'Availability Onboarding - Body',
+    description:
+      "Recommended baseline body for the availability-collection agent's outbound onboarding email. Frames the recruitment-session context and asks for upcoming availability without proposing specific times (that's the booking agent's job). Variables: {therapistFirstName}.",
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Welcome to Spill - you've been added to our platform as part of our therapist recruitment process. The next step is a single trial session, which we'll arrange with you shortly.
+
+So that we can find a time that works, could you let me know what days and times you're free over the next two or three weeks? A few options is plenty - mornings, afternoons, specific days, whatever fits your schedule. Don't worry about exact times yet; once your availability is on file, the booking system will follow up with a specific proposal.
+
+If you use a scheduling tool (Calendly, Acuity, YouCanBook.me, anything similar), feel free to share that link instead and we'll use it directly - saves you spelling out individual times.
+
+Best wishes,
+
+Justin`,
+  },
+  'email.availabilitySupersededAckSubject': {
+    category: 'emailTemplates',
+    label: 'Availability Conversation Superseded - Ack Subject',
+    description:
+      "One-shot acknowledgement subject sent when a therapist replies on an availability-collection thread that has been superseded by a real booking. After this one message we go silent on the thread.",
+    valueType: 'string',
+    defaultValue: 'Thanks - we have your booking in hand',
+  },
+  'email.availabilitySupersededAckBody': {
+    category: 'emailTemplates',
+    label: 'Availability Conversation Superseded - Ack Body',
+    description:
+      "One-shot acknowledgement body. Sent at most once per superseded conversation (gated by TherapistConversation.supersededAckSent). Should NOT mention specific session times — the booking agent handles that on its own thread. Variables: {therapistFirstName}.",
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Thanks for your reply. A booking is now in progress for you, so I'll hand the conversation over to my colleague who's coordinating that specific session - they'll be in touch (or already have been) on a separate thread.
+
+No need to reply to this one; I'll go quiet here.
+
+Best wishes,
+
+Justin`,
+  },
   'email.slotConfirmationToTherapistBody': {
     category: 'emailTemplates',
     label: 'Slot Confirmation Request - Body',
@@ -950,13 +1000,16 @@ Justin`,
   'email.therapistNudgeBody': {
     category: 'emailTemplates',
     label: 'Therapist Nudge - Body',
-    description: 'Email body for the periodic nudge email sent to unmatched therapists. Variables: {therapistFirstName}, {agentFirstName}',
+    description:
+      "Email body for the periodic nudge email sent to unmatched therapists. Should include an availability ask — phase 5 onwards, replies route to the availability-collection agent, which uses what's shared to refresh Therapist.upcomingAvailability. Variables: {therapistFirstName}, {agentFirstName}",
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 
-Just a quick note to let you know we haven't forgotten about you! We're still actively looking for a client to match with you for a session.
+Just a quick note to let you know we haven't forgotten about you - we're still actively looking for a client to match with you.
 
-We really appreciate your patience — as soon as we have someone, we'll be in touch to get things booked in.
+While we keep searching, it would really help to have your latest availability on file so we can move quickly once we find someone. Could you let me know what days and times work for you over the next few weeks? Even a rough sketch is plenty - mornings, afternoons, specific days, whatever fits your schedule.
+
+If anything has changed (you're paused, taking on work elsewhere, no longer wanting to take Spill clients) just let me know and I'll update our records.
 
 Best wishes
 

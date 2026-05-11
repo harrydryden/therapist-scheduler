@@ -49,6 +49,7 @@ jest.mock('../utils/database', () => ({
     },
     therapist: {
       findFirst: jest.fn(),
+      findUnique: jest.fn(),
       update: jest.fn(),
     },
   },
@@ -136,6 +137,20 @@ beforeEach(() => {
   // Default: human control NOT enabled, so the TOCTOU lock succeeds.
   getPrismaMock().appointmentRequest.updateMany.mockResolvedValue({ count: 1 });
   getPrismaMock().appointmentRequest.update.mockResolvedValue({ id: 'apt-1' });
+  getPrismaMock().appointmentRequest.findUnique.mockResolvedValue({
+    memory: null,
+    gmailThreadId: null,
+    therapistGmailThreadId: null,
+    therapistEmail: 'dr.j@example.com',
+    initialMessageId: null,
+    trackingCode: null,
+  });
+  // Default: no per-therapist data on file.
+  getPrismaMock().therapist.findUnique.mockResolvedValue({
+    upcomingAvailability: null,
+    bookingLink: null,
+  });
+  getPrismaMock().therapist.update.mockResolvedValue({ id: 'tx-1' });
   // Default: not previously executed (idempotency miss).
   mockRedisGet.mockResolvedValue(null);
   // Default: per-appointment counter is small.
@@ -421,6 +436,133 @@ describe('remember tool — strict appointment-ID scoping', () => {
 // =============================================================================
 // idempotency
 // =============================================================================
+
+// =============================================================================
+// One-source-of-truth: record_availability_window dispatches by source
+// =============================================================================
+
+describe('record_availability_window — dispatch by source', () => {
+  const FUTURE_START = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  const FUTURE_END = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000 + 2 * 60 * 60 * 1000).toISOString();
+
+  it('routes therapist-source windows to Therapist.upcomingAvailability (per-therapist store)', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: FUTURE_START,
+        ends_at: FUTURE_END,
+        status: 'available',
+        source: 'therapist',
+        quote: 'I can do Tuesdays',
+      }),
+      { ...baseContext, therapistId: 'tx-1' },
+    );
+
+    expect(result.success).toBe(true);
+    // Per-therapist update fired — this is the single source of truth
+    // for future bookings to also see.
+    const calls = getPrismaMock().therapist.update.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    // The result message advertises the per-therapist path explicitly.
+    expect(result.resultMessage).toMatch(/permanent record/i);
+    // Per-appointment write did NOT fire for this case.
+    const apptUpdates = getPrismaMock().appointmentRequest.update.mock.calls;
+    expect(apptUpdates.length).toBe(0);
+  });
+
+  it('routes user-source windows to AppointmentRequest.memory (per-booking store)', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: FUTURE_START,
+        ends_at: FUTURE_END,
+        status: 'unavailable',
+        source: 'user',
+        quote: "I'm out next week",
+      }),
+      { ...baseContext, therapistId: 'tx-1' },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultMessage).toMatch(/for this booking/i);
+    // Per-appointment memory was updated. Per-therapist was NOT.
+    const apptUpdates = getPrismaMock().appointmentRequest.update.mock.calls;
+    expect(apptUpdates.length).toBeGreaterThanOrEqual(1);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
+  it('falls back to per-appointment for therapist-source when therapistId is missing (legacy appointment)', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: FUTURE_START,
+        ends_at: FUTURE_END,
+        status: 'available',
+        source: 'therapist',
+        quote: 'thursday afternoons',
+      }),
+      // No therapistId — simulates legacy appointment without a
+      // linked Therapist row. Per-therapist write has no primary key
+      // to scope on; fall back to per-appointment.
+      { ...baseContext, therapistId: undefined },
+    );
+
+    expect(result.success).toBe(true);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+    expect(getPrismaMock().appointmentRequest.update.mock.calls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// =============================================================================
+// record_booking_link — booking agent persists detected links
+// =============================================================================
+
+describe('record_booking_link — persists to Therapist.bookingLink', () => {
+  it('writes the URL via the shared recordTherapistBookingLink helper', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'https://calendly.com/dr-jones/50min' }),
+      { ...baseContext, therapistId: 'tx-1' },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultMessage).toMatch(/booking link recorded/i);
+    // Update fired with bookingLink in the data payload, scoped to
+    // the therapist primary key from context.
+    const calls = getPrismaMock().therapist.update.mock.calls;
+    const matching = calls.find(
+      (c: unknown[]) =>
+        (c[0] as { where: { id: string }; data: { bookingLink?: string } }).where.id === 'tx-1' &&
+        (c[0] as { data: { bookingLink?: string } }).data.bookingLink ===
+          'https://calendly.com/dr-jones/50min',
+    );
+    expect(matching).toBeDefined();
+  });
+
+  it('rejects non-URL input via Zod', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'calendly.com/no-scheme' }),
+      { ...baseContext, therapistId: 'tx-1' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Invalid record_booking_link input/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
+  it('does not write when therapistId is missing (legacy appointment) — surfaces a note instead', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'https://calendly.com/x' }),
+      { ...baseContext, therapistId: undefined },
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.resultMessage).toMatch(/not persisted/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+});
 
 describe('per-call idempotency', () => {
   it('skips the tool call when the same hash exists in Redis', async () => {
