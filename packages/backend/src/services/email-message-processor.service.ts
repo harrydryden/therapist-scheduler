@@ -65,8 +65,10 @@ import {
 } from '../services/thread-divergence.service';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
 import { CLEANUP_CHECK_AND_RESET_SCRIPT, ATOMIC_LOCK_CHECK_SCRIPT } from '../utils/redis-scripts';
-import { findMatchingAppointmentRequest } from '../utils/thread-matcher';
+import { findMatchingAppointmentRequest, findMatchingTherapistConversation } from '../utils/thread-matcher';
+import type { TherapistConversationMatch } from '../utils/thread-matcher';
 import { tryHandleInvitationReply } from './invitation-reply.service';
+import { AvailabilityAgentService } from './availability-agent.service';
 
 // Redis keys — imported from centralized constants
 const {
@@ -261,7 +263,15 @@ export type ProcessedMessageContext =
   | 'invitation-reply'
   | 'unmatched-abandoned'
   | 'divergence-blocked-abandoned'
-  | 'processing-failed-abandoned';
+  | 'processing-failed-abandoned'
+  // Phase 4: inbound replies routed to the availability-collection
+  // agent's TherapistConversation. The four variants correspond to
+  // the four lifecycle statuses; admin UI can distinguish them
+  // without needing to JOIN the conversation row.
+  | 'availability-agent-active'
+  | 'availability-agent-superseded'
+  | 'availability-agent-completed'
+  | 'availability-agent-abandoned';
 
 /**
  * Mark a Gmail message as processed in both Redis (fast) and database (durable).
@@ -564,6 +574,20 @@ export class EmailMessageProcessorService {
       const appointmentRequest = await findMatchingAppointmentRequest(email);
 
       if (!appointmentRequest) {
+        // Phase 4: try the availability-collection agent's conversations
+        // before falling through to the unmatched-email path. A reply on
+        // a TherapistConversation thread belongs to the availability
+        // agent (or, if that conversation has been superseded by a
+        // booking, the dispatcher fires a one-shot ack here and then
+        // goes silent). Done BEFORE the legacy nudge-sender fallback
+        // because deterministic thread matching is always preferred
+        // over heuristics.
+        const convoMatch = await findMatchingTherapistConversation(email);
+        if (convoMatch) {
+          const handled = await this.routeToAvailabilityAgent(email, convoMatch, messageId, traceId);
+          if (handled) return true;
+        }
+
         // Sender-based nudge reply fallback:
         // The primary threadId-based nudge detection (above) can fail when Gmail
         // assigns the reply a different thread ID (common for replies arriving
@@ -1055,6 +1079,100 @@ export class EmailMessageProcessorService {
       // permanent deduplication record. This is intentional for the fallback case.
     }
     });
+  }
+
+  // ─── Availability-collection agent routing ─────────────────────────
+
+  /**
+   * Route an inbound email that matched a TherapistConversation row to
+   * the appropriate downstream behaviour, based on the conversation's
+   * lifecycle status. Returns true when the email is fully handled
+   * (caller should mark processed and stop); false when the caller
+   * should fall through to the next dispatch branch.
+   *
+   * Status semantics:
+   *   - `active`: hand to availabilityAgent.processReply for the
+   *     usual tool loop.
+   *   - `superseded`: a booking has taken priority. If the one-shot
+   *     ack hasn't been sent yet, fire it now (and only now); after
+   *     that, every reply is captured silently.
+   *   - `completed` / `abandoned`: silent — the conversation has
+   *     reached its terminal lifecycle stage. We still mark the
+   *     message processed so it doesn't churn the unmatched-retry
+   *     loop.
+   *
+   * All branches return true (the inbound has been accounted for one
+   * way or another), so the caller short-circuits to markProcessed.
+   */
+  private async routeToAvailabilityAgent(
+    email: EmailMessage,
+    convoMatch: TherapistConversationMatch,
+    messageId: string,
+    traceId: string,
+  ): Promise<boolean> {
+    extendTraceContext({ therapistConversationId: convoMatch.id });
+    logger.info(
+      {
+        traceId,
+        messageId,
+        conversationId: convoMatch.id,
+        therapistId: convoMatch.therapistId,
+        status: convoMatch.status,
+      },
+      'Routing inbound to availability-collection agent',
+    );
+
+    const agent = new AvailabilityAgentService(traceId);
+
+    if (convoMatch.status === 'active') {
+      try {
+        await agent.processReply({
+          conversationId: convoMatch.id,
+          emailContent: email.body,
+          fromEmail: email.from,
+        });
+        await markMessageProcessed(messageId, traceId, 'availability-agent-active');
+        return true;
+      } catch (err) {
+        logger.error(
+          { traceId, messageId, conversationId: convoMatch.id, err },
+          'availability-agent processReply threw — leaving for retry',
+        );
+        return false;
+      }
+    }
+
+    if (convoMatch.status === 'superseded') {
+      if (!convoMatch.supersededAckSent) {
+        const result = await agent.sendSupersessionAck(convoMatch.id);
+        logger.info(
+          {
+            traceId,
+            messageId,
+            conversationId: convoMatch.id,
+            alreadySent: result.alreadySent,
+            emailSent: result.emailSent,
+          },
+          'availability-agent supersession ack outcome',
+        );
+      } else {
+        logger.info(
+          { traceId, messageId, conversationId: convoMatch.id },
+          'availability-agent: reply on superseded thread ignored — ack already sent',
+        );
+      }
+      await markMessageProcessed(messageId, traceId, 'availability-agent-superseded');
+      return true;
+    }
+
+    // completed / abandoned — silent, but still mark processed so we
+    // don't churn the unmatched-retry loop on stale terminal rows.
+    const terminalContext: ProcessedMessageContext =
+      convoMatch.status === 'completed'
+        ? 'availability-agent-completed'
+        : 'availability-agent-abandoned';
+    await markMessageProcessed(messageId, traceId, terminalContext);
+    return true;
   }
 
   // ─── Nudge reply fallback ──────────────────────────────────────────

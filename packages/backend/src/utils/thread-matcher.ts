@@ -37,6 +37,28 @@ export interface AppointmentMatch {
 }
 
 /**
+ * Result of a successful TherapistConversation match.
+ *
+ * Distinct from AppointmentMatch because the dispatcher routes the two
+ * kinds of matches to different agents (booking vs. availability) and
+ * needs different downstream data:
+ *
+ *   - `status` drives the routing decision (active → run agent;
+ *     superseded → maybe send ack; completed/abandoned → silent).
+ *   - `supersededAckSent` gates the one-shot ack so the therapist
+ *     gets at most one "we've moved this conversation" reply on a
+ *     superseded thread.
+ */
+export interface TherapistConversationMatch {
+  id: string;
+  therapistId: string;
+  therapistEmail: string;
+  status: 'active' | 'completed' | 'superseded' | 'abandoned';
+  supersededAckSent: boolean;
+  kind: 'onboarding' | 'nudge_reply';
+}
+
+/**
  * Find an appointment request that matches the given email.
  *
  * Priority order:
@@ -146,6 +168,99 @@ export async function findMatchingAppointmentRequest(
 
   // PRIORITY 4: Fallback to sender + therapist name matching (for legacy appointments without tracking codes)
   return findByLegacyMatch(email);
+}
+
+/**
+ * Find a TherapistConversation row that the inbound email belongs to.
+ *
+ * Matches deterministically by Gmail thread ID and, as a secondary,
+ * by `initialMessageId` via the In-Reply-To / References headers — same
+ * two priorities the appointment matcher uses, in the same order. We
+ * skip the tracking-code and sender-legacy paths: TherapistConversation
+ * doesn't have a tracking code, and the legacy sender-name fallback
+ * would be unsafe here because a therapist may belong to many
+ * conversations (active + superseded) where deterministic markers
+ * matter more than ever.
+ *
+ * NO status filter — the caller decides what to do per status:
+ *   - 'active'      → run the availability agent's processReply
+ *   - 'superseded'  → send one-shot ack if `supersededAckSent === false`
+ *   - 'completed'   → silent
+ *   - 'abandoned'   → silent
+ *
+ * Routing-by-status is the dispatcher's job, not the matcher's. The
+ * matcher's only contract is "does this email belong to a known
+ * therapist-only conversation row".
+ */
+export async function findMatchingTherapistConversation(
+  email: MatchableEmail,
+): Promise<TherapistConversationMatch | null> {
+  const messageIds: string[] = [];
+  if (email.references?.length || email.inReplyTo) {
+    messageIds.push(...(email.references || []));
+    if (email.inReplyTo && !messageIds.includes(email.inReplyTo)) {
+      messageIds.push(email.inReplyTo);
+    }
+  }
+
+  const conditions: Array<Record<string, unknown>> = [];
+  if (email.threadId) {
+    conditions.push({ gmailThreadId: email.threadId });
+  }
+  if (messageIds.length > 0) {
+    conditions.push({ initialMessageId: { in: messageIds } });
+  }
+  if (conditions.length === 0) {
+    return null;
+  }
+
+  // Multiple rows could match (e.g. a therapist has both a superseded
+  // onboarding and an active follow-up). Sort by most-recent-activity
+  // and prefer active rows over terminal ones, so a stale superseded
+  // row doesn't shadow a live conversation that happens to share an
+  // initialMessageId.
+  const candidates = await prisma.therapistConversation.findMany({
+    where: { OR: conditions },
+    select: {
+      id: true,
+      therapistId: true,
+      status: true,
+      supersededAckSent: true,
+      kind: true,
+      gmailThreadId: true,
+      initialMessageId: true,
+      lastActivityAt: true,
+      therapist: { select: { email: true } },
+    },
+    orderBy: { lastActivityAt: 'desc' },
+  });
+
+  if (candidates.length === 0) return null;
+
+  // Prefer active. Within active (or within non-active), the orderBy
+  // above already broke ties by most-recent-activity.
+  const active = candidates.find((c) => c.status === 'active');
+  const chosen = active ?? candidates[0];
+
+  logger.info(
+    {
+      conversationId: chosen.id,
+      therapistId: chosen.therapistId,
+      status: chosen.status,
+      threadId: email.threadId,
+      messageIdMatch: messageIds.includes(chosen.initialMessageId ?? ''),
+    },
+    'Matched therapist conversation by deterministic thread/message id',
+  );
+
+  return {
+    id: chosen.id,
+    therapistId: chosen.therapistId,
+    therapistEmail: chosen.therapist.email,
+    status: chosen.status as TherapistConversationMatch['status'],
+    supersededAckSent: chosen.supersededAckSent,
+    kind: chosen.kind as TherapistConversationMatch['kind'],
+  };
 }
 
 /**

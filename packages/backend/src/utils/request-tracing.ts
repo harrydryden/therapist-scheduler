@@ -30,6 +30,9 @@ export interface TraceContext {
   startTime?: number;
   /** Optional context for background processing. */
   appointmentId?: string;
+  /** Set by the inbound dispatcher when the email matches a
+   *  therapist-only conversation (availability-collection agent). */
+  therapistConversationId?: string;
   source?: string;
 }
 

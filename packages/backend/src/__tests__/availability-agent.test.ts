@@ -64,6 +64,9 @@ type ConversationRow = {
   lastActivityAt: Date;
   gmailThreadId: string | null;
   initialMessageId: string | null;
+  supersededAckSent: boolean;
+  supersededAt: Date | null;
+  supersededByAppointmentId: string | null;
   therapist?: TherapistRow;
 };
 
@@ -98,15 +101,31 @@ const conversationCreate = jest.fn(async ({ data }: { data: Partial<Conversation
     lastActivityAt: new Date(),
     gmailThreadId: data.gmailThreadId ?? null,
     initialMessageId: data.initialMessageId ?? null,
+    supersededAckSent: false,
+    supersededAt: null,
+    supersededByAppointmentId: null,
   };
   conversations[id] = row;
   return row;
 });
 const conversationFindUnique = jest.fn(
-  async ({ where, include }: { where: { id: string }; include?: { therapist?: unknown } }) => {
+  async ({
+    where,
+    include,
+    select,
+  }: {
+    where: { id: string };
+    include?: { therapist?: unknown };
+    select?: { therapist?: unknown };
+  }) => {
     const row = conversations[where.id];
     if (!row) return null;
-    if (include?.therapist) {
+    // Always eagerly attach the therapist relation when the caller's
+    // include OR select asks for it. The real Prisma client returns
+    // shaped projections, but our tests don't depend on shape — just
+    // on the relation being present (or not) for the
+    // `if (!row.therapist)` guards in the service code.
+    if (include?.therapist || select?.therapist) {
       return { ...row, therapist: therapists[row.therapistId] };
     }
     return row;
@@ -129,21 +148,34 @@ const conversationUpdateMany = jest.fn(
       status?: string;
       humanControlEnabled?: boolean;
       gmailThreadId?: string | null;
+      supersededAckSent?: boolean;
+      therapistId?: string;
     };
     data: Partial<ConversationRow>;
   }) => {
-    const row = conversations[where.id];
-    if (!row) return { count: 0 };
-    if (where.status !== undefined && row.status !== where.status) return { count: 0 };
-    if (
-      where.humanControlEnabled !== undefined &&
-      row.humanControlEnabled !== where.humanControlEnabled
-    )
-      return { count: 0 };
-    if (where.gmailThreadId !== undefined && row.gmailThreadId !== where.gmailThreadId)
-      return { count: 0 };
-    conversations[where.id] = { ...row, ...data };
-    return { count: 1 };
+    // Cover both the "where: { id }" case (most calls) and the
+    // "where: { therapistId, status: 'active' }" supersession case
+    // (no id). Iterate rather than direct lookup so both work.
+    let matched = 0;
+    for (const row of Object.values(conversations)) {
+      if (where.id !== undefined && row.id !== where.id) continue;
+      if (where.status !== undefined && row.status !== where.status) continue;
+      if (
+        where.humanControlEnabled !== undefined &&
+        row.humanControlEnabled !== where.humanControlEnabled
+      )
+        continue;
+      if (where.gmailThreadId !== undefined && row.gmailThreadId !== where.gmailThreadId) continue;
+      if (
+        where.supersededAckSent !== undefined &&
+        row.supersededAckSent !== where.supersededAckSent
+      )
+        continue;
+      if (where.therapistId !== undefined && row.therapistId !== where.therapistId) continue;
+      conversations[row.id] = { ...row, ...data };
+      matched++;
+    }
+    return { count: matched };
   },
 );
 
@@ -236,20 +268,26 @@ jest.mock('../services/ai-conversation.service', () => ({
 }));
 
 // Outbound email mock for the send_email tool path.
-const mockSendEmail = jest.fn(async () => ({
-  threadId: 'thread-default',
-  messageId: 'msg-default',
-}));
+// Arrow-fn indirection in the factory is required because jest.mock
+// is hoisted above this declaration; only call-time resolves the
+// reference correctly.
+const mockSendEmail = jest.fn(
+  async (_params: { to: string; subject: string; body: string; threadId?: string }) => ({
+    threadId: 'thread-default',
+    messageId: 'msg-default',
+  }),
+);
 jest.mock('../services/email-processing.service', () => ({
   emailProcessingService: {
-    sendEmail: (...a: unknown[]) =>
-      (mockSendEmail as (...x: unknown[]) => Promise<{ threadId: string; messageId: string }>)(
-        ...a,
-      ),
+    sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
+      mockSendEmail(params),
   },
 }));
 
-import { AvailabilityAgentService } from '../services/availability-agent.service';
+import {
+  AvailabilityAgentService,
+  supersedeActiveTherapistConversationInTx,
+} from '../services/availability-agent.service';
 
 // ─── Helpers to build scripted Anthropic.Message responses ──────────────────
 
@@ -411,6 +449,9 @@ describe('AvailabilityAgentService.processReply', () => {
       lastActivityAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
     };
 
     const futureStart = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -465,6 +506,9 @@ describe('AvailabilityAgentService.processReply', () => {
       lastActivityAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
     };
 
     const service = new AvailabilityAgentService('trace-1');
@@ -498,6 +542,9 @@ describe('AvailabilityAgentService.processReply', () => {
       lastActivityAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
     };
 
     const service = new AvailabilityAgentService('trace-1');
@@ -514,6 +561,13 @@ describe('AvailabilityAgentService.processReply', () => {
     const state = conversations['convo-pre'].conversationState as { messages: Array<{ content: string }> };
     expect(state.messages).toHaveLength(1);
     expect(state.messages[0].content).toMatch(/Received while paused/);
+  });
+
+  it('also fires sendSupersessionAck when explicitly invoked', () => {
+    // Bridge test — the sendSupersessionAck path is exercised
+    // thoroughly in the dedicated describe block below; this stub
+    // just documents that the orchestrator surface has it.
+    expect(typeof new AvailabilityAgentService('trace-1').sendSupersessionAck).toBe('function');
   });
 
   it('flags for human review when the agent escalates', async () => {
@@ -534,6 +588,9 @@ describe('AvailabilityAgentService.processReply', () => {
       lastActivityAt: new Date(),
       gmailThreadId: null,
       initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
     };
     scriptedResponses = [
       toolUseResponse('flag_for_human_review', {
@@ -553,5 +610,200 @@ describe('AvailabilityAgentService.processReply', () => {
     expect(result.message).toMatch(/human review/i);
     expect(conversations['convo-pre'].humanControlEnabled).toBe(true);
     expect(conversations['convo-pre'].humanControlReason).toMatch(/pricing/);
+  });
+});
+
+describe('AvailabilityAgentService.sendSupersessionAck', () => {
+  function seedSupersededConversation(overrides: Partial<ConversationRow> = {}) {
+    seedTherapist();
+    conversations['convo-superseded'] = {
+      id: 'convo-superseded',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'superseded',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: null,
+      memory: null,
+      conversationState: { messages: [] },
+      messageCount: 0,
+      lastActivityAt: new Date(),
+      gmailThreadId: 'thread-old',
+      initialMessageId: 'msg-old',
+      supersededAckSent: false,
+      supersededAt: new Date(),
+      supersededByAppointmentId: 'appt-new',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    // Configure settings mock to return an ack template that uses the
+    // {therapistFirstName} variable, so the substitution path is
+    // exercised.
+    const settingsMod = jest.requireMock('../services/settings.service') as {
+      getSettingValues: jest.Mock;
+    };
+    settingsMod.getSettingValues.mockResolvedValue(
+      new Map([
+        ['email.availabilitySupersededAckSubject', 'Thanks - we have your booking in hand'],
+        ['email.availabilitySupersededAckBody', 'Hi {therapistFirstName}, ack body.'],
+      ]),
+    );
+  });
+
+  it('claims the flag, sends the ack on the existing thread, and reports emailSent=true', async () => {
+    seedSupersededConversation();
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-old', messageId: 'msg-ack' });
+
+    const result = await new AvailabilityAgentService('trace-1').sendSupersessionAck(
+      'convo-superseded',
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.alreadySent).toBe(false);
+    expect(result.emailSent).toBe(true);
+    // Flag flipped (no rollback because send succeeded).
+    expect(conversations['convo-superseded'].supersededAckSent).toBe(true);
+    // Ack went on the SAME thread as the original conversation so the
+    // therapist sees a single inline reply, not a new thread.
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    const sent = mockSendEmail.mock.calls[0][0];
+    expect(sent.threadId).toBe('thread-old');
+    expect(sent.to).toBe('alex@example.com');
+    expect(sent.subject).toContain('Spill');
+    expect(sent.body).toContain('Alex'); // substituted from "Alex Therapist"
+  });
+
+  it('is a no-op when the ack has already been sent (alreadySent=true)', async () => {
+    seedSupersededConversation({ supersededAckSent: true });
+    const result = await new AvailabilityAgentService('trace-1').sendSupersessionAck(
+      'convo-superseded',
+    );
+    expect(result.alreadySent).toBe(true);
+    expect(result.emailSent).toBe(false);
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+
+  it('rolls the flag back to false when the outbound email fails', async () => {
+    seedSupersededConversation();
+    mockSendEmail.mockRejectedValueOnce(new Error('Gmail 503'));
+
+    const result = await new AvailabilityAgentService('trace-1').sendSupersessionAck(
+      'convo-superseded',
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.emailSent).toBe(false);
+    // Critical: flag must be back to false so a later inbound on the
+    // same thread can re-trigger the ack rather than be silently
+    // dropped forever.
+    expect(conversations['convo-superseded'].supersededAckSent).toBe(false);
+  });
+
+  it('does not send when the row has flipped away from superseded mid-race', async () => {
+    // Row is now 'completed' (e.g. admin manually closed it) — the CAS
+    // predicate guards against acking on a non-superseded row.
+    seedSupersededConversation({ status: 'completed' });
+    const result = await new AvailabilityAgentService('trace-1').sendSupersessionAck(
+      'convo-superseded',
+    );
+    expect(result.alreadySent).toBe(true);
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('supersedeActiveTherapistConversationInTx', () => {
+  // Cast our mock as the full TransactionClient surface — only the
+  // therapistConversation.updateMany method is exercised here, so
+  // the rest stays unimplemented.
+  const txStub = {
+    therapistConversation: {
+      updateMany: (...a: unknown[]) =>
+        conversationUpdateMany(
+          ...(a as [
+            {
+              where: {
+                id: string;
+                status?: string;
+                humanControlEnabled?: boolean;
+                gmailThreadId?: string | null;
+                supersededAckSent?: boolean;
+                therapistId?: string;
+              };
+              data: Partial<ConversationRow>;
+            },
+          ]),
+        ),
+    },
+  } as unknown as Parameters<typeof supersedeActiveTherapistConversationInTx>[0];
+
+  it('flips all active conversations for the therapist to superseded', async () => {
+    seedTherapist();
+    conversations['convo-active-1'] = {
+      id: 'convo-active-1',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'active',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: null,
+      memory: null,
+      conversationState: { messages: [] },
+      messageCount: 0,
+      lastActivityAt: new Date(),
+      gmailThreadId: 'thread-a',
+      initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
+    };
+
+    const count = await supersedeActiveTherapistConversationInTx(txStub, 'tx-1', 'appt-new');
+
+    expect(count).toBe(1);
+    expect(conversations['convo-active-1'].status).toBe('superseded');
+    expect(conversations['convo-active-1'].supersededAt).toBeInstanceOf(Date);
+    expect(conversations['convo-active-1'].supersededByAppointmentId).toBe('appt-new');
+  });
+
+  it('does not touch already-completed/superseded/abandoned rows', async () => {
+    seedTherapist();
+    conversations['convo-completed'] = {
+      id: 'convo-completed',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'completed',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: new Date(),
+      memory: null,
+      conversationState: { messages: [] },
+      messageCount: 0,
+      lastActivityAt: new Date(),
+      gmailThreadId: null,
+      initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
+    };
+
+    const count = await supersedeActiveTherapistConversationInTx(txStub, 'tx-1', 'appt-new');
+
+    expect(count).toBe(0);
+    expect(conversations['convo-completed'].status).toBe('completed');
+    expect(conversations['convo-completed'].supersededAt).toBeNull();
+  });
+
+  it('returns 0 when no conversation exists for the therapist', async () => {
+    seedTherapist();
+    const count = await supersedeActiveTherapistConversationInTx(txStub, 'tx-1', 'appt-new');
+    expect(count).toBe(0);
   });
 });

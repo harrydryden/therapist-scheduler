@@ -14,11 +14,15 @@ jest.mock('../utils/logger', () => ({
 
 const mockFindMany = jest.fn();
 const mockFindFirst = jest.fn();
+const mockConvoFindMany = jest.fn();
 jest.mock('../utils/database', () => ({
   prisma: {
     appointmentRequest: {
       findMany: (...args: unknown[]) => mockFindMany(...args),
       findFirst: (...args: unknown[]) => mockFindFirst(...args),
+    },
+    therapistConversation: {
+      findMany: (...args: unknown[]) => mockConvoFindMany(...args),
     },
   },
 }));
@@ -27,7 +31,11 @@ jest.mock('../services/tracking-code.service', () => ({
   extractTrackingCode: jest.fn().mockReturnValue(null),
 }));
 
-import { findMatchingAppointmentRequest, type MatchableEmail } from '../utils/thread-matcher';
+import {
+  findMatchingAppointmentRequest,
+  findMatchingTherapistConversation,
+  type MatchableEmail,
+} from '../utils/thread-matcher';
 
 function makeEmail(overrides: Partial<MatchableEmail> = {}): MatchableEmail {
   return {
@@ -216,5 +224,112 @@ describe('findMatchingAppointmentRequest', () => {
       expect(result).toBeNull();
       expect(mockFindFirst).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('findMatchingTherapistConversation', () => {
+  beforeEach(() => {
+    mockConvoFindMany.mockReset();
+  });
+
+  function convoCandidate(overrides: {
+    id?: string;
+    therapistId?: string;
+    status?: 'active' | 'completed' | 'superseded' | 'abandoned';
+    supersededAckSent?: boolean;
+    kind?: 'onboarding' | 'nudge_reply';
+    gmailThreadId?: string | null;
+    initialMessageId?: string | null;
+    lastActivityAt?: Date;
+    therapistEmail?: string;
+  } = {}) {
+    return {
+      id: overrides.id ?? 'convo-1',
+      therapistId: overrides.therapistId ?? 'tx-1',
+      status: overrides.status ?? 'active',
+      supersededAckSent: overrides.supersededAckSent ?? false,
+      kind: overrides.kind ?? 'onboarding',
+      gmailThreadId: overrides.gmailThreadId ?? 'thread-abc',
+      initialMessageId: overrides.initialMessageId ?? null,
+      lastActivityAt: overrides.lastActivityAt ?? new Date(),
+      therapist: { email: overrides.therapistEmail ?? 'therapist@example.com' },
+    };
+  }
+
+  it('returns the row when the inbound thread ID matches', async () => {
+    mockConvoFindMany.mockResolvedValueOnce([convoCandidate()]);
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: 'thread-abc' }),
+    );
+    expect(result).not.toBeNull();
+    expect(result?.id).toBe('convo-1');
+    expect(result?.status).toBe('active');
+    expect(result?.therapistEmail).toBe('therapist@example.com');
+  });
+
+  it('returns null when no candidates match', async () => {
+    mockConvoFindMany.mockResolvedValueOnce([]);
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: 'thread-unknown' }),
+    );
+    expect(result).toBeNull();
+  });
+
+  it('matches via In-Reply-To when threadId is absent', async () => {
+    mockConvoFindMany.mockResolvedValueOnce([
+      convoCandidate({ gmailThreadId: null, initialMessageId: '<original@spill.chat>' }),
+    ]);
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: '', inReplyTo: '<original@spill.chat>' }),
+    );
+    expect(result?.id).toBe('convo-1');
+  });
+
+  it('returns null when neither threadId nor In-Reply-To/References are present', async () => {
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: '', inReplyTo: undefined, references: undefined }),
+    );
+    // No DB query should fire if there's nothing deterministic to match on.
+    expect(mockConvoFindMany).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
+
+  it('prefers an active candidate over a superseded one even if both match', async () => {
+    // Both rows share the threadId (e.g. a therapist accidentally has
+    // overlapping rows from history). The matcher must NOT silently
+    // route the inbound through the terminal row.
+    mockConvoFindMany.mockResolvedValueOnce([
+      convoCandidate({
+        id: 'convo-stale',
+        status: 'superseded',
+        supersededAckSent: true,
+        lastActivityAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000),
+      }),
+      convoCandidate({
+        id: 'convo-active',
+        status: 'active',
+        lastActivityAt: new Date(),
+      }),
+    ]);
+
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: 'thread-abc' }),
+    );
+    expect(result?.id).toBe('convo-active');
+    expect(result?.status).toBe('active');
+  });
+
+  it('returns the superseded row when no active candidate exists', async () => {
+    mockConvoFindMany.mockResolvedValueOnce([
+      convoCandidate({ id: 'convo-superseded', status: 'superseded' }),
+    ]);
+    const result = await findMatchingTherapistConversation(
+      makeEmail({ threadId: 'thread-abc' }),
+    );
+    expect(result?.id).toBe('convo-superseded');
+    expect(result?.status).toBe('superseded');
+    // The dispatcher uses this signal to decide whether to fire the
+    // one-shot ack — the matcher just reports the row.
+    expect(result?.supersededAckSent).toBe(false);
   });
 });

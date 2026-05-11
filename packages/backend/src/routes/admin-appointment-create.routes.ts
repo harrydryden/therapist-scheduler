@@ -20,6 +20,7 @@ import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateUser } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { JustinTimeService } from '../services/justin-time.service';
+import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
 
 const createAppointmentSchema = z.object({
@@ -137,6 +138,13 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
               userEmail,
               tx
             );
+
+            // Supersede any active availability-collection conversation for
+            // this therapist — the booking now takes precedence. Inside the
+            // same tx as the appointment create so the two state changes
+            // commit together; a crash between commit and supersession would
+            // otherwise leave the availability agent free to keep talking.
+            await supersedeActiveTherapistConversationInTx(tx, therapistEntity.id, newRequest.id);
 
             return newRequest;
           },

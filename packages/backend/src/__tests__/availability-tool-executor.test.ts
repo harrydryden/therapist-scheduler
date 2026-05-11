@@ -37,16 +37,21 @@ jest.mock('../config', () => ({
   },
 }));
 
-const mockSendEmail = jest.fn(async () => ({
-  threadId: 'thread-default',
-  messageId: 'msg-default',
-}));
+// Typed with an explicit params arg so mock.calls[i][0] is typed
+// — lets tests assert on what the executor passed. The arrow-fn
+// indirection in the factory below is required because jest.mock is
+// hoisted above this declaration; the closure capture only resolves
+// at call time, after the const has been initialised.
+const mockSendEmail = jest.fn(
+  async (_params: { to: string; subject: string; body: string; threadId?: string }) => ({
+    threadId: 'thread-default',
+    messageId: 'msg-default',
+  }),
+);
 jest.mock('../services/email-processing.service', () => ({
   emailProcessingService: {
-    sendEmail: (...a: unknown[]) =>
-      (mockSendEmail as (...x: unknown[]) => Promise<{ threadId: string; messageId: string }>)(
-        ...a,
-      ),
+    sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
+      mockSendEmail(params),
   },
 }));
 

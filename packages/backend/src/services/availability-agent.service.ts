@@ -26,8 +26,10 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
+import { emailProcessingService } from './email-processing.service';
 import { runAvailabilityToolLoop, type AvailabilityAgentContext } from './agent-tool-loop';
 import { AvailabilityToolExecutorService } from './availability-tool-executor.service';
 import { truncateMessageContent } from './ai-conversation.service';
@@ -164,6 +166,119 @@ export class AvailabilityAgentService {
           ? `Collection started with ${result.totalToolErrors} tool error(s)`
           : 'Collection conversation started',
     };
+  }
+
+  /**
+   * Send the one-shot supersession acknowledgement on a conversation
+   * that's been marked `status='superseded'` by a real booking.
+   *
+   * The flag `supersededAckSent` is the dedup guard. We claim it via
+   * an atomic CAS (`updateMany` with `supersededAckSent: false +
+   * status: 'superseded'` as predicate) BEFORE the outbound send, so
+   * two concurrent dispatchers can't both send. If the send then
+   * fails for any reason, we roll the flag back so a later retry can
+   * re-claim — without rollback a flaky Gmail call would permanently
+   * silence the ack.
+   *
+   * The ack body comes from the admin-editable settings
+   * (`email.availabilitySupersededAck{Subject,Body}`) and is sent on
+   * the conversation's stored Gmail thread so it lands inline with
+   * the therapist's reply rather than starting a new thread.
+   *
+   * No-op outcomes (return `alreadySent: true`) for either: the ack
+   * was sent by a prior call, or the row is no longer 'superseded'
+   * (e.g. completed concurrently — rare, but possible).
+   */
+  async sendSupersessionAck(
+    conversationId: string,
+  ): Promise<{ success: boolean; alreadySent: boolean; emailSent: boolean }> {
+    // 1. Atomic claim. Only one caller wins; everyone else gets
+    //    alreadySent. The status predicate guards against acking a
+    //    row that flipped back to active or got completed mid-race.
+    const claim = await prisma.therapistConversation.updateMany({
+      where: { id: conversationId, supersededAckSent: false, status: 'superseded' },
+      data: { supersededAckSent: true },
+    });
+    if (claim.count === 0) {
+      logger.info(
+        { traceId: this.traceId, conversationId },
+        'availability-agent: supersession ack skipped — already sent or status changed',
+      );
+      return { success: true, alreadySent: true, emailSent: false };
+    }
+
+    // 2. Now fetch what we need to compose + send. Done after the
+    //    claim so we don't waste cycles when we'd lose the race.
+    const row = await prisma.therapistConversation.findUnique({
+      where: { id: conversationId },
+      select: {
+        gmailThreadId: true,
+        therapist: { select: { name: true, email: true } },
+      },
+    });
+    if (!row || !row.therapist) {
+      // Extremely unlikely — the row existed for the updateMany to
+      // succeed. Roll back the flag and surface the error.
+      await this.rollbackSupersessionAck(conversationId);
+      return { success: false, alreadySent: false, emailSent: false };
+    }
+
+    const therapistFirstName = firstName(row.therapist.name);
+    const settings = await getSettingValues<string>([
+      'email.availabilitySupersededAckSubject',
+      'email.availabilitySupersededAckBody',
+    ]);
+    const subjectTemplate = settings.get('email.availabilitySupersededAckSubject') ?? '';
+    const bodyTemplate = settings.get('email.availabilitySupersededAckBody') ?? '';
+    const subject = substituteVars(subjectTemplate, { therapistFirstName });
+    const body = substituteVars(bodyTemplate, { therapistFirstName });
+
+    try {
+      await emailProcessingService.sendEmail({
+        to: row.therapist.email,
+        subject: subject.toLowerCase().includes('spill') ? subject : `Spill - ${subject}`,
+        body,
+        threadId: row.gmailThreadId || undefined,
+      });
+    } catch (err) {
+      // 3. Send failed. Roll back the claim so a future inbound on
+      //    this thread can re-trigger the ack.
+      logger.error(
+        { traceId: this.traceId, conversationId, err },
+        'availability-agent: supersession ack send failed — rolling back claim',
+      );
+      await this.rollbackSupersessionAck(conversationId);
+      return { success: false, alreadySent: false, emailSent: false };
+    }
+
+    logger.info(
+      { traceId: this.traceId, conversationId, to: row.therapist.email },
+      'availability-agent: supersession ack sent',
+    );
+    return { success: true, alreadySent: false, emailSent: true };
+  }
+
+  /**
+   * Roll the supersededAckSent flag back to false. Used only when a
+   * claimed send fails — the row's status predicate keeps the rollback
+   * safe even if the row has since changed status (only flips back
+   * when status is still 'superseded' and the flag is currently true).
+   * Best-effort: if the rollback itself fails we log and continue, the
+   * worst case being the ack is permanently locked out (admin can flip
+   * manually via DB if needed).
+   */
+  private async rollbackSupersessionAck(conversationId: string): Promise<void> {
+    try {
+      await prisma.therapistConversation.updateMany({
+        where: { id: conversationId, status: 'superseded', supersededAckSent: true },
+        data: { supersededAckSent: false },
+      });
+    } catch (rollbackErr) {
+      logger.error(
+        { traceId: this.traceId, conversationId, rollbackErr },
+        'availability-agent: supersession ack rollback failed — manual intervention may be needed',
+      );
+    }
   }
 
   /**
@@ -341,7 +456,59 @@ ${safeContent}`;
   }
 }
 
+// ─── Supersession trigger ──────────────────────────────────────────────────
+
+/**
+ * Mark any active availability-collection conversations for this
+ * therapist as `superseded` because a real booking has just been
+ * created. Called from inside the transaction that creates the
+ * AppointmentRequest so the two state changes are atomic — without
+ * that, a crash between commit and supersession would leave the
+ * availability agent free to continue conversing while a booking is
+ * already in flight.
+ *
+ * Returns the number of rows superseded so callers can log it.
+ * Filters by `status: 'active'` so completed / abandoned / already-
+ * superseded rows are not re-stamped.
+ *
+ * The one-shot ack on inbound replies is a separate concern — see
+ * `AvailabilityAgentService.sendSupersessionAck`. This function only
+ * flips the lifecycle state; the ack fires later when the dispatcher
+ * sees an inbound on a superseded thread.
+ */
+export async function supersedeActiveTherapistConversationInTx(
+  tx: Prisma.TransactionClient,
+  therapistId: string,
+  supersededByAppointmentId: string,
+): Promise<number> {
+  const result = await tx.therapistConversation.updateMany({
+    where: { therapistId, status: 'active' },
+    data: {
+      status: 'superseded',
+      supersededAt: new Date(),
+      supersededByAppointmentId,
+    },
+  });
+  if (result.count > 0) {
+    logger.info(
+      { therapistId, supersededByAppointmentId, count: result.count },
+      'availability-agent: marked active conversations as superseded by booking',
+    );
+  }
+  return result.count;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Slim {var} substitution for email templates. Keeps the variable
+ * set small + explicit — no full Mustache here.
+ */
+function substituteVars(template: string, vars: Record<string, string>): string {
+  return template.replace(/\{(\w+)\}/g, (match, key) => {
+    return Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : match;
+  });
+}
 
 function parseConversationState(raw: unknown): AvailabilityConversationStateJson {
   if (!raw || typeof raw !== 'object') return { messages: [] };

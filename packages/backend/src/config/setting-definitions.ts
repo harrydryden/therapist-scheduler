@@ -571,6 +571,30 @@ Best wishes,
 
 Justin`,
   },
+  'email.availabilitySupersededAckSubject': {
+    category: 'emailTemplates',
+    label: 'Availability Conversation Superseded - Ack Subject',
+    description:
+      "One-shot acknowledgement subject sent when a therapist replies on an availability-collection thread that has been superseded by a real booking. After this one message we go silent on the thread.",
+    valueType: 'string',
+    defaultValue: 'Thanks - we have your booking in hand',
+  },
+  'email.availabilitySupersededAckBody': {
+    category: 'emailTemplates',
+    label: 'Availability Conversation Superseded - Ack Body',
+    description:
+      "One-shot acknowledgement body. Sent at most once per superseded conversation (gated by TherapistConversation.supersededAckSent). Should NOT mention specific session times — the booking agent handles that on its own thread. Variables: {therapistFirstName}.",
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+Thanks for your reply. A booking is now in progress for you, so I'll hand the conversation over to my colleague who's coordinating that specific session - they'll be in touch (or already have been) on a separate thread.
+
+No need to reply to this one; I'll go quiet here.
+
+Best wishes,
+
+Justin`,
+  },
   'email.slotConfirmationToTherapistBody': {
     category: 'emailTemplates',
     label: 'Slot Confirmation Request - Body',
