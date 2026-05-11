@@ -1,19 +1,35 @@
 /**
  * Weekly Mailing List Service
  *
- * Sends automated weekly promotional emails to subscribed users
- * when at least one therapist is available for booking.
+ * Sends a "come book a session" email to subscribed users. Two trigger
+ * conditions, evaluated on every periodic tick (≤1 hour latency):
  *
- * Eligibility criteria (all must be true):
- * - User is subscribed (Notion Users database)
- * - User has no upcoming appointments
- * - At least one therapist is available (Active + not frozen)
+ *   1. **Event-triggered** — at least one therapist has become active
+ *      since the last send. This fast-lane fires regardless of how many
+ *      therapists are currently available, so new arrivals don't sit
+ *      idle waiting for the threshold to be hit.
  *
- * Features:
- * - Configurable send day/time via admin settings
- * - Uses LockedTaskRunner for distributed lock management
- * - Tracks last send date to prevent duplicate sends
- * - Includes personalized unsubscribe links
+ *   2. **Weekly cadence (threshold-gated)** — the directory holds at
+ *      least `weeklyMailing.availableThreshold` bookable therapists.
+ *      This is the steady-state "we still have capacity, come back" send.
+ *
+ * Both branches respect a once-per-7-days ceiling so back-to-back
+ * therapist ingestions never produce back-to-back emails to the same user.
+ *
+ * Admins can also trigger a manual send from Admin Settings → Weekly
+ * Mailing. The button shows a preview (recipient count + rendered body)
+ * before confirming. forceSend() respects the 7-day ceiling by default;
+ * pass `skipAlreadySentCheck=true` only from internal tooling that needs
+ * to override it.
+ *
+ * Eligibility (per user) — all must be true:
+ *   - Subscribed
+ *   - Has no upcoming confirmed appointment
+ *   - At least one therapist is available platform-wide
+ *
+ * Voucher lifecycle is per-recipient and orthogonal to the trigger:
+ * the voucher section is rendered inside sendWeeklyEmail() based on
+ * each user's VoucherTracking row.
  */
 
 import { config } from '../config';
@@ -29,7 +45,6 @@ import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
 import { firstName } from '../utils/first-name';
-import { safeJsonParse } from '../utils/json-parser';
 import { WEEKLY_MAILING, APPOINTMENT_STATUS } from '../constants';
 
 /**
@@ -52,6 +67,11 @@ interface MailingListTherapist {
   name: string;
   areasOfFocus: string[];
 }
+
+/** Result of the trigger-evaluation step. */
+type SendDecision =
+  | { shouldSend: true; reason: 'new-therapist' | 'threshold' }
+  | { shouldSend: false; reason: 'no-therapists' | 'no-trigger' };
 
 const CHECK_INTERVAL_MS = WEEKLY_MAILING.CHECK_INTERVAL_MS;
 
@@ -107,29 +127,30 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
-   * Force send the weekly email to all eligible users
-   * Bypasses the day/time check but still requires enabled flag
-   * and checks if already sent this week (can be overridden)
+   * Force send the email to all eligible users. Used by the admin
+   * "Send to users now" button and the legacy /trigger endpoint.
+   *
+   * Respects the enabled flag and the 7-day ceiling by default; pass
+   * `skipAlreadySentCheck=true` only from internal tooling that has
+   * already vetted the call.
+   *
+   * Unlike the periodic tick, this skips the event/threshold gate —
+   * the admin has decided to send.
    */
   async forceSend(skipAlreadySentCheck: boolean = false): Promise<{ sent: number; failed: number; total: number }> {
     const checkId = `force-${Date.now().toString(36)}`;
     logger.info({ checkId, skipAlreadySentCheck }, 'Force sending weekly mailing');
 
-    // Check if enabled
     const enabled = await getSettingValue<boolean>('weeklyMailing.enabled');
     if (!enabled) {
       logger.warn({ checkId }, 'Weekly mailing is disabled - enable it first');
       throw new Error('Weekly mailing is disabled. Enable it in settings first.');
     }
 
-    // Check if already sent this week (unless overridden)
     if (!skipAlreadySentCheck && await this.hasAlreadySentThisWeek()) {
       logger.warn({ checkId }, 'Weekly email already sent this week');
-      throw new Error('Weekly email already sent this week. Wait until next week or use skipAlreadySentCheck.');
+      throw new Error('Email already sent this week. Wait for the 7-day window to pass or use skipAlreadySentCheck.');
     }
-
-    const availableTherapists = await this.getAvailableTherapists();
-    const newTherapists = await this.getNewTherapists(availableTherapists);
 
     const users = await this.getEligibleUsers();
     if (users.length === 0) {
@@ -137,16 +158,15 @@ class WeeklyMailingListService extends LockedPeriodicService {
       return { sent: 0, failed: 0, total: 0 };
     }
 
-    logger.info({ checkId, userCount: users.length, newTherapists: newTherapists.length }, 'Force sending weekly emails');
+    logger.info({ checkId, userCount: users.length }, 'Force sending weekly emails');
 
     const emailSettings = await this.fetchEmailSettings();
-    const newTherapistsSection = this.buildNewTherapistsSection(newTherapists);
 
     let sent = 0;
     let failed = 0;
     for (const user of users) {
       try {
-        await this.sendWeeklyEmail(user, emailSettings, newTherapistsSection);
+        await this.sendWeeklyEmail(user, emailSettings);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -154,9 +174,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
       }
     }
 
-    if (sent > 0) {
-      await this.recordKnownTherapists(availableTherapists);
-    }
     await this.markAsSent();
 
     logger.info({ checkId, sent, failed, total: users.length }, 'Force weekly mailing complete');
@@ -164,69 +181,101 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
-   * Main check function - determines if it's time to send and processes eligible users.
-   * Accepts isLockValid callback from LockedTaskRunner to abort if lock is lost mid-send.
+   * Build a preview of the next send for the admin UI: how many users
+   * would receive it, plus the rendered subject and body.
+   *
+   * Voucher section is rendered in its "new voucher" form because
+   * that's what a fresh recipient would see — the actual per-user
+   * reminder/strike variations aren't visualised. Goal is to show the
+   * shape of the message, not predict every recipient's variant.
+   */
+  async previewSend(): Promise<{
+    enabled: boolean;
+    recipientCount: number;
+    subjectPreview: string;
+    bodyPreview: string;
+  }> {
+    const enabled = (await getSettingValue<boolean>('weeklyMailing.enabled')) ?? false;
+    const emailSettings = await this.fetchEmailSettings();
+    const users = await this.getEligibleUsers();
+
+    const placeholderName = 'there';
+    const voucherSection = emailSettings.voucherEnabled
+      ? renderVoucherSection({
+          isReminder: false,
+          voucherExpiry: formatVoucherExpiry(
+            new Date(Date.now() + emailSettings.voucherExpiryDays * 24 * 60 * 60 * 1000),
+          ),
+        })
+      : '';
+
+    const subjectPreview = renderTemplate(emailSettings.subjectTemplate, { userName: placeholderName });
+    const bodyPreview = renderUnifiedBody(
+      emailSettings.bodyTemplate,
+      {
+        userName: placeholderName,
+        webAppUrl: emailSettings.webAppUrl,
+        unsubscribeUrl: '<unique unsubscribe link per recipient>',
+      },
+      voucherSection,
+    );
+
+    return {
+      enabled,
+      recipientCount: users.length,
+      subjectPreview,
+      bodyPreview,
+    };
+  }
+
+  /**
+   * Main check function — runs every CHECK_INTERVAL_MS under a
+   * distributed lock. Honours the once-per-7-days ceiling and only
+   * proceeds if a trigger condition is satisfied (new therapist
+   * since last send, or available count ≥ threshold).
    */
   private async checkAndSendWeeklyEmail(isLockValid: () => boolean): Promise<void> {
     const checkId = Date.now().toString(36);
     logger.info({ checkId }, 'Running weekly mailing check');
 
-    // Check if enabled
     const enabled = await getSettingValue<boolean>('weeklyMailing.enabled');
     if (!enabled) {
       logger.debug({ checkId }, 'Weekly mailing is disabled');
       return;
     }
 
-    // Check if it's the right day and hour
-    if (!(await this.shouldSendNow())) {
-      logger.debug({ checkId }, 'Not time to send weekly email');
-      return;
-    }
-
-    // Check if already sent this week
     if (await this.hasAlreadySentThisWeek()) {
       logger.debug({ checkId }, 'Weekly email already sent this week');
       return;
     }
 
-    // Get available therapists (also checks if any exist)
-    const availableTherapists = await this.getAvailableTherapists();
-    if (availableTherapists.length === 0) {
-      logger.info({ checkId }, 'No therapists available - skipping weekly mailing');
+    const decision = await this.evaluateSendDecision();
+    if (!decision.shouldSend) {
+      logger.debug({ checkId, reason: decision.reason }, 'Not sending — trigger conditions not met');
       return;
     }
 
-    // Determine which therapists are new since last email
-    const newTherapists = await this.getNewTherapists(availableTherapists);
-
-    // Get eligible users
     const users = await this.getEligibleUsers();
     if (users.length === 0) {
-      logger.info({ checkId }, 'No eligible users for weekly mailing');
-      // Still mark as sent to avoid rechecking every hour
+      logger.info({ checkId, trigger: decision.reason }, 'No eligible users — marking as sent to avoid rechecking every hour');
       await this.markAsSent();
       return;
     }
 
-    logger.info({ checkId, userCount: users.length, newTherapists: newTherapists.length }, 'Sending weekly emails');
+    logger.info({ checkId, trigger: decision.reason, userCount: users.length }, 'Sending weekly emails');
 
-    // Fetch email template settings once for the entire batch
     const emailSettings = await this.fetchEmailSettings();
-    const newTherapistsSection = this.buildNewTherapistsSection(newTherapists);
 
-    // Send emails
     let sent = 0;
     let failed = 0;
 
     for (const user of users) {
-      // Abort if we lost the distributed lock mid-send
       if (!isLockValid()) {
         logger.warn({ checkId, sent, failed, remaining: users.length - sent - failed }, 'Aborting weekly mailing - lock lost');
         break;
       }
       try {
-        await this.sendWeeklyEmail(user, emailSettings, newTherapistsSection);
+        await this.sendWeeklyEmail(user, emailSettings);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
@@ -234,49 +283,85 @@ class WeeklyMailingListService extends LockedPeriodicService {
       }
     }
 
-    if (sent > 0) {
-      await this.recordKnownTherapists(availableTherapists);
-    }
-    // Mark as sent for this week (even partial sends count to avoid double-send)
     await this.markAsSent();
 
-    logger.info({ checkId, sent, failed, total: users.length }, 'Weekly mailing complete');
+    logger.info({ checkId, sent, failed, total: users.length, trigger: decision.reason }, 'Weekly mailing complete');
   }
 
   /**
-   * Check if current time matches the configured send day and hour
+   * Decide whether the periodic tick should send. Two ways to qualify:
+   *
+   *   - **new-therapist**: ≥1 active therapist with `ingestedAt > lastSentAt`.
+   *     This is the event-triggered fast lane.
+   *   - **threshold**: the available count meets `weeklyMailing.availableThreshold`.
+   *
+   * If the directory is empty we always skip.
+   *
+   * NOTE: callers must have already verified the 7-day ceiling
+   * (hasAlreadySentThisWeek). This method only decides "given that
+   * we're allowed to send, do we want to?".
    */
-  private async shouldSendNow(): Promise<boolean> {
-    // Batch fetch schedule settings in a single query
-    const settingsMap = await getSettingValues([
-      'weeklyMailing.sendDay',
-      'weeklyMailing.sendHour',
-      'general.timezone',
+  private async evaluateSendDecision(): Promise<SendDecision> {
+    const [availableTherapists, thresholdRaw, lastSentAt] = await Promise.all([
+      this.getAvailableTherapists(),
+      getSettingValue<number>('weeklyMailing.availableThreshold'),
+      this.getLastSentAt(),
     ]);
-    const sendDay = settingsMap.get('weeklyMailing.sendDay') as number;
-    const sendHour = settingsMap.get('weeklyMailing.sendHour') as number;
-    const timezone = settingsMap.get('general.timezone') as string;
 
-    // Get current time in configured timezone
-    const now = new Date();
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      weekday: 'short',
-      hour: 'numeric',
-      hour12: false,
-    });
+    if (availableTherapists.length === 0) {
+      return { shouldSend: false, reason: 'no-therapists' };
+    }
 
-    const parts = formatter.formatToParts(now);
-    const dayName = parts.find(p => p.type === 'weekday')?.value;
-    const hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
+    const newCount = await this.countNewTherapistsSince(lastSentAt);
+    if (newCount > 0) {
+      return { shouldSend: true, reason: 'new-therapist' };
+    }
 
-    // Map day name to number
-    const dayMap: Record<string, number> = {
-      Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-    };
-    const currentDay = dayMap[dayName || 'Mon'] ?? 1;
+    const threshold = thresholdRaw ?? 5;
+    if (availableTherapists.length >= threshold) {
+      return { shouldSend: true, reason: 'threshold' };
+    }
 
-    return currentDay === sendDay && hour === sendHour;
+    return { shouldSend: false, reason: 'no-trigger' };
+  }
+
+  /**
+   * Count therapists who became active since the last send. First-ever
+   * run (lastSentAt=null) treats every therapist with a known
+   * ingestedAt as new — that's the initial "platform launch" send.
+   *
+   * Legacy rows with ingestedAt=null don't contribute to the event
+   * trigger (they predate the trigger mechanism); the threshold path
+   * still picks them up.
+   */
+  private async countNewTherapistsSince(lastSentAt: Date | null): Promise<number> {
+    try {
+      return await prisma.therapist.count({
+        where: {
+          active: true,
+          ingestedAt: lastSentAt ? { gt: lastSentAt } : { not: null },
+        },
+      });
+    } catch (error) {
+      logger.warn({ error }, 'Failed to count new therapists since last send');
+      return 0;
+    }
+  }
+
+  /**
+   * Read the last-sent timestamp from Redis. Returns null if never sent
+   * or if the key has expired (90-day TTL).
+   */
+  private async getLastSentAt(): Promise<Date | null> {
+    try {
+      const str = await redis.get(WEEKLY_MAILING.LAST_SEND_KEY);
+      if (!str) return null;
+      const dt = new Date(str);
+      return isNaN(dt.getTime()) ? null : dt;
+    } catch (error) {
+      logger.warn({ error }, 'Failed to read last-sent timestamp');
+      return null;
+    }
   }
 
   /**
@@ -321,7 +406,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
 
       // Calculate days difference using UTC midnight-to-midnight
       const daysDiff = Math.floor((nowUTC - lastSendUTC) / (1000 * 60 * 60 * 24));
-      return daysDiff < 6;
+      return daysDiff < WEEKLY_MAILING.MIN_INTERVAL_DAYS - 1;
     } catch (error) {
       logger.warn({ error }, 'Failed to check last send date');
       return false;
@@ -333,23 +418,14 @@ class WeeklyMailingListService extends LockedPeriodicService {
    */
   private async markAsSent(): Promise<void> {
     try {
-      // Store for 8 days to cover week + buffer
-      await redis.set(WEEKLY_MAILING.LAST_SEND_KEY, new Date().toISOString(), 'EX', 8 * 24 * 60 * 60);
+      await redis.set(
+        WEEKLY_MAILING.LAST_SEND_KEY,
+        new Date().toISOString(),
+        'EX',
+        WEEKLY_MAILING.LAST_SEND_TTL_SECONDS,
+      );
     } catch (error) {
       logger.error({ error }, 'Failed to mark weekly email as sent');
-    }
-  }
-
-  /**
-   * Check if at least one therapist is available for booking
-   */
-  private async isAnyTherapistAvailable(): Promise<boolean> {
-    try {
-      const available = await this.getAvailableTherapists();
-      return available.length > 0;
-    } catch (error) {
-      logger.error({ error }, 'Failed to check therapist availability');
-      return false;
     }
   }
 
@@ -374,59 +450,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
         areasOfFocus: t.areasOfFocus,
       }))
       .filter((t) => !unavailableSet.has(t.id));
-  }
-
-  /**
-   * Determine which therapists are new since the last weekly email.
-   * Compares against a Redis-stored set of known IDs but does NOT update it —
-   * call recordKnownTherapists() after a successful send so a failing batch
-   * doesn't silently mark new therapists as "known".
-   */
-  private async getNewTherapists(availableTherapists: MailingListTherapist[]): Promise<MailingListTherapist[]> {
-    try {
-      const storedJson = await redis.get(WEEKLY_MAILING.KNOWN_THERAPISTS_KEY);
-      const knownIdsArray = safeJsonParse<string[]>(storedJson, [], { context: 'known-therapists' });
-      const knownIds = new Set(knownIdsArray);
-      return availableTherapists.filter(t => !knownIds.has(t.id));
-    } catch (error) {
-      logger.warn({ error }, 'Failed to determine new therapists, treating all as known');
-      return [];
-    }
-  }
-
-  /**
-   * Persist the current available therapist IDs as the new "known" set.
-   * Called after a send batch so the next run only flags genuinely new arrivals.
-   */
-  private async recordKnownTherapists(availableTherapists: MailingListTherapist[]): Promise<void> {
-    try {
-      const currentIds = availableTherapists.map(t => t.id);
-      await redis.set(
-        WEEKLY_MAILING.KNOWN_THERAPISTS_KEY,
-        JSON.stringify(currentIds),
-        'EX',
-        30 * 24 * 60 * 60,
-      );
-    } catch (error) {
-      logger.warn({ error }, 'Failed to record known therapists set');
-    }
-  }
-
-  /**
-   * Build the "new therapists" section for the weekly email.
-   * Returns empty string if no new therapists.
-   */
-  private buildNewTherapistsSection(newTherapists: MailingListTherapist[]): string {
-    if (newTherapists.length === 0) return '';
-
-    const therapistLines = newTherapists.map(t => {
-      if (t.areasOfFocus.length > 0) {
-        return `• ${t.name} — specialises in ${t.areasOfFocus.slice(0, 3).join(', ').toLowerCase()}`;
-      }
-      return `• ${t.name}`;
-    });
-
-    return `\nWe have new therapists available:\n${therapistLines.join('\n')}\n`;
   }
 
   /**
@@ -501,11 +524,9 @@ class WeeklyMailingListService extends LockedPeriodicService {
   /**
    * Send weekly email to a single user.
    *
-   * Produces a single unified email with:
-   * 1. New therapists section (if any new therapists since last email)
-   * 2. Voucher section — either a new code or a reminder about an existing one
-   *
-   * The voucher code is never shown as text; it is only embedded in the booking URL.
+   * Produces a single unified email with the voucher section — either
+   * a new code or a reminder about an existing one. The voucher code
+   * is never shown as text; it is only embedded in the booking URL.
    *
    * Voucher lifecycle (use-it-or-lose-it):
    * - No tracking or expired-and-used: issue new code
@@ -516,7 +537,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
   private async sendWeeklyEmail(
     user: MailingListUser,
     emailSettings: EmailSettings,
-    newTherapistsSection: string,
   ): Promise<void> {
     const unsubscribeUrl = generateUnsubscribeUrl(user.email, config.backendUrl);
 
@@ -524,7 +544,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
       await this.renderAndSend(user, emailSettings, {
         webAppUrl: emailSettings.webAppUrl,
         unsubscribeUrl,
-        newTherapistsSection,
         voucherSection: '',
       });
       logger.info({ email: user.email }, 'Sent weekly mailing email (no voucher)');
@@ -551,7 +570,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
       await this.renderAndSend(user, emailSettings, {
         webAppUrl: voucherWebAppUrl,
         unsubscribeUrl,
-        newTherapistsSection,
         voucherSection: renderVoucherSection({ isReminder: true, voucherExpiry: formatVoucherExpiry(expiresAt), daysRemaining }),
       });
 
@@ -579,7 +597,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       logger.info({ email: emailLower }, 'Voucher was used, strike count reset');
     }
 
-    await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, newTherapistsSection, tracking);
+    await this.sendNewVoucherEmail(user, emailSettings, unsubscribeUrl, tracking);
   }
 
   /**
@@ -594,7 +612,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
     user: MailingListUser,
     emailSettings: EmailSettings,
     unsubscribeUrl: string,
-    newTherapistsSection: string,
     tracking: { id: string; strikeCount: number } | null,
   ): Promise<void> {
     const emailLower = user.email.toLowerCase();
@@ -617,7 +634,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
     await this.renderAndSend(user, emailSettings, {
       webAppUrl: voucherResult.url,
       unsubscribeUrl,
-      newTherapistsSection,
       voucherSection: renderVoucherSection({ isReminder: false, voucherExpiry: formatVoucherExpiry(voucherResult.expiresAt) }),
     });
 
@@ -637,7 +653,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
     sections: {
       webAppUrl: string;
       unsubscribeUrl: string;
-      newTherapistsSection: string;
       voucherSection: string;
     },
   ): Promise<void> {
@@ -646,7 +661,6 @@ class WeeklyMailingListService extends LockedPeriodicService {
     const body = renderUnifiedBody(
       emailSettings.bodyTemplate,
       { userName: userFirstName, webAppUrl: sections.webAppUrl, unsubscribeUrl: sections.unsubscribeUrl },
-      sections.newTherapistsSection,
       sections.voucherSection,
     );
     await emailProcessingService.sendEmail({ to: user.email, subject, body });
@@ -721,25 +735,27 @@ interface EmailSettings {
 }
 
 /**
- * Format a date for display in emails (e.g., "2 April 2026")
- */
-/**
  * Render the unified weekly email body.
  *
- * The two-pass design avoids double-escaping the system-generated sections:
- * renderTemplate HTML-escapes its variables, but the email body is also passed
- * through convertToHtml downstream which escapes again. So we render user-supplied
- * variables via renderTemplate (escaped once) and inject the section strings
- * via plain replacement (escaped only by convertToHtml).
+ * The two-pass design avoids double-escaping the system-generated voucher
+ * section: renderTemplate HTML-escapes its variables, but the email body is
+ * also passed through convertToHtml downstream which escapes again. So we
+ * render user-supplied variables via renderTemplate (escaped once) and
+ * inject the voucher section via plain replacement (escaped only by
+ * convertToHtml).
+ *
+ * `{newTherapistsSection}` is kept as a no-op substitution so any
+ * customer-customised template that still references it keeps rendering
+ * cleanly — the section itself was retired when the trigger model moved
+ * from "weekly digest of new arrivals" to "we have therapists, come book".
  */
 function renderUnifiedBody(
   template: string,
   variables: TemplateVariables,
-  newTherapistsSection: string,
   voucherSection: string,
 ): string {
   return renderTemplate(template, variables)
-    .replace(/\{newTherapistsSection\}/g, newTherapistsSection)
+    .replace(/\{newTherapistsSection\}/g, '')
     .replace(/\{voucherSection\}/g, voucherSection);
 }
 

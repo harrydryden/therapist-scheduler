@@ -1,8 +1,17 @@
 import { useState, useMemo, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { getSettings, updateSetting, resetSetting, getSlackStatus, sendSlackTest, resetSlackCircuit } from '../api/client';
-import type { SlackStatus } from '../api/client';
+import {
+  getSettings,
+  updateSetting,
+  resetSetting,
+  getSlackStatus,
+  sendSlackTest,
+  resetSlackCircuit,
+  getWeeklyMailingPreview,
+  triggerWeeklyMailing,
+} from '../api/client';
+import type { SlackStatus, WeeklyMailingPreview } from '../api/client';
 import type { SystemSetting, SettingCategory } from '../types';
 import { COUNTRIES } from '@therapist-scheduler/shared';
 import { getAdminId } from '../utils/admin-id';
@@ -327,6 +336,138 @@ function StatusCard({ label, value, variant }: { label: string; value: string; v
   );
 }
 
+// ─── Weekly Mailing — Send to Users Panel ────────────────────────────────────
+
+/**
+ * Manual "Send to users now" panel surfaced on the Weekly Mailing tab.
+ *
+ * Two-step flow: click "Send to users now" → fetch a preview (recipient
+ * count + rendered subject/body) → show confirm dialog → on confirm, hit
+ * the trigger endpoint. The preview step is the safety guard against
+ * "I meant to look at it first" — the dialog is the safety guard against
+ * fat-finger clicks. Backend rate-limit (1/hour) is the last line of
+ * defence.
+ */
+function WeeklyMailingSendPanel() {
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  const previewMutation = useMutation({
+    mutationFn: getWeeklyMailingPreview,
+    onSuccess: () => setPreviewOpen(true),
+  });
+
+  const triggerMutation = useMutation({
+    mutationFn: triggerWeeklyMailing,
+    onSuccess: () => setPreviewOpen(false),
+  });
+
+  const preview: WeeklyMailingPreview | undefined = previewMutation.data;
+  const isPending = previewMutation.isPending || triggerMutation.isPending;
+
+  const handleOpen = () => {
+    triggerMutation.reset();
+    previewMutation.mutate();
+  };
+
+  const handleConfirm = () => {
+    if (!triggerMutation.isPending) triggerMutation.mutate();
+  };
+
+  const handleCancel = () => {
+    if (triggerMutation.isPending) return;
+    setPreviewOpen(false);
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-100">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-base font-semibold text-slate-900">Send to users now</h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Send the email immediately to every eligible subscriber. The
+              periodic check normally fires when a new therapist is added,
+              or weekly when the directory is above the threshold — use
+              this button only for one-off sends.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleOpen}
+            disabled={isPending}
+            className="flex-shrink-0 px-4 py-2 text-sm font-medium bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50"
+          >
+            {previewMutation.isPending ? 'Loading preview...' : 'Send to users now'}
+          </button>
+        </div>
+      </div>
+
+      {previewMutation.isError && (
+        <div className="px-6 py-3 bg-red-50 border-b border-red-100">
+          <p className="text-sm text-red-700">
+            Failed to load preview: {previewMutation.error instanceof Error ? previewMutation.error.message : 'Unknown error'}
+          </p>
+        </div>
+      )}
+
+      {triggerMutation.isSuccess && triggerMutation.data && (
+        <div className="px-6 py-3 bg-emerald-50 border-b border-emerald-100">
+          <p className="text-sm text-emerald-700">
+            Sent to {triggerMutation.data.sent} of {triggerMutation.data.total} eligible users
+            {triggerMutation.data.failed > 0 ? ` (${triggerMutation.data.failed} failed)` : ''}.
+          </p>
+        </div>
+      )}
+
+      {previewOpen && preview && (
+        <ConfirmDialog
+          title="Send weekly mailing now?"
+          confirmLabel={`Send to ${preview.recipientCount} ${preview.recipientCount === 1 ? 'user' : 'users'}`}
+          confirmVariant="primary"
+          isPending={triggerMutation.isPending}
+          disabled={preview.recipientCount === 0 || !preview.enabled}
+          onConfirm={handleConfirm}
+          onCancel={handleCancel}
+        >
+          <div className="space-y-3">
+            {!preview.enabled && (
+              <div className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-sm text-amber-800">
+                Weekly mailing is currently disabled. Enable the
+                <span className="font-medium"> &ldquo;Enable Weekly Mailing&rdquo; </span>
+                setting first, or this send will fail.
+              </div>
+            )}
+            <p className="text-sm text-slate-600">
+              This will send to <strong>{preview.recipientCount}</strong> eligible{' '}
+              {preview.recipientCount === 1 ? 'user' : 'users'} — subscribed and without an upcoming confirmed appointment.
+            </p>
+
+            <div>
+              <p className="text-xs font-medium text-slate-500 mb-1">Subject</p>
+              <div className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-sm text-slate-800 font-mono">
+                {preview.subjectPreview}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-slate-500 mb-1">Body</p>
+              <pre className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-xs text-slate-700 max-h-64 overflow-y-auto whitespace-pre-wrap font-mono leading-relaxed">
+                {preview.bodyPreview}
+              </pre>
+            </div>
+
+            {triggerMutation.isError && (
+              <div className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 text-sm text-red-700">
+                {triggerMutation.error instanceof Error ? triggerMutation.error.message : 'Failed to send'}
+              </div>
+            )}
+          </div>
+        </ConfirmDialog>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Settings Page ──────────────────────────────────────────────────────
 
 export default function AdminSettingsPage() {
@@ -485,6 +626,10 @@ export default function AdminSettingsPage() {
           <div className="space-y-6">
             {(activeCategory === 'all' || activeCategory === 'general') && (
               <CountriesPanel />
+            )}
+
+            {(activeCategory === 'all' || activeCategory === 'weeklyMailing') && (
+              <WeeklyMailingSendPanel />
             )}
 
             {showSlackDiagnostics && (
