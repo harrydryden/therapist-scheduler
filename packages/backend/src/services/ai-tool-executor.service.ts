@@ -91,17 +91,27 @@ function hashToolCall(appointmentId: string, toolName: string, input: unknown): 
 }
 
 /**
- * Check if a tool call was already executed (for idempotency)
- * Returns true if already executed, false if new
+ * Check if a tool call was already executed (for idempotency).
+ * Returns true if already executed, false if new.
+ *
+ * Fail-closed on Redis unavailability: when we can't read the idempotency
+ * key we assume the tool already ran. The previous fail-open semantics
+ * meant a Redis flap during a turn could send duplicate emails to the
+ * therapist / client — recoverable but visible to real users. Failing
+ * closed instead pauses tool activity until Redis recovers; the next
+ * inbound email picks the conversation back up cleanly. Logged at error
+ * level so an outage isn't silent.
  */
 async function wasToolExecuted(hash: string): Promise<boolean> {
   try {
     const result = await redis.get(`${TOOL_EXECUTION_PREFIX}${hash}`);
     return result !== null;
   } catch (err) {
-    // Redis unavailable - allow execution but log warning
-    logger.warn({ err, hash }, 'Redis unavailable for idempotency check - allowing execution');
-    return false;
+    logger.error(
+      { err, hash },
+      'Redis unavailable for idempotency check — failing closed (skipping tool to avoid duplicate)',
+    );
+    return true;
   }
 }
 

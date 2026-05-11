@@ -1126,6 +1126,13 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
   // Admin Appointments Management Endpoints
   // ============================================
 
+  // Safety cap for admin dropdown queries. The frontend filters client-side
+  // so the dropdown UX needs the full list in memory; the cap exists only
+  // so a runaway dataset can't OOM the response. Set generously above any
+  // realistic workspace size — when we hit it, log a warning so the
+  // truncation is visible instead of silent.
+  const DROPDOWN_LIMIT = 5000;
+
   /**
    * GET /api/admin/appointments/users
    * List all users from PostgreSQL for dropdown population
@@ -1145,8 +1152,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             odId: true,
           },
           orderBy: { name: 'asc' },
-          take: 1000, // Cap results to prevent unbounded queries
+          take: DROPDOWN_LIMIT,
         });
+
+        if (users.length >= DROPDOWN_LIMIT) {
+          logger.warn(
+            { requestId, limit: DROPDOWN_LIMIT },
+            'User dropdown hit the safety cap — admin sees a truncated list. Time to switch to a typeahead-search endpoint.',
+          );
+        }
 
         return sendSuccess(reply, users);
       } catch (err) {
@@ -1176,8 +1190,15 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             odId: true,
           },
           orderBy: { name: 'asc' },
-          take: 1000, // Cap results to prevent unbounded queries
+          take: DROPDOWN_LIMIT,
         });
+
+        if (therapists.length >= DROPDOWN_LIMIT) {
+          logger.warn(
+            { requestId, limit: DROPDOWN_LIMIT },
+            'Therapist dropdown hit the safety cap — admin sees a truncated list. Time to switch to a typeahead-search endpoint.',
+          );
+        }
 
         return sendSuccess(reply, therapists);
       } catch (err) {

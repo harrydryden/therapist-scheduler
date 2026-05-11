@@ -196,8 +196,18 @@ class SSEService {
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
       for (const [id, conn] of this.connections) {
+        const socket = conn.reply.raw;
+        // Proactively detect sockets the OS has closed under us — `write`
+        // on a destroyed/ended stream returns false rather than throwing,
+        // which the catch below would miss. Without this check, dead
+        // connections accumulate against the MAX_CONNECTIONS cap until a
+        // write actually errors (which it may never do).
+        if (socket.destroyed || socket.writableEnded || !socket.writable) {
+          this.removeConnection(id);
+          continue;
+        }
         try {
-          conn.reply.raw.write(': heartbeat\n\n');
+          socket.write(': heartbeat\n\n');
         } catch {
           // Dead connection — remove it and its EventEmitter listener
           this.removeConnection(id);
