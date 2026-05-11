@@ -30,7 +30,14 @@ export interface ToolExecutionResult {
   toolName: string;
   error?: string;
   skipped?: boolean;
-  skipReason?: 'human_control' | 'idempotent';
+  // 'human_control'        — admin has taken over (both agents)
+  // 'idempotent'           — same tool call already executed within TTL (both agents)
+  // 'conversation_inactive'— the parent entity (TherapistConversation) is no longer
+  //                          'active' (completed / superseded / abandoned). Only set
+  //                          by the availability-collection executor; the booking
+  //                          executor never returns this because the equivalent
+  //                          condition (cancelled appointment) is gated upstream.
+  skipReason?: 'human_control' | 'idempotent' | 'conversation_inactive';
   /** Action to record in checkpoint after successful execution */
   checkpointAction?: ConversationAction;
   /** Who the email was sent to (for checkpoint context) */
