@@ -26,7 +26,7 @@ import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
 import { auditEventService } from '../services/audit-event.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
-import { resetAppointmentToolCount } from '../services/ai-tool-executor.service';
+import { resetAppointmentToolCount } from '../services/appointment-tool-counter';
 
 // Schema for listing all appointments (admin page)
 const listAllAppointmentsSchema = z.object({

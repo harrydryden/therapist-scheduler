@@ -28,6 +28,10 @@ import type { AppointmentStatus } from '../constants';
 import { prependTrackingCodeToSubject } from '../services/tracking-code.service';
 import { emailQueueService } from './email-queue.service';
 import { redis } from '../utils/redis';
+import {
+  incrementAppointmentToolCount,
+  peekAppointmentToolCount,
+} from './appointment-tool-counter';
 import { TOOL_EXECUTION } from '../constants';
 import type { ConversationAction } from '../services/conversation-checkpoint.service';
 import type { SchedulingContext, ToolExecutionResult } from './scheduling-context.service';
@@ -59,59 +63,11 @@ import {
 
 const TOOL_EXECUTION_PREFIX = TOOL_EXECUTION.PREFIX;
 const TOOL_EXECUTION_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
-const TOOL_COUNT_PREFIX = TOOL_EXECUTION.COUNT_PREFIX;
-const TOOL_COUNT_TTL_SECONDS = TOOL_EXECUTION.COUNT_TTL_SECONDS;
 const PER_APPOINTMENT_LIMIT = TOOL_EXECUTION.PER_APPOINTMENT_LIMIT;
 
-/**
- * Increment the per-appointment tool-call counter and return the new
- * value. Redis-unavailable falls open (returns 0) so a Redis flap
- * doesn't paralyse the agent — the per-turn cap still bounds the loop.
- */
-async function incrementAppointmentToolCount(appointmentId: string): Promise<number> {
-  try {
-    const key = `${TOOL_COUNT_PREFIX}${appointmentId}`;
-    const count = await redis.incr(key);
-    // EXPIRE on every INCR is cheap; ensures the TTL never lapses for
-    // a long-running appointment and ages out for archived ones.
-    await redis.expire(key, TOOL_COUNT_TTL_SECONDS);
-    return count;
-  } catch (err) {
-    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count');
-    return 0;
-  }
-}
-
-/**
- * Reset the per-appointment tool-call counter. Used by the bulk-release
- * operator path so a freshly-released appointment doesn't immediately
- * re-trip the ceiling on its next tool call. Redis-unavailable is
- * non-fatal — log and continue so the wider release still succeeds.
- */
-export async function resetAppointmentToolCount(appointmentId: string): Promise<void> {
-  try {
-    await redis.del(`${TOOL_COUNT_PREFIX}${appointmentId}`);
-  } catch (err) {
-    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count reset');
-  }
-}
-
-/**
- * Read the per-appointment tool-call counter without incrementing it.
- * Used for the pre-flight ceiling check now that the counter measures
- * completed tool calls rather than attempts — the increment moved to
- * the success path. Falls open to 0 on Redis failure (same convention
- * as the increment helper) so a Redis flap doesn't paralyse the agent.
- */
-async function peekAppointmentToolCount(appointmentId: string): Promise<number> {
-  try {
-    const value = await redis.get(`${TOOL_COUNT_PREFIX}${appointmentId}`);
-    return value ? Number(value) : 0;
-  } catch (err) {
-    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count peek');
-    return 0;
-  }
-}
+// Per-appointment tool-call counter helpers live in their own module so
+// the operator routes (e.g. bulk-release) can import the reset path
+// without pulling the entire executor module graph.
 
 /**
  * Generate a deterministic hash for a tool call to enable idempotency checking
