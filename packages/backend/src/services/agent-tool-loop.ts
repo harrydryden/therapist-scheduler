@@ -34,6 +34,7 @@ import {
   wouldRegress,
 } from '../services/conversation-checkpoint.service';
 import { truncateMessageContent } from './ai-conversation.service';
+import { auditEventService } from './audit-event.service';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
 import {
@@ -458,6 +459,16 @@ export async function runToolLoop(
           content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
           is_error: false,
         });
+        // Audit the short-circuit. The executor never sees this tool_use
+        // block, so without this the only signal that something was
+        // suppressed lives in the assistant message; the audit log lets a
+        // post-incident triage break "51/50" down by bucket.
+        auditEventService.logToolExecuted(context.appointmentRequestId, {
+          traceId,
+          toolName: toolCall.name,
+          result: 'skipped',
+          bucket: 'turn_budget_exhausted',
+        });
         continue;
       }
 
@@ -476,6 +487,12 @@ export async function runToolLoop(
           content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
           is_error: false,
         });
+        auditEventService.logToolExecuted(context.appointmentRequestId, {
+          traceId,
+          toolName: toolCall.name,
+          result: 'skipped',
+          bucket: 'same_hash_aborted',
+        });
         continue;
       }
 
@@ -488,6 +505,12 @@ export async function runToolLoop(
           tool_use_id: toolCall.id,
           content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
           is_error: false,
+        });
+        auditEventService.logToolExecuted(context.appointmentRequestId, {
+          traceId,
+          toolName: toolCall.name,
+          result: 'skipped',
+          bucket: 'same_hash_blocked',
         });
         continue;
       }
