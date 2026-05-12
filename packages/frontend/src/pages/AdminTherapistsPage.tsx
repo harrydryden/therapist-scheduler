@@ -6,6 +6,7 @@ import {
   getAdminTherapist,
   updateAdminTherapist,
   unfreezeAdminTherapist,
+  freezeAdminTherapist,
 } from '../api/admin-therapists';
 import type {
   TherapistListItem,
@@ -144,6 +145,11 @@ function TherapistDetailDrawer({ therapistId, onClose }: DetailDrawerProps) {
                 queryClient.invalidateQueries({ queryKey: ['admin-therapists'] });
                 showToast('Therapist unfrozen', 'success');
               }}
+              onFrozen={() => {
+                queryClient.invalidateQueries({ queryKey: ['admin-therapist', therapistId] });
+                queryClient.invalidateQueries({ queryKey: ['admin-therapists'] });
+                showToast('Therapist frozen', 'success');
+              }}
             />
           )}
         </div>
@@ -158,9 +164,10 @@ interface DetailEditorProps {
   onSaved: () => void;
   onError: (err: unknown) => void;
   onUnfrozen: () => void;
+  onFrozen: () => void;
 }
 
-function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: DetailEditorProps) {
+function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFrozen }: DetailEditorProps) {
   // Local edit state. Initialised from the server payload and re-synced when
   // the server data changes (e.g. after a save invalidates the query).
   const [draft, setDraft] = useState<TherapistUpdate>({});
@@ -187,6 +194,12 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
   const unfreezeMutation = useMutation({
     mutationFn: () => unfreezeAdminTherapist(therapistId),
     onSuccess: onUnfrozen,
+    onError,
+  });
+
+  const freezeMutation = useMutation({
+    mutationFn: () => freezeAdminTherapist(therapistId),
+    onSuccess: onFrozen,
     onError,
   });
 
@@ -414,15 +427,35 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen }: Detai
                 </div>
               </dl>
             </div>
-            {data.bookingStatus.frozen && !data.bookingStatus.hasConfirmedBooking && (
-              <button
-                type="button"
-                onClick={() => unfreezeMutation.mutate()}
-                disabled={unfreezeMutation.isPending}
-                className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded hover:bg-amber-200 disabled:opacity-50"
-              >
-                {unfreezeMutation.isPending ? 'Unfreezing…' : 'Force unfreeze'}
-              </button>
+            {/* Freeze / unfreeze controls. Visible on every active therapist
+                so an admin can manually pin the state when the auto logic has
+                gone the wrong way (e.g. an awaiting-therapist conversation
+                that's gone past the inactivity threshold). When frozen due
+                to a confirmed booking, unfreezing alone won't help —
+                that's the note below. */}
+            {data.active && (
+              <div className="flex gap-2">
+                {!data.bookingStatus.frozen && (
+                  <button
+                    type="button"
+                    onClick={() => freezeMutation.mutate()}
+                    disabled={freezeMutation.isPending}
+                    className="px-3 py-1.5 text-xs font-medium text-blue-800 bg-blue-100 border border-blue-200 rounded hover:bg-blue-200 disabled:opacity-50"
+                  >
+                    {freezeMutation.isPending ? 'Freezing…' : 'Force freeze'}
+                  </button>
+                )}
+                {data.bookingStatus.frozen && !data.bookingStatus.hasConfirmedBooking && (
+                  <button
+                    type="button"
+                    onClick={() => unfreezeMutation.mutate()}
+                    disabled={unfreezeMutation.isPending}
+                    className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded hover:bg-amber-200 disabled:opacity-50"
+                  >
+                    {unfreezeMutation.isPending ? 'Unfreezing…' : 'Force unfreeze'}
+                  </button>
+                )}
+              </div>
             )}
           </div>
           {data.bookingStatus.hasConfirmedBooking && data.bookingStatus.frozen && (

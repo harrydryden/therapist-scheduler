@@ -116,3 +116,13 @@ export async function unfreezeAdminTherapist(id: string) {
     'unfreeze',
   );
 }
+
+export async function freezeAdminTherapist(id: string) {
+  return unwrap(
+    await fetchAdminApi<{ frozen: boolean }>(`/admin/therapists/${id}/freeze`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+    'freeze',
+  );
+}

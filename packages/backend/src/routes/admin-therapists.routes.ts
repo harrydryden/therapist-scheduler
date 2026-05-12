@@ -383,6 +383,73 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
   );
 
   /**
+   * POST /api/admin/therapists/:id/freeze — set the freeze marker on the
+   * therapist booking status row so they stop accepting new requests.
+   *
+   * Manual escalation: complements the existing /unfreeze endpoint so an
+   * admin can pin a therapist into the frozen state when the auto-unfreeze
+   * logic has incorrectly released them (e.g. a conversation we're still
+   * waiting on the therapist to reply to has gone past the inactivity
+   * threshold).
+   *
+   * Upserts because a therapist with no prior bookings has no
+   * therapist_booking_status row yet. The id field tracks the booking
+   * handle (legacy notionId or post-Notion uuid).
+   */
+  fastify.post<{ Params: { id: string } }>(
+    '/api/admin/therapists/:id/freeze',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params;
+
+      try {
+        const therapist = await prisma.therapist.findUnique({
+          where: { id },
+          select: { id: true, notionId: true, name: true },
+        });
+        if (!therapist) {
+          return Errors.notFound(reply, 'Therapist');
+        }
+
+        const handle = therapist.notionId ?? therapist.id;
+        const now = new Date();
+
+        await prisma.therapistBookingStatus.upsert({
+          where: { id: handle },
+          create: {
+            id: handle,
+            therapistName: therapist.name ?? '',
+            uniqueRequestCount: 0,
+            frozenAt: now,
+            frozenUntil: null,
+          },
+          update: {
+            frozenAt: now,
+            frozenUntil: null,
+          },
+        });
+
+        logger.info(
+          { therapistId: id, notionId: therapist.notionId, name: therapist.name },
+          'Admin force-froze therapist',
+        );
+
+        return sendSuccess(reply, { frozen: true });
+      } catch (err) {
+        logger.error({ err, therapistId: id }, 'Failed to freeze therapist');
+        return Errors.internal(reply, 'Failed to freeze therapist');
+      }
+    },
+  );
+
+  /**
    * POST /api/admin/therapists/:id/unfreeze — clear the freeze marker on
    * the therapist booking status row so they accept new requests again.
    *
