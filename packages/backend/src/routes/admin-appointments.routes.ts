@@ -6,6 +6,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
+import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { emailProcessingService } from '../services/email-processing.service';
 import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../services/appointment-lifecycle.service';
@@ -27,6 +28,27 @@ import { sseService } from '../services/sse.service';
 import { auditEventService } from '../services/audit-event.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { resetAppointmentToolCount } from '../services/appointment-tool-counter';
+
+/**
+ * Build the lastMessagePreview field shape from a raw JSONB extraction.
+ *
+ * The dashboard list endpoint pulls the last conversation message's role
+ * and a snippet of its content via Postgres JSONB ops (avoiding a full
+ * conversationState blob load). This helper normalises the row into the
+ * shape the API returns, collapsing assistant→agent, dropping admin
+ * system notes (they're not "messages" in the conversational sense),
+ * and trimming whitespace + bracketed system markers from snippets.
+ */
+function buildLastMessagePreview(
+  row: { role: string | null; content: string | null } | undefined,
+): { role: 'agent' | 'inbound' | 'admin'; snippet: string } | null {
+  if (!row || !row.role || !row.content) return null;
+  const trimmed = row.content.replace(/\s+/g, ' ').trim();
+  if (!trimmed) return null;
+  const role: 'agent' | 'inbound' | 'admin' =
+    row.role === 'assistant' ? 'agent' : row.role === 'admin' ? 'admin' : 'inbound';
+  return { role, snippet: trimmed };
+}
 
 // Schema for listing all appointments (admin page)
 const listAllAppointmentsSchema = z.object({
@@ -174,6 +196,23 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           prisma.appointmentRequest.count({ where }),
         ]);
 
+        // Last-message preview per appointment. Pulled via a Postgres JSONB
+        // path expression so we don't have to load the whole conversationState
+        // blob (the FIX #21 perf optimisation below). Returns { id, role, content }
+        // per row; `LEFT(..., 240)` caps the snippet at the DB layer.
+        const lastMessages = appointments.length > 0
+          ? await prisma.$queryRaw<Array<{ id: string; role: string | null; content: string | null }>>`
+              SELECT id,
+                     conversation_state->'messages'->-1->>'role' AS role,
+                     LEFT(conversation_state->'messages'->-1->>'content', 240) AS content
+              FROM appointment_requests
+              WHERE id IN (${Prisma.join(appointments.map((a) => a.id))})
+            `
+          : [];
+        const lastMessageById = new Map(
+          lastMessages.map((m) => [m.id, { role: m.role, content: m.content }]),
+        );
+
         // FIX #21: Use denormalized columns directly — no need to parse the full blob
         const healthThresholds = await getHealthThresholds();
         const appointmentsWithMeta = appointments.map((apt) => {
@@ -213,6 +252,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
             closureRecommendedReason: apt.closureRecommendedReason,
             closureRecommendationActioned: apt.closureRecommendationActioned,
             reschedulingInProgress: apt.reschedulingInProgress,
+            lastMessagePreview: buildLastMessagePreview(lastMessageById.get(apt.id)),
           };
         });
 

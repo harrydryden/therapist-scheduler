@@ -170,6 +170,23 @@ export interface AppointmentListItem {
   closureRecommendedReason: string | null;
   closureRecommendationActioned: boolean;
   reschedulingInProgress: boolean;
+  /**
+   * Snippet of the most recent conversation message, surfaced on the
+   * dashboard list rows. Server pulls this from conversationState via a
+   * Postgres JSONB path expression so the full blob isn't loaded; null
+   * when the conversation has no messages yet (e.g. brand-new
+   * appointment) or when the content is empty after trimming.
+   */
+  lastMessagePreview: {
+    /**
+     * 'agent' for the AI assistant, 'admin' for in-band admin notes,
+     * 'inbound' for any client- or therapist-originated message
+     * (the conversation log doesn't distinguish those at the role layer).
+     */
+    role: 'agent' | 'inbound' | 'admin';
+    /** First ~240 characters of the message content, whitespace-collapsed. */
+    snippet: string;
+  } | null;
 }
 
 export interface AppointmentSummary {
