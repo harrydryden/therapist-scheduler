@@ -72,13 +72,24 @@ const RowContent = memo(function RowContent({
     annotations.push({ label: 'Human control', tone: 'slate' });
   }
 
+  // Latest message preview labels are short prefixes — keeps the column
+  // scannable. Empty snippet falls back to a dash.
+  const latestLabel =
+    appointment.lastMessagePreview === null
+      ? null
+      : appointment.lastMessagePreview.role === 'agent'
+        ? 'Agent'
+        : appointment.lastMessagePreview.role === 'admin'
+          ? 'Admin'
+          : 'Inbound';
+
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={isSelected}
       aria-label={`Open appointment for ${appointment.userName || appointment.userEmail} with ${appointment.therapistName}`}
-      className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.2fr)] gap-3 items-center transition-colors ${
+      className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_minmax(0,2.4fr)] gap-3 items-center transition-colors ${
         isSelected ? 'bg-spill-blue-50 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
       }`}
       style={{ height: APPOINTMENT_ROW_HEIGHT }}
@@ -136,9 +147,36 @@ const RowContent = memo(function RowContent({
       </span>
 
       {/* Activity */}
-      <span className="min-w-0 text-right">
+      <span className="min-w-0">
         <span className="block text-sm text-slate-700">{appointment.messageCount} msgs</span>
         <span className="block text-xs text-slate-500">{lastActivity}</span>
+      </span>
+
+      {/* Latest message */}
+      <span className="min-w-0">
+        {latestLabel === null ? (
+          <span className="block text-xs text-slate-400">No messages yet</span>
+        ) : (
+          <>
+            <span
+              className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium mb-0.5 ${
+                latestLabel === 'Agent'
+                  ? 'bg-spill-blue-100 text-spill-blue-800'
+                  : latestLabel === 'Admin'
+                    ? 'bg-slate-200 text-slate-700'
+                    : 'bg-emerald-100 text-emerald-800'
+              }`}
+            >
+              {latestLabel}
+            </span>
+            <span
+              className="block text-xs text-slate-600 line-clamp-2 leading-snug"
+              title={appointment.lastMessagePreview?.snippet}
+            >
+              {appointment.lastMessagePreview?.snippet}
+            </span>
+          </>
+        )}
       </span>
     </button>
   );
@@ -243,7 +281,7 @@ export default function AppointmentsTable({
   return (
     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
       {/* Sticky header */}
-      <div className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200 px-3 py-2 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.2fr)] gap-3 items-center">
+      <div className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200 px-3 py-2 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_minmax(0,2.4fr)] gap-3 items-center">
         <span className="sr-only">Health</span>
         <HeaderCell label="Client" />
         <HeaderCell label="Therapist" />
@@ -252,12 +290,12 @@ export default function AppointmentsTable({
         <HeaderCell label="Confirmed" />
         <HeaderCell
           label="Activity"
-          align="right"
           sortKey="updatedAt"
           currentSort={filters.sortBy}
           currentOrder={filters.sortOrder}
           onSort={onSortChange}
         />
+        <HeaderCell label="Latest" />
       </div>
 
       {/* Body */}
