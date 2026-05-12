@@ -88,6 +88,29 @@ export async function releaseControl(
   );
 }
 
+export async function getCeilingTrippedCount(): Promise<{ count: number }> {
+  return unwrap(
+    await fetchAdminApi<{ count: number }>('/admin/dashboard/ceiling-tripped-count'),
+    'ceiling-tripped count'
+  );
+}
+
+export async function releaseCeilingTripped(): Promise<{
+  released: string[];
+  failed: Array<{ id: string; reason: string }>;
+}> {
+  return unwrap(
+    await fetchAdminApi<{ released: string[]; failed: Array<{ id: string; reason: string }> }>(
+      '/admin/dashboard/release-ceiling-tripped',
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+    'bulk-release ceiling-tripped'
+  );
+}
+
 export async function sendAdminMessage(
   appointmentId: string,
   data: SendMessageRequest

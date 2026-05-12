@@ -1,10 +1,12 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
   getAppointments,
   getAppointmentDetail,
   getDashboardStats,
+  getCeilingTrippedCount,
+  releaseCeilingTripped,
 } from '../api/client';
 import type { AppointmentFilters } from '../types';
 import { useDebounce } from '../hooks/useDebounce';
@@ -14,6 +16,8 @@ import type { DashboardTileFilter } from '../components/AppointmentPipeline';
 import TherapistGroupList from '../components/TherapistGroupList';
 import type { TherapistGroup } from '../components/TherapistGroupList';
 import AppointmentDetailPanel from '../components/AppointmentDetailPanel';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useToastContext } from '../components/Toast';
 
 export default function AdminDashboardPage() {
   const [filters, setFilters] = useState<AppointmentFilters>({
@@ -65,6 +69,47 @@ export default function AdminDashboardPage() {
     refetchInterval: 30000,
     staleTime: 30000,
     refetchOnWindowFocus: false,
+  });
+
+  // Count of appointments paused by the tool-call ceiling. Polled on the
+  // same cadence as stats so the banner stays in sync after an SSE-driven
+  // change elsewhere on the page.
+  const queryClient = useQueryClient();
+  const { showToast } = useToastContext();
+  const { data: ceilingTripped } = useQuery({
+    queryKey: ['ceiling-tripped-count'],
+    queryFn: getCeilingTrippedCount,
+    refetchInterval: 30000,
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
+  });
+
+  const [confirmingBulkRelease, setConfirmingBulkRelease] = useState(false);
+
+  const bulkReleaseMutation = useMutation({
+    mutationFn: releaseCeilingTripped,
+    onSuccess: (result) => {
+      setConfirmingBulkRelease(false);
+      const releasedCount = result.released.length;
+      const failedCount = result.failed.length;
+      if (releasedCount > 0 && failedCount === 0) {
+        showToast(`Released ${releasedCount} appointment${releasedCount === 1 ? '' : 's'}.`, 'success');
+      } else if (releasedCount > 0 && failedCount > 0) {
+        showToast(`Released ${releasedCount}, failed ${failedCount}. Check logs.`, 'error');
+      } else if (releasedCount === 0 && failedCount > 0) {
+        showToast(`All ${failedCount} releases failed. Check logs.`, 'error');
+      } else {
+        showToast('Nothing to release.', 'success');
+      }
+      // Refresh the count, appointments, and stats so the dashboard reflects
+      // the new state immediately rather than waiting for the 30s poll.
+      void queryClient.invalidateQueries({ queryKey: ['ceiling-tripped-count'] });
+      void queryClient.invalidateQueries({ queryKey: ['appointments'] });
+      void queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
+    },
+    onError: (err) => {
+      showToast(err instanceof Error ? err.message : 'Bulk release failed', 'error');
+    },
   });
 
   // Fetch selected appointment detail
@@ -201,6 +246,48 @@ export default function AdminDashboardPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-slate-900">Scheduling Dashboard</h1>
         </div>
+
+        {/* Bulk-release banner: appointments paused by the tool-call ceiling.
+            Only renders when the count is positive so the dashboard stays
+            clean in the normal case. */}
+        {ceilingTripped && ceilingTripped.count > 0 && (
+          <div className="mb-4 p-3 rounded-lg bg-orange-50 border border-orange-200 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-orange-900">
+              <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-orange-200 text-orange-700 text-xs font-bold flex-shrink-0">!</span>
+              <span>
+                <strong>{ceilingTripped.count}</strong> appointment{ceilingTripped.count === 1 ? '' : 's'} paused by the tool-call ceiling
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setConfirmingBulkRelease(true)}
+              disabled={bulkReleaseMutation.isPending}
+              className="px-3 py-1.5 text-sm font-medium rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+            >
+              {bulkReleaseMutation.isPending ? 'Releasing…' : 'Release all'}
+            </button>
+          </div>
+        )}
+
+        {confirmingBulkRelease && ceilingTripped && (
+          <ConfirmDialog
+            title="Release all ceiling-tripped appointments?"
+            confirmLabel={`Release ${ceilingTripped.count}`}
+            confirmVariant="primary"
+            isPending={bulkReleaseMutation.isPending}
+            onConfirm={() => bulkReleaseMutation.mutate()}
+            onCancel={() => setConfirmingBulkRelease(false)}
+          >
+            <p>
+              This will resume agent automation on <strong>{ceilingTripped.count}</strong> appointment
+              {ceilingTripped.count === 1 ? '' : 's'} currently paused because the tool-call ceiling was reached.
+            </p>
+            <p className="mt-2 text-slate-600">
+              Each appointment's tool-count counter will be reset so the ceiling doesn't re-trip immediately.
+              Other agent-flagged appointments (genuine uncertainty, error breaker, etc.) are not affected and still need per-thread review.
+            </p>
+          </ConfirmDialog>
+        )}
 
         {/* Summary Tiles */}
         <AppointmentPipeline

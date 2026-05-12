@@ -83,6 +83,20 @@ async function incrementAppointmentToolCount(appointmentId: string): Promise<num
 }
 
 /**
+ * Reset the per-appointment tool-call counter. Used by the bulk-release
+ * operator path so a freshly-released appointment doesn't immediately
+ * re-trip the ceiling on its next tool call. Redis-unavailable is
+ * non-fatal — log and continue so the wider release still succeeds.
+ */
+export async function resetAppointmentToolCount(appointmentId: string): Promise<void> {
+  try {
+    await redis.del(`${TOOL_COUNT_PREFIX}${appointmentId}`);
+  } catch (err) {
+    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count reset');
+  }
+}
+
+/**
  * Generate a deterministic hash for a tool call to enable idempotency checking
  */
 function hashToolCall(appointmentId: string, toolName: string, input: unknown): string {

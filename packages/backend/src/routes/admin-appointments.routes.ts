@@ -26,6 +26,7 @@ import { AppointmentStatus } from '../constants';
 import { sseService } from '../services/sse.service';
 import { auditEventService } from '../services/audit-event.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
+import { resetAppointmentToolCount } from '../services/ai-tool-executor.service';
 
 // Schema for listing all appointments (admin page)
 const listAllAppointmentsSchema = z.object({
@@ -491,6 +492,128 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
         return Errors.internal(reply, 'Failed to release human control');
       }
     }
+  );
+
+  // ------------------------------------------------------------------------
+  // Bulk-release: appointments paused by the per-appointment tool-call
+  // ceiling. The ceiling is a defence-in-depth control that has historically
+  // produced false positives on long, legitimate conversations. The count
+  // surfaces on the dashboard; the release endpoint unpauses every
+  // ceiling-tripped appointment in one operator action, resets each
+  // appointment's Redis tool-count key (otherwise the next inbound call
+  // re-trips the ceiling on the same counter), and re-arms stall detection.
+  //
+  // Filter is deliberately narrow: only `humanControlReason` matching
+  // 'Tool execution ceiling reached'. Other agent-flag reasons (genuine
+  // uncertainty, the loop-level breakers added in #207/#208) are still
+  // routed through the per-appointment release-control endpoint so an
+  // admin can triage each one.
+  // ------------------------------------------------------------------------
+  const CEILING_TRIPPED_WHERE = {
+    humanControlEnabled: true,
+    humanControlTakenBy: 'agent-flagged',
+    humanControlReason: { contains: 'Tool execution ceiling reached' },
+  } as const;
+
+  /**
+   * GET /api/admin/dashboard/ceiling-tripped-count
+   * Number of appointments currently paused by the tool-call ceiling.
+   */
+  fastify.get(
+    '/api/admin/dashboard/ceiling-tripped-count',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      try {
+        const count = await prisma.appointmentRequest.count({ where: CEILING_TRIPPED_WHERE });
+        return sendSuccess(reply, { count });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to count ceiling-tripped appointments');
+        return Errors.internal(reply, 'Failed to count ceiling-tripped appointments');
+      }
+    },
+  );
+
+  /**
+   * POST /api/admin/dashboard/release-ceiling-tripped
+   * Release human control on every ceiling-tripped appointment and reset
+   * each one's Redis tool-count key so it doesn't immediately re-trip.
+   */
+  fastify.post(
+    '/api/admin/dashboard/release-ceiling-tripped',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      try {
+        const candidates = await prisma.appointmentRequest.findMany({
+          where: CEILING_TRIPPED_WHERE,
+          select: { id: true },
+        });
+
+        const released: string[] = [];
+        const failed: Array<{ id: string; reason: string }> = [];
+
+        for (const { id } of candidates) {
+          try {
+            // Best-effort audit append — same pattern as release-control.
+            // Losing the audit entry is preferable to leaving the appointment
+            // paused if the conversation append racing fails twice.
+            await aiConversationService
+              .appendConversationMessage(id, {
+                role: 'admin',
+                content: '[System] Human control released via bulk ceiling-tripped release. Agent resuming automated responses.',
+              })
+              .catch((err) => {
+                logger.error(
+                  { err, requestId, appointmentId: id },
+                  'Bulk-release audit append failed — continuing with DB update',
+                );
+              });
+
+            await prisma.appointmentRequest.update({
+              where: { id },
+              data: {
+                humanControlEnabled: false,
+                autoEscalatedAt: null,
+                conversationStallAlertAt: null,
+                conversationStallAcknowledged: false,
+              },
+              select: { id: true },
+            });
+
+            // Reset the Redis tool-count key — without this, the next tool
+            // call on this appointment increments past the ceiling again
+            // and re-trips immediately.
+            await resetAppointmentToolCount(id);
+
+            sseService.emitHumanControl(id, false);
+            released.push(id);
+          } catch (err) {
+            logger.error(
+              { err, requestId, appointmentId: id },
+              'Failed to release individual ceiling-tripped appointment',
+            );
+            failed.push({ id, reason: err instanceof Error ? err.message : 'Unknown error' });
+          }
+        }
+
+        logger.info(
+          { requestId, releasedCount: released.length, failedCount: failed.length },
+          'Bulk-release of ceiling-tripped appointments complete',
+        );
+
+        return sendSuccess(reply, { released, failed });
+      } catch (err) {
+        logger.error({ err, requestId }, 'Failed to bulk-release ceiling-tripped appointments');
+        return Errors.internal(reply, 'Failed to bulk-release ceiling-tripped appointments');
+      }
+    },
   );
 
   /**
