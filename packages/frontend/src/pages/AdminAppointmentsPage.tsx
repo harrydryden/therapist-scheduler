@@ -602,7 +602,20 @@ function AppointmentsTable() {
   const [sortBy, setSortBy] = useState<string>('updatedAt');
   const [sortOrder, setSortOrder] = useState<string>('desc');
   const [savingId, setSavingId] = useState<string | null>(null);
-  const [clearDateId, setClearDateId] = useState<string | null>(null);
+  // Pending force-update that the operator has staged but not yet
+  // confirmed. The backend's /admin/appointments PATCH bypasses the
+  // state machine and requires a non-empty reason — captured via the
+  // dialog below before the mutation fires. `label` is the human-readable
+  // change description shown in the dialog header.
+  const [pendingUpdate, setPendingUpdate] = useState<
+    | {
+        id: string;
+        label: string;
+        payload: { status?: string; confirmedDateTime?: string | null };
+      }
+    | null
+  >(null);
+  const [reasonText, setReasonText] = useState('');
   const limit = 20;
   const queryClient = useQueryClient();
   const { showToast } = useToastContext();
@@ -640,8 +653,16 @@ function AppointmentsTable() {
   const pagination = data?.pagination;
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, ...rest }: { id: string; status?: string; confirmedDateTime?: string | null; adminId: string }) =>
-      updateAdminAppointment(id, rest),
+    mutationFn: ({
+      id,
+      ...rest
+    }: {
+      id: string;
+      status?: string;
+      confirmedDateTime?: string | null;
+      adminId: string;
+      reason: string;
+    }) => updateAdminAppointment(id, rest),
     onSuccess: () => {
       setSavingId(null);
       queryClient.invalidateQueries({ queryKey: ['admin-all-appointments'] });
@@ -652,34 +673,62 @@ function AppointmentsTable() {
     },
   });
 
+  // All three change paths stage the update on `pendingUpdate` and open
+  // the reason dialog — the backend's bypass-state-machine PATCH refuses
+  // empty reasons (for audit), so the UI has to collect one before firing.
   const handleStatusChange = useCallback((appointmentId: string, newStatus: string) => {
-    setSavingId(appointmentId);
-    updateMutation.mutate({ id: appointmentId, status: newStatus, adminId: 'admin' });
-  }, [updateMutation]);
-
-  const handleDateChange = useCallback((appointmentId: string, newDateTime: string) => {
-    setSavingId(appointmentId);
-    updateMutation.mutate({ id: appointmentId, confirmedDateTime: newDateTime, adminId: 'admin' });
-  }, [updateMutation]);
-
-  const handleClearDate = useCallback((appointmentId: string) => {
-    // Replaces blocking window.confirm() with in-app ConfirmDialog so the
-    // action matches the rest of the admin UI and can show a pending state.
-    setClearDateId(appointmentId);
+    setPendingUpdate({
+      id: appointmentId,
+      label: `Change status to "${newStatus}"`,
+      payload: { status: newStatus },
+    });
+    setReasonText('');
   }, []);
 
-  const confirmClearDate = useCallback(() => {
-    if (!clearDateId || updateMutation.isPending) return;
-    setSavingId(clearDateId);
-    updateMutation.mutate(
-      { id: clearDateId, confirmedDateTime: null, adminId: 'admin' },
-      { onSettled: () => setClearDateId(null) }
-    );
-  }, [clearDateId, updateMutation]);
+  const handleDateChange = useCallback((appointmentId: string, newDateTime: string) => {
+    setPendingUpdate({
+      id: appointmentId,
+      label: 'Update confirmed date/time',
+      payload: { confirmedDateTime: newDateTime },
+    });
+    setReasonText('');
+  }, []);
 
-  const cancelClearDate = useCallback(() => {
+  const handleClearDate = useCallback((appointmentId: string) => {
+    setPendingUpdate({
+      id: appointmentId,
+      label: 'Clear confirmed date/time',
+      payload: { confirmedDateTime: null },
+    });
+    setReasonText('');
+  }, []);
+
+  const confirmPendingUpdate = useCallback(() => {
+    if (!pendingUpdate || updateMutation.isPending) return;
+    const trimmed = reasonText.trim();
+    if (!trimmed) return; // dialog disables confirm when empty; defence in depth
+    setSavingId(pendingUpdate.id);
+    updateMutation.mutate(
+      {
+        id: pendingUpdate.id,
+        status: pendingUpdate.payload.status,
+        confirmedDateTime: pendingUpdate.payload.confirmedDateTime,
+        adminId: 'admin',
+        reason: trimmed,
+      },
+      {
+        onSettled: () => {
+          setPendingUpdate(null);
+          setReasonText('');
+        },
+      },
+    );
+  }, [pendingUpdate, reasonText, updateMutation]);
+
+  const cancelPendingUpdate = useCallback(() => {
     if (updateMutation.isPending) return;
-    setClearDateId(null);
+    setPendingUpdate(null);
+    setReasonText('');
   }, [updateMutation.isPending]);
 
   const handleSort = useCallback((column: string) => {
@@ -850,19 +899,36 @@ function AppointmentsTable() {
         />
       )}
 
-      {/* Clear confirmed date confirmation */}
-      {clearDateId && (
+      {/* Force-update reason dialog. Used for every status / date /
+          clear-date change because the underlying admin endpoint
+          bypasses the state machine and requires a non-empty audit
+          reason. Confirm button stays disabled until a non-blank
+          reason is entered. */}
+      {pendingUpdate && (
         <ConfirmDialog
-          title="Clear Confirmed Date"
-          confirmLabel="Clear Date"
-          confirmVariant="danger"
+          title={pendingUpdate.label}
+          confirmLabel="Apply"
+          confirmVariant={pendingUpdate.payload.confirmedDateTime === null ? 'danger' : 'primary'}
           isPending={updateMutation.isPending}
-          onConfirm={confirmClearDate}
-          onCancel={cancelClearDate}
+          disabled={!reasonText.trim()}
+          onConfirm={confirmPendingUpdate}
+          onCancel={cancelPendingUpdate}
         >
-          <p className="text-slate-600">
-            Clear the confirmed date? This will mark the appointment for rescheduling.
+          <p className="text-slate-600 mb-3">
+            This bypasses the normal state-machine validation. Give a short reason — it's stored in the audit trail.
           </p>
+          <label className="block text-xs font-medium text-slate-700 mb-1" htmlFor="reason-input">
+            Reason
+          </label>
+          <textarea
+            id="reason-input"
+            value={reasonText}
+            onChange={(e) => setReasonText(e.target.value)}
+            placeholder="e.g. Re-opened on user's request after cancellation"
+            rows={3}
+            autoFocus
+            className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+          />
         </ConfirmDialog>
       )}
     </div>
