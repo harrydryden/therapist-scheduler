@@ -71,6 +71,7 @@ async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<
 
 async function submitFeedback(data: {
   trackingCode?: string;
+  feedbackToken?: string;
   therapistName: string;
   responses: Record<string, string | number>;
 }): Promise<{ success: boolean; submissionId: string; message: string }> {
@@ -238,6 +239,14 @@ function ChoiceWithTextQuestion({
 
 export default function FeedbackFormPage() {
   const { splCode } = useParams<{ splCode?: string }>();
+  // HMAC-signed proof that this form was reached via the emailed link.
+  // Backend's GET prefill endpoint already reads `fk` from the URL, but
+  // the response doesn't echo it back — so the submit body has to read
+  // the same query parameter directly. Without this, every legitimate
+  // submission from an email link arrives token-less, the appointment
+  // isn't auto-completed, and an admin Slack alert fires.
+  const feedbackToken =
+    new URLSearchParams(window.location.search).get('fk') ?? undefined;
 
   // Form state
   const [formConfig, setFormConfig] = useState<FormConfig | null>(null);
@@ -391,6 +400,7 @@ export default function FeedbackFormPage() {
 
       await submitFeedback({
         trackingCode: prefilled?.trackingCode || splCode,
+        feedbackToken,
         therapistName,
         responses,
       });
