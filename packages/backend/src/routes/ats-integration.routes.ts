@@ -21,7 +21,7 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
+import { supersedeActiveTherapistConversationInTx, AvailabilityAgentService } from '../services/availability-agent.service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
@@ -831,6 +831,42 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             { requestId, therapistId: therapistEntity.id, externalId: data.externalId },
             'ATS: Created new therapist'
           );
+
+          // Kick off the availability-collection agent in the background.
+          // Mirrors the PDF-ingestion path (pdf-ingestion.service.ts:437) so
+          // ATS-onboarded therapists get an outreach email within seconds
+          // rather than waiting up to 6h for the nudge cron to find them.
+          //
+          // Idempotency guard: only fire if no onboarding conversation
+          // already exists. Defends against (a) concurrent ATS imports
+          // racing on the same externalId and (b) getOrCreateTherapist
+          // returning an existing row that the outer existingTherapist
+          // check didn't catch.
+          //
+          // Send failures don't block the response — the admin will
+          // see the therapist row in the dashboard either way; the
+          // monitoring query in the red-team report catches stalled
+          // conversations if the first send dies silently.
+          const hasOnboardingConvo = await prisma.therapistConversation.findFirst({
+            where: {
+              therapistId: therapistEntity.id,
+              kind: 'onboarding',
+            },
+            select: { id: true },
+          });
+          if (!hasOnboardingConvo) {
+            const therapistId = therapistEntity.id;
+            runBackgroundTask(
+              () => AvailabilityAgentService.instance(requestId).startCollection({
+                therapistId,
+                kind: 'onboarding',
+              }),
+              {
+                name: 'availability-onboarding-start-ats',
+                context: { therapistId, requestId },
+              },
+            );
+          }
         }
 
         const response: ATSTherapistResponse = {
