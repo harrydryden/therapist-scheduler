@@ -400,65 +400,69 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
         )}
       </div>
 
-      {/* Booking status */}
-      {data.bookingStatus && (
+      {/* Booking status. Render the panel for every active therapist —
+          including those with no therapist_booking_status row yet —
+          because the freeze button must be reachable to create that
+          row in the first place. Previously this whole block was gated
+          on `data.bookingStatus`, so a therapist without a row had no
+          UI to freeze them and they remained stuck unfrozen. */}
+      {data.active && (
         <div className="bg-slate-50 border border-slate-200 rounded-lg p-4">
           <div className="flex items-start justify-between">
             <div>
               <h4 className="text-sm font-semibold text-slate-900 mb-2">Booking status</h4>
-              <dl className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Has confirmed booking</dt>
-                  <dd className="text-slate-700">
-                    {data.bookingStatus.hasConfirmedBooking ? 'Yes' : 'No'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Active requests</dt>
-                  <dd className="text-slate-700">{data.bookingStatus.uniqueRequestCount}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Frozen at</dt>
-                  <dd className="text-slate-700">{formatDate(data.bookingStatus.frozenAt)}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Confirmed at</dt>
-                  <dd className="text-slate-700">{formatDate(data.bookingStatus.confirmedAt)}</dd>
-                </div>
-              </dl>
+              {data.bookingStatus ? (
+                <dl className="grid grid-cols-2 gap-2 text-sm">
+                  <div>
+                    <dt className="text-xs text-slate-500">Has confirmed booking</dt>
+                    <dd className="text-slate-700">
+                      {data.bookingStatus.hasConfirmedBooking ? 'Yes' : 'No'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-slate-500">Active requests</dt>
+                    <dd className="text-slate-700">{data.bookingStatus.uniqueRequestCount}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-slate-500">Frozen at</dt>
+                    <dd className="text-slate-700">{formatDate(data.bookingStatus.frozenAt)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-slate-500">Confirmed at</dt>
+                    <dd className="text-slate-700">{formatDate(data.bookingStatus.confirmedAt)}</dd>
+                  </div>
+                </dl>
+              ) : (
+                <p className="text-xs text-slate-500">No bookings yet — therapist is currently free.</p>
+              )}
             </div>
-            {/* Freeze / unfreeze controls. Visible on every active therapist
-                so an admin can manually pin the state when the auto logic has
-                gone the wrong way (e.g. an awaiting-therapist conversation
-                that's gone past the inactivity threshold). When frozen due
-                to a confirmed booking, unfreezing alone won't help —
-                that's the note below. */}
-            {data.active && (
-              <div className="flex gap-2">
-                {!data.bookingStatus.frozen && (
-                  <button
-                    type="button"
-                    onClick={() => freezeMutation.mutate()}
-                    disabled={freezeMutation.isPending}
-                    className="px-3 py-1.5 text-xs font-medium text-blue-800 bg-blue-100 border border-blue-200 rounded hover:bg-blue-200 disabled:opacity-50"
-                  >
-                    {freezeMutation.isPending ? 'Freezing…' : 'Force freeze'}
-                  </button>
-                )}
-                {data.bookingStatus.frozen && !data.bookingStatus.hasConfirmedBooking && (
-                  <button
-                    type="button"
-                    onClick={() => unfreezeMutation.mutate()}
-                    disabled={unfreezeMutation.isPending}
-                    className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded hover:bg-amber-200 disabled:opacity-50"
-                  >
-                    {unfreezeMutation.isPending ? 'Unfreezing…' : 'Force unfreeze'}
-                  </button>
-                )}
-              </div>
-            )}
+            {/* Freeze / unfreeze controls. The freeze endpoint upserts
+                the booking-status row, so the button is meaningful even
+                when bookingStatus is null. */}
+            <div className="flex gap-2">
+              {!data.bookingStatus?.frozen && (
+                <button
+                  type="button"
+                  onClick={() => freezeMutation.mutate()}
+                  disabled={freezeMutation.isPending}
+                  className="px-3 py-1.5 text-xs font-medium text-blue-800 bg-blue-100 border border-blue-200 rounded hover:bg-blue-200 disabled:opacity-50"
+                >
+                  {freezeMutation.isPending ? 'Freezing…' : 'Force freeze'}
+                </button>
+              )}
+              {data.bookingStatus?.frozen && !data.bookingStatus.hasConfirmedBooking && (
+                <button
+                  type="button"
+                  onClick={() => unfreezeMutation.mutate()}
+                  disabled={unfreezeMutation.isPending}
+                  className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded hover:bg-amber-200 disabled:opacity-50"
+                >
+                  {unfreezeMutation.isPending ? 'Unfreezing…' : 'Force unfreeze'}
+                </button>
+              )}
+            </div>
           </div>
-          {data.bookingStatus.hasConfirmedBooking && data.bookingStatus.frozen && (
+          {data.bookingStatus?.hasConfirmedBooking && data.bookingStatus.frozen && (
             <p className="mt-2 text-xs text-slate-500">
               Therapist is frozen due to a confirmed booking. Cancel the booking via the
               Appointments admin to unfreeze.
