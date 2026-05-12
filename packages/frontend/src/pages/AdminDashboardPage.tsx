@@ -15,9 +15,12 @@ import AppointmentPipeline from '../components/AppointmentPipeline';
 import type { DashboardTileFilter } from '../components/AppointmentPipeline';
 import TherapistGroupList from '../components/TherapistGroupList';
 import type { TherapistGroup } from '../components/TherapistGroupList';
-import AppointmentDetailPanel from '../components/AppointmentDetailPanel';
+import AppointmentsTable from '../components/AppointmentsTable';
+import AppointmentDetailDrawer from '../components/AppointmentDetailDrawer';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToastContext } from '../components/Toast';
+
+type ViewMode = 'flat' | 'grouped';
 
 export default function AdminDashboardPage() {
   const [filters, setFilters] = useState<AppointmentFilters>({
@@ -32,6 +35,10 @@ export default function AdminDashboardPage() {
   );
   const [selectedTile, setSelectedTile] = useState<DashboardTileFilter>('active');
   const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
+  // Flat is the default view shipped with the redesign; group-by-therapist
+  // is retained as an opt-in mode for when admins want to triage one
+  // therapist's load. Falls back to the (unchanged) TherapistGroupList.
+  const [viewMode, setViewMode] = useState<ViewMode>('flat');
 
   // Sync URL search param when selection changes
   useEffect(() => {
@@ -306,52 +313,91 @@ export default function AdminDashboardPage() {
           </div>
         )}
 
-        {/* Main Content: List + Detail */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div>
-            {/* Sort control */}
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-medium text-slate-700">
-                {selectedTile ? tileLabel[selectedTile] || 'All' : 'All Appointments'}
-                <span className="text-slate-400 font-normal ml-1.5">
-                  ({filteredAppointments.length})
-                </span>
-              </h2>
-              <select
-                value={filters.sortBy || 'updatedAt'}
-                onChange={(e) =>
-                  setFilters((prev) => ({ ...prev, sortBy: e.target.value as AppointmentFilters['sortBy'], page: 1 }))
-                }
-                className="text-xs px-2 py-1 border border-slate-200 rounded-lg text-slate-500 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+        {/* Toolbar: tile-derived heading + count, view-mode toggle, sort. */}
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <h2 className="text-sm font-medium text-slate-700">
+            {selectedTile ? tileLabel[selectedTile] || 'All' : 'All Appointments'}
+            <span className="text-slate-400 font-normal ml-1.5">
+              ({filteredAppointments.length})
+            </span>
+          </h2>
+          <div className="flex items-center gap-2">
+            {/* View mode toggle: flat table is the default; grouped falls
+                back to the (existing) TherapistGroupList for admins
+                triaging a single therapist's load. */}
+            <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs" role="group" aria-label="View mode">
+              <button
+                type="button"
+                onClick={() => setViewMode('flat')}
+                aria-pressed={viewMode === 'flat'}
+                className={`px-2.5 py-1 transition-colors ${viewMode === 'flat' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
               >
-                <option value="updatedAt">Last updated</option>
-                <option value="createdAt">Date created</option>
-              </select>
+                Flat
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('grouped')}
+                aria-pressed={viewMode === 'grouped'}
+                className={`px-2.5 py-1 transition-colors border-l border-slate-200 ${viewMode === 'grouped' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
+              >
+                By therapist
+              </button>
             </div>
-
-            <TherapistGroupList
-              therapistGroups={therapistGroups}
-              filters={filters}
-              pagination={appointmentsData?.pagination}
-              loadingList={loadingList}
-              selectedAppointment={selectedAppointment}
-              expandedTherapists={expandedTherapists}
-              onSelectAppointment={setSelectedAppointment}
-              onToggleTherapist={toggleTherapistExpanded}
-              onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
-            />
-          </div>
-
-          <div className="lg:sticky lg:top-4 lg:self-start">
-            <AppointmentDetailPanel
-              selectedAppointment={selectedAppointment}
-              appointmentDetail={appointmentDetail}
-              loadingDetail={loadingDetail}
-              detailError={detailError}
-              onClearSelection={() => setSelectedAppointment(null)}
-            />
+            <select
+              value={filters.sortBy || 'updatedAt'}
+              onChange={(e) =>
+                setFilters((prev) => ({ ...prev, sortBy: e.target.value as AppointmentFilters['sortBy'], page: 1 }))
+              }
+              className="text-xs px-2 py-1 border border-slate-200 rounded-lg text-slate-500 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+              aria-label="Sort by"
+            >
+              <option value="updatedAt">Last updated</option>
+              <option value="createdAt">Date created</option>
+            </select>
           </div>
         </div>
+
+        {/* Main content: one container, not two. Drawer slides over from
+            the right when a row is selected. */}
+        {viewMode === 'flat' ? (
+          <AppointmentsTable
+            appointments={filteredAppointments}
+            filters={filters}
+            pagination={appointmentsData?.pagination}
+            loadingList={loadingList}
+            selectedAppointment={selectedAppointment}
+            onSelectAppointment={setSelectedAppointment}
+            onSortChange={(sortBy) =>
+              setFilters((prev) => ({
+                ...prev,
+                sortBy,
+                sortOrder: prev.sortBy === sortBy && prev.sortOrder === 'desc' ? 'asc' : 'desc',
+                page: 1,
+              }))
+            }
+            onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
+          />
+        ) : (
+          <TherapistGroupList
+            therapistGroups={therapistGroups}
+            filters={filters}
+            pagination={appointmentsData?.pagination}
+            loadingList={loadingList}
+            selectedAppointment={selectedAppointment}
+            expandedTherapists={expandedTherapists}
+            onSelectAppointment={setSelectedAppointment}
+            onToggleTherapist={toggleTherapistExpanded}
+            onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
+          />
+        )}
+
+        <AppointmentDetailDrawer
+          selectedAppointment={selectedAppointment}
+          appointmentDetail={appointmentDetail}
+          loadingDetail={loadingDetail}
+          detailError={detailError}
+          onClearSelection={() => setSelectedAppointment(null)}
+        />
       </div>
     </div>
   );
