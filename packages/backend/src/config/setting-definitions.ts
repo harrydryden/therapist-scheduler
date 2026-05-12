@@ -114,6 +114,13 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     maxValue: 10,
     defaultValue: CLAUDE_API.MAX_RETRIES,
   },
+  'agent.stageGatedTools': {
+    category: 'agent',
+    label: 'Stage-gated Tool Surface',
+    description: 'When enabled, the booking agent only sees tools that make sense at the current conversation stage (e.g. no mark_scheduling_complete before a slot exists, no update_therapist_availability after confirmation). Defence-in-depth against hallucinated wrong-stage tool calls.',
+    valueType: 'boolean',
+    defaultValue: false,
+  },
   'agent.languageStyle': {
     category: 'agent',
     label: 'Language Style',
