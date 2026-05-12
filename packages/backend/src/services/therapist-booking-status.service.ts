@@ -10,6 +10,18 @@ type TransactionClient = Prisma.TransactionClient;
 type PrismaClient = typeof prisma;
 
 // FIX M9: Retry configuration for serialization failures
+/** Checkpoint stages where the next action is on the therapist's side.
+ *  Auto-unfreeze must not fire while a conversation is in one of these —
+ *  the conversation looks dormant on lastActivityAt alone but we're still
+ *  expecting a reply that has to land on a frozen therapist. Unfreezing
+ *  before the reply arrives lets the booking layer accept a second
+ *  appointment for the same therapist. */
+const THERAPIST_PENDING_STAGES = new Set<string>([
+  'awaiting_therapist_availability',
+  'awaiting_therapist_confirmation',
+  'awaiting_meeting_link',
+]);
+
 const SERIALIZATION_RETRY = {
   MAX_RETRIES: 3,
   BASE_DELAY_MS: 50,
@@ -513,14 +525,20 @@ class TherapistBookingStatusService {
             therapistHandle: { in: therapistIds },
             status: { in: [...PRE_BOOKING_STATUSES] },
           },
-          select: { therapistHandle: true, lastActivityAt: true },
+          select: { therapistHandle: true, lastActivityAt: true, checkpointStage: true },
         });
 
         // Group conversations by therapist
-        const conversationsByTherapist = new Map<string, Array<{ lastActivityAt: Date | null }>>();
+        const conversationsByTherapist = new Map<
+          string,
+          Array<{ lastActivityAt: Date | null; checkpointStage: string | null }>
+        >();
         for (const conv of allActiveConversations) {
           const existing = conversationsByTherapist.get(conv.therapistHandle) || [];
-          existing.push({ lastActivityAt: conv.lastActivityAt });
+          existing.push({
+            lastActivityAt: conv.lastActivityAt,
+            checkpointStage: conv.checkpointStage,
+          });
           conversationsByTherapist.set(conv.therapistHandle, existing);
         }
 
@@ -532,6 +550,19 @@ class TherapistBookingStatusService {
 
           // If no active conversations, skip (already handled by other flows)
           if (!conversations || conversations.length === 0) continue;
+
+          // Skip if ANY conversation is awaiting a response from THIS
+          // therapist. The conversation may look stale on lastActivityAt
+          // alone (we sent a chase a week ago and they haven't replied),
+          // but it isn't abandoned — we still expect a reply that has
+          // to land on a frozen therapist or we'll double-book them.
+          // Previous behaviour treated all stale conversations as
+          // abandoned, which prematurely unfroze therapists who were
+          // just slow to respond.
+          const awaitingTherapist = conversations.some(
+            (conv) => conv.checkpointStage && THERAPIST_PENDING_STAGES.has(conv.checkpointStage),
+          );
+          if (awaitingTherapist) continue;
 
           // Check if ALL are inactive (no activity after threshold)
           const allInactive = conversations.every(
