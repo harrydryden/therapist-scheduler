@@ -197,10 +197,17 @@ describe('TOCTOU lock — humanControlEnabled', () => {
 // =============================================================================
 
 describe('per-appointment tool ceiling', () => {
-  it('flips into human control + skips once the Redis counter exceeds the limit', async () => {
-    // Counter just over the limit (50). The first call past the limit
-    // should not actually execute send_email.
-    mockRedisIncr.mockResolvedValueOnce(51);
+  it('flips into human control + skips once the Redis counter is at or above the limit', async () => {
+    // Counter at the limit (50). The pre-flight peek (redis.get) returns
+    // the current count without incrementing — the increment moved to
+    // the success path so the counter measures completed tool calls,
+    // not attempts. Route by key prefix so the idempotency get still
+    // returns null and we don't accidentally match that path.
+    mockRedisGet.mockImplementation((key: unknown) =>
+      typeof key === 'string' && key.startsWith('tool:count:')
+        ? Promise.resolve('50')
+        : Promise.resolve(null),
+    );
 
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
@@ -229,7 +236,13 @@ describe('per-appointment tool ceiling', () => {
   });
 
   it('proceeds normally when the counter is below the limit', async () => {
-    mockRedisIncr.mockResolvedValueOnce(10);
+    // Peek returns 10 (well below 50); idempotency get returns null (not
+    // previously executed). Tool should run normally.
+    mockRedisGet.mockImplementation((key: unknown) =>
+      typeof key === 'string' && key.startsWith('tool:count:')
+        ? Promise.resolve('10')
+        : Promise.resolve(null),
+    );
 
     const exec = new AIToolExecutorService('test');
     await exec.executeToolCall(
@@ -242,6 +255,9 @@ describe('per-appointment tool ceiling', () => {
     );
 
     expect(mockSendEmail).toHaveBeenCalled();
+    // Counter increments only on successful completion (semantics shipped
+    // alongside this change); verify the success path bumped the counter.
+    expect(mockRedisIncr).toHaveBeenCalled();
   });
 });
 
@@ -566,8 +582,15 @@ describe('record_booking_link — persists to Therapist.bookingLink', () => {
 
 describe('per-call idempotency', () => {
   it('skips the tool call when the same hash exists in Redis', async () => {
-    // Pre-populate the idempotency cache
-    mockRedisGet.mockResolvedValueOnce('previous-trace-id');
+    // Pre-populate the idempotency cache. Route by key prefix because
+    // the executor now also reads tool:count:* during the pre-flight
+    // peek; we want the count peek to return null (i.e. 0) and only
+    // the idempotency get to return the cached trace ID.
+    mockRedisGet.mockImplementation((key: unknown) =>
+      typeof key === 'string' && key.startsWith('tool:executed:')
+        ? Promise.resolve('previous-trace-id')
+        : Promise.resolve(null),
+    );
 
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(

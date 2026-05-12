@@ -97,6 +97,23 @@ export async function resetAppointmentToolCount(appointmentId: string): Promise<
 }
 
 /**
+ * Read the per-appointment tool-call counter without incrementing it.
+ * Used for the pre-flight ceiling check now that the counter measures
+ * completed tool calls rather than attempts — the increment moved to
+ * the success path. Falls open to 0 on Redis failure (same convention
+ * as the increment helper) so a Redis flap doesn't paralyse the agent.
+ */
+async function peekAppointmentToolCount(appointmentId: string): Promise<number> {
+  try {
+    const value = await redis.get(`${TOOL_COUNT_PREFIX}${appointmentId}`);
+    return value ? Number(value) : 0;
+  } catch (err) {
+    logger.warn({ err, appointmentId }, 'Redis unavailable for per-appointment tool count peek');
+    return 0;
+  }
+}
+
+/**
  * Generate a deterministic hash for a tool call to enable idempotency checking
  */
 function hashToolCall(appointmentId: string, toolName: string, input: unknown): string {
@@ -194,19 +211,21 @@ export class AIToolExecutorService {
         toolName: name,
         result: 'skipped',
         skipReason: 'human_control',
+        bucket: 'human_control_skip',
       });
 
       return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
     }
 
-    // SECURITY: Per-appointment hard ceiling on tool calls. The per-turn
-    // cap (MAX_TOOL_ITERATIONS) bounds runaway loops within a single
-    // inbound email; this counter bounds total agent activity across an
-    // entire appointment. A prompt-injecting back-and-forth can't keep
-    // driving the agent past the ceiling. When exceeded we flip into
-    // human control via flag_for_human_review and return a skip.
-    const appointmentToolCount = await incrementAppointmentToolCount(context.appointmentRequestId);
-    if (appointmentToolCount > PER_APPOINTMENT_LIMIT) {
+    // Per-appointment lifecycle ceiling on tool calls. Pre-flight check
+    // reads (does NOT increment) the counter — the increment now lives
+    // in the success path below so the counter measures completed tool
+    // calls rather than attempts. Combined with the turn-level breakers
+    // shipped in #207/#208, this is the cross-turn drift backstop:
+    // ~50 successful state-changing tool calls across an appointment's
+    // entire lifetime is unambiguously anomalous.
+    const appointmentToolCount = await peekAppointmentToolCount(context.appointmentRequestId);
+    if (appointmentToolCount >= PER_APPOINTMENT_LIMIT) {
       logger.warn(
         {
           traceId: this.traceId,
@@ -220,8 +239,8 @@ export class AIToolExecutorService {
       try {
         await this.flagForHumanReview(context, {
           reason:
-            `Tool execution ceiling reached (${appointmentToolCount}/${PER_APPOINTMENT_LIMIT}). ` +
-            `The agent has performed an unusually high number of tool calls on this conversation; ` +
+            `Tool execution ceiling reached (${appointmentToolCount}/${PER_APPOINTMENT_LIMIT} successful tool calls). ` +
+            `The agent has performed an unusually high number of state-changing actions on this conversation; ` +
             `pausing automation pending admin review.`,
         });
       } catch (flagErr) {
@@ -238,6 +257,7 @@ export class AIToolExecutorService {
         toolName: name,
         result: 'skipped',
         skipReason: 'human_control',
+        bucket: 'lifecycle_ceiling_skip',
       });
       return { success: true, toolName: name, skipped: true, skipReason: 'human_control' };
     }
@@ -259,6 +279,7 @@ export class AIToolExecutorService {
         toolName: name,
         result: 'skipped',
         skipReason: 'idempotent',
+        bucket: 'idempotent_skip',
       });
 
       return { success: true, toolName: name, skipped: true, skipReason: 'idempotent' };
@@ -699,12 +720,20 @@ export class AIToolExecutorService {
         'Tool execution marked as complete (idempotency recorded)'
       );
 
+      // Lifecycle counter increment moved here from the pre-flight check.
+      // Only successful, non-skipped calls advance the counter, so its
+      // value reflects completed tool activity on this appointment rather
+      // than attempts. Idempotent replays, human-control skips, and
+      // failures no longer inflate it.
+      await incrementAppointmentToolCount(context.appointmentRequestId);
+
       // Audit log: successful tool execution
       auditEventService.logToolExecuted(context.appointmentRequestId, {
         traceId: this.traceId,
         toolName: name,
         input: input as Record<string, unknown>,
         result: 'success',
+        bucket: 'executed',
       });
 
       // FIX RSA-1: Return checkpoint action for caller to update state
@@ -721,6 +750,7 @@ export class AIToolExecutorService {
         input: input as Record<string, unknown>,
         result: 'failed',
         error: errorMsg,
+        bucket: 'error',
       });
 
       // Record the failure in the database for admin visibility

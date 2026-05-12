@@ -69,6 +69,24 @@ export interface EmailEventPayload extends BasePayload {
 }
 
 /**
+ * Bucket field on tool-execution audit events. Distinguishes the cause
+ * of each event so a post-incident triage can break down "51/50" into
+ * the dominant failure mode without joining against logs. New values
+ * cover the loop-level short-circuits (turn budget, same-hash guard)
+ * which never reach the executor but still represent tool-use blocks
+ * the model emitted.
+ */
+export type ToolEventBucket =
+  | 'executed'
+  | 'idempotent_skip'
+  | 'human_control_skip'
+  | 'lifecycle_ceiling_skip'
+  | 'turn_budget_exhausted'
+  | 'same_hash_blocked'
+  | 'same_hash_aborted'
+  | 'error';
+
+/**
  * Payload for tool execution events
  */
 export interface ToolEventPayload extends BasePayload {
@@ -77,6 +95,7 @@ export interface ToolEventPayload extends BasePayload {
   result?: 'success' | 'failed' | 'skipped';
   skipReason?: string;
   error?: string;
+  bucket?: ToolEventBucket;
 }
 
 /**
