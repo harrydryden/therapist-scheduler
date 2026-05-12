@@ -771,6 +771,17 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           return Errors.badRequest(reply, 'confirmedDateTime is required when setting status to confirmed');
         }
 
+        // Require reason whenever the request would mutate state. Matches the
+        // strictness of /api/admin/appointments/:id (#215) so the audit trail
+        // is consistent across both admin update paths. A no-op call (no
+        // status change, no date change) doesn't need a reason.
+        const statusChanging = !!newStatus && newStatus !== appointment.status;
+        const dateChanging = confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime;
+        const reasonProvided = !!reason && reason.trim().length > 0;
+        if ((statusChanging || dateChanging) && !reasonProvided) {
+          return Errors.badRequest(reply, 'reason is required when editing an appointment');
+        }
+
         // Check for unusual transitions and generate warnings
         let warning: string | undefined;
         const previousStatus = appointment.status;
@@ -816,13 +827,14 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance) {
           }
         } else if (confirmedDateTime !== undefined && confirmedDateTime !== appointment.confirmedDateTime) {
           // Only confirmedDateTime changed, not status — use adminForceUpdate for consistency
-          // (handles rescheduling flags, audit trail, SSE notifications)
+          // (handles rescheduling flags, audit trail, SSE notifications). Reason is
+          // guaranteed non-empty by the pre-flight check above.
           await appointmentLifecycleService.adminForceUpdate(id, {
             confirmedDateTime,
             confirmedDateTimeParsed,
             adminId,
             bypassStateMachine: true,
-            reason: reason || 'Admin date/time edit (no status change)',
+            reason: reason!,
           });
         }
 

@@ -29,8 +29,10 @@ export interface AppointmentControls {
   setEditStatus: (status: string) => void;
   editConfirmedDateTime: string;
   setEditConfirmedDateTime: (value: string) => void;
+  editReason: string;
+  setEditReason: (value: string) => void;
   editWarning: string | null;
-  updateAppointmentMutation: ReturnType<typeof useMutation<{ warning?: string }, Error, { id: string; status?: string; confirmedDateTime?: string | null }>>;
+  updateAppointmentMutation: ReturnType<typeof useMutation<{ warning?: string }, Error, { id: string; status?: string; confirmedDateTime?: string | null; reason?: string }>>;
 
   // Messaging
   sendMessageMutation: ReturnType<typeof useMutation<unknown, Error, { id: string; to: string; subject: string; body: string }>>;
@@ -59,6 +61,7 @@ export function useAppointmentControls(
   const [showEditPanel, setShowEditPanel] = useState(false);
   const [editStatus, setEditStatus] = useState<string | null>(null);
   const [editConfirmedDateTime, setEditConfirmedDateTime] = useState('');
+  const [editReason, setEditReason] = useState('');
   const [editWarning, setEditWarning] = useState<string | null>(null);
   const editWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [reprocessPreview, setReprocessPreview] = useState<ReprocessPreviewResult | null>(null);
@@ -174,11 +177,22 @@ export function useAppointmentControls(
   });
 
   const updateAppointmentMutation = useMutation({
-    mutationFn: ({ id, status, confirmedDateTime }: { id: string; status?: string; confirmedDateTime?: string | null }) =>
+    mutationFn: ({
+      id,
+      status,
+      confirmedDateTime,
+      reason,
+    }: {
+      id: string;
+      status?: string;
+      confirmedDateTime?: string | null;
+      reason?: string;
+    }) =>
       updateAppointment(id, {
         status: status as 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'cancelled' | undefined,
         confirmedDateTime,
         adminId,
+        reason,
       }),
     onMutate: () => { setMutationError(null); },
     onSuccess: (data) => {
@@ -186,6 +200,7 @@ export function useAppointmentControls(
       invalidateList();
       invalidateStats();
       setShowEditPanel(false);
+      setEditReason('');
       setMutationError(null);
       if (data.warning) {
         setEditWarning(data.warning);
@@ -237,6 +252,8 @@ export function useAppointmentControls(
     setEditStatus,
     editConfirmedDateTime,
     setEditConfirmedDateTime,
+    editReason,
+    setEditReason,
     editWarning,
     updateAppointmentMutation,
     sendMessageMutation,

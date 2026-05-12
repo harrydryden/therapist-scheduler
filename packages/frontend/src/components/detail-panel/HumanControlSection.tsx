@@ -180,12 +180,31 @@ export default function HumanControlSection({
                 </div>
               )}
 
+              {/* Reason for the edit — required by the backend whenever
+                  status or confirmed date/time actually change (state-
+                  changing edits get audit-trailed). Mirrors the
+                  /admin/appointments dialog from #215. */}
+              <div className="mb-2">
+                <label className="text-sm text-slate-600 block mb-1">
+                  Reason:
+                  <span className="text-red-500 ml-1">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={controls.editReason}
+                  onChange={(e) => controls.setEditReason(e.target.value)}
+                  placeholder="Short note for the audit trail"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+                />
+              </div>
+
               <div className="flex gap-2">
                 <button
                   onClick={() => {
                     controls.setShowEditPanel(false);
                     controls.setEditStatus(appointment.status);
                     controls.setEditConfirmedDateTime(appointment.confirmedDateTime || '');
+                    controls.setEditReason('');
                   }}
                   aria-label="Cancel edit"
                   className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors text-sm"
@@ -198,11 +217,21 @@ export default function HumanControlSection({
                       id: appointment.id,
                       status: controls.editStatus || undefined,
                       confirmedDateTime: controls.editStatus === 'confirmed' ? controls.editConfirmedDateTime : undefined,
+                      reason: controls.editReason.trim() || undefined,
                     });
                   }}
                   disabled={
                     controls.updateAppointmentMutation.isPending ||
-                    (controls.editStatus === 'confirmed' && !controls.editConfirmedDateTime.trim())
+                    (controls.editStatus === 'confirmed' && !controls.editConfirmedDateTime.trim()) ||
+                    // Reason is required whenever the edit would change
+                    // state. The backend enforces this; mirroring it here
+                    // gives immediate feedback rather than a toast on submit.
+                    (
+                      (controls.editStatus !== appointment.status ||
+                        (controls.editStatus === 'confirmed' &&
+                          controls.editConfirmedDateTime !== (appointment.confirmedDateTime || ''))) &&
+                      !controls.editReason.trim()
+                    )
                   }
                   aria-label="Save appointment changes"
                   aria-busy={controls.updateAppointmentMutation.isPending}
