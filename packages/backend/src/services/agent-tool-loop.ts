@@ -37,6 +37,7 @@ import { truncateMessageContent } from './ai-conversation.service';
 import { auditEventService } from './audit-event.service';
 import { getSettingValue } from './settings.service';
 import { getToolsForStage } from './tools-for-stage';
+import { buildSkipMessage, computeTurnHash } from './tool-loop-helpers';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
 import {
@@ -72,31 +73,9 @@ const SAME_HASH_TURN_ABORT = 3;
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
-/** Stable per-turn hash for de-duplicating identical tool calls. Turn-local
- *  (in-memory map within one runToolLoop invocation), so no SHA needed —
- *  string equality on (name, input) is enough. Decoupled from the executor's
- *  persistent hash (which spans turns via Redis) so the two checks compose
- *  cleanly: this one catches in-turn retries before they touch the executor
- *  or the lifecycle counter. */
-function computeTurnHash(toolName: string, input: unknown): string {
-  return `${toolName}:${JSON.stringify(input)}`;
-}
-
-/** Build the tool_result text shown to Claude for a skipped tool call.
- *  The previous "Tool X skipped: idempotent" wording was easy for the
- *  model to misread as a failure and retry — which then incremented the
- *  per-appointment tool counter on every retry. The new wording names the
- *  outcome (already-completed / paused-for-human) and tells Claude what
- *  to do next, so it stops looping on the same hash. */
-function buildSkipMessage(toolName: string, skipReason?: string): string {
-  if (skipReason === 'idempotent') {
-    return `Tool ${toolName} was already completed earlier in this conversation. This is not an error — continue with the next step in the workflow, or call flag_for_human_review if there is nothing more to do.`;
-  }
-  if (skipReason === 'human_control') {
-    return `Tool ${toolName} was not executed because this conversation is now under human control. Stop responding; an admin will take over.`;
-  }
-  return `Tool ${toolName} skipped: ${skipReason ?? 'unknown reason'}`;
-}
+// Pure helpers (computeTurnHash, buildSkipMessage) live in
+// tool-loop-helpers.ts so they can be unit-tested without dragging in
+// the loop's anthropic + prisma + settings module graph.
 
 /** Scheduling tools definition — passed to Claude */
 export const schedulingTools: Anthropic.Tool[] = [
@@ -693,6 +672,7 @@ export async function runToolLoop(
           iteration,
           budgetExhausted,
           sameHashAborted,
+          bucket: budgetExhausted ? 'turn_budget_exhausted' : 'same_hash_aborted',
         },
         `${logContext} - Turn-level circuit breaker tripped — ${reason}`,
       );
@@ -731,6 +711,7 @@ export async function runToolLoop(
           totalToolErrors,
           limit: TURN_ERROR_LIMIT,
           iteration,
+          bucket: 'error',
         },
         `${logContext} - Tool error circuit breaker tripped — stopping loop and flagging for review`,
       );
@@ -954,7 +935,12 @@ export async function runAvailabilityToolLoop(
       let toolResult: string;
       let isError = false;
 
-      // Turn budget guard (mirrors booking loop).
+      // Turn budget guard (mirrors booking loop). The booking loop writes
+      // an audit event via auditEventService.logToolExecuted; the
+      // availability loop has no equivalent table (audit events are
+      // appointment-scoped, this loop runs on TherapistConversation), so
+      // we surface the bucket through structured logging instead. Same
+      // searchable signal in logs without a schema lift.
       if (toolsThisTurn >= TURN_TOOL_BUDGET) {
         budgetExhausted = true;
         toolResults.push({
@@ -963,6 +949,15 @@ export async function runAvailabilityToolLoop(
           content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
           is_error: false,
         });
+        logger.warn(
+          {
+            traceId,
+            conversationId: context.conversationId,
+            toolName: toolCall.name,
+            bucket: 'turn_budget_exhausted',
+          },
+          `${logContext} - availability turn budget exhausted on tool ${toolCall.name}`,
+        );
         continue;
       }
 
@@ -979,6 +974,16 @@ export async function runAvailabilityToolLoop(
           content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
           is_error: false,
         });
+        logger.warn(
+          {
+            traceId,
+            conversationId: context.conversationId,
+            toolName: toolCall.name,
+            seenCount,
+            bucket: 'same_hash_aborted',
+          },
+          `${logContext} - availability same-hash abort on tool ${toolCall.name}`,
+        );
         continue;
       }
 
@@ -990,6 +995,16 @@ export async function runAvailabilityToolLoop(
           content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
           is_error: false,
         });
+        logger.info(
+          {
+            traceId,
+            conversationId: context.conversationId,
+            toolName: toolCall.name,
+            seenCount,
+            bucket: 'same_hash_blocked',
+          },
+          `${logContext} - availability same-hash 2nd-occurrence skip on tool ${toolCall.name}`,
+        );
         continue;
       }
 
@@ -1094,6 +1109,7 @@ export async function runAvailabilityToolLoop(
           totalToolErrors,
           limit: TURN_ERROR_LIMIT,
           iteration,
+          bucket: 'error',
         },
         `${logContext} - availability tool error circuit breaker tripped — stopping loop and flagging for review`,
       );
