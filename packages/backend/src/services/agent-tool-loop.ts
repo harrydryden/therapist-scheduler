@@ -35,6 +35,8 @@ import {
 } from '../services/conversation-checkpoint.service';
 import { truncateMessageContent } from './ai-conversation.service';
 import { auditEventService } from './audit-event.service';
+import { getSettingValue } from './settings.service';
+import { getToolsForStage } from './tools-for-stage';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
 import {
@@ -318,6 +320,10 @@ const SIDE_EFFECT_TOOLS = new Set([
   'issue_voucher_code',
 ]);
 
+// Stage-gated tool surface lives in tools-for-stage.ts to keep the matrix
+// a pure function — easier to unit-test without dragging in the loop's
+// anthropic + prisma + settings module graph.
+
 export interface ExecutedTool {
   toolName: string;
   emailSentTo?: 'user' | 'therapist';
@@ -389,6 +395,21 @@ export async function runToolLoop(
   let budgetExhausted = false;
   let sameHashAborted = false;
 
+  // Read the stage-gate setting once per invocation. The tool surface is
+  // still re-derived per iteration (since the checkpoint can advance
+  // mid-loop), but the on/off switch is stable within a single inbound.
+  // Falls open to false on settings failure — narrower is the behaviour
+  // change, full surface is the safe default.
+  let stageGatedToolsEnabled = false;
+  try {
+    stageGatedToolsEnabled = await getSettingValue<boolean>('agent.stageGatedTools');
+  } catch (err) {
+    logger.warn(
+      { err, traceId, appointmentRequestId: context.appointmentRequestId },
+      `${logContext} - Failed to read agent.stageGatedTools setting; defaulting to full tool surface`,
+    );
+  }
+
   while (iteration < MAX_TOOL_ITERATIONS) {
     iteration++;
     logger.debug(
@@ -396,12 +417,22 @@ export async function runToolLoop(
       `${logContext} - Claude API call iteration`
     );
 
+    // Re-derive the tool surface every iteration: the checkpoint can
+    // advance during the loop (e.g. send_email → awaiting_user_slot_selection)
+    // and a narrower tool set may apply to the next Claude call.
+    const tools = stageGatedToolsEnabled
+      ? getToolsForStage(
+          conversationState.checkpoint?.stage as ConversationStage | undefined,
+          schedulingTools,
+        )
+      : schedulingTools;
+
     const response = await resilientCall(
       () => anthropicClient.messages.create({
         model: CLAUDE_MODELS.AGENT,
         max_tokens: MODEL_CONFIG.agent.maxTokens,
         system: systemPrompt,
-        tools: schedulingTools,
+        tools,
         messages: messagesForClaude,
       }),
       { context: logContext, traceId, circuitBreaker: claudeCircuitBreaker }
