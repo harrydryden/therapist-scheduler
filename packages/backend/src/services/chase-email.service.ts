@@ -6,6 +6,7 @@ import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
+import { isTherapistPending, isUserPending } from './stage-groups';
 import { appointmentLifecycleService } from './appointment-lifecycle.service';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
@@ -355,11 +356,7 @@ class ChaseEmailService {
     const stage = appointment.checkpointStage;
 
     // Stages where we're waiting on the therapist
-    if (
-      stage === 'awaiting_therapist_availability' ||
-      stage === 'awaiting_therapist_confirmation' ||
-      stage === 'awaiting_meeting_link' // Therapist needs to send the meeting link
-    ) {
+    if (isTherapistPending(stage)) {
       return {
         target: 'therapist',
         email: appointment.therapistEmail,
@@ -368,7 +365,7 @@ class ChaseEmailService {
     }
 
     // Stages where we're waiting on the user
-    if (stage === 'awaiting_user_slot_selection') {
+    if (isUserPending(stage)) {
       return {
         target: 'user',
         email: appointment.userEmail,

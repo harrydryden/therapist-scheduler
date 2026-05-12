@@ -4,24 +4,13 @@ import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
 import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES, ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
+import { isTherapistPending } from './stage-groups';
 
 // Type for transaction client
 type TransactionClient = Prisma.TransactionClient;
 type PrismaClient = typeof prisma;
 
 // FIX M9: Retry configuration for serialization failures
-/** Checkpoint stages where the next action is on the therapist's side.
- *  Auto-unfreeze must not fire while a conversation is in one of these —
- *  the conversation looks dormant on lastActivityAt alone but we're still
- *  expecting a reply that has to land on a frozen therapist. Unfreezing
- *  before the reply arrives lets the booking layer accept a second
- *  appointment for the same therapist. */
-const THERAPIST_PENDING_STAGES = new Set<string>([
-  'awaiting_therapist_availability',
-  'awaiting_therapist_confirmation',
-  'awaiting_meeting_link',
-]);
-
 const SERIALIZATION_RETRY = {
   MAX_RETRIES: 3,
   BASE_DELAY_MS: 50,
@@ -559,9 +548,7 @@ class TherapistBookingStatusService {
           // Previous behaviour treated all stale conversations as
           // abandoned, which prematurely unfroze therapists who were
           // just slow to respond.
-          const awaitingTherapist = conversations.some(
-            (conv) => conv.checkpointStage && THERAPIST_PENDING_STAGES.has(conv.checkpointStage),
-          );
+          const awaitingTherapist = conversations.some((conv) => isTherapistPending(conv.checkpointStage));
           if (awaitingTherapist) continue;
 
           // Check if ALL are inactive (no activity after threshold)

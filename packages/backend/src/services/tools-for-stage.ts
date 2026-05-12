@@ -20,21 +20,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import type { ConversationStage } from '@therapist-scheduler/shared';
-
-/** Stages where no slot exists yet — completing or rescheduling is
- *  nonsensical because there's nothing to complete or move. */
-const PRE_SLOT_STAGES = new Set<ConversationStage>([
-  'initial_contact',
-  'awaiting_therapist_availability',
-  'awaiting_user_slot_selection',
-]);
-
-/** Stages where the slot is locked in — collecting more availability
- *  data is past its relevance. */
-const POST_CONFIRM_STAGES = new Set<ConversationStage>([
-  'confirmed',
-  'awaiting_meeting_link',
-]);
+import { PRE_SLOT_STAGES, POST_CONFIRM_STAGES } from './stage-groups';
 
 const PRE_SLOT_DISALLOWED = new Set<string>([
   'mark_scheduling_complete',
