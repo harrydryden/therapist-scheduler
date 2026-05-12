@@ -745,6 +745,8 @@ class TherapistBookingStatusService {
       try {
         await prisma.$transaction(
           async (tx) => {
+            const now = new Date();
+
             // Count unique email addresses with active (non-terminal) requests.
             // Uses ACTIVE_STATUSES so completed/cancelled appointments don't keep
             // the booking status record alive with a stale frozenAt.
@@ -763,39 +765,70 @@ class TherapistBookingStatusService {
               where: { id: therapistHandle },
             });
 
-            if (!status) {
-              // No status record means therapist was never booked - nothing to update
+            // Case 1: no active requests. Delete the row if it exists; otherwise
+            // nothing to do. Earlier behaviour returned early when !status; the
+            // explicit guard preserves that.
+            if (uniqueCount === 0) {
+              if (status) {
+                await tx.therapistBookingStatus.delete({ where: { id: therapistHandle } });
+                logger.info(
+                  { therapistHandle },
+                  'Removed therapist booking status - no active requests remaining',
+                );
+              }
               return;
             }
 
-            // If count is 0, we can delete the status record (therapist fully available)
-            if (uniqueCount === 0) {
-              await tx.therapistBookingStatus.delete({
+            // Case 2: row exists, count > 0 — update count and clear the admin
+            // alert if we've dropped below the threshold. frozenAt is NOT
+            // touched here; auto-unfreeze (#213) owns that semantic.
+            if (status) {
+              await tx.therapistBookingStatus.update({
                 where: { id: therapistHandle },
+                data: {
+                  uniqueRequestCount: uniqueCount,
+                  ...(uniqueCount < maxReqsThreshold && {
+                    adminAlertAt: null,
+                    adminAlertAcknowledged: false,
+                  }),
+                },
               });
               logger.info(
-                { therapistHandle },
-                'Removed therapist booking status - no active requests remaining'
+                { therapistHandle, uniqueCount },
+                'Recalculated unique request count for therapist',
               );
               return;
             }
 
-            // Update the count
-            await tx.therapistBookingStatus.update({
-              where: { id: therapistHandle },
+            // Case 3: row missing but active requests exist. This happens when
+            // an earlier recalculate deleted the row (count hit zero) and a
+            // new active appointment then arrived via a path that doesn't
+            // call recordNewRequest — e.g. a status flip from cancelled back
+            // to pending. Without this branch the booking layer sees the
+            // therapist as free and can accept a second concurrent active
+            // appointment. Re-creates the row with frozenAt=now to match what
+            // recordNewRequest would have done. Surfaced as a follow-up in
+            // #214; the symptom there was admins seeing no Freeze button on
+            // the therapist detail panel.
+            const sample = await tx.appointmentRequest.findFirst({
+              where: {
+                therapistHandle,
+                status: { in: [...ACTIVE_STATUSES] },
+              },
+              select: { therapistName: true },
+              orderBy: { updatedAt: 'desc' },
+            });
+            await tx.therapistBookingStatus.create({
               data: {
+                id: therapistHandle,
+                therapistName: sample?.therapistName ?? 'Unknown',
                 uniqueRequestCount: uniqueCount,
-                // Reset admin alert if count drops below threshold
-                ...(uniqueCount < maxReqsThreshold && {
-                  adminAlertAt: null,
-                  adminAlertAcknowledged: false,
-                }),
+                frozenAt: now,
               },
             });
-
             logger.info(
               { therapistHandle, uniqueCount },
-              'Recalculated unique request count for therapist'
+              'Re-created therapist booking status — active requests existed without a status row',
             );
           },
           {
