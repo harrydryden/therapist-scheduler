@@ -44,7 +44,30 @@ import {
 
 const MAX_TOOL_ITERATIONS = 5;
 
+/** Cumulative tool-call failures within a single runToolLoop invocation
+ *  that trip the error circuit breaker. Three failures in one turn is the
+ *  agent thrashing on a real problem (validation errors, transient outages,
+ *  prompt-injection driving impossible tool calls). Better to escalate
+ *  than keep retrying. */
+const TURN_ERROR_LIMIT = 3;
+
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
+
+/** Build the tool_result text shown to Claude for a skipped tool call.
+ *  The previous "Tool X skipped: idempotent" wording was easy for the
+ *  model to misread as a failure and retry — which then incremented the
+ *  per-appointment tool counter on every retry. The new wording names the
+ *  outcome (already-completed / paused-for-human) and tells Claude what
+ *  to do next, so it stops looping on the same hash. */
+function buildSkipMessage(toolName: string, skipReason?: string): string {
+  if (skipReason === 'idempotent') {
+    return `Tool ${toolName} was already completed earlier in this conversation. This is not an error — continue with the next step in the workflow, or call flag_for_human_review if there is nothing more to do.`;
+  }
+  if (skipReason === 'human_control') {
+    return `Tool ${toolName} was not executed because this conversation is now under human control. Stop responding; an admin will take over.`;
+  }
+  return `Tool ${toolName} skipped: ${skipReason ?? 'unknown reason'}`;
+}
 
 /** Scheduling tools definition — passed to Claude */
 export const schedulingTools: Anthropic.Tool[] = [
@@ -279,6 +302,12 @@ export interface ToolLoopCallbacks {
   executeToolCall: (toolCall: Anthropic.ToolUseBlock, context: SchedulingContext) => Promise<ToolExecutionResult>;
   /** Optional: checkpoint state before side-effecting tools (used by processEmailReply) */
   checkpointBeforeSideEffects?: () => Promise<void>;
+  /** Optional: server-side escalation when the loop detects a runaway
+   *  condition (e.g. TURN_ERROR_LIMIT tripped) without the agent having
+   *  called flag_for_human_review itself. Implementations should flip
+   *  humanControlEnabled on the appointment so subsequent inbound mail
+   *  doesn't resume the loop. */
+  flagForHumanReview?: (reason: string) => Promise<void>;
 }
 
 export interface ToolLoopResult {
@@ -387,7 +416,7 @@ export async function runToolLoop(
 
       if (result.success) {
         if (result.skipped) {
-          toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
+          toolResult = buildSkipMessage(result.toolName, result.skipReason);
         } else {
           toolResult = result.resultMessage || `Tool ${result.toolName} executed successfully.`;
 
@@ -511,6 +540,46 @@ export async function runToolLoop(
       });
     }
 
+    // Error circuit breaker: TURN_ERROR_LIMIT failures within a single
+    // runToolLoop invocation indicates the agent is thrashing — either a
+    // genuinely broken tool, an impossible request, or prompt-injection
+    // pushing impossible inputs. Escalate to human control rather than
+    // continue iterating and burning the per-appointment tool ceiling.
+    // Checked after the inner for-loop so all tool_results from this
+    // iteration are still collected for logging, then the while loop
+    // exits without sending them back to Claude (same pattern as
+    // flag_for_human_review).
+    if (!stopLoop && !flaggedForHumanReview && totalToolErrors >= TURN_ERROR_LIMIT) {
+      logger.warn(
+        {
+          traceId,
+          appointmentRequestId: context.appointmentRequestId,
+          totalToolErrors,
+          limit: TURN_ERROR_LIMIT,
+          iteration,
+        },
+        `${logContext} - Tool error circuit breaker tripped — stopping loop and flagging for review`,
+      );
+      conversationState.messages.push({
+        role: 'admin' as const,
+        content: `[System: ${totalToolErrors} tool failures in this turn — pausing for admin review.]`,
+      });
+      if (callbacks.flagForHumanReview) {
+        try {
+          await callbacks.flagForHumanReview(
+            `Tool error circuit breaker tripped (${totalToolErrors} failures in one turn). Agent paused for review.`,
+          );
+        } catch (flagErr) {
+          logger.error(
+            { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
+            `${logContext} - Failed to flag for human review at circuit breaker`,
+          );
+        }
+      }
+      flaggedForHumanReview = true;
+      stopLoop = true;
+    }
+
     if (stopLoop) {
       break;
     }
@@ -583,6 +652,10 @@ export interface AvailabilityToolLoopCallbacks {
    *  tool runs. Same role as in runToolLoop — protects against losing
    *  the agent's prior work if a write crashes mid-execution. */
   checkpointBeforeSideEffects?: () => Promise<void>;
+  /** Server-side escalation when the loop trips its error circuit
+   *  breaker. Flips humanControlEnabled on the TherapistConversation so
+   *  later inbound mail doesn't resume the loop. */
+  flagForHumanReview?: (reason: string) => Promise<void>;
 }
 
 export interface AvailabilityToolLoopResult {
@@ -702,7 +775,7 @@ export async function runAvailabilityToolLoop(
 
       if (result.success) {
         if (result.skipped) {
-          toolResult = `Tool ${result.toolName} skipped: ${result.skipReason}`;
+          toolResult = buildSkipMessage(result.toolName, result.skipReason);
         } else {
           toolResult = result.resultMessage || `Tool ${result.toolName} executed successfully.`;
           executedTools.push({
@@ -750,6 +823,40 @@ export async function runAvailabilityToolLoop(
       });
 
       if (stopLoop) break;
+    }
+
+    // Error circuit breaker — mirrors the booking loop. TURN_ERROR_LIMIT
+    // failures in one runAvailabilityToolLoop invocation means the agent
+    // is thrashing; escalate to human control rather than continue.
+    if (!stopLoop && !flaggedForHumanReview && !markedComplete && totalToolErrors >= TURN_ERROR_LIMIT) {
+      logger.warn(
+        {
+          traceId,
+          conversationId: context.conversationId,
+          totalToolErrors,
+          limit: TURN_ERROR_LIMIT,
+          iteration,
+        },
+        `${logContext} - availability tool error circuit breaker tripped — stopping loop and flagging for review`,
+      );
+      conversationState.messages.push({
+        role: 'admin' as const,
+        content: `[System: ${totalToolErrors} tool failures in this turn — pausing for admin review.]`,
+      });
+      if (callbacks.flagForHumanReview) {
+        try {
+          await callbacks.flagForHumanReview(
+            `Tool error circuit breaker tripped (${totalToolErrors} failures in one turn). Agent paused for review.`,
+          );
+        } catch (flagErr) {
+          logger.error(
+            { traceId, conversationId: context.conversationId, err: flagErr },
+            `${logContext} - Failed to flag for human review at circuit breaker`,
+          );
+        }
+      }
+      flaggedForHumanReview = true;
+      stopLoop = true;
     }
 
     if (stopLoop) break;

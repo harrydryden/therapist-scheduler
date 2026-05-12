@@ -1395,6 +1395,19 @@ export class AIToolExecutorService {
   }
 
   /**
+   * Public entry point for the tool loop to escalate runaway conditions
+   * (e.g. error circuit breaker tripped) without the agent having
+   * called flag_for_human_review itself. Mirrors the side effects of
+   * the tool: humanControlEnabled, audit event, Slack alert.
+   */
+  async flagForHumanReviewFromLoop(
+    context: SchedulingContext,
+    reason: string,
+  ): Promise<void> {
+    await this.flagForHumanReview(context, { reason });
+  }
+
+  /**
    * Flag appointment for human review when agent is uncertain
    * Enables human control mode so admin can review and respond
    */
