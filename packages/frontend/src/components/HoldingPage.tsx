@@ -41,14 +41,11 @@ export default function HoldingPage() {
         </svg>
       </div>
       <h2 className="text-2xl font-semibold text-slate-900 mb-3">
-        We're adding new therapists soon
+        Therapists coming soon
       </h2>
       <p className="text-slate-600 leading-relaxed">
-        No therapists are available to book right now, but we're working on it.
-        We'll notify you as soon as new therapists are ready to take sessions.
-      </p>
-      <p className="mt-4 text-sm text-slate-500">
-        Thanks for your patience.
+        We don't have any therapists on the platform at the moment. More will be added soon.
+        We'll notify you when they are.
       </p>
     </div>
   );
