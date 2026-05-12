@@ -172,6 +172,7 @@ export class AvailabilityAgentService {
       context,
       {
         executeToolCall: (tc, ctx) => this.executor.executeToolCall(tc, ctx),
+        flagForHumanReview: (reason) => this.executor.flagForHumanReviewFromLoop(context, reason),
       },
       this.traceId,
       'startCollection',
@@ -458,6 +459,7 @@ ${safeContent}`;
       context,
       {
         executeToolCall: (tc, ctx) => this.executor.executeToolCall(tc, ctx),
+        flagForHumanReview: (reason) => this.executor.flagForHumanReviewFromLoop(context, reason),
         // Checkpoint state before each side-effecting tool, with
         // optimistic locking on updatedAt. If the lock fails we log
         // and re-throw — the loop will surface the error in the

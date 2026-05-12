@@ -507,6 +507,18 @@ export class AvailabilityToolExecutorService {
    * race with supersession or completion is a no-op rather than a
    * silent stomp.
    */
+  /** Public entry point for the availability tool loop to escalate
+   *  runaway conditions (e.g. error circuit breaker tripped) without the
+   *  agent having called flag_for_human_review itself. Routes through
+   *  the same private method so behaviour stays in lockstep with the
+   *  tool path. */
+  async flagForHumanReviewFromLoop(
+    context: AvailabilityAgentContext,
+    reason: string,
+  ): Promise<void> {
+    await this.flagForHumanReview({ reason }, context);
+  }
+
   private async flagForHumanReview(
     rawInput: unknown,
     context: AvailabilityAgentContext,

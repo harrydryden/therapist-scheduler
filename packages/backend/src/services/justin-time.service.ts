@@ -115,7 +115,10 @@ export class JustinTimeService {
         [{ role: 'user', content: initialMessage }],
         conversationState,
         context,
-        { executeToolCall: (tc, ctx) => this.toolExecutor.executeToolCall(tc, ctx) },
+        {
+          executeToolCall: (tc, ctx) => this.toolExecutor.executeToolCall(tc, ctx),
+          flagForHumanReview: (reason) => this.toolExecutor.flagForHumanReviewFromLoop(context, reason),
+        },
         this.traceId,
         'startScheduling',
       );
@@ -480,6 +483,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
         context,
         {
           executeToolCall: (tc, ctx) => this.toolExecutor.executeToolCall(tc, ctx),
+          flagForHumanReview: (reason) => this.toolExecutor.flagForHumanReviewFromLoop(context, reason),
           // Checkpoint state before side-effecting tools to enable recovery
           checkpointBeforeSideEffects: async () => {
             try {
