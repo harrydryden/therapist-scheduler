@@ -51,7 +51,33 @@ const MAX_TOOL_ITERATIONS = 5;
  *  than keep retrying. */
 const TURN_ERROR_LIMIT = 3;
 
+/** Maximum tool-call attempts across a single runToolLoop invocation.
+ *  Closes the "5 iterations × N tool_use blocks per iteration" amplification
+ *  that lets one inbound trigger push 30+ calls into the per-appointment
+ *  lifecycle counter. Generous enough for a realistic turn — e.g.
+ *  remember + record_availability_window + send_email + record_booking_link
+ *  + a follow-up email — but well below any plausible legitimate need. */
+const TURN_TOOL_BUDGET = 8;
+
+/** Number of times the same (toolName, input) hash can appear within one
+ *  runToolLoop invocation before the loop aborts. 1st: executes. 2nd:
+ *  short-circuited with a directive telling the model to try something
+ *  else or call flag_for_human_review. 3rd: loop aborts and escalates.
+ *  Catches the dominant cause of ceiling trips — idempotent retries and
+ *  injection-driven repeated calls. */
+const SAME_HASH_TURN_ABORT = 3;
+
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
+
+/** Stable per-turn hash for de-duplicating identical tool calls. Turn-local
+ *  (in-memory map within one runToolLoop invocation), so no SHA needed —
+ *  string equality on (name, input) is enough. Decoupled from the executor's
+ *  persistent hash (which spans turns via Redis) so the two checks compose
+ *  cleanly: this one catches in-turn retries before they touch the executor
+ *  or the lifecycle counter. */
+function computeTurnHash(toolName: string, input: unknown): string {
+  return `${toolName}:${JSON.stringify(input)}`;
+}
 
 /** Build the tool_result text shown to Claude for a skipped tool call.
  *  The previous "Tool X skipped: idempotent" wording was easy for the
@@ -354,6 +380,14 @@ export async function runToolLoop(
   const executedTools: ExecutedTool[] = [];
   let flaggedForHumanReview = false;
 
+  // Turn-scope counters for the budget + same-hash guards. Both live in
+  // this closure so they cumulate across iterations within one runToolLoop
+  // invocation but reset cleanly per invocation.
+  let toolsThisTurn = 0;
+  const turnHashCounts = new Map<string, number>();
+  let budgetExhausted = false;
+  let sameHashAborted = false;
+
   while (iteration < MAX_TOOL_ITERATIONS) {
     iteration++;
     logger.debug(
@@ -412,6 +446,55 @@ export async function runToolLoop(
       let toolResult: string;
       let isError = false;
 
+      // Turn budget guard. Once exhausted, push a synthetic result for
+      // every remaining tool_use block in this iteration (Anthropic
+      // requires one result per use) but do not execute. The trip is
+      // flagged after the for-loop completes.
+      if (toolsThisTurn >= TURN_TOOL_BUDGET) {
+        budgetExhausted = true;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      // Same-hash-in-turn guard. 1st occurrence executes; 2nd is
+      // short-circuited with a directive (model gets one chance to
+      // pivot); SAME_HASH_TURN_ABORT-th aborts the loop entirely.
+      const turnHash = computeTurnHash(toolCall.name, toolCall.input);
+      const seenCount = (turnHashCounts.get(turnHash) ?? 0) + 1;
+      turnHashCounts.set(turnHash, seenCount);
+
+      if (seenCount >= SAME_HASH_TURN_ABORT) {
+        sameHashAborted = true;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      if (seenCount > 1) {
+        // 2nd occurrence: skip with directive, still costs a budget slot
+        // (a tool_use block was emitted and answered).
+        toolsThisTurn++;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      // First occurrence — execute. Increment before the call so a thrown
+      // exception still counts against the budget.
+      toolsThisTurn++;
       const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
@@ -538,6 +621,43 @@ export async function runToolLoop(
         content: toolResult,
         is_error: isError,
       });
+    }
+
+    // Turn-level circuit breakers: budget exhaustion or same-hash abort.
+    // Both trip after the inner for-loop so all tool_results for this
+    // iteration are collected (Anthropic requires one result per use)
+    // before the while loop exits without feeding them back to Claude.
+    if (!stopLoop && !flaggedForHumanReview && (budgetExhausted || sameHashAborted)) {
+      const reason = budgetExhausted
+        ? `Turn tool budget exhausted (${TURN_TOOL_BUDGET} tool calls in one inbound trigger). Agent paused for admin review.`
+        : `Same tool called ${SAME_HASH_TURN_ABORT}+ times with identical arguments in one turn — agent thrashing on a duplicate call. Paused for review.`;
+      logger.warn(
+        {
+          traceId,
+          appointmentRequestId: context.appointmentRequestId,
+          toolsThisTurn,
+          iteration,
+          budgetExhausted,
+          sameHashAborted,
+        },
+        `${logContext} - Turn-level circuit breaker tripped — ${reason}`,
+      );
+      conversationState.messages.push({
+        role: 'admin' as const,
+        content: `[System: ${reason}]`,
+      });
+      if (callbacks.flagForHumanReview) {
+        try {
+          await callbacks.flagForHumanReview(reason);
+        } catch (flagErr) {
+          logger.error(
+            { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
+            `${logContext} - Failed to flag for human review at turn-level breaker`,
+          );
+        }
+      }
+      flaggedForHumanReview = true;
+      stopLoop = true;
     }
 
     // Error circuit breaker: TURN_ERROR_LIMIT failures within a single
@@ -706,6 +826,14 @@ export async function runAvailabilityToolLoop(
   let flaggedForHumanReview = false;
   let markedComplete = false;
 
+  // Turn-scope counters for the budget + same-hash guards (mirrors the
+  // booking loop). Closure-scoped so they cumulate across iterations
+  // within one runAvailabilityToolLoop invocation and reset per invocation.
+  let toolsThisTurn = 0;
+  const turnHashCounts = new Map<string, number>();
+  let budgetExhausted = false;
+  let sameHashAborted = false;
+
   // cache_control on the system block caches both tool definitions and
   // system prompt (tools render before system in the request prefix).
   // Both are stable for the lifetime of one conversation, so every
@@ -769,9 +897,50 @@ export async function runAvailabilityToolLoop(
     let stopLoop = false;
 
     for (const toolCall of toolCalls) {
-      const result = await callbacks.executeToolCall(toolCall, context);
       let toolResult: string;
       let isError = false;
+
+      // Turn budget guard (mirrors booking loop).
+      if (toolsThisTurn >= TURN_TOOL_BUDGET) {
+        budgetExhausted = true;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      // Same-hash-in-turn guard (mirrors booking loop).
+      const turnHash = computeTurnHash(toolCall.name, toolCall.input);
+      const seenCount = (turnHashCounts.get(turnHash) ?? 0) + 1;
+      turnHashCounts.set(turnHash, seenCount);
+
+      if (seenCount >= SAME_HASH_TURN_ABORT) {
+        sameHashAborted = true;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      if (seenCount > 1) {
+        toolsThisTurn++;
+        toolResults.push({
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
+          is_error: false,
+        });
+        continue;
+      }
+
+      toolsThisTurn++;
+      const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
         if (result.skipped) {
@@ -823,6 +992,41 @@ export async function runAvailabilityToolLoop(
       });
 
       if (stopLoop) break;
+    }
+
+    // Turn-level circuit breakers (budget / same-hash). Mirror the booking
+    // loop and fire before the error breaker so the right cause is logged.
+    if (!stopLoop && !flaggedForHumanReview && !markedComplete && (budgetExhausted || sameHashAborted)) {
+      const reason = budgetExhausted
+        ? `Turn tool budget exhausted (${TURN_TOOL_BUDGET} tool calls in one inbound trigger). Agent paused for admin review.`
+        : `Same tool called ${SAME_HASH_TURN_ABORT}+ times with identical arguments in one turn — agent thrashing on a duplicate call. Paused for review.`;
+      logger.warn(
+        {
+          traceId,
+          conversationId: context.conversationId,
+          toolsThisTurn,
+          iteration,
+          budgetExhausted,
+          sameHashAborted,
+        },
+        `${logContext} - availability turn-level circuit breaker tripped — ${reason}`,
+      );
+      conversationState.messages.push({
+        role: 'admin' as const,
+        content: `[System: ${reason}]`,
+      });
+      if (callbacks.flagForHumanReview) {
+        try {
+          await callbacks.flagForHumanReview(reason);
+        } catch (flagErr) {
+          logger.error(
+            { traceId, conversationId: context.conversationId, err: flagErr },
+            `${logContext} - Failed to flag for human review at turn-level breaker`,
+          );
+        }
+      }
+      flaggedForHumanReview = true;
+      stopLoop = true;
     }
 
     // Error circuit breaker — mirrors the booking loop. TURN_ERROR_LIMIT
