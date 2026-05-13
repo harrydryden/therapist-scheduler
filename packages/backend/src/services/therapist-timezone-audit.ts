@@ -34,6 +34,10 @@ export interface TherapistTimezoneInput {
   name: string;
   email: string;
   country: string;
+  /** Value of the new `Therapist.timezone` column (the canonical
+   *  agent-confirmed zone). When present, the row is OK regardless of
+   *  what's in availability.timezone — explicit wins. */
+  explicitTimezone?: string | null;
   /** Parsed `availability` JSON or null if the therapist has none. */
   availability: { timezone?: string } | null;
 }
@@ -53,6 +57,14 @@ export interface TherapistTimezoneAuditRow {
 export function classifyTherapistTimezone(
   row: TherapistTimezoneInput,
 ): TherapistTimezoneAuditRow {
+  // Explicit `Therapist.timezone` column trumps everything — the
+  // canonical agent-confirmed zone. When present, the row is OK and
+  // the legacy stamp is irrelevant for classification.
+  const explicit = (row.explicitTimezone ?? '').trim();
+  if (explicit) {
+    return base(row, explicit, 'OK', '-');
+  }
+
   const current = row.availability?.timezone ?? '';
   const countryDefault = getDefaultTimezone(row.country);
   const multiZone = hasMultipleTimezones(row.country);
@@ -110,5 +122,68 @@ function base(
     currentTimezone: current,
     classification,
     suggestedFix,
+  };
+}
+
+/**
+ * User classifier. Simpler than the therapist one — users have only the
+ * single `User.timezone` column, no `availability.timezone` fallback.
+ *
+ * Buckets used:
+ *   - OK         explicit zone on file
+ *   - AUTO_FIXABLE   single-zone country, no zone — country default is unambiguous
+ *   - AMBIGUOUS  multi-zone country, no zone — the booking agent should ask
+ */
+export interface UserTimezoneInput {
+  id: string;
+  name: string | null;
+  email: string;
+  country: string;
+  explicitTimezone?: string | null;
+}
+
+export interface UserTimezoneAuditRow {
+  id: string;
+  name: string;
+  email: string;
+  country: string;
+  currentTimezone: string;
+  classification: 'OK' | 'AUTO_FIXABLE' | 'AMBIGUOUS';
+  suggestedFix: string;
+}
+
+export function classifyUserTimezone(row: UserTimezoneInput): UserTimezoneAuditRow {
+  const explicit = (row.explicitTimezone ?? '').trim();
+  if (explicit) {
+    return {
+      id: row.id,
+      name: row.name ?? '',
+      email: row.email,
+      country: row.country,
+      currentTimezone: explicit,
+      classification: 'OK',
+      suggestedFix: '-',
+    };
+  }
+  const countryDefault = getDefaultTimezone(row.country);
+  if (countryDefault) {
+    return {
+      id: row.id,
+      name: row.name ?? '',
+      email: row.email,
+      country: row.country,
+      currentTimezone: '',
+      classification: 'AUTO_FIXABLE',
+      suggestedFix: countryDefault,
+    };
+  }
+  return {
+    id: row.id,
+    name: row.name ?? '',
+    email: row.email,
+    country: row.country,
+    currentTimezone: '',
+    classification: 'AMBIGUOUS',
+    suggestedFix: `ASK CLIENT (${row.country} has multiple timezones)`,
   };
 }

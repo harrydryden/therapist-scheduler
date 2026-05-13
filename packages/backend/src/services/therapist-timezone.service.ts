@@ -25,28 +25,41 @@ import { logger } from '../utils/logger';
 
 /**
  * Where the resolved timezone came from:
- *   - 'stamped'         — an explicit `availability.timezone` on the row,
- *                         the strongest signal.
+ *   - 'explicit'        — `Therapist.timezone` column populated by the
+ *                         agent after asking the therapist. STRONGEST
+ *                         signal; supersedes everything else.
+ *   - 'stamped'         — `availability.timezone` legacy stamp on the
+ *                         row. Still trusted, but the explicit column
+ *                         is preferred when both are present.
  *   - 'country_default' — single-zone country (UK, IE, etc.), the country
  *                         default is unambiguous.
  *   - 'platform_default' — multi-zone country with no stamp, falling
  *                         through to the platform default. The agent
  *                         SHOULD ask before relying on this.
  */
-export type TimezoneSource = 'stamped' | 'country_default' | 'platform_default';
+export type TimezoneSource = 'explicit' | 'stamped' | 'country_default' | 'platform_default';
 
 export interface ResolvedTimezone {
   timezone: string;
   source: TimezoneSource;
-  /** True iff the country has multiple zones AND no explicit stamp. */
+  /** True iff the country has multiple zones AND no explicit zone /
+   *  stamp on file — the agent should ASK before relying on the
+   *  resolved value. */
   needsClarification: boolean;
 }
 
 export function resolveTherapistTimezone(args: {
+  /** Value of the new `Therapist.timezone` column. */
+  explicitTimezone?: string | null;
+  /** Value of legacy `availability.timezone` JSON field. */
   stampedTimezone: string | null | undefined;
   country: string | null | undefined;
   platformTimezone: string;
 }): ResolvedTimezone {
+  const explicit = (args.explicitTimezone ?? '').trim();
+  if (explicit) {
+    return { timezone: explicit, source: 'explicit', needsClarification: false };
+  }
   const stamped = (args.stampedTimezone ?? '').trim();
   if (stamped) {
     // Light sanity check: stamped but country is multi-zone is fine —
@@ -109,9 +122,15 @@ function maybeWarnSuspicious(stamped: string, country: string | null | undefined
  * country to platform default.
  */
 export function resolveUserTimezone(args: {
+  /** Value of the new `User.timezone` column. */
+  explicitTimezone?: string | null;
   country: string | null | undefined;
   platformTimezone: string;
 }): ResolvedTimezone {
+  const explicit = (args.explicitTimezone ?? '').trim();
+  if (explicit) {
+    return { timezone: explicit, source: 'explicit', needsClarification: false };
+  }
   const countryDefault = getDefaultTimezone(args.country ?? '');
   if (countryDefault) {
     return {

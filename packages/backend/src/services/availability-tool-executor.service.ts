@@ -43,10 +43,12 @@ import {
   availabilitySendEmailInputSchema,
   flagForHumanReviewInputSchema,
   recordBookingLinkInputSchema,
+  recordTherapistTimezoneInputSchema,
   rememberInputSchema,
   resolveLocalTimeInputSchema,
 } from '../schemas/tool-inputs';
 import { resolveWallClock, formatIsoWithOffset } from '../utils/timezone-resolver';
+import { isValidIanaTimezone } from '../utils/iana-timezone';
 import { addUpcomingAvailability, recordTherapistBookingLink } from './therapist-availability.service';
 import { addConversationNote } from './therapist-conversation-memory.service';
 import { emailProcessingService } from './email-processing.service';
@@ -210,6 +212,9 @@ export class AvailabilityToolExecutorService {
           break;
         case 'record_booking_link':
           result = await this.recordBookingLink(input, context);
+          break;
+        case 'record_therapist_timezone':
+          result = await this.recordTherapistTimezone(input, context);
           break;
         case 'remember':
           result = await this.remember(input, context);
@@ -502,6 +507,59 @@ export class AvailabilityToolExecutorService {
       success: true,
       toolName: 'record_booking_link',
       resultMessage: `Booking link recorded: ${url}`,
+    };
+  }
+
+  /**
+   * Persist the therapist's confirmed IANA timezone to
+   * `Therapist.timezone`. Used after asking the therapist which
+   * city/region they're in (when the prompt flagged a multi-zone-
+   * country need-clarification). Validated via Intl so the agent
+   * can't store a plausible-but-invalid zone.
+   */
+  private async recordTherapistTimezone(
+    rawInput: unknown,
+    context: AvailabilityAgentContext,
+  ): Promise<ToolExecutionResult> {
+    const parsed = recordTherapistTimezoneInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      return {
+        success: false,
+        toolName: 'record_therapist_timezone',
+        error: `Invalid input: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
+      };
+    }
+    const { timezone } = parsed.data;
+    if (!isValidIanaTimezone(timezone)) {
+      return {
+        success: false,
+        toolName: 'record_therapist_timezone',
+        error: `Unknown IANA timezone: "${timezone}". Pick a real zone — use one of the country's listed zones from the prompt.`,
+      };
+    }
+    const r = await prisma.therapist.updateMany({
+      where: { id: context.therapistId },
+      data: { timezone },
+    });
+    if (r.count === 0) {
+      logger.warn(
+        { traceId: this.traceId, therapistId: context.therapistId, timezone },
+        'record_therapist_timezone: no therapist row matched — no-op',
+      );
+      return {
+        success: true,
+        toolName: 'record_therapist_timezone',
+        resultMessage: `Note: no Therapist row matched for ${context.therapistId}; the timezone was not persisted.`,
+      };
+    }
+    logger.info(
+      { traceId: this.traceId, therapistId: context.therapistId, timezone },
+      'availability-tool-executor: persisted therapist timezone',
+    );
+    return {
+      success: true,
+      toolName: 'record_therapist_timezone',
+      resultMessage: `Recorded therapist timezone: ${timezone}.`,
     };
   }
 

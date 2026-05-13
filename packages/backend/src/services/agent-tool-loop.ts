@@ -148,20 +148,29 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
   {
     name: 'mark_scheduling_complete',
-    description: 'Mark the scheduling as complete and send final confirmation emails to both parties. Use this AFTER the therapist confirms they will send the meeting link.',
+    description: "Mark the scheduling as complete and send final confirmation emails to both parties. Use this AFTER the therapist confirms they will send the meeting link.\n\nPREFERRED CALL SHAPE: supply the structured form — `timezone` + `year` + `month` + `day` + `hour` + `minute` — and the executor synthesises the canonical ISO 8601 datetime via the same DST-aware path resolve_local_time uses. Use Europe/London (UK time) as the timezone in line with the 'Database / source of truth' rule from the Timezones section.\n\nLEGACY CALL SHAPE: pass `confirmed_datetime` as a freeform string like \"Monday 3rd February at 10:00am\". Kept for backward compatibility; chrono-parsed downstream. Prefer the structured form for new calls — it eliminates a class of date-resolution errors.",
     input_schema: {
       type: 'object' as const,
       properties: {
         confirmed_datetime: {
           type: 'string',
-          description: 'The confirmed appointment date and time (e.g., "Monday 3rd February at 10:00am")',
+          description: 'LEGACY: the confirmed appointment date and time as a freeform string (e.g., "Monday 3rd February at 10:00am"). Provide this OR the structured form (timezone+year+month+day+hour+minute), not both.',
         },
+        timezone: {
+          type: 'string',
+          description: 'PREFERRED: IANA timezone of the confirmed time. Use "Europe/London" — appointment times are canonical in UK time per the Timezones section.',
+        },
+        year: { type: 'number', description: 'PREFERRED: four-digit year of the confirmed appointment.' },
+        month: { type: 'number', description: 'PREFERRED: month 1-12 of the confirmed appointment.' },
+        day: { type: 'number', description: 'PREFERRED: day of month 1-31 of the confirmed appointment.' },
+        hour: { type: 'number', description: 'PREFERRED: hour 0-23 of the confirmed appointment (UK time).' },
+        minute: { type: 'number', description: 'PREFERRED: minute 0-59 of the confirmed appointment.' },
         notes: {
           type: 'string',
           description: 'Any additional notes about the booking',
         },
       },
-      required: ['confirmed_datetime'],
+      required: [],
     },
   },
   {
@@ -310,6 +319,38 @@ export const schedulingTools: Anthropic.Tool[] = [
         },
       },
       required: ['starts_at', 'ends_at', 'status', 'source', 'quote'],
+    },
+  },
+  {
+    name: 'record_user_timezone',
+    description:
+      "Persist the client's IANA timezone on their User record. Call this when you've determined what timezone the client is actually in — typically after asking them which city/region they're based in, when the Timezones section above flags their country as having multiple zones. Map their stated location (e.g. \"San Francisco\", \"NYC\", \"Brisbane\") to the matching IANA zone from the country's list shown in the Timezones section, and pass that here. After this call, every subsequent confirmation/reminder email to the client quotes times in this zone. Once recorded, you do NOT need to ask again on subsequent turns.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timezone: {
+          type: 'string',
+          description:
+            'IANA timezone identifier the client confirmed (e.g. "America/Los_Angeles", "Australia/Sydney"). MUST be a real IANA zone — the executor validates via Intl.DateTimeFormat and rejects unknown strings. Prefer a zone from the country\'s timezone list shown in the Timezones section.',
+        },
+      },
+      required: ['timezone'],
+    },
+  },
+  {
+    name: 'record_therapist_timezone',
+    description:
+      "Persist the therapist's IANA timezone on their Therapist record. Call this once you know which region they're in — typically after asking them, when their country has multiple zones (US, AU, CA, ...) and we don't yet have a stamped zone on file. The recorded zone becomes the canonical signal for: (a) interpreting future bare wall-clock times they mention, (b) formatting emails to them, (c) stamping a recurring schedule via update_therapist_availability. Once recorded, you do NOT need to ask again on subsequent turns.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timezone: {
+          type: 'string',
+          description:
+            'IANA timezone identifier the therapist confirmed (e.g. "America/New_York", "Pacific/Auckland"). MUST be a real IANA zone — the executor validates via Intl.DateTimeFormat and rejects unknown strings. Prefer a zone from the country\'s timezone list shown in the Timezones section.',
+        },
+      },
+      required: ['timezone'],
     },
   },
 ];

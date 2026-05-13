@@ -53,9 +53,12 @@ import {
   rememberInputSchema,
   recordAvailabilityWindowInputSchema,
   recordBookingLinkInputSchema,
+  recordUserTimezoneInputSchema,
+  recordTherapistTimezoneInputSchema,
   resolveLocalTimeInputSchema,
 } from '../schemas/tool-inputs';
 import { resolveWallClock, formatIsoWithOffset } from '../utils/timezone-resolver';
+import { isValidIanaTimezone } from '../utils/iana-timezone';
 import { addNote, addAvailabilityWindow } from './agent-memory.service';
 import {
   addUpcomingAvailability,
@@ -360,18 +363,73 @@ export class AIToolExecutorService {
           }
           const completeData = parsed.data;
 
+          // Synthesize confirmed_datetime from the structured form when
+          // the agent supplied one. This routes through the same
+          // resolveWallClock path that resolve_local_time uses, so DST
+          // / non-existent / unknown-timezone errors surface as
+          // specific tool errors the agent can react to. Legacy callers
+          // that pass the freeform `confirmed_datetime` string flow
+          // through unchanged.
+          let confirmedDateTime = completeData.confirmed_datetime;
+          if (
+            !confirmedDateTime &&
+            completeData.timezone &&
+            completeData.year !== undefined &&
+            completeData.month !== undefined &&
+            completeData.day !== undefined &&
+            completeData.hour !== undefined &&
+            completeData.minute !== undefined
+          ) {
+            if (!isValidIanaTimezone(completeData.timezone)) {
+              return {
+                success: false,
+                toolName: name,
+                error: `Unknown IANA timezone: "${completeData.timezone}". Pick a real zone.`,
+              };
+            }
+            const resolved = resolveWallClock(
+              completeData.timezone,
+              completeData.year,
+              completeData.month - 1,
+              completeData.day,
+              completeData.hour,
+              completeData.minute,
+            );
+            if (!resolved.ok) {
+              return {
+                success: false,
+                toolName: name,
+                error: `${resolved.error}: ${resolved.detail}`,
+              };
+            }
+            confirmedDateTime = formatIsoWithOffset(resolved.resolved);
+            logger.info(
+              { traceId: this.traceId, confirmedDateTime, structuredInput: completeData },
+              'mark_scheduling_complete: synthesised confirmed_datetime from structured form',
+            );
+          }
+          if (!confirmedDateTime) {
+            // Shouldn't reach here — the Zod refine catches this — but
+            // defensive in case the schema is relaxed.
+            return {
+              success: false,
+              toolName: name,
+              error: 'No confirmed_datetime provided and structured form is incomplete.',
+            };
+          }
+
           // FIX RSA-2: Validate that confirmed_datetime contains a parseable date/time
           // Either party (user or therapist) can confirm, but a datetime must be provided
-          const validationError = await availabilityResolver.validateMarkComplete(completeData.confirmed_datetime);
+          const validationError = await availabilityResolver.validateMarkComplete(confirmedDateTime);
           if (validationError) {
             logger.warn(
-              { traceId: this.traceId, confirmedDateTime: completeData.confirmed_datetime, error: validationError },
+              { traceId: this.traceId, confirmedDateTime, error: validationError },
               'mark_scheduling_complete validation failed'
             );
             return { success: false, toolName: name, error: validationError };
           }
 
-          await this.markComplete(context, { confirmed_datetime: completeData.confirmed_datetime, notes: completeData.notes });
+          await this.markComplete(context, { confirmed_datetime: confirmedDateTime, notes: completeData.notes });
           checkpointAction = 'sent_final_confirmations';
           break;
         }
@@ -679,6 +737,115 @@ export class AIToolExecutorService {
             const msg = err instanceof Error ? err.message : String(err);
             return { success: false, toolName: name, error: msg };
           }
+        }
+
+        case 'record_user_timezone': {
+          const parsed = recordUserTimezoneInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Invalid record_user_timezone input: ${parsed.error.message}`,
+            };
+          }
+          const { timezone } = parsed.data;
+          if (!isValidIanaTimezone(timezone)) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Unknown IANA timezone: "${timezone}". Pick a real zone — when in doubt, use one of the zones listed in the Timezones section above.`,
+            };
+          }
+          // Scope: prefer userId when present (covers cases where the
+          // user has multiple email aliases on file); fall back to
+          // email-keyed update for legacy rows. updateMany is used
+          // either way so a missing row is a no-op rather than a throw.
+          let updatedCount = 0;
+          if (context.userId) {
+            const r = await prisma.user.updateMany({
+              where: { id: context.userId },
+              data: { timezone },
+            });
+            updatedCount = r.count;
+          } else if (context.userEmail) {
+            const r = await prisma.user.updateMany({
+              where: { email: context.userEmail.toLowerCase() },
+              data: { timezone },
+            });
+            updatedCount = r.count;
+          }
+          if (updatedCount === 0) {
+            logger.warn(
+              { traceId: this.traceId, userId: context.userId, userEmail: context.userEmail, timezone },
+              'record_user_timezone: no user row matched — write was a no-op',
+            );
+            return {
+              success: true,
+              toolName: name,
+              resultMessage: `Note: no User row matched for ${context.userEmail}; the timezone was not persisted (client may not have a User record yet).`,
+            };
+          }
+          logger.info(
+            { traceId: this.traceId, userId: context.userId, userEmail: context.userEmail, timezone },
+            'record_user_timezone: persisted client timezone',
+          );
+          return {
+            success: true,
+            toolName: name,
+            resultMessage: `Recorded client timezone: ${timezone}.`,
+          };
+        }
+
+        case 'record_therapist_timezone': {
+          const parsed = recordTherapistTimezoneInputSchema.safeParse(input);
+          if (!parsed.success) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Invalid record_therapist_timezone input: ${parsed.error.message}`,
+            };
+          }
+          const { timezone } = parsed.data;
+          if (!isValidIanaTimezone(timezone)) {
+            return {
+              success: false,
+              toolName: name,
+              error: `Unknown IANA timezone: "${timezone}". Pick a real zone — when in doubt, use one of the zones listed in the Timezones section above.`,
+            };
+          }
+          if (!context.therapistId) {
+            // Legacy appointment without a therapistId — same handling
+            // as record_booking_link for that branch.
+            return {
+              success: true,
+              toolName: name,
+              resultMessage: `Note: no therapistId on this legacy appointment; ${timezone} was not persisted to a Therapist record.`,
+            };
+          }
+          const r = await prisma.therapist.updateMany({
+            where: { id: context.therapistId },
+            data: { timezone },
+          });
+          if (r.count === 0) {
+            logger.warn(
+              { traceId: this.traceId, therapistId: context.therapistId, timezone },
+              'record_therapist_timezone: no therapist row matched — write was a no-op',
+            );
+            return {
+              success: true,
+              toolName: name,
+              resultMessage: `Note: no Therapist row matched for ${context.therapistId}; the timezone was not persisted.`,
+            };
+          }
+          logger.info(
+            { traceId: this.traceId, therapistId: context.therapistId, timezone },
+            'record_therapist_timezone: persisted therapist timezone',
+          );
+          return {
+            success: true,
+            toolName: name,
+            resultMessage: `Recorded therapist timezone: ${timezone}.`,
+          };
         }
 
         default:

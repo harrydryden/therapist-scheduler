@@ -32,10 +32,44 @@ export const updateAvailabilityInputSchema = z.object({
     .optional(),
 });
 
-export const markCompleteInputSchema = z.object({
-  confirmed_datetime: z.string().min(1),
-  notes: z.string().optional(),
-});
+/**
+ * mark_scheduling_complete accepts EITHER:
+ *   - the legacy `confirmed_datetime` freeform string (kept for backward
+ *     compatibility — chrono-parsed downstream), OR
+ *   - the structured form: timezone + calendar components, which the
+ *     executor passes through resolve_local_time to produce a
+ *     deterministic ISO 8601 string. PREFERRED for new flows.
+ *
+ * The refine() rejects calls that provide neither shape, so the
+ * downstream code can rely on having a usable confirmed_datetime
+ * after the executor synthesises one from the structured form.
+ */
+export const markCompleteInputSchema = z
+  .object({
+    confirmed_datetime: z.string().min(1).optional(),
+    notes: z.string().optional(),
+    // Structured form (preferred):
+    timezone: z.string().min(1).max(64).optional(),
+    year: z.number().int().gte(2020).lte(2100).optional(),
+    month: z.number().int().gte(1).lte(12).optional(),
+    day: z.number().int().gte(1).lte(31).optional(),
+    hour: z.number().int().gte(0).lte(23).optional(),
+    minute: z.number().int().gte(0).lte(59).optional(),
+  })
+  .refine(
+    (d) =>
+      !!d.confirmed_datetime ||
+      (typeof d.timezone === 'string' &&
+        d.year !== undefined &&
+        d.month !== undefined &&
+        d.day !== undefined &&
+        d.hour !== undefined &&
+        d.minute !== undefined),
+    {
+      message:
+        'Provide either confirmed_datetime (legacy string) OR the structured form: timezone + year + month + day + hour + minute.',
+    },
+  );
 
 export const cancelAppointmentInputSchema = z.object({
   reason: z.string().min(1).max(500),
@@ -154,6 +188,34 @@ export const availabilityMarkCompleteInputSchema = z.object({
 export const flagForHumanReviewInputSchema = z.object({
   reason: z.string().min(1).max(500),
   suggested_action: z.string().max(500).optional(),
+});
+
+/**
+ * Persist an explicit IANA timezone on the User row. Used by the
+ * booking agent after asking the client where they're based — closes
+ * the multi-zone-country silent-fallback gap.
+ */
+export const recordUserTimezoneInputSchema = z.object({
+  timezone: z
+    .string()
+    .min(1)
+    .max(64)
+    .refine((s) => /^[A-Za-z_+\-/0-9]+$/.test(s), 'timezone must be an IANA identifier (e.g. "America/New_York")'),
+});
+
+/**
+ * Persist an explicit IANA timezone on the Therapist row. Used by
+ * both agents (availability-collection and booking) after asking the
+ * therapist which region they're in. Stamps the canonical `Therapist
+ * .timezone` column, which the resolver prefers over
+ * `availability.timezone` and the country default.
+ */
+export const recordTherapistTimezoneInputSchema = z.object({
+  timezone: z
+    .string()
+    .min(1)
+    .max(64)
+    .refine((s) => /^[A-Za-z_+\-/0-9]+$/.test(s), 'timezone must be an IANA identifier (e.g. "America/Los_Angeles")'),
 });
 
 /**
