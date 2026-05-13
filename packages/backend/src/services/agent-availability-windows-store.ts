@@ -266,7 +266,7 @@ export interface FormatWindowsHeaders {
  * it only ever talks to the therapist.
  *
  * Each `formatInTimezone` is the same function from
- * `utils/timezone-resolver` — passed in here so this module stays
+ * `core/timezone` — passed in here so this module stays
  * dependency-light and the booking agent can supply its own renderer
  * for tests.
  */

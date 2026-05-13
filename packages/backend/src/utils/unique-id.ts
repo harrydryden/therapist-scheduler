@@ -90,7 +90,7 @@ export async function generateUniqueTherapistId(): Promise<string> {
  * carried through to callers.
  *
  * `country` is a country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA).
- * Drives recipient timezone resolution (see recipient-timezone.service.ts).
+ * Drives recipient timezone resolution (see core/timezone/resolve.ts).
  * When the user already exists, country is only overwritten when an
  * explicit value is passed AND it differs from the stored one — passing
  * undefined leaves the existing country intact. New users without an

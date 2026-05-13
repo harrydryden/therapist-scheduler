@@ -4,7 +4,7 @@
  * test it directly without mocking the rest of the prompt assembly.
  */
 
-import { buildTimezoneSection } from '../services/timezone-section';
+import { buildTimezoneSection } from '../core/timezone/prompt-section';
 import type { SchedulingContext } from '../services/scheduling-context.service';
 
 function makeContext(partial: Partial<SchedulingContext>): SchedulingContext {

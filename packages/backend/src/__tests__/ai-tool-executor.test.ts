@@ -106,7 +106,12 @@ jest.mock('../services/availability-resolver.service', () => ({
   },
 }));
 
-jest.mock('../services/recipient-timezone.service', () => ({
+// Mock just the DB-touching resolveRecipientTimezone export, keeping
+// the rest of the core/timezone barrel (wall-clock helpers, validators,
+// audit classifiers) as real implementations — `ai-tool-executor`
+// statically imports several of them.
+jest.mock('../core/timezone', () => ({
+  ...jest.requireActual('../core/timezone'),
   resolveRecipientTimezone: jest.fn().mockResolvedValue('Europe/London'),
 }));
 

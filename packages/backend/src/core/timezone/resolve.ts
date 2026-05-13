@@ -1,48 +1,44 @@
 /**
- * Resolve a therapist's IANA timezone with confidence labelling.
+ * Pure timezone resolution for therapists and users.
  *
- * Several callers (the availability-collection agent's prompt builder,
- * the booking agent's prompt builder, the recurring-schedule writer)
- * need the therapist's wall-clock timezone. Up to now the pattern was:
+ * The resolvers in this module are dependency-light by design — no
+ * Prisma, no config, no Redis. They take the relevant row fields as
+ * input and apply the precedence chain:
  *
- *   const tz = therapist.availability?.timezone
- *           || getDefaultTimezone(therapist.country)
- *           || platformTimezone;
+ *   1. Explicit `timezone` column (populated by the agent after asking
+ *      where the person is based). STRONGEST signal; supersedes
+ *      everything else.
+ *   2. (Therapists only) The legacy `availability.timezone` stamp.
+ *   3. The country's default timezone for single-zone countries.
+ *   4. Platform default ('Europe/London'), with `needsClarification`
+ *      flagged so the agent knows it's a guess.
  *
- * which silently lands at the platform default (Europe/London) for any
- * therapist in a multi-zone country (US, AU, CA, RU, BR, ...) who
- * hasn't yet had a recurring schedule stamped. Every "Tuesday 9am" they
- * mention is then misinterpreted by several hours, indistinguishably
- * from intentional London time.
- *
- * This helper returns the same string the original chain would have,
- * but also tells the caller WHICH branch supplied it so the prompt
- * builder can ask the therapist to confirm rather than guess.
+ * Callers that need to look a recipient up by email and load the row
+ * themselves use `resolveRecipientTimezone` from `./recipient.ts`,
+ * which lives in a separate module so importing this file (or the
+ * `core/timezone` barrel via the wall-clock helpers) doesn't transitively
+ * pull in Prisma + config and break test-time module loading.
  */
 
 import { getDefaultTimezone } from '@therapist-scheduler/shared';
-import { logger } from '../utils/logger';
+import { logger } from '../../utils/logger';
 
 /**
  * Where the resolved timezone came from:
- *   - 'explicit'        — `Therapist.timezone` column populated by the
- *                         agent after asking the therapist. STRONGEST
- *                         signal; supersedes everything else.
- *   - 'stamped'         — `availability.timezone` legacy stamp on the
- *                         row. Still trusted, but the explicit column
- *                         is preferred when both are present.
- *   - 'country_default' — single-zone country (UK, IE, etc.), the country
- *                         default is unambiguous.
- *   - 'platform_default' — multi-zone country with no stamp, falling
- *                         through to the platform default. The agent
- *                         SHOULD ask before relying on this.
+ *   - 'explicit'         the `Therapist.timezone` / `User.timezone` column.
+ *   - 'stamped'          legacy `Therapist.availability.timezone` JSON
+ *                        field (therapists only).
+ *   - 'country_default'  single-zone country, the country default is
+ *                        unambiguous.
+ *   - 'platform_default' multi-zone country with no stamp; the agent
+ *                        SHOULD ask before relying on this.
  */
 export type TimezoneSource = 'explicit' | 'stamped' | 'country_default' | 'platform_default';
 
 export interface ResolvedTimezone {
   timezone: string;
   source: TimezoneSource;
-  /** True iff the country has multiple zones AND no explicit zone /
+  /** True iff the country has multiple zones AND no explicit zone or
    *  stamp on file — the agent should ASK before relying on the
    *  resolved value. */
   needsClarification: boolean;
@@ -62,10 +58,6 @@ export function resolveTherapistTimezone(args: {
   }
   const stamped = (args.stampedTimezone ?? '').trim();
   if (stamped) {
-    // Light sanity check: stamped but country is multi-zone is fine —
-    // the stamp wins. Stamped but doesn't match the country's default
-    // is also fine (therapist may live in a different region than the
-    // platform default for their country).
     maybeWarnSuspicious(stamped, args.country);
     return { timezone: stamped, source: 'stamped', needsClarification: false };
   }
@@ -98,16 +90,9 @@ export function resolveTherapistTimezone(args: {
  */
 function maybeWarnSuspicious(stamped: string, country: string | null | undefined) {
   if (!country) return;
-  // Heuristic: stamped is 'Europe/London' (the platform default) and
-  // the country is one where the country default would have returned
-  // null (i.e. multi-zone). getDefaultTimezone returning null is the
-  // signal for "multi-zone" — we re-evaluate to detect the case
-  // without hard-coding country codes here.
   if (stamped !== 'Europe/London') return;
   const countryDefault = getDefaultTimezone(country);
   if (countryDefault === null && country.toUpperCase() !== 'UK') {
-    // Multi-zone country stamped with the UK default. Probable legacy
-    // miss-stamp from before the country-default precedence existed.
     logger.warn(
       { country, stamped },
       'therapist-timezone: stamped timezone looks suspicious — multi-zone country with Europe/London stamp, may be a legacy miss-stamp',
@@ -116,13 +101,12 @@ function maybeWarnSuspicious(stamped: string, country: string | null | undefined
 }
 
 /**
- * Resolve the timezone for a user (booking-side client) with the same
- * three-tier confidence labelling. Mirrors resolveTherapistTimezone but
- * users have no explicit stamp field today — we go straight from
- * country to platform default.
+ * Resolve the timezone for a user (booking-side client). Mirrors
+ * `resolveTherapistTimezone` but users have no `availability.timezone`
+ * stamp field — we go straight from country to platform default when
+ * there's no explicit value.
  */
 export function resolveUserTimezone(args: {
-  /** Value of the new `User.timezone` column. */
   explicitTimezone?: string | null;
   country: string | null | undefined;
   platformTimezone: string;

@@ -3,7 +3,7 @@
  *
  * Scans every active therapist row AND every user row, classifies the
  * timezone state of each via the shared classifiers in
- * `src/services/therapist-timezone-audit.ts`, and prints a tab-
+ * `src/core/timezone`, and prints a tab-
  * separated report. Optional `--apply` flag stamps the country default
  * on the safe subset:
  *
@@ -36,7 +36,7 @@ import {
   type TimezoneClassification,
   type UserTimezoneAuditRow,
   type UserTimezoneInput,
-} from '../src/services/therapist-timezone-audit';
+} from '../src/core/timezone';
 
 async function main(): Promise<void> {
   const apply = process.argv.includes('--apply');

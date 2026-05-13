@@ -28,11 +28,25 @@
  */
 
 /**
+ * Validate that a string is a real IANA timezone identifier.
+ *
+ * `Intl.DateTimeFormat` throws when constructed with an unknown
+ * timeZone — we use that as the oracle.
+ */
+export function isValidIanaTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Internal: read the wall-clock components of `date` in `timezone`.
  * Inlined rather than imported from `./date` so this module stays
  * dependency-free (date.ts pulls in config/settings, which trip up
- * tests that mount only the resolver). Functionally identical to
- * `getDateInTimezone` in date.ts.
+ * tests that mount only the resolver).
  */
 function readWallClock(date: Date, timezone: string): {
   year: number;
@@ -116,16 +130,6 @@ function landsOn(
   );
 }
 
-/** Validate that an IANA timezone string is recognised by Intl. */
-function isValidTimezone(tz: string): boolean {
-  try {
-    new Intl.DateTimeFormat('en-GB', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Resolve a wall-clock time in `timezone` to an absolute instant.
  *
@@ -142,7 +146,7 @@ export function resolveWallClock(
   hour: number,
   minute: number,
 ): ResolveResult {
-  if (!isValidTimezone(timezone)) {
+  if (!isValidIanaTimezone(timezone)) {
     return {
       ok: false,
       error: 'invalid_timezone',

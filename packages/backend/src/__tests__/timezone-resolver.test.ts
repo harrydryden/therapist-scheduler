@@ -7,7 +7,10 @@
  * pin the contract.
  */
 
-import { resolveWallClock, formatIsoWithOffset, formatInTimezone } from '../utils/timezone-resolver';
+// Import the wall-clock submodule directly; the `core/timezone` barrel
+// transitively pulls in DB + config and isn't needed for a pure-math
+// resolver test.
+import { resolveWallClock, formatIsoWithOffset, formatInTimezone } from '../core/timezone/wall-clock';
 
 describe('resolveWallClock — happy paths', () => {
   it('encodes a UK winter time with the +00:00 offset', () => {

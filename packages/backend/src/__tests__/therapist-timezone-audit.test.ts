@@ -14,7 +14,7 @@ import {
   classifyUserTimezone,
   type TherapistTimezoneInput,
   type UserTimezoneInput,
-} from '../services/therapist-timezone-audit';
+} from '../core/timezone/audit';
 
 function row(overrides: Partial<TherapistTimezoneInput>): TherapistTimezoneInput {
   return {
