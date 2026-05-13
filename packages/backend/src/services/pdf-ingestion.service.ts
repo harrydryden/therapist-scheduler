@@ -70,12 +70,7 @@ Return a JSON object with these fields:
   "areasOfFocus": [
     {"type": "Category Name", "evidence": "quoted text from source...", "reasoning": "why this maps to category"}
   ],
-  "availability": {
-    "timezone": "${timezone}",
-    "slots": [
-      {"day": "Monday", "start": "09:00", "end": "17:00"}
-    ]
-  },
+  "availability": null,
   "qualifications": ["List of qualifications and certifications"],
   "yearsExperience": number or null
 }
@@ -124,7 +119,11 @@ STRICT RULES:
 - Each category assignment MUST have clear, specific evidence that would satisfy a clinical reviewer
 - "Working at Depth" can ONLY appear in Style, NEVER in Approach
 - If the source text is generic or lacks specific clinical detail, assign FEWER categories
-- If availability information is not provided, set availability to null
+- AVAILABILITY EXTRACTION (read carefully):
+  - Default: leave "availability" as null. The availability-collection agent will ask the therapist directly after ingestion.
+  - ONLY override the null when the source text contains an EXPLICIT, unambiguous statement of recurring working hours from the therapist themselves (e.g. "I work Mondays 10am-2pm and Wednesdays 9am-5pm"). A generic phrase like "available weekdays" or "flexible hours" is NOT explicit — keep null.
+  - When you do override, return: { "timezone": "${timezone}", "slots": [ ... ] } where each slot is { "day": "<full English weekday>", "start": "<HH:MM 24h>", "end": "<HH:MM 24h>" } in the therapist's local time. Include one slot per stated day-window, exactly as stated — do NOT invent additional days or "fill in" a typical 9-5 pattern.
+  - NEVER assume defaults. Most therapists do NOT work standard office hours. If you are unsure, null is the correct answer.
 - The name and email fields are REQUIRED - look for them in both the document text AND the additional information section below
 - If no email is found anywhere, use "unknown@placeholder.com" as a placeholder
 `;
