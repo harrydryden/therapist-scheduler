@@ -240,22 +240,46 @@ pattern. Each handler file 30–250 lines.
 Two callsites updated: `services/justin-time.service.ts` and the
 unit test.
 
-### Phase 2d — `admin-appointments.routes.ts` (1,771 lines)
+### Phase 2d — `admin-appointments.routes.ts` (1,771 lines) ✅ DONE
 
-Target: `routes/admin/appointments/`
+Landed in PR #240. The original sketch had placeholders that didn't
+match the actual endpoint set — there's no separate `transitions.ts`
+or `comments.ts` endpoint; instead there are two PATCH endpoints
+(dashboard vs appointments-page, with different control-flow), plus
+several side-channel actions (send-message, feedback-email,
+reprocess-thread, action-closure, ceiling release). Realised layout:
 
 ```
 routes/admin/appointments/
-  list.ts                 ← GET /
-  detail.ts               ← GET /:id
-  transitions.ts          ← POST /:id/transition
-  human-control.ts        ← take-control, release-control
-  comments.ts             ← admin comments
-  index.ts                ← register all under /admin/appointments
+├── index.ts                 adminAppointmentRoutes — top-level plugin
+│                            that registers all sub-plugins under a
+│                            single verifyWebhookSecret preHandler hook.
+├── schemas.ts               Shared Zod schemas + buildLastMessagePreview
+│                            + CEILING_TRIPPED_WHERE.
+├── list-dashboard.ts        GET /api/admin/dashboard/appointments
+├── detail.ts                GET /api/admin/dashboard/appointments/:id
+├── list-all.ts              GET /api/admin/appointments/all
+├── human-control.ts         take-control + release-control + ceiling
+│                            (count + bulk-release)
+├── delete.ts                DELETE /api/admin/dashboard/appointments/:id
+├── patch-dashboard.ts       PATCH dashboard variant (requires human control)
+├── patch-admin.ts           PATCH appointments-page variant (uses
+│                            adminForceUpdate, no human-control gate)
+├── send-message.ts          manual admin email
+├── feedback-email.ts        feedback-form trigger + force-flag
+├── reprocess-thread.ts      preview / safe / force-reprocess Gmail thread
+├── action-closure.ts        cancel or dismiss a closure recommendation
+├── dropdowns.ts             users + therapists dropdown data
+└── README.md
 ```
 
-Each subfile is ~200–400 lines. No business logic moves — only
-routing.
+Each endpoint file exports a Fastify plugin function; the top-level
+`adminAppointmentRoutes` registers them in `index.ts`. The single
+`verifyWebhookSecret` preHandler hook applies to all routes — no
+individual handler can forget it. Each endpoint file is 70–200 lines.
+
+No business logic moved — pure routing split. Two callsites updated:
+`admin-dashboard.routes.ts` and the take-control unit test.
 
 ---
 

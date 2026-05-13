@@ -15,7 +15,7 @@
  *   - adminRoutes            (diagnostics — Gmail / Slack / weekly-mailing)
  */
 import { FastifyInstance } from 'fastify';
-import { adminAppointmentRoutes } from './admin-appointments.routes';
+import { adminAppointmentRoutes } from './admin/appointments';
 import { adminAppointmentCreateRoutes } from './admin-appointment-create.routes';
 import { adminMonitoringRoutes } from './admin-monitoring.routes';
 
