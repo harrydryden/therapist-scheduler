@@ -23,7 +23,7 @@
  *
  * Refactored: the pure list-manipulation pieces (hashing, parsing,
  * FIFO eviction, prompt rendering) now live in
- * `agent-notes-store.ts` and `agent-availability-windows-store.ts`,
+ * `agent-notes-store.ts` and `domain/scheduling/availability/windows/store.ts`,
  * shared with the therapist-side stores. This file retains the
  * appointment-specific DB I/O and combined-blob handling.
  *
@@ -50,7 +50,7 @@ import {
   appendWindowToList,
   getActiveWindows as getActiveWindowsShared,
   formatWindowsForPrompt,
-} from './agent-availability-windows-store';
+} from '../domain/scheduling/availability/windows/store';
 
 // Re-export so external callers continue to import these from
 // agent-memory.service.ts (where they've lived since launch).
@@ -315,7 +315,7 @@ export function formatMemoryForPrompt(memory: AgentThreadMemory): string {
 export function formatAvailabilityWindowsForPrompt(
   memory: AgentThreadMemory,
   now: Date = new Date(),
-  tzTargets?: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets,
+  tzTargets?: import('../domain/scheduling/availability/windows/store').FormatWindowsTimezoneTargets,
 ): string {
   return formatWindowsForPrompt(
     memory.availabilityWindows,

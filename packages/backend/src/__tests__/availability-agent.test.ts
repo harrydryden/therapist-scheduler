@@ -352,7 +352,7 @@ jest.mock('../services/email-processing.service', () => ({
 import {
   AvailabilityAgentService,
   supersedeActiveTherapistConversationInTx,
-} from '../services/availability-agent.service';
+} from '../domain/scheduling/availability/agent/service';
 
 // ─── Helpers to build scripted Anthropic.Message responses ──────────────────
 

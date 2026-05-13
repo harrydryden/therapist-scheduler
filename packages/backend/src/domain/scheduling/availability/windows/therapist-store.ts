@@ -27,16 +27,16 @@
  * read for therapist B.
  */
 
-import { prisma } from '../utils/database';
-import { logger } from '../utils/logger';
-import { withSerializationRetry } from '../utils/serialization-retry';
+import { prisma } from '../../../../utils/database';
+import { logger } from '../../../../utils/logger';
+import { withSerializationRetry } from '../../../../utils/serialization-retry';
 import {
   type AvailabilityWindow,
+  type AppendWindowResult,
   parseWindows,
   appendWindowToList,
-  getActiveWindows as getActiveWindowsShared,
   formatWindowsForPrompt,
-} from './agent-availability-windows-store';
+} from './store';
 
 /**
  * Bound on stored windows. Higher than the per-appointment cap (30)
@@ -86,14 +86,6 @@ export async function getTherapistSchedulingDataForPrompt(
   };
 }
 
-export interface AddUpcomingWindowResult {
-  /** True for a new row; false when an identical (status,source,starts,ends)
-   *  combination was already present and we skipped the write. */
-  added: boolean;
-  windows: AvailabilityWindow[];
-  windowId: string;
-}
-
 /**
  * Append an upcoming window to the therapist row.
  *
@@ -127,7 +119,7 @@ export async function addUpcomingAvailability(
     quote: string;
   },
   now: Date = new Date(),
-): Promise<AddUpcomingWindowResult> {
+): Promise<AppendWindowResult> {
   return withSerializationRetry(
     () =>
       prisma.$transaction(async (tx) => {
@@ -211,18 +203,6 @@ export async function recordTherapistBookingLink(
 }
 
 /**
- * Future-only view, sorted by start. Re-exposed here for callers that
- * already imported it from this module; delegates to the shared
- * implementation.
- */
-export function getActiveUpcomingWindows(
-  windows: AvailabilityWindow[],
-  now: Date = new Date(),
-): AvailabilityWindow[] {
-  return getActiveWindowsShared(windows, now);
-}
-
-/**
  * Prompt-ready rendering of the therapist's upcoming windows. Empty
  * string when there are no active windows so the prompt builder can
  * drop the whole section.
@@ -240,7 +220,7 @@ export function getActiveUpcomingWindows(
 export function formatUpcomingAvailabilityForPrompt(
   windows: AvailabilityWindow[],
   now: Date = new Date(),
-  tzTargets?: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets,
+  tzTargets?: import('./store').FormatWindowsTimezoneTargets,
 ): string {
   return formatWindowsForPrompt(
     windows,

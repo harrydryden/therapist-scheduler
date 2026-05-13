@@ -101,7 +101,7 @@ import {
   addUpcomingAvailability,
   getUpcomingAvailability,
   MAX_UPCOMING_WINDOWS_PER_THERAPIST,
-} from '../services/therapist-availability.service';
+} from '../domain/scheduling/availability/windows/therapist-store';
 
 beforeEach(() => {
   jest.clearAllMocks();

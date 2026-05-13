@@ -13,7 +13,7 @@ import { generateUniqueTherapistId } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { parseJsonFromLLMResponse } from '../utils/json-parser';
 import { runBackgroundTask } from '../utils/background-task';
-import { AvailabilityAgentService } from './availability-agent.service';
+import { AvailabilityAgentService } from '../domain/scheduling/availability/agent/service';
 import { getDefaultTimezone, getCountryLabel } from '@therapist-scheduler/shared';
 import type { CategoryWithEvidence, ExtractedTherapistProfile, AdminNotes } from '@therapist-scheduler/shared';
 

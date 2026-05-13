@@ -68,7 +68,7 @@ import { CLEANUP_CHECK_AND_RESET_SCRIPT, ATOMIC_LOCK_CHECK_SCRIPT } from '../uti
 import { findMatchingAppointmentRequest, findMatchingTherapistConversation } from '../utils/thread-matcher';
 import type { TherapistConversationMatch } from '../utils/thread-matcher';
 import { tryHandleInvitationReply } from './invitation-reply.service';
-import { AvailabilityAgentService } from './availability-agent.service';
+import { AvailabilityAgentService } from '../domain/scheduling/availability/agent/service';
 
 // Redis keys — imported from centralized constants
 const {

@@ -173,7 +173,7 @@ jest.mock('../utils/redis', () => ({
   },
 }));
 
-import { AvailabilityToolExecutorService } from '../services/availability-tool-executor.service';
+import { AvailabilityToolExecutorService } from '../domain/scheduling/availability/agent/tool-executor';
 import type { AvailabilityAgentContext } from '../services/agent-tool-loop';
 
 function makeContext(overrides: Partial<AvailabilityAgentContext> = {}): AvailabilityAgentContext {

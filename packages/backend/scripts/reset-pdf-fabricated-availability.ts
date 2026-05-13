@@ -28,7 +28,7 @@
  */
 
 import { PrismaClient } from '@prisma/client';
-import { parseWindows } from '../src/services/agent-availability-windows-store';
+import { parseWindows } from '../src/domain/scheduling/availability/windows/store';
 
 interface Row {
   id: string;

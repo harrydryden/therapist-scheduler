@@ -21,7 +21,7 @@ import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { supersedeActiveTherapistConversationInTx, AvailabilityAgentService } from '../services/availability-agent.service';
+import { supersedeActiveTherapistConversationInTx, AvailabilityAgentService } from '../domain/scheduling/availability/agent/service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { parseTherapistAvailability } from '../utils/json-parser';

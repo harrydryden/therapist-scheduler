@@ -20,7 +20,7 @@
  */
 
 import crypto from 'crypto';
-import { logger } from '../utils/logger';
+import { logger } from '../../../../utils/logger';
 
 /** Cap on the quote string captured from the original message. */
 export const MAX_WINDOW_QUOTE_LENGTH = 280;

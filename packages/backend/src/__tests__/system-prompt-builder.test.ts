@@ -113,7 +113,7 @@ jest.mock('../core/timezone', () => ({
 
 // Simple availability formatter stub — when the test passes a context
 // with slots, this returns a deterministic summary.
-jest.mock('../services/availability-formatter.service', () => ({
+jest.mock('../domain/scheduling/availability/windows/formatter', () => ({
   formatAvailabilityForUser: jest.fn().mockReturnValue({
     summary: 'TEST_AVAIL_SUMMARY',
     therapistTimezone: 'America/New_York',

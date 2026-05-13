@@ -9,7 +9,7 @@
  * - Handles timezone conversion
  */
 
-import { logger } from '../utils/logger';
+import { logger } from '../../../../utils/logger';
 import {
   MIN_BOOKING_LEAD_HOURS,
   formatTime12Compact,
@@ -17,8 +17,8 @@ import {
   formatDateShort,
   getDateInTimezone,
   wallClockToUtc,
-} from '../utils/date';
-import type { AvailabilitySlot, TherapistAvailability } from '../types';
+} from '../../../../utils/date';
+import type { AvailabilitySlot, TherapistAvailability } from '../../../../types';
 
 // Re-export for consumers
 export type { AvailabilitySlot, TherapistAvailability };
