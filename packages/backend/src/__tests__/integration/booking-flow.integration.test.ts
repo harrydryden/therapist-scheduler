@@ -144,7 +144,7 @@ import {
   integrationDescribe,
 } from '../helpers/integration-db';
 import { appointmentsRoutes } from '../../routes/appointments.routes';
-import { appointmentLifecycleService } from '../../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../../domain/scheduling/lifecycle';
 
 // ============================================
 // Test setup

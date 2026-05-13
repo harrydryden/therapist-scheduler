@@ -72,7 +72,7 @@ jest.mock('../services/appointment-notifications.service', () => ({
   },
 }));
 
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { InvalidTransitionError } from '../errors';
 import { p2025 } from './_global-mocks';
 

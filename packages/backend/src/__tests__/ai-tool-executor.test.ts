@@ -93,7 +93,7 @@ jest.mock('../services/email-queue.service', () => ({
 
 const mockTransitionToConfirmed = jest.fn();
 const mockTransitionToCancelled = jest.fn();
-jest.mock('../services/appointment-lifecycle.service', () => ({
+jest.mock('../domain/scheduling/lifecycle', () => ({
   appointmentLifecycleService: {
     transitionToConfirmed: (...a: unknown[]) => mockTransitionToConfirmed(...(a as [unknown])),
     transitionToCancelled: (...a: unknown[]) => mockTransitionToCancelled(...(a as [unknown])),

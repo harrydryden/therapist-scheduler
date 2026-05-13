@@ -28,7 +28,7 @@ import { therapistBookingStatusService } from '../services/therapist-booking-sta
 import { sseService } from '../services/sse.service';
 import { messageQueueHealthService } from '../services/message-queue-health.service';
 import { sideEffectRetryService } from '../services/side-effect-retry.service';
-import { appointmentLifecycleTickService } from '../services/appointment-lifecycle-tick.service';
+import { appointmentLifecycleTickService } from '../domain/scheduling/lifecycle';
 import {
   backfillMissingTrackingCodes,
   fixDuplicateTrackingCodes,

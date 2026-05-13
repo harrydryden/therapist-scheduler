@@ -47,7 +47,7 @@ function getAgentProcessor(traceId: string): AgentProcessor {
 import { threadFetchingService } from './thread-fetching.service';
 import { emailBounceService } from './email-bounce.service';
 import { slackNotificationService } from './slack-notification.service';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { classifyEmail } from '../services/email-classifier.service';
 import { runWithTrace, extendTraceContext } from '../utils/request-tracing';

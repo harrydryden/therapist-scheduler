@@ -69,7 +69,7 @@ jest.mock('../services/ai-conversation.service', () => ({
 // ============================================
 
 import { prisma } from '../utils/database';
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from '../services/ai-conversation.service';
 
 // Typed handle to the mock declared inside the factory above.

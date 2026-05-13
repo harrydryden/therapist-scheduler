@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
 import { parseConfirmedDateTime } from '../utils/date';

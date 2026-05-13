@@ -14,7 +14,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { sanitizeName, sanitizeObject } from '../utils/input-sanitizer';

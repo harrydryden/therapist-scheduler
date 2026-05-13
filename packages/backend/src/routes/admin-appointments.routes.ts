@@ -9,7 +9,7 @@ import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { emailProcessingService } from '../services/email-processing.service';
-import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService, InvalidTransitionError, ConcurrentModificationError } from '../domain/scheduling/lifecycle';
 import { recordAppointmentEvent } from '../services/appointment-event.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';

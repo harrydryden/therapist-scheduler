@@ -88,37 +88,56 @@ sneak in.
 Each god module is its own PR. Behaviour-preserving file split; same
 exports re-routed through an `index.ts` barrel.
 
-### Phase 2a — `appointment-lifecycle.service.ts` (1,972 lines)
+### Phase 2a — `appointment-lifecycle.service.ts` (1,972 lines) ✅ DONE
 
-Target: `domain/scheduling/lifecycle/`
+Landed in PR #237. The actual decomposition diverged from the original
+sketch on closer inspection — the file had richer cohesion lines than
+the bullets above suggested. Final layout:
 
 ```
 domain/scheduling/lifecycle/
-  transitions.ts          ← preconditioned updateMany writes
-  side-effects.ts         ← Slack / email / sync orchestration
-  denormalizers.ts        ← messageCount, lastActivityAt, etc.
-  audit.ts                ← AppointmentAuditEvent emission
+  service.ts              ← appointmentLifecycleService — object literal
+                            binding the transition functions (the class
+                            collapsed; no method used `this` state)
   tick.ts                 ← AppointmentLifecycleTickService
-  index.ts                ← public surface (preserves
-                            `appointmentLifecycleService` export)
+  types.ts                ← TransitionSource, *Params, TransitionResult
+  status-order.ts         ← LIFECYCLE_STATUS_ORDER, progressionResetsFor,
+                            computeBackwardSentinelResets
+  update-fragments.ts     ← CLEAR_RESCHEDULING_STATE,
+                            RESET_ALL_FOLLOWUP_SENTINELS
+  audit.ts                ← addAuditMessage (SQL JSON append),
+                            recordStatusChangeEvent
+  terminal-tx.ts          ← runTerminalTransitionTx + types
+  dispatch-helpers.ts     ← fireAndForget, notifyTransition,
+                            catchUpSessionHeldEffects
+  transitions/
+    light.ts              ← applyLightTransition + contacted /
+                            negotiating / session_held /
+                            feedback_requested
+    confirmed.ts          ← transitionToConfirmed
+    completed.ts          ← transitionToCompleted
+    cancelled.ts          ← transitionToCancelled
+  admin-force.ts          ← adminForceUpdate
+  closure-dismiss.ts      ← dismissClosureRecommendation
+  update-status.ts        ← UPDATE_STATUS_DISPATCH + updateStatus
+  index.ts                ← public barrel
 ```
 
-**Critical invariant:** every status transition continues to use
-`updateMany` with status preconditions. The integration test
-`__tests__/integration/lifecycle.integration.test.ts` is the gate.
+Callers continue to import `appointmentLifecycleService` and call the
+same method names — the object literal preserves the API exactly.
 
-**Approach:**
-1. Add `index.ts` re-exporting from current monolith. No callers
-   change.
-2. Move atomic transition fns to `transitions.ts`. Monolith re-
-   exports.
-3. Move side-effect orchestration to `side-effects.ts`. Continue
-   re-exports.
-4. Move audit + denormalizer code. Continue re-exports.
-5. Delete monolith; promote `index.ts` to canonical.
+**Follow-up not yet done:** `transition-side-effects.service.ts`
+(352 lines) and `appointment-notifications.service.ts` (583 lines)
+remain in `services/`. They're called from the new module but not
+yet moved into it. They're already focused single-concern files, so
+the move is low-priority; tracked as a future small PR.
 
-**Risk:** High. This is the FSM source-of-truth. Each step gets its
-own commit; tests run on every commit.
+**Test rewrite note:** `lifecycle-feedback-source-gating.test.ts`
+was rewritten to assert on `prisma.appointmentRequest.updateMany`'s
+`where.status.in` instead of monkey-patching the private
+`applyLightTransition` method. The new test exercises the real
+transition path against a mocked DB — more robust and no longer
+coupled to the implementation's class structure.
 
 ### Phase 2b — `email-message-processor.service.ts` (1,837 lines)
 

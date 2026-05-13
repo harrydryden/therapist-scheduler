@@ -1,19 +1,17 @@
 /**
- * Appointment Lifecycle Tick Service
- *
  * Periodic background task that transitions `confirmed` appointments to
- * `session_held` once the scheduled session time has passed (with a one-hour
- * buffer to allow for sessions that run long).
+ * `session_held` once the scheduled session time has passed (with a
+ * one-hour buffer to allow for sessions that run long).
  *
  * Runs every 30 minutes; each transition uses atomic preconditions, so
  * multiple instances racing on the same appointment is safe.
  */
 
-import { prisma } from '../utils/database';
-import { logger } from '../utils/logger';
-import { LockedPeriodicService } from '../utils/locked-periodic-service';
-import { APPOINTMENT_STATUS } from '../constants';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { prisma } from '../../../utils/database';
+import { logger } from '../../../utils/logger';
+import { LockedPeriodicService } from '../../../utils/locked-periodic-service';
+import { APPOINTMENT_STATUS } from '../../../constants';
+import { transitionToSessionHeld } from './transitions/light';
 
 const TICK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const STARTUP_DELAY_MS = 2 * 60 * 1000;  // 2 minutes
@@ -60,7 +58,7 @@ class AppointmentLifecycleTickService extends LockedPeriodicService<TickResult> 
 
     const results = await Promise.allSettled(
       appointments.map(async (apt) => {
-        const result = await appointmentLifecycleService.transitionToSessionHeld({
+        const result = await transitionToSessionHeld({
           appointmentId: apt.id,
           source: 'system',
         });

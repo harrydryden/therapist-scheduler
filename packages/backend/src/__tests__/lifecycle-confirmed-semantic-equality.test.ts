@@ -58,7 +58,7 @@ jest.mock('../services/appointment-notifications.service', () => ({
   },
 }));
 
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 
 beforeEach(() => {
   jest.clearAllMocks();

@@ -23,7 +23,7 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-// Stub the heavy imports that appointment-lifecycle.service pulls in at
+// Stub the heavy imports that the lifecycle module pulls in at
 // module evaluation time (notifications → slack → redis → config). The
 // helper under test only touches prisma + the supplied callbacks, so the
 // rest of the dependency graph just needs to load without side effects.
@@ -98,7 +98,10 @@ jest.mock('../utils/database', () => ({
 }));
 
 import { Prisma } from '@prisma/client';
-import { runTerminalTransitionTx } from '../services/appointment-lifecycle.service';
+// runTerminalTransitionTx is re-exported by the lifecycle barrel.
+// Import from the submodule to keep this test's dep graph narrow —
+// avoids transitively loading the heavy transitions/* + service.ts.
+import { runTerminalTransitionTx } from '../domain/scheduling/lifecycle/terminal-tx';
 import { AppointmentNotFoundError } from '../errors';
 
 beforeEach(() => {
