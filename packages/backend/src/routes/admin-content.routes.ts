@@ -21,9 +21,6 @@ import { knowledgeService } from '../services/knowledge.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { getOrCreateFeedbackFormConfig, DEFAULT_QUESTIONS } from '../utils/feedback-form-config';
 
-// Re-export for backward compatibility (feedback-form.routes.ts dynamic import)
-export { DEFAULT_QUESTIONS };
-
 // ============================================
 // Knowledge Base — Validation Schemas
 // ============================================

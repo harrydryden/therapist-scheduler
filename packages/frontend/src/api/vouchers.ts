@@ -62,13 +62,6 @@ export async function getVouchers(filters: VoucherFilters = {}): Promise<Voucher
   );
 }
 
-export async function getVoucher(email: string): Promise<VoucherRecord> {
-  return unwrap(
-    await fetchAdminApi<VoucherRecord>(`/admin/vouchers/${encodeURIComponent(email)}`),
-    'voucher'
-  );
-}
-
 export async function issueVoucher(data: {
   email: string;
   expiryDays?: number;

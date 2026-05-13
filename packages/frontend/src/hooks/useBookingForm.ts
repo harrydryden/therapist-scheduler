@@ -15,13 +15,12 @@ function isValidEmail(email: string): boolean {
 
 interface UseBookingFormOptions {
   therapistHandle: string;
-  therapistName?: string;
   onSuccess?: () => void;
   /** HMAC-signed voucher token from weekly email (optional) */
   voucherToken?: string | null;
 }
 
-export function useBookingForm({ therapistHandle, therapistName, onSuccess, voucherToken }: UseBookingFormOptions) {
+export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: UseBookingFormOptions) {
   const [firstName, setFirstName] = useState('');
   const [email, setEmail] = useState('');
 
@@ -39,7 +38,6 @@ export function useBookingForm({ therapistHandle, therapistName, onSuccess, vouc
       userName: firstName.trim(),
       userEmail: email.trim(),
       therapistHandle,
-      therapistName,
       ...(voucherToken ? { voucherToken } : {}),
       bookingMethod,
     });
