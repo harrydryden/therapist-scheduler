@@ -119,7 +119,6 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
     therapistHandle: therapist.id,
-    therapistName: therapist.name,
     voucherToken: voucher?.voucherToken,
   });
 

@@ -22,22 +22,15 @@ import { validateVoucherToken, getDisplayCodeFromToken } from '../utils/voucher-
 // Idempotency window: 5 minutes
 const IDEMPOTENCY_WINDOW_MS = 5 * 60 * 1000;
 
-// Validation schema for appointment request from public frontend
-// NOTE: therapistEmail and therapistName are optional - we re-fetch them
-// from Postgres by therapistHandle for security (clients can't spoof them).
+// Validation schema for appointment request from public frontend.
+// Therapist identity is resolved server-side from therapistHandle so the
+// client can't spoof it; we do not accept therapist details in the body.
 const appointmentRequestSchema = z.object({
   userName: z.string().min(1, 'Name is required').max(100),
   userEmail: z.string().email('Invalid email address').max(255),
   therapistHandle: z.string().min(1, 'Therapist ID is required').max(100),
-  // Idempotency key for preventing duplicate requests (optional - will be computed if not provided)
   idempotencyKey: z.string().max(255).optional(),
-  // Legacy fields - kept for backward compatibility but not used
-  therapistEmail: z.string().email('Invalid therapist email').max(255).optional(),
-  therapistName: z.string().min(1, 'Therapist name is required').max(200).optional(),
-  therapistAvailability: z.any().optional(),
-  // Voucher token from weekly promotional email (HMAC-signed, auto-applied via URL)
   voucherToken: z.string().max(500).optional(),
-  // How the user intends to book: via agent negotiation (default) or direct booking link
   bookingMethod: z.enum(['agent_negotiated', 'direct_link']).default('agent_negotiated').optional(),
 });
 

@@ -65,8 +65,6 @@ export interface AppointmentRequest {
   userName: string;
   userEmail: string;
   therapistHandle: string;
-  therapistName?: string;
-  therapistAvailability?: TherapistAvailability | null;
   /** HMAC-signed voucher token from weekly promotional email (auto-applied via URL or manually entered) */
   voucherToken?: string;
   /** How the user intends to book: via agent negotiation (default) or direct booking link */

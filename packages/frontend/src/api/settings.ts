@@ -1,8 +1,6 @@
 import type {
   SettingsResponse,
-  SystemSetting,
   UpdateSettingRequest,
-  BulkUpdateSettingsRequest,
 } from '../types';
 import { fetchApi, fetchAdminApi, unwrap } from './core';
 
@@ -10,10 +8,6 @@ import { fetchApi, fetchAdminApi, unwrap } from './core';
 
 export async function getSettings(): Promise<SettingsResponse> {
   return unwrap(await fetchAdminApi<SettingsResponse>('/admin/settings'), 'settings');
-}
-
-export async function getSetting(key: string): Promise<SystemSetting> {
-  return unwrap(await fetchAdminApi<SystemSetting>(`/admin/settings/${key}`), 'setting');
 }
 
 export async function updateSetting(
@@ -29,18 +23,6 @@ export async function updateSetting(
       }
     ),
     'setting update'
-  );
-}
-
-export async function bulkUpdateSettings(
-  data: BulkUpdateSettingsRequest
-): Promise<{ updated: number }> {
-  return unwrap(
-    await fetchAdminApi<{ updated: number }>('/admin/settings', {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
-    'settings update'
   );
 }
 

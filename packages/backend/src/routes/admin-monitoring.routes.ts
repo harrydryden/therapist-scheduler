@@ -364,10 +364,6 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
       }
     );
 
-    // The previous /api/admin/dashboard/sync-notion-ids endpoint was retired
-    // alongside the Notion deprecation (PR 2). Postgres is the source of
-    // truth now, so there's nothing to sync. Callers that hit it will 404.
-
     // ------------------------------------------------------------------------
     // Message queue health & review (formerly admin-queue-review.routes.ts)
     // ------------------------------------------------------------------------

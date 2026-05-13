@@ -26,7 +26,6 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
 
   const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
     therapistHandle: therapist.id,
-    therapistName: therapist.name,
     onSuccess: () => setSubmitted(true),
     voucherToken: voucher?.voucherToken,
   });
