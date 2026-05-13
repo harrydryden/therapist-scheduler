@@ -56,7 +56,7 @@ import { getAllTaskMetrics, getBackgroundTaskHealth } from './utils/background-t
 import { getTimeoutStats } from './utils/timeout';
 import { slackNotificationService } from './services/slack-notification.service';
 import { sseService } from './services/sse.service';
-import { registerAgentProcessor } from './services/email-message-processor.service';
+import { registerAgentProcessor } from './core/email';
 import { JustinTimeService } from './services/justin-time.service';
 import { therapistNudgeService } from './services/therapist-nudge.service';
 import { missedMessageScannerService } from './services/missed-message-scanner.service';

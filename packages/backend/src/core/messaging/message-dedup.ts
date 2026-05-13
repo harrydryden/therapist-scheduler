@@ -146,9 +146,19 @@ export type ProcessedContext =
   | 'bounce'
   | 'own-email'
   | 'weekly-mailing-reply'
+  | 'therapist-nudge-reply'
+  | 'invitation-reply'
   | 'unmatched-abandoned'
   | 'divergence-blocked-abandoned'
   | 'processing-failed-abandoned'
+  // Inbound replies routed to the availability-collection agent's
+  // TherapistConversation. The four variants correspond to the four
+  // lifecycle statuses; admin UI can distinguish them without needing
+  // to JOIN the conversation row.
+  | 'availability-agent-active'
+  | 'availability-agent-superseded'
+  | 'availability-agent-completed'
+  | 'availability-agent-abandoned'
   | 'legacy';
 
 export async function markMessageProcessed(
@@ -188,6 +198,25 @@ export async function releaseMessageLock(messageId: string, traceId: string): Pr
     }
   } catch (err) {
     logger.debug({ messageId, traceId, err }, 'Lock release failed; will expire on its own');
+  }
+}
+
+/**
+ * Release the DB-fallback advisory lock created by `acquireMessageLock`
+ * when Redis was unavailable. The fallback creates a `ProcessedGmailMessage`
+ * row to serve as a lock placeholder — if processing then fails, this
+ * removes the placeholder so the next scanner pass can retry.
+ *
+ * Idempotent: P2025 (RecordNotFound) is treated as success. Other errors
+ * are logged at WARN but swallowed so failure handling can continue.
+ */
+export async function releaseDbLock(messageId: string): Promise<void> {
+  try {
+    await prisma.processedGmailMessage.delete({ where: { id: messageId } });
+  } catch (err: unknown) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code === 'P2025') return;
+    logger.warn({ messageId, err }, 'Failed to release DB fallback lock');
   }
 }
 

@@ -2,7 +2,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
-import { emailMessageProcessorService, getLastProcessingErrors } from './email-message-processor.service';
+import { emailMessageProcessorService, getLastProcessingErrors } from '../core/email';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
