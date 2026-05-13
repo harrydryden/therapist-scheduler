@@ -18,7 +18,7 @@ export async function updateSetting(
     await fetchAdminApi<{ key: string; value: string | number | boolean; updatedAt: string }>(
       `/admin/settings/${key}`,
       {
-        method: 'PUT',
+        method: 'PATCH',
         body: JSON.stringify(data),
       }
     ),

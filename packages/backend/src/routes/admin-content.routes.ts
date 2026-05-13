@@ -166,10 +166,11 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
   );
 
   /**
-   * PUT /api/admin/knowledge/:id
-   * Update an existing knowledge entry
+   * PATCH /api/admin/knowledge/:id
+   * Partial update of a knowledge entry — only fields present in the body
+   * are modified.
    */
-  fastify.put<{ Params: { id: string } }>(
+  fastify.patch<{ Params: { id: string } }>(
     '/api/admin/knowledge/:id',
     {
       config: {
@@ -268,10 +269,11 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
   });
 
   /**
-   * PUT /api/admin/forms/feedback
-   * Update the feedback form configuration
+   * PATCH /api/admin/forms/feedback
+   * Partial update of the singleton feedback-form config (upserts on first
+   * call). Only fields present in the body are modified.
    */
-  fastify.put('/api/admin/forms/feedback', async (request: FastifyRequest, reply: FastifyReply) => {
+  fastify.patch('/api/admin/forms/feedback', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const validation = updateFormConfigSchema.safeParse(request.body);
 

@@ -54,7 +54,7 @@ async function getFormConfig(): Promise<AdminFormConfig> {
 
 async function updateFormConfig(updates: Partial<AdminFormConfig>): Promise<AdminFormConfig> {
   const response = await fetchAdminApi<AdminFormConfig>('/admin/forms/feedback', {
-    method: 'PUT',
+    method: 'PATCH',
     body: JSON.stringify(updates),
   });
   if (!response.data) throw new Error('Failed to save form configuration');
