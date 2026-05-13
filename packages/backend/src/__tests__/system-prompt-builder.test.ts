@@ -496,3 +496,81 @@ describe('buildSystemPrompt — knowledge wiring', () => {
     expect(prompt).toContain('## Available Tools');
   });
 });
+
+describe('buildSystemPrompt — pre-converted window bullets (PR after #229)', () => {
+  // Each AvailabilityWindow gets its raw ISO line plus two sub-lines
+  // showing the wall-clock in (a) the therapist's timezone, (b) the
+  // client's timezone — pre-computed at prompt-build time so the agent
+  // doesn't reason about timezone conversions inside the prompt.
+  // When either party's timezone is "ambiguous" (multi-zone country,
+  // no stamp), that sub-line is omitted rather than rendering a
+  // misleading conversion.
+
+  // 14:00 UTC on a June Tuesday = 15:00 BST in London, 10:00 EDT in NY.
+  const futureStart = '2030-06-18T14:00:00Z';
+  const futureEnd = '2030-06-18T15:00:00Z';
+
+  function seedAppointmentWithWindow() {
+    const prismaMock = jest.requireMock('../utils/database');
+    prismaMock.prisma.appointmentRequest.findUnique.mockResolvedValueOnce({
+      memory: {
+        notes: [],
+        availabilityWindows: [
+          {
+            id: 'w1',
+            startsAt: futureStart,
+            endsAt: futureEnd,
+            status: 'available',
+            source: 'therapist',
+            quote: 'PRECONVERT_QUOTE',
+            recordedAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      },
+    });
+  }
+
+  it('renders both therapist-time and client-time sub-lines when both zones are unambiguous', async () => {
+    seedAppointmentWithWindow();
+    // Use single-zone countries on both sides so the resolver returns
+    // needsClarification=false and both target lines are rendered.
+    const prompt = await buildSystemPrompt({
+      ...baseContext,
+      userCountry: 'UK',
+      therapistCountry: 'IE',
+    });
+
+    expect(prompt).toContain('PRECONVERT_QUOTE');
+    // Pre-conversion sub-lines (the agent should see these and not
+    // need to compute the conversion itself).
+    expect(prompt).toMatch(/in therapist time \(Europe\/Dublin\)/);
+    expect(prompt).toMatch(/in client time \(Europe\/London\)/);
+  });
+
+  it('omits the client sub-line when the client country is multi-zone (needs clarification)', async () => {
+    seedAppointmentWithWindow();
+    const prompt = await buildSystemPrompt({
+      ...baseContext,
+      userCountry: 'US',          // multi-zone, no stamp → ambiguous
+      therapistCountry: 'IE',     // single-zone, unambiguous
+    });
+
+    // Therapist line still present.
+    expect(prompt).toMatch(/in therapist time \(Europe\/Dublin\)/);
+    // Client line suppressed — agent is instructed elsewhere in the
+    // prompt to ASK the client where they are.
+    expect(prompt).not.toMatch(/in client time \(/);
+  });
+
+  it('omits the therapist sub-line when the therapist country is multi-zone with no stamp', async () => {
+    seedAppointmentWithWindow();
+    const prompt = await buildSystemPrompt({
+      ...baseContext,
+      userCountry: 'UK',
+      therapistCountry: 'US',     // multi-zone, no stamp → ambiguous
+    });
+
+    expect(prompt).not.toMatch(/in therapist time \(/);
+    expect(prompt).toMatch(/in client time \(Europe\/London\)/);
+  });
+});

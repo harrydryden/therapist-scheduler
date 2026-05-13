@@ -220,8 +220,15 @@ ${getValidActionsForStage(currentStage)}
     country: context.userCountry,
     platformTimezone: timezone,
   });
+  // Pass the ACTUAL stamp (or undefined when there isn't one), not the
+  // already-resolved `therapistTimezone` above — that's the post-
+  // fallback value used for slot rendering. Feeding it into the
+  // resolver as a stamp would short-circuit the country-default lookup
+  // and surface every therapist as "stamped", even those who only
+  // inherited the platform default.
+  const therapistStampedTimezone = (context.therapistAvailability as { timezone?: string } | null)?.timezone;
   const therapistTzResolved = resolveTherapistTimezone({
-    stampedTimezone: therapistTimezone,
+    stampedTimezone: therapistStampedTimezone,
     country: context.therapistCountry,
     platformTimezone: timezone,
   });
