@@ -196,7 +196,7 @@ MAX_CONNECTIONS_PER_USER=10
 MAX_TOTAL_CONNECTIONS=500
 ```
 
-At large scale, consider separating API and worker services (see `ARCHITECTURE_RECOMMENDATIONS.md`).
+At large scale, consider separating API and worker services into independent deploys.
 
 ## Troubleshooting
 
