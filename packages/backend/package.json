@@ -18,7 +18,8 @@
     "test": "jest --testPathIgnorePatterns=/integration/",
     "test:integration": "jest --testPathPattern=/integration/ --runInBand",
     "test:all": "jest --runInBand",
-    "check:schema-migration": "node scripts/check-schema-migration.js"
+    "check:schema-migration": "node scripts/check-schema-migration.js",
+    "audit:therapist-timezones": "ts-node scripts/audit-therapist-timezones.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",

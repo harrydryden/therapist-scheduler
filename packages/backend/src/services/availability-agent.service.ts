@@ -665,7 +665,7 @@ You don't propose specific session times, you don't confirm bookings, and you do
  * info we already have), the conversation's running notes, and the
  * tool-usage guidance.
  */
-async function buildAvailabilitySystemPrompt(
+export async function buildAvailabilitySystemPrompt(
   therapist: Pick<Therapist, 'id' | 'name' | 'email' | 'country' | 'availability' | 'bookingLink'>,
   context: AvailabilityAgentContext,
 ): Promise<string> {
