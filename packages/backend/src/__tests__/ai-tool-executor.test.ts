@@ -469,7 +469,7 @@ describe('record_availability_window — dispatch by source', () => {
   const FUTURE_START = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   const FUTURE_END = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000 + 2 * 60 * 60 * 1000).toISOString();
 
-  it('routes therapist-source windows to Therapist.upcomingAvailability (per-therapist store)', async () => {
+  it('routes therapist-source windows to Therapist.upcomingAvailability (per-therapist store) when inboundSender=therapist', async () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_availability_window', {
@@ -479,7 +479,10 @@ describe('record_availability_window — dispatch by source', () => {
         source: 'therapist',
         quote: 'I can do Tuesdays',
       }),
-      { ...baseContext, therapistId: 'tx-1' },
+      // inboundSender=therapist is required for source='therapist' to
+      // be honoured — the executor gates this to prevent prompt-
+      // injected clients from polluting the therapist's record.
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);
@@ -492,6 +495,35 @@ describe('record_availability_window — dispatch by source', () => {
     // Per-appointment write did NOT fire for this case.
     const apptUpdates = getPrismaMock().appointmentRequest.update.mock.calls;
     expect(apptUpdates.length).toBe(0);
+  });
+
+  it("DOWNGRADES source='therapist' to per-appointment when inboundSender is not therapist (prevents client poisoning)", async () => {
+    // SECURITY pin: a client (inboundSender='user') asking the agent
+    // to record a "therapist-source" window — most likely via prompt
+    // injection — must NOT land on the therapist's permanent record.
+    // The executor downgrades to per-appointment silently and logs.
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: FUTURE_START,
+        ends_at: FUTURE_END,
+        status: 'available',
+        source: 'therapist',
+        quote: 'forwarded therapist-style availability from client email',
+      }),
+      // inboundSender='user' — same as default baseContext, made
+      // explicit here for the security test.
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'user' },
+    );
+
+    expect(result.success).toBe(true);
+    // CRITICAL: per-therapist update did NOT fire.
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+    // Per-appointment update DID fire.
+    expect(getPrismaMock().appointmentRequest.update.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // Result message reflects the per-appointment path with source=user.
+    expect(result.resultMessage).toMatch(/for this booking/i);
+    expect(result.resultMessage).toMatch(/source: user/i);
   });
 
   it('routes user-source windows to AppointmentRequest.memory (per-booking store)', async () => {
@@ -527,8 +559,11 @@ describe('record_availability_window — dispatch by source', () => {
       }),
       // No therapistId — simulates legacy appointment without a
       // linked Therapist row. Per-therapist write has no primary key
-      // to scope on; fall back to per-appointment.
-      { ...baseContext, therapistId: undefined },
+      // to scope on; fall back to per-appointment. inboundSender is
+      // therapist so the source-routing gate doesn't downgrade — we
+      // want this test to specifically exercise the legacy-fallback
+      // branch, not the gate.
+      { ...baseContext, therapistId: undefined, inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);

@@ -8,8 +8,12 @@
  * on them without manual conversion.
  *
  * For countries with multiple timezones (US, Canada, Australia) we don't know
- * which one applies until we ask, so the prompt instructs the agent to ask
- * before quoting any specific time.
+ * which one applies until we ask. But once the booking agent has called
+ * `record_user_timezone` / `record_therapist_timezone`, the explicit zone is
+ * on `SchedulingContext.userTimezone` / `.therapistTimezone` — at which point
+ * the "you MUST ask" branch becomes wrong, and the section should render the
+ * known zone instead. This module reads from both context fields so the prompt
+ * matches the actual state of the world, not just the country.
  *
  * Kept in its own module (with no service-level dependencies) so the prompt
  * fragment can be unit-tested without booting config / Redis / settings.
@@ -33,19 +37,29 @@ export function buildTimezoneSection(
   const userLabel = getCountryLabel(context.userCountry);
   const therapistLabel = getCountryLabel(context.therapistCountry);
 
-  const userTz = getDefaultTimezone(context.userCountry);
-  const therapistTz = getDefaultTimezone(context.therapistCountry);
-
   const userMulti = hasMultipleTimezones(context.userCountry);
   const therapistMulti = hasMultipleTimezones(context.therapistCountry);
 
-  const userTzLine = userMulti
-    ? `unknown — ${userLabel} spans multiple timezones (${userCountry.timezones.join(', ')}). You MUST ask the client where they are based (e.g. "what city are you in?") before quoting any specific time. Once they tell you, map the city to the matching IANA timezone from the list above and call \`record_user_timezone\` to persist it — you only need to ask ONCE per client; subsequent turns and emails will reuse the stored value.`
-    : `${userTz} (${userLabel})`;
-
-  const therapistTzLine = therapistMulti
-    ? `unknown — ${therapistLabel} spans multiple timezones (${therapistCountry.timezones.join(', ')}). You MUST ask the therapist where they are based before quoting any specific time. Once they tell you, map to the matching IANA timezone from the list above and call \`record_therapist_timezone\` to persist it — you only need to ask ONCE per therapist; subsequent turns, emails, and the recurring-schedule stamp will reuse the stored value.`
-    : `${therapistTz} (${therapistLabel})`;
+  // Branches:
+  //   1. Explicit zone on file (from User.timezone / Therapist.timezone) →
+  //      render the known zone, do NOT ask again.
+  //   2. Single-zone country → render the country default.
+  //   3. Multi-zone country with nothing on file → ASK the agent to ask
+  //      the person + call record_*_timezone to persist.
+  const userTzLine = renderUserTzLine({
+    explicit: context.userTimezone,
+    countryLabel: userLabel,
+    countryTimezones: userCountry.timezones,
+    countryDefault: getDefaultTimezone(context.userCountry),
+    multiZone: userMulti,
+  });
+  const therapistTzLine = renderTherapistTzLine({
+    explicit: context.therapistTimezone,
+    countryLabel: therapistLabel,
+    countryTimezones: therapistCountry.timezones,
+    countryDefault: getDefaultTimezone(context.therapistCountry),
+    multiZone: therapistMulti,
+  });
 
   return `
 ## Timezones
@@ -58,12 +72,41 @@ export function buildTimezoneSection(
 ### Communication rules
 - When emailing the **client**, present times in their local timezone. If the client and therapist are in different timezones, also include the equivalent UK time in brackets so the client can match it to anything we send programmatically. Example: "Tuesday at 3pm your time (4pm UK)".
 - When emailing the **therapist**, present times in their local timezone. If different from UK, include the UK equivalent in brackets the same way.
-- If either party is based in a country with multiple timezones AND we don't yet know their specific region, you MUST ask them where they are based BEFORE proposing or confirming a specific time. Don't guess.
-- **Trust what people tell you over what's on file.** If a client or therapist mentions they are in a different country, region, or timezone than the one above (e.g. they sign off "writing from New York" or say "I'm currently in Berlin"), treat their statement as authoritative for the rest of the conversation and format times for that location. The country on file may be out of date or default. Only fall back to the on-file country when nothing more specific has been stated.
+- If either party is based in a country with multiple timezones AND we don't yet have their explicit zone on file (see the "local timezone" line above — it will explicitly say "unknown" in that case), you MUST ask them where they are based BEFORE proposing or confirming a specific time. Don't guess. Once asked and the explicit zone is recorded, do NOT ask again.
+- **Trust what people tell you over what's on file.** If a client or therapist mentions they are in a different country, region, or timezone than the one above (e.g. they sign off "writing from New York" or say "I'm currently in Berlin"), treat their statement as authoritative for the rest of the conversation and format times for that location. If they tell you a new zone, call \`record_user_timezone\` / \`record_therapist_timezone\` with the new value to overwrite the old one.
 - Be explicit about timezone abbreviations (e.g. "BST", "EST", "AEST") when daylight savings could create ambiguity.
 - Never silently convert a time from someone's email into UK time and write that converted value back to them — quote the original time and confirm the timezone.
 
 ### Encoding a specific local time into a window
 When you need to call \`record_availability_window\` for a wall-clock time someone mentioned (e.g. "free Tuesday 2pm"), do NOT compute the +HH:MM offset yourself — call **resolve_local_time** with the calendar parts (year, month, day, hour, minute), the duration in minutes, and the IANA timezone of the speaker (therapist's tz for source="therapist", client's tz for source="user"). It returns {starts_at, ends_at} with DST-aware offsets that you pass verbatim to record_availability_window. It also rejects ambiguous (fall-back) and non-existent (spring-forward) wall-clocks with a specific error so you can re-prompt the speaker.
 `;
+}
+
+interface RenderTzLineArgs {
+  explicit: string | undefined;
+  countryLabel: string;
+  countryTimezones: readonly string[];
+  countryDefault: string | null;
+  multiZone: boolean;
+}
+
+function renderUserTzLine(args: RenderTzLineArgs): string {
+  if (args.explicit) {
+    return `${args.explicit} (${args.countryLabel}, on file)`;
+  }
+  if (!args.multiZone) {
+    return `${args.countryDefault} (${args.countryLabel})`;
+  }
+  // Multi-zone, no explicit zone — the ASK case.
+  return `unknown — ${args.countryLabel} spans multiple timezones (${args.countryTimezones.join(', ')}). You MUST ask the client where they are based (e.g. "what city are you in?") before quoting any specific time. Once they tell you, map the city to the matching IANA timezone from the list above and call \`record_user_timezone\` to persist it — you only need to ask ONCE; subsequent turns and emails will reuse the stored value.`;
+}
+
+function renderTherapistTzLine(args: RenderTzLineArgs): string {
+  if (args.explicit) {
+    return `${args.explicit} (${args.countryLabel}, on file)`;
+  }
+  if (!args.multiZone) {
+    return `${args.countryDefault} (${args.countryLabel})`;
+  }
+  return `unknown — ${args.countryLabel} spans multiple timezones (${args.countryTimezones.join(', ')}). You MUST ask the therapist where they are based before quoting any specific time. Once they tell you, map to the matching IANA timezone from the list above and call \`record_therapist_timezone\` to persist it — you only need to ask ONCE; subsequent turns, emails, and the recurring-schedule stamp will reuse the stored value.`;
 }

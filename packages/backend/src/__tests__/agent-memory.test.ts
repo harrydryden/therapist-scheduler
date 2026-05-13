@@ -34,14 +34,25 @@ const mockUpdate = jest.fn(async ({ where, data }: { where: { id: string }; data
   return { id: where.id };
 });
 
-jest.mock('../utils/database', () => ({
-  prisma: {
+jest.mock('../utils/database', () => {
+  const client = {
     appointmentRequest: {
       findUnique: (...a: unknown[]) => mockFindUnique(...(a as [{ where: { id: string } }])),
       update: (...a: unknown[]) => mockUpdate(...(a as [{ where: { id: string }; data: { memory: unknown } }])),
     },
-  },
-}));
+    // No-op for the row-lock SELECT used by addNote /
+    // addAvailabilityWindow — single-threaded test scheduler means the
+    // lock is moot, but the production helper expects $queryRaw to
+    // exist on the tx.
+    $queryRaw: jest.fn(async () => []),
+  };
+  return {
+    prisma: {
+      ...client,
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(client)),
+    },
+  };
+});
 
 import {
   addNote,
