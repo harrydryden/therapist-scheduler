@@ -195,28 +195,50 @@ The unmatched-attempt path stays DB-authoritative locally
 `recordUnmatchedAttempt` is Redis-only with a different reliability
 shape; aligning is a future PR.
 
-### Phase 2c — `ai-tool-executor.service.ts` (1,789 lines)
+### Phase 2c — `ai-tool-executor.service.ts` (1,789 lines) ✅ DONE
 
-Target: `core/agent/tools/` + per-tool handlers.
+Landed in PR #239. The original sketch had a `registry.ts` for Zod
+schemas, but the existing `schemas/tool-inputs.ts` already serves
+that role — each handler imports its own schema directly from there.
+Realised layout:
 
 ```
 core/agent/tools/
-  registry.ts             ← Zod schemas keyed by tool name
-  dispatch.ts             ← validate + invoke
-  idempotency.ts          ← Redis-backed idempotency
-  email-normalization.ts  ← outbound-email rewriting
-  handlers/
-    record-availability.ts
-    record-booking-link.ts
-    mark-scheduling-complete.ts
-    resolve-local-time.ts
-    record-user-timezone.ts
-    record-therapist-timezone.ts
-    remember.ts
-    ...
+├── dispatch.ts                 orchestrator (atomic gate + ceiling +
+│                               idempotency + dispatch switch +
+│                               post-success bookkeeping) +
+│                               AIToolExecutorService class (thin)
+├── idempotency.ts              hashToolCall, wasToolExecuted, markToolExecuted
+├── email-normalization.ts      normalizeEmailBody
+├── send.ts                     sendAppointmentEmail
+│                               (per-appointment Gmail wrap with thread +
+│                                tracking-code + atomic human-control
+│                                + queue fallback)
+├── handlers/
+│   ├── resolve-local-time.ts            (pure, bypasses the gate)
+│   ├── send-email.ts
+│   ├── update-therapist-availability.ts
+│   ├── mark-scheduling-complete.ts
+│   ├── cancel-appointment.ts
+│   ├── initiate-reschedule.ts
+│   ├── human-control.ts                 (flag + recommend_cancel_match)
+│   ├── issue-voucher-code.ts
+│   ├── remember.ts
+│   ├── record-availability-window.ts
+│   ├── record-booking-link.ts
+│   ├── record-user-timezone.ts
+│   └── record-therapist-timezone.ts
+├── index.ts
+└── README.md
 ```
 
-One handler per tool. Each handler stays under ~150 lines.
+The class collapsed to a thin wrapper holding the traceId — its only
+state. `flag_for_human_review` and `recommend_cancel_match` share a
+file because they share the human-control-flip + audit + Slack
+pattern. Each handler file 30–250 lines.
+
+Two callsites updated: `services/justin-time.service.ts` and the
+unit test.
 
 ### Phase 2d — `admin-appointments.routes.ts` (1,771 lines)
 
