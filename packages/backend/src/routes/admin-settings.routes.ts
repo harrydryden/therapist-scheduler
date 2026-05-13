@@ -151,10 +151,11 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
   );
 
   /**
-   * PUT /api/admin/settings/:key
-   * Update a single setting
+   * PATCH /api/admin/settings/:key
+   * Update a single setting (partial update: body carries `{value, adminId}`;
+   * the setting's other metadata stays untouched).
    */
-  fastify.put<{ Params: { key: string } }>(
+  fastify.patch<{ Params: { key: string } }>(
     '/api/admin/settings/:key',
     {
       config: {
@@ -276,10 +277,11 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
   );
 
   /**
-   * PUT /api/admin/settings
-   * Bulk update multiple settings
+   * PATCH /api/admin/settings
+   * Bulk-apply a list of setting updates. Each entry is a partial update of
+   * its keyed setting; rejects atomically if any entry fails validation.
    */
-  fastify.put(
+  fastify.patch(
     '/api/admin/settings',
     {
       config: {

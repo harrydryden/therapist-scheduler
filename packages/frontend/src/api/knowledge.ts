@@ -30,7 +30,7 @@ export async function updateKnowledgeEntry(
 ): Promise<KnowledgeEntry> {
   return unwrap(
     await fetchAdminApi<KnowledgeEntry>(`/admin/knowledge/${id}`, {
-      method: 'PUT',
+      method: 'PATCH',
       body: JSON.stringify(data),
     }),
     'knowledge entry'
