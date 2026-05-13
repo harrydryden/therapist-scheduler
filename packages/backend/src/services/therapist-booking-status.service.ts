@@ -2,6 +2,11 @@ import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
 import { sleep } from '../utils/timeout';
+import {
+  SERIALIZATION_RETRY,
+  getBackoffDelay,
+  isSerializationError,
+} from '../utils/serialization-retry';
 import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES, ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
 import { isTherapistPending } from './stage-groups';
@@ -9,34 +14,6 @@ import { isTherapistPending } from './stage-groups';
 // Type for transaction client
 type TransactionClient = Prisma.TransactionClient;
 type PrismaClient = typeof prisma;
-
-// FIX M9: Retry configuration for serialization failures
-const SERIALIZATION_RETRY = {
-  MAX_RETRIES: 3,
-  BASE_DELAY_MS: 50,
-  MAX_DELAY_MS: 500,
-  JITTER_FACTOR: 0.2,
-};
-
-/**
- * Calculate exponential backoff delay with jitter
- */
-function getBackoffDelay(attempt: number): number {
-  const baseDelay = SERIALIZATION_RETRY.BASE_DELAY_MS * Math.pow(2, attempt);
-  const cappedDelay = Math.min(baseDelay, SERIALIZATION_RETRY.MAX_DELAY_MS);
-  const jitter = cappedDelay * SERIALIZATION_RETRY.JITTER_FACTOR * Math.random();
-  return cappedDelay + jitter;
-}
-
-/**
- * Check if error is a serialization failure
- */
-function isSerializationError(error: unknown): boolean {
-  return error instanceof Error && (
-    error.message.includes('could not serialize') ||
-    (error as any).code === 'P2034'
-  );
-}
 
 export interface TherapistAvailabilityStatus {
   canAcceptNewRequests: boolean;

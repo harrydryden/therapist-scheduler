@@ -133,8 +133,8 @@ const conversationUpdateMany = jest.fn(
   },
 );
 
-jest.mock('../utils/database', () => ({
-  prisma: {
+jest.mock('../utils/database', () => {
+  const client = {
     therapist: {
       findUnique: (...a: unknown[]) => therapistFindUnique(...(a as [{ where: { id: string } }])),
       update: (...a: unknown[]) => therapistUpdate(...(a as [{ where: { id: string }; data: Partial<TherapistRow> }])),
@@ -147,8 +147,18 @@ jest.mock('../utils/database', () => ({
       updateMany: (...a: unknown[]) =>
         conversationUpdateMany(...(a as [{ where: { id: string; status?: string }; data: Partial<ConversationRow> }])),
     },
-  },
-}));
+    // No-op for the row-lock SELECT used by addUpcomingAvailability —
+    // single-threaded test scheduler renders the lock moot, but the
+    // production helper expects $queryRaw to exist on the tx.
+    $queryRaw: jest.fn(async () => []),
+  };
+  return {
+    prisma: {
+      ...client,
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(client)),
+    },
+  };
+});
 
 // Idempotency cache — same shape the real redis client exposes for
 // the keys we use (get/set with EX).
@@ -368,7 +378,29 @@ describe('AvailabilityToolExecutor — record_availability_window', () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/parseable ISO 8601/);
+    expect(result.error).toMatch(/ISO 8601 with an explicit timezone offset/);
+  });
+
+  it('rejects ISO 8601 strings missing the timezone offset', async () => {
+    seedTherapist();
+    seedConversation();
+    const exec = new AvailabilityToolExecutorService('trace-1');
+
+    // Offset-less form: Date.parse accepts but the meaning depends on
+    // the runtime's local timezone — a silent corruption of the
+    // absolute-instant invariant. The schema must reject.
+    const result = await exec.executeToolCall(
+      makeToolCall('record_availability_window', {
+        starts_at: '2026-05-19T14:00:00',
+        ends_at: '2026-05-19T15:00:00+01:00',
+        status: 'available',
+        quote: 'no offset',
+      }),
+      makeContext(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/explicit timezone offset/);
   });
 
   it('deduplicates identical windows on the same therapist', async () => {

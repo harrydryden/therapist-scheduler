@@ -20,6 +20,7 @@
  */
 
 import crypto from 'crypto';
+import { logger } from '../utils/logger';
 
 /** Cap on the quote string captured from the original message. */
 export const MAX_WINDOW_QUOTE_LENGTH = 280;
@@ -79,12 +80,28 @@ export function windowId(
  * the agent loop. Includes a parseability check on the timestamps
  * because rendering a window with an unparseable startsAt would put
  * garbage in the prompt.
+ *
+ * Dropped entries are warned at WARN level so silent corruption of
+ * the JSON column doesn't go unnoticed (e.g. a hand-edit or a partial
+ * migration leaving one row in a malformed shape).
  */
 export function parseWindows(raw: unknown): AvailabilityWindow[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) {
+    if (raw !== null && raw !== undefined) {
+      logger.warn(
+        { rawType: typeof raw },
+        'agent-availability-windows-store: parseWindows received non-array input — returning []',
+      );
+    }
+    return [];
+  }
   const windows: AvailabilityWindow[] = [];
+  let dropped = 0;
   for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') {
+      dropped++;
+      continue;
+    }
     const w = item as Partial<AvailabilityWindow>;
     if (
       typeof w.id !== 'string' ||
@@ -92,11 +109,22 @@ export function parseWindows(raw: unknown): AvailabilityWindow[] {
       typeof w.endsAt !== 'string' ||
       typeof w.quote !== 'string' ||
       typeof w.recordedAt !== 'string'
-    )
+    ) {
+      dropped++;
       continue;
-    if (w.status !== 'available' && w.status !== 'unavailable') continue;
-    if (w.source !== 'therapist' && w.source !== 'user') continue;
-    if (isNaN(Date.parse(w.startsAt)) || isNaN(Date.parse(w.endsAt))) continue;
+    }
+    if (w.status !== 'available' && w.status !== 'unavailable') {
+      dropped++;
+      continue;
+    }
+    if (w.source !== 'therapist' && w.source !== 'user') {
+      dropped++;
+      continue;
+    }
+    if (isNaN(Date.parse(w.startsAt)) || isNaN(Date.parse(w.endsAt))) {
+      dropped++;
+      continue;
+    }
     windows.push({
       id: w.id,
       startsAt: w.startsAt,
@@ -106,6 +134,12 @@ export function parseWindows(raw: unknown): AvailabilityWindow[] {
       quote: w.quote,
       recordedAt: w.recordedAt,
     });
+  }
+  if (dropped > 0) {
+    logger.warn(
+      { dropped, kept: windows.length },
+      'agent-availability-windows-store: parseWindows dropped malformed entries',
+    );
   }
   return windows;
 }

@@ -28,6 +28,7 @@ import type { AppointmentStatus } from '../constants';
 import { prependTrackingCodeToSubject } from '../services/tracking-code.service';
 import { emailQueueService } from './email-queue.service';
 import { redis } from '../utils/redis';
+import { canonicalStringify } from '../utils/canonical-json';
 import {
   incrementAppointmentToolCount,
   peekAppointmentToolCount,
@@ -73,7 +74,10 @@ const PER_APPOINTMENT_LIMIT = TOOL_EXECUTION.PER_APPOINTMENT_LIMIT;
  * Generate a deterministic hash for a tool call to enable idempotency checking
  */
 function hashToolCall(appointmentId: string, toolName: string, input: unknown): string {
-  const data = JSON.stringify({ appointmentId, toolName, input });
+  // canonicalStringify sorts keys at every depth so {a,b} and {b,a}
+  // hash identically — important because the Anthropic API doesn't
+  // guarantee property ordering across retries or model versions.
+  const data = canonicalStringify({ appointmentId, toolName, input });
   return crypto.createHash('sha256').update(data).digest('hex').substring(0, 32);
 }
 

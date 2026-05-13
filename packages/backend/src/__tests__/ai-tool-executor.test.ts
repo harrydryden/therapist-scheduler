@@ -37,8 +37,8 @@ jest.mock('../services/settings.service', () => require('./_global-mocks').setti
 // can't define `jest.fn()` outside and reference it inside the factory.
 // Define the fns inside the factory and pull them back out via
 // `jest.requireMock(...)` in the tests / setup.
-jest.mock('../utils/database', () => ({
-  prisma: {
+jest.mock('../utils/database', () => {
+  const client = {
     appointmentRequest: {
       updateMany: jest.fn(),
       update: jest.fn(),
@@ -52,8 +52,16 @@ jest.mock('../utils/database', () => ({
       findUnique: jest.fn(),
       update: jest.fn(),
     },
-  },
-}));
+    // No-op for the row-lock SELECT used by addUpcomingAvailability.
+    $queryRaw: jest.fn(async () => []),
+  };
+  return {
+    prisma: {
+      ...client,
+      $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(client)),
+    },
+  };
+});
 
 // --- redis mock for tool-call idempotency + per-appointment counter ----------
 const mockRedisGet = jest.fn();

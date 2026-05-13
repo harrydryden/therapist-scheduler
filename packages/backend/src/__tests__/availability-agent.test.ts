@@ -191,10 +191,19 @@ const conversationUpdateMany = jest.fn(
         row.updatedAt.getTime() !== where.updatedAt.getTime()
       )
         continue;
-      // Real Prisma bumps `updatedAt` automatically on any write via
-      // the @updatedAt directive; replicate that here so subsequent
-      // lock predicates see a fresh timestamp.
-      conversations[row.id] = { ...row, ...data, updatedAt: data.updatedAt ?? new Date() };
+      // We DON'T auto-bump updatedAt here even though real Prisma
+      // does via @updatedAt. Reason: the agent's gate + tool writes
+      // omit updatedAt from their `data`, but the persistStateWithLock
+      // writes ALWAYS pass an explicit `updatedAt`. Auto-bumping on
+      // the gate/tool writes makes the persistStateWithLock predicate
+      // probabilistically miss when the test runs across a millisecond
+      // boundary (faster on isolated runs, slower under load), which
+      // turns deterministic flow tests into flaky ones. Tests that
+      // need to exercise a real updatedAt drift (the optimistic-lock
+      // conflict test) mutate `conversations[id].updatedAt` directly.
+      conversations[row.id] = data.updatedAt !== undefined
+        ? { ...row, ...data, updatedAt: data.updatedAt }
+        : { ...row, ...data };
       matched++;
     }
     return { count: matched };
@@ -240,6 +249,10 @@ jest.mock('../utils/database', () => {
           ]),
         ),
     },
+    // No-op for the row-lock SELECT used by addUpcomingAvailability —
+    // the in-test scheduler is single-threaded so the lock is moot,
+    // but the production code expects $queryRaw to exist on the tx.
+    $queryRaw: jest.fn(async () => []),
   };
   return {
     prisma: {

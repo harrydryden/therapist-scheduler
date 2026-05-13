@@ -35,6 +35,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
+import { canonicalStringify } from '../utils/canonical-json';
 import { TOOL_EXECUTION } from '../constants';
 import {
   availabilityRecordWindowInputSchema,
@@ -57,7 +58,10 @@ const AVAILABILITY_TOOL_PREFIX = `${TOOL_EXECUTION.PREFIX}avail:`;
 const AVAILABILITY_TOOL_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
 
 function hashToolCall(conversationId: string, toolName: string, input: unknown): string {
-  const data = JSON.stringify({ conversationId, toolName, input });
+  // canonicalStringify sorts keys at every depth so {a,b} and {b,a}
+  // hash identically — important because the Anthropic API doesn't
+  // guarantee property ordering across retries or model versions.
+  const data = canonicalStringify({ conversationId, toolName, input });
   return crypto.createHash('sha256').update(data).digest('hex').substring(0, 32);
 }
 

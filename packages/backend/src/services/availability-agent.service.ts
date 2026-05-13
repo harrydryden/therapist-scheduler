@@ -45,8 +45,9 @@ import {
   formatMemoryForPrompt,
 } from './therapist-conversation-memory.service';
 import { formatDateLong } from '../utils/date';
-import { getSettingValues } from './settings.service';
+import { getSettingValues, getSettingValue } from './settings.service';
 import { firstName } from '../utils/first-name';
+import { getDefaultTimezone } from '@therapist-scheduler/shared';
 import type { Therapist } from '@prisma/client';
 
 /**
@@ -668,7 +669,17 @@ async function buildAvailabilitySystemPrompt(
   therapist: Pick<Therapist, 'id' | 'name' | 'email' | 'country' | 'availability' | 'bookingLink'>,
   context: AvailabilityAgentContext,
 ): Promise<string> {
-  const today = formatDateLong(new Date(), 'Europe/London');
+  // Resolve "today" in the therapist's own timezone, not Europe/London,
+  // so the agent computes ISO 8601 offsets that match the therapist's
+  // wall-clock. Precedence mirrors buildPersistedAvailability:
+  //   existing availability.timezone > country default > platform default.
+  const platformTimezone =
+    (await getSettingValue<string>('general.timezone')) || 'Europe/London';
+  const therapistTimezone =
+    (therapist.availability as { timezone?: string } | null)?.timezone ||
+    getDefaultTimezone(therapist.country) ||
+    platformTimezone;
+  const today = formatDateLong(new Date(), therapistTimezone);
 
   // Show the agent what's already on file so it doesn't waste a turn
   // asking for it. Recurring schedule + per-therapist upcoming windows
@@ -743,8 +754,8 @@ You collect upcoming availability from therapists and write it to their record o
 You only ever talk to one person: the therapist named below. You never email anyone else.
 
 ## Today's date
-${today} (Europe/London)
-When the therapist mentions relative times like "next Friday" or "the week of the 15th", resolve them against today's date to absolute ISO 8601 timestamps before calling record_availability_window.
+${today} (${therapistTimezone})
+When the therapist mentions relative times like "next Friday" or "the week of the 15th", resolve them against today's date to absolute ISO 8601 timestamps before calling record_availability_window. When the therapist mentions a time without an explicit timezone (e.g. "Tuesday at 2pm"), interpret it in **${therapistTimezone}** — their local timezone — and encode the matching offset on the ISO 8601 string (DST-aware: the offset for the actual date, not for today). The Zod validator rejects offset-less timestamps, so always include "Z" or "±HH:MM".
 
 ## Therapist
 - Name: ${therapist.name}

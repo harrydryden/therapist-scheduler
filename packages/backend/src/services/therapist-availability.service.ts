@@ -29,6 +29,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { withSerializationRetry } from '../utils/serialization-retry';
 import {
   type AvailabilityWindow,
   parseWindows,
@@ -106,6 +107,15 @@ export interface AddUpcomingWindowResult {
  * accumulate expired entries over a therapist's lifetime on the
  * platform — distinct from the per-appointment store where the list
  * is short-lived enough that compacting on every write isn't worth it.
+ *
+ * CONCURRENCY: the read-modify-write happens inside an interactive
+ * transaction with `SELECT ... FOR UPDATE` on the therapist row, so a
+ * concurrent writer (the booking agent's record_availability_window
+ * with source='therapist' routes here too — see ai-tool-executor) is
+ * serialised rather than racing in a last-writer-wins on the JSON
+ * column. The advisory pattern Prisma exposes is to wrap the body in
+ * `$transaction` after taking a row lock via $queryRaw; we retry on
+ * serialization failure with backoff (see withSerializationRetry).
  */
 export async function addUpcomingAvailability(
   therapistId: string,
@@ -118,41 +128,60 @@ export async function addUpcomingAvailability(
   },
   now: Date = new Date(),
 ): Promise<AddUpcomingWindowResult> {
-  const current = await getUpcomingAvailability(therapistId);
-  const result = appendWindowToList(current, params, {
-    maxSize: MAX_UPCOMING_WINDOWS_PER_THERAPIST,
-    compactPast: true,
-    now,
-  });
+  return withSerializationRetry(
+    () =>
+      prisma.$transaction(async (tx) => {
+        // Row lock: blocks concurrent writers from running their read-
+        // modify-write against the same therapist. Released on commit
+        // or rollback. The locked row is the therapist; the column we
+        // mutate is JSON inside that row, so a row lock is the right
+        // granularity.
+        await tx.$queryRaw`SELECT id FROM therapists WHERE id = ${therapistId} FOR UPDATE`;
 
-  if (!result.added) {
-    logger.debug(
-      { therapistId, windowId: result.windowId, status: params.status },
-      'therapist-availability: window already present, skipping (idempotent)',
-    );
-    return { added: false, windows: current, windowId: result.windowId };
-  }
+        const row = await tx.therapist.findUnique({
+          where: { id: therapistId },
+          select: { upcomingAvailability: true },
+        });
+        const current = row ? parseWindows(row.upcomingAvailability) : EMPTY;
 
-  await prisma.therapist.update({
-    where: { id: therapistId },
-    data: { upcomingAvailability: result.windows as unknown as object },
-    select: { id: true },
-  });
+        const result = appendWindowToList(current, params, {
+          maxSize: MAX_UPCOMING_WINDOWS_PER_THERAPIST,
+          compactPast: true,
+          now,
+        });
 
-  logger.info(
-    {
-      therapistId,
-      windowId: result.windowId,
-      status: params.status,
-      source: params.source,
-      startsAt: params.startsAt,
-      endsAt: params.endsAt,
-      total: result.windows.length,
-    },
-    'therapist-availability: window added',
+        if (!result.added) {
+          logger.debug(
+            { therapistId, windowId: result.windowId, status: params.status },
+            'therapist-availability: window already present, skipping (idempotent)',
+          );
+          return { added: false, windows: current, windowId: result.windowId };
+        }
+
+        await tx.therapist.update({
+          where: { id: therapistId },
+          data: { upcomingAvailability: result.windows as unknown as object },
+          select: { id: true },
+        });
+
+        logger.info(
+          {
+            therapistId,
+            windowId: result.windowId,
+            status: params.status,
+            source: params.source,
+            startsAt: params.startsAt,
+            endsAt: params.endsAt,
+            total: result.windows.length,
+          },
+          'therapist-availability: window added',
+        );
+
+        return { added: true, windows: result.windows, windowId: result.windowId };
+      }),
+    { therapistId, op: 'addUpcomingAvailability' },
+    (msg, ctx) => logger.warn(ctx, msg),
   );
-
-  return { added: true, windows: result.windows, windowId: result.windowId };
 }
 
 /**

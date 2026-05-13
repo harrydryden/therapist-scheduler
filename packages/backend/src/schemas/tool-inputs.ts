@@ -45,20 +45,36 @@ export const rememberInputSchema = z.object({
 });
 
 /**
+ * Match ISO 8601 with an EXPLICIT timezone offset — `Z` or `±HH:MM`.
+ * We reject the date-only and offset-less forms (e.g. "2026-05-19" or
+ * "2026-05-19T14:00:00") because `Date.parse` accepts them but their
+ * meaning depends on the runtime's local timezone, which silently
+ * corrupts the absolute-instant guarantee the stored window relies on.
+ *
+ * Seconds are optional, fractional seconds are optional.
+ */
+const ISO_DATETIME_WITH_OFFSET =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const isoDatetimeWithOffset = (label: string) =>
+  z
+    .string()
+    .min(1)
+    .max(50)
+    .refine(
+      (s) => ISO_DATETIME_WITH_OFFSET.test(s) && !isNaN(Date.parse(s)),
+      `${label} must be ISO 8601 with an explicit timezone offset (e.g. "2026-05-19T14:00:00+01:00" or "...Z")`,
+    );
+
+/**
  * Validate an availability-window tool call. Both ends must be
- * parseable ISO 8601 datetimes; ordering and "not entirely in the
- * past" are checked at execution time so we can give the agent a
- * specific error message rather than a generic Zod failure.
+ * parseable ISO 8601 datetimes WITH offset; ordering and "not entirely
+ * in the past" are checked at execution time so we can give the agent
+ * a specific error message rather than a generic Zod failure.
  */
 export const recordAvailabilityWindowInputSchema = z.object({
-  starts_at: z.string().min(1).max(50).refine(
-    (s) => !isNaN(Date.parse(s)),
-    'starts_at must be a parseable ISO 8601 datetime (e.g. "2026-02-03T10:00:00+00:00")',
-  ),
-  ends_at: z.string().min(1).max(50).refine(
-    (s) => !isNaN(Date.parse(s)),
-    'ends_at must be a parseable ISO 8601 datetime',
-  ),
+  starts_at: isoDatetimeWithOffset('starts_at'),
+  ends_at: isoDatetimeWithOffset('ends_at'),
   status: z.enum(['available', 'unavailable']),
   source: z.enum(['therapist', 'user']),
   quote: z.string().min(1).max(280),
@@ -72,14 +88,8 @@ export const recordAvailabilityWindowInputSchema = z.object({
  * the model.
  */
 export const availabilityRecordWindowInputSchema = z.object({
-  starts_at: z.string().min(1).max(50).refine(
-    (s) => !isNaN(Date.parse(s)),
-    'starts_at must be a parseable ISO 8601 datetime (e.g. "2026-05-19T14:00:00+01:00")',
-  ),
-  ends_at: z.string().min(1).max(50).refine(
-    (s) => !isNaN(Date.parse(s)),
-    'ends_at must be a parseable ISO 8601 datetime',
-  ),
+  starts_at: isoDatetimeWithOffset('starts_at'),
+  ends_at: isoDatetimeWithOffset('ends_at'),
   status: z.enum(['available', 'unavailable']),
   quote: z.string().min(1).max(280),
 });
