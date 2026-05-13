@@ -20,7 +20,7 @@
     "test:all": "jest --runInBand",
     "check:schema-migration": "node scripts/check-schema-migration.js",
     "audit:therapist-timezones": "ts-node scripts/audit-therapist-timezones.ts",
-    "reset:pdf-fabricated-availability": "ts-node scripts/reset-pdf-fabricated-availability.ts"
+    "reset:pdf-fabricated-availability": "tsx scripts/reset-pdf-fabricated-availability.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",
