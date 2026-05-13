@@ -1,16 +1,21 @@
 /**
- * Therapist Timezone Audit
+ * Therapist + User Timezone Audit
  *
- * Scans every active therapist row, classifies the
- * `availability.timezone` stamp via the shared classifier in
+ * Scans every active therapist row AND every user row, classifies the
+ * timezone state of each via the shared classifiers in
  * `src/services/therapist-timezone-audit.ts`, and prints a tab-
  * separated report. Optional `--apply` flag stamps the country default
- * on the narrow safe subset: AUTO_FIXABLE rows (single-zone country
- * with no stamp).
+ * on the safe subset:
+ *
+ *   - Therapist AUTO_FIXABLE rows: single-zone country, no
+ *     `Therapist.timezone` column AND no `availability.timezone` —
+ *     writes the country default to `Therapist.timezone`.
+ *   - User AUTO_FIXABLE rows: single-zone country, no `User.timezone`
+ *     — writes the country default to `User.timezone`.
  *
  * Multi-zone countries (US, Australia, Canada, ...) are NEVER auto-
- * corrected because we don't know which region. They're flagged for
- * human review.
+ * corrected; only the agent (after asking the person) can do that via
+ * record_therapist_timezone / record_user_timezone.
  *
  * Usage:
  *   npx ts-node scripts/audit-therapist-timezones.ts            # dry run
@@ -19,15 +24,18 @@
  * Or via the npm alias:
  *   npm run audit:therapist-timezones -- --apply
  *
- * Reads DATABASE_URL from env (whatever Prisma needs to connect).
+ * Reads DATABASE_URL from env.
  */
 
 import { PrismaClient } from '@prisma/client';
 import {
   classifyTherapistTimezone,
+  classifyUserTimezone,
   type TherapistTimezoneAuditRow,
   type TherapistTimezoneInput,
   type TimezoneClassification,
+  type UserTimezoneAuditRow,
+  type UserTimezoneInput,
 } from '../src/services/therapist-timezone-audit';
 
 async function main(): Promise<void> {
@@ -35,13 +43,28 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   try {
+    // ─── Therapists ──────────────────────────────────────────────────
     const therapists = (await prisma.therapist.findMany({
       where: { active: true },
-      select: { id: true, name: true, email: true, country: true, availability: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        country: true,
+        timezone: true,
+        availability: true,
+      },
+    })).map((t) => ({
+      id: t.id,
+      name: t.name,
+      email: t.email,
+      country: t.country,
+      explicitTimezone: t.timezone,
+      availability: t.availability as { timezone?: string } | null,
     })) as TherapistTimezoneInput[];
 
-    const report: TherapistTimezoneAuditRow[] = therapists.map(classifyTherapistTimezone);
-    const buckets: Record<TimezoneClassification, TherapistTimezoneAuditRow[]> = {
+    const therapistReport: TherapistTimezoneAuditRow[] = therapists.map(classifyTherapistTimezone);
+    const therapistBuckets: Record<TimezoneClassification, TherapistTimezoneAuditRow[]> = {
       OK: [],
       LEGACY_MISS_STAMP: [],
       AUTO_FIXABLE: [],
@@ -49,47 +72,81 @@ async function main(): Promise<void> {
       AMBIGUOUS: [],
       NO_SCHEDULE: [],
     };
-    for (const r of report) buckets[r.classification].push(r);
+    for (const r of therapistReport) therapistBuckets[r.classification].push(r);
 
-    console.log('# Therapist timezone audit');
-    console.log(`Scanned ${therapists.length} active therapists.\n`);
-    console.log('## Summary');
-    for (const k of Object.keys(buckets) as TimezoneClassification[]) {
-      console.log(`  ${k.padEnd(22)} ${buckets[k].length}`);
+    // ─── Users ────────────────────────────────────────────────────────
+    const users = (await prisma.user.findMany({
+      select: { id: true, name: true, email: true, country: true, timezone: true },
+    })).map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      country: u.country,
+      explicitTimezone: u.timezone,
+    })) as UserTimezoneInput[];
+
+    const userReport: UserTimezoneAuditRow[] = users.map(classifyUserTimezone);
+    const userBuckets: Record<UserTimezoneAuditRow['classification'], UserTimezoneAuditRow[]> = {
+      OK: [],
+      AUTO_FIXABLE: [],
+      AMBIGUOUS: [],
+    };
+    for (const r of userReport) userBuckets[r.classification].push(r);
+
+    // ─── Report ──────────────────────────────────────────────────────
+    console.log('# Timezone audit\n');
+    console.log(`## Therapists (${therapists.length} active)`);
+    for (const k of Object.keys(therapistBuckets) as TimezoneClassification[]) {
+      console.log(`  ${k.padEnd(22)} ${therapistBuckets[k].length}`);
     }
     console.log('');
 
-    console.log('## Rows needing attention');
-    console.log(
-      ['id', 'name', 'email', 'country', 'current_tz', 'classification', 'suggested_fix'].join('\t'),
-    );
-    for (const r of report) {
+    console.log(`## Users (${users.length} total)`);
+    for (const k of Object.keys(userBuckets) as Array<UserTimezoneAuditRow['classification']>) {
+      console.log(`  ${k.padEnd(22)} ${userBuckets[k].length}`);
+    }
+    console.log('');
+
+    console.log('## Therapist rows needing attention');
+    console.log(['kind', 'id', 'name', 'email', 'country', 'current_tz', 'classification', 'suggested_fix'].join('\t'));
+    for (const r of therapistReport) {
       if (r.classification === 'OK') continue;
-      console.log(
-        [r.id, r.name, r.email, r.country, r.currentTimezone, r.classification, r.suggestedFix].join('\t'),
-      );
+      console.log(['therapist', r.id, r.name, r.email, r.country, r.currentTimezone, r.classification, r.suggestedFix].join('\t'));
+    }
+
+    console.log('\n## User rows needing attention');
+    console.log(['kind', 'id', 'name', 'email', 'country', 'current_tz', 'classification', 'suggested_fix'].join('\t'));
+    for (const r of userReport) {
+      if (r.classification === 'OK') continue;
+      console.log(['user', r.id, r.name, r.email, r.country, r.currentTimezone, r.classification, r.suggestedFix].join('\t'));
     }
 
     if (!apply) {
-      console.log('\n(Dry run. Re-run with --apply to stamp the country default on AUTO_FIXABLE rows.)');
+      console.log('\n(Dry run. Re-run with --apply to stamp the country default on AUTO_FIXABLE rows in BOTH tables.)');
       return;
     }
 
-    let applied = 0;
-    for (const r of buckets.AUTO_FIXABLE) {
-      const therapist = therapists.find((t) => t.id === r.id);
-      if (!therapist) continue;
-      const existing = (therapist.availability ?? {}) as Record<string, unknown>;
-      const next = { ...existing, timezone: r.suggestedFix };
+    // ─── Apply phase ─────────────────────────────────────────────────
+    let appliedTherapists = 0;
+    for (const r of therapistBuckets.AUTO_FIXABLE) {
       await prisma.therapist.update({
         where: { id: r.id },
-        data: { availability: next as unknown as object },
+        data: { timezone: r.suggestedFix },
       });
-      console.log(`APPLIED  ${r.id}  ${r.email}  -> ${r.suggestedFix}`);
-      applied++;
+      console.log(`APPLIED therapist ${r.id}  ${r.email}  -> ${r.suggestedFix}`);
+      appliedTherapists++;
+    }
+    let appliedUsers = 0;
+    for (const r of userBuckets.AUTO_FIXABLE) {
+      await prisma.user.update({
+        where: { id: r.id },
+        data: { timezone: r.suggestedFix },
+      });
+      console.log(`APPLIED user ${r.id}  ${r.email}  -> ${r.suggestedFix}`);
+      appliedUsers++;
     }
     console.log(
-      `\nApplied ${applied} fixes. LEGACY_MISS_STAMP / SINGLE_ZONE_OVERRIDE / AMBIGUOUS rows were NOT modified — please review manually.`,
+      `\nApplied ${appliedTherapists} therapist fixes and ${appliedUsers} user fixes. LEGACY_MISS_STAMP / SINGLE_ZONE_OVERRIDE / AMBIGUOUS rows were NOT modified.`,
     );
   } finally {
     await prisma.$disconnect();

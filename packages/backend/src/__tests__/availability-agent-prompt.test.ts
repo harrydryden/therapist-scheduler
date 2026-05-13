@@ -50,12 +50,13 @@ import type { Therapist } from '@prisma/client';
 
 const baseTherapist: Pick<
   Therapist,
-  'id' | 'name' | 'email' | 'country' | 'availability' | 'bookingLink'
+  'id' | 'name' | 'email' | 'country' | 'timezone' | 'availability' | 'bookingLink'
 > = {
   id: 'tx-1',
   name: 'Sam Therapist',
   email: 'sam@example.com',
   country: 'UK',
+  timezone: null,
   availability: null,
   bookingLink: null,
 };

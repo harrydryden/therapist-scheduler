@@ -24,6 +24,15 @@ model User {
   // times remain in UK time; this controls how times are presented to the user.
   country String  @default("UK")
 
+  // IANA timezone identifier (e.g. "Europe/London", "America/Los_Angeles").
+  // Populated by the booking agent's `record_user_timezone` tool after the
+  // agent asks where the user is based — necessary for users in multi-zone
+  // countries (US, CA, AU, ...) so confirmation emails can quote times in
+  // their actual local zone rather than falling back to UK time. Null for
+  // users who haven't yet been asked or who are in single-zone countries
+  // (the country default suffices there).
+  timezone String? @map("timezone")
+
   // Mailing list opt-in. Mirrors the Notion `Subscribed` checkbox while the
   // Notion users database is still authoritative; reads switch to this column
   // in PR 2 of the Notion deprecation.
@@ -77,6 +86,18 @@ model Therapist {
   // Country code (UK, IE, US, CA, ES, DE, FR, PT, AU, NZ, ZA). Drives timezone
   // for agent communication and the flag emoji on the public therapist card.
   country      String  @default("UK")
+
+  // IANA timezone identifier (e.g. "Europe/London", "America/Los_Angeles").
+  // The therapist's CANONICAL location — populated by either agent via
+  // `record_therapist_timezone` after asking which city/region. Used for
+  // resolving wall-clock times the therapist mentions, formatting emails
+  // sent to them, and stamping new recurring schedules. Takes precedence
+  // over `availability.timezone` because it's the therapist's *location*,
+  // not a property of a specific schedule. Null until the agent has
+  // confirmed; the resolver in therapist-timezone.service falls back
+  // through availability.timezone → country default → platform default
+  // exactly as before.
+  timezone     String? @map("timezone")
   // Therapist's recurring availability. Source of truth — Notion is no longer
   // read or written for availability. Shape: { timezone: string, slots:
   // [{day, start, end}], exceptions?: [{date, available}] }. May be null until

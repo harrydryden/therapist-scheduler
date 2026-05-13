@@ -20,6 +20,7 @@ beforeEach(() => warnSpy.mockClear());
 describe('resolveTherapistTimezone', () => {
   it("returns the stamped timezone when present", () => {
     const r = resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: 'America/Los_Angeles',
       country: 'US',
       platformTimezone: 'Europe/London',
@@ -31,6 +32,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("falls back to the country default for a single-zone country", () => {
     const r = resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: null,
       country: 'UK',
       platformTimezone: 'Europe/London',
@@ -42,6 +44,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("flags multi-zone country with no stamp as needing clarification", () => {
     const r = resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: null,
       country: 'US',
       platformTimezone: 'Europe/London',
@@ -53,6 +56,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("flags Australia with no stamp the same way as US", () => {
     const r = resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: null,
       country: 'AU',
       platformTimezone: 'Europe/London',
@@ -63,6 +67,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("emits a WARN when a multi-zone country is stamped with the platform default (legacy miss-stamp signal)", () => {
     resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: 'Europe/London',
       country: 'US',
       platformTimezone: 'Europe/London',
@@ -73,6 +78,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("does NOT WARN when a UK therapist is legitimately stamped Europe/London", () => {
     resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: 'Europe/London',
       country: 'UK',
       platformTimezone: 'Europe/London',
@@ -82,6 +88,7 @@ describe('resolveTherapistTimezone', () => {
 
   it("does NOT WARN when a US therapist is stamped with a US timezone", () => {
     resolveTherapistTimezone({
+      explicitTimezone: undefined,
       stampedTimezone: 'America/New_York',
       country: 'US',
       platformTimezone: 'Europe/London',
@@ -101,5 +108,52 @@ describe('resolveUserTimezone', () => {
     const r = resolveUserTimezone({ country: 'US', platformTimezone: 'Europe/London' });
     expect(r.source).toBe('platform_default');
     expect(r.needsClarification).toBe(true);
+  });
+
+  it("returns the explicit User.timezone when present, overriding country default", () => {
+    const r = resolveUserTimezone({
+      explicitTimezone: 'America/Los_Angeles',
+      country: 'US',
+      platformTimezone: 'Europe/London',
+    });
+    expect(r.source).toBe('explicit');
+    expect(r.timezone).toBe('America/Los_Angeles');
+    expect(r.needsClarification).toBe(false);
+  });
+
+  it("returns the explicit zone even when the country is single-zone", () => {
+    // A UK-country user who's actually in NYC — explicit wins.
+    const r = resolveUserTimezone({
+      explicitTimezone: 'America/New_York',
+      country: 'UK',
+      platformTimezone: 'Europe/London',
+    });
+    expect(r.source).toBe('explicit');
+    expect(r.timezone).toBe('America/New_York');
+  });
+});
+
+describe('resolveTherapistTimezone — explicit precedence', () => {
+  it("returns 'explicit' when Therapist.timezone is set, even when availability.timezone also exists", () => {
+    const r = resolveTherapistTimezone({
+      explicitTimezone: 'America/Los_Angeles',
+      stampedTimezone: 'America/New_York', // legacy stamp; should be ignored
+      country: 'US',
+      platformTimezone: 'Europe/London',
+    });
+    expect(r.source).toBe('explicit');
+    expect(r.timezone).toBe('America/Los_Angeles');
+    expect(r.needsClarification).toBe(false);
+  });
+
+  it("falls back to the legacy availability.timezone stamp when no explicit zone is set", () => {
+    const r = resolveTherapistTimezone({
+      explicitTimezone: undefined,
+      stampedTimezone: 'America/Chicago',
+      country: 'US',
+      platformTimezone: 'Europe/London',
+    });
+    expect(r.source).toBe('stamped');
+    expect(r.timezone).toBe('America/Chicago');
   });
 });

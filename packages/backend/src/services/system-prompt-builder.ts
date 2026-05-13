@@ -217,17 +217,21 @@ ${getValidActionsForStage(currentStage)}
   // explicit stamp) we omit that target — the timezone-section above
   // already instructs the agent to ASK rather than guess.
   const userTzResolved = resolveUserTimezone({
+    explicitTimezone: context.userTimezone,
     country: context.userCountry,
     platformTimezone: timezone,
   });
-  // Pass the ACTUAL stamp (or undefined when there isn't one), not the
-  // already-resolved `therapistTimezone` above — that's the post-
-  // fallback value used for slot rendering. Feeding it into the
+  // Pass the ACTUAL legacy stamp (or undefined when there isn't one),
+  // not the already-resolved `therapistTimezone` above — that's the
+  // post-fallback value used for slot rendering. Feeding it into the
   // resolver as a stamp would short-circuit the country-default lookup
   // and surface every therapist as "stamped", even those who only
-  // inherited the platform default.
+  // inherited the platform default. The new `context.therapistTimezone`
+  // (from `Therapist.timezone` column) is the explicit signal and
+  // takes precedence inside the resolver.
   const therapistStampedTimezone = (context.therapistAvailability as { timezone?: string } | null)?.timezone;
   const therapistTzResolved = resolveTherapistTimezone({
+    explicitTimezone: context.therapistTimezone,
     stampedTimezone: therapistStampedTimezone,
     country: context.therapistCountry,
     platformTimezone: timezone,

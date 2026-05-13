@@ -77,6 +77,22 @@ export const availabilityTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'record_therapist_timezone',
+    description:
+      "Persist the therapist's IANA timezone on their record. Call this once you know which region they're in — typically after asking them, when their country has multiple zones (US, AU, CA, ...) and we don't yet have a stamped zone. Map their stated city/region (e.g. \"NYC\", \"Brisbane\") to the matching IANA zone from the country's list shown above. Once recorded, you do NOT need to ask again; subsequent turns + future bookings see this zone. Always do this BEFORE recording specific windows for a multi-zone-country therapist, so resolve_local_time receives the correct zone.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timezone: {
+          type: 'string',
+          description:
+            'IANA timezone identifier the therapist confirmed (e.g. "America/New_York", "Pacific/Auckland"). MUST be a real IANA zone — the executor validates via Intl.DateTimeFormat and rejects unknown strings.',
+        },
+      },
+      required: ['timezone'],
+    },
+  },
+  {
     name: 'resolve_local_time',
     description:
       'Convert a wall-clock time in a specific IANA timezone into the ISO 8601 timestamp pair (starts_at, ends_at) that record_availability_window expects. ALWAYS call this before record_availability_window — do NOT compute the +HH:MM offset yourself, because it changes across DST and varies by region. Steps: figure out the calendar date (year, month, day) from the relative phrasing using today\'s date, pick the start hour/minute, supply the therapist\'s timezone and the duration in minutes. The executor handles DST-aware offset selection and rejects ambiguous (fall-back) or non-existent (spring-forward) inputs so you can re-prompt the therapist. Returns {starts_at, ends_at} which you then pass through verbatim to record_availability_window.',
@@ -213,6 +229,7 @@ export const AVAILABILITY_SIDE_EFFECT_TOOLS = new Set([
   'send_email',
   'record_availability_window',
   'record_booking_link',
+  'record_therapist_timezone',
   'mark_complete',
   'flag_for_human_review',
 ]);

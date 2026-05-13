@@ -64,6 +64,19 @@ export interface SchedulingContext {
   /** Country code where the therapist is based. Defaults to "UK". */
   therapistCountry: string;
   /**
+   * Explicit IANA timezone the booking agent has recorded for the user
+   * via `record_user_timezone`. Optional — null for users in single-zone
+   * countries (the resolver falls back to the country default) or
+   * multi-zone users we haven't yet asked.
+   */
+  userTimezone?: string;
+  /**
+   * Explicit IANA timezone for the therapist (from `Therapist.timezone`,
+   * populated by either agent via `record_therapist_timezone`).
+   * Optional — same fallback chain applies when absent.
+   */
+  therapistTimezone?: string;
+  /**
    * Which party sent the inbound email that triggered this tool loop.
    * Undefined for startScheduling (no inbound — kicked off by the booking
    * form). Used to gate sender-attributable tools like
@@ -113,8 +126,8 @@ export function buildSchedulingContext(
     therapistId?: string | null;
     therapistAvailability: unknown;
     bookingMethod?: string;
-    user?: { country: string } | null;
-    therapist?: { country: string } | null;
+    user?: { country: string; timezone?: string | null } | null;
+    therapist?: { country: string; timezone?: string | null } | null;
   },
 ): SchedulingContext {
   return {
@@ -132,6 +145,8 @@ export function buildSchedulingContext(
     bookingMethod: (appointmentRequest.bookingMethod as BookingMethod) || 'agent_negotiated',
     userCountry: appointmentRequest.user?.country || 'UK',
     therapistCountry: appointmentRequest.therapist?.country || 'UK',
+    userTimezone: appointmentRequest.user?.timezone ?? undefined,
+    therapistTimezone: appointmentRequest.therapist?.timezone ?? undefined,
   };
 }
 
@@ -146,8 +161,8 @@ export async function fetchSchedulingContext(
   const appointmentRequest = await prisma.appointmentRequest.findUnique({
     where: { id: appointmentRequestId },
     include: {
-      user: { select: { country: true } },
-      therapist: { select: { country: true } },
+      user: { select: { country: true, timezone: true } },
+      therapist: { select: { country: true, timezone: true } },
     },
   });
 

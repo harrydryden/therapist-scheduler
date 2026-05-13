@@ -48,6 +48,7 @@ import { formatDateLong } from '../utils/date';
 import { getSettingValues, getSettingValue } from './settings.service';
 import { firstName } from '../utils/first-name';
 import { resolveTherapistTimezone } from './therapist-timezone.service';
+import { getCountry } from '@therapist-scheduler/shared';
 import type { Therapist } from '@prisma/client';
 
 /**
@@ -102,6 +103,7 @@ export class AvailabilityAgentService {
         name: true,
         email: true,
         country: true,
+        timezone: true,
         availability: true,
         bookingLink: true,
       },
@@ -328,6 +330,7 @@ export class AvailabilityAgentService {
             name: true,
             email: true,
             country: true,
+            timezone: true,
             availability: true,
             bookingLink: true,
           },
@@ -666,7 +669,7 @@ You don't propose specific session times, you don't confirm bookings, and you do
  * tool-usage guidance.
  */
 export async function buildAvailabilitySystemPrompt(
-  therapist: Pick<Therapist, 'id' | 'name' | 'email' | 'country' | 'availability' | 'bookingLink'>,
+  therapist: Pick<Therapist, 'id' | 'name' | 'email' | 'country' | 'timezone' | 'availability' | 'bookingLink'>,
   context: AvailabilityAgentContext,
 ): Promise<string> {
   // Resolve the therapist's timezone with confidence labelling so the
@@ -677,12 +680,18 @@ export async function buildAvailabilitySystemPrompt(
     (await getSettingValue<string>('general.timezone')) || 'Europe/London';
   const stampedTimezone = (therapist.availability as { timezone?: string } | null)?.timezone;
   const resolvedTz = resolveTherapistTimezone({
+    explicitTimezone: therapist.timezone,
     stampedTimezone,
     country: therapist.country,
     platformTimezone,
   });
   const therapistTimezone = resolvedTz.timezone;
   const today = formatDateLong(new Date(), therapistTimezone);
+  // When the resolver flags clarification-needed, surface the country's
+  // candidate zones so the agent can map the therapist's stated city
+  // to a real IANA identifier rather than guessing.
+  const countryDef = getCountry(therapist.country);
+  const candidateZones = countryDef.timezones;
 
   // Show the agent what's already on file so it doesn't waste a turn
   // asking for it. Recurring schedule + per-therapist upcoming windows
@@ -760,8 +769,10 @@ You only ever talk to one person: the therapist named below. You never email any
 ${today} (${therapistTimezone}${resolvedTz.source === 'platform_default' ? ' — PLATFORM DEFAULT, may not match the therapist' : resolvedTz.source === 'country_default' ? ' — country default for ' + therapist.country : ''})
 
 ${resolvedTz.needsClarification
-  ? `**Timezone clarification needed.** The therapist's country (${therapist.country}) spans multiple timezones and we don't have a stamped timezone for them. Before recording any specific windows, ASK the therapist which timezone they're in (e.g. "Pacific time", "Eastern", "Sydney"). Once they tell you, use the matching IANA timezone (e.g. "America/Los_Angeles", "America/New_York", "Australia/Sydney") in your resolve_local_time calls. Do NOT silently use ${therapistTimezone} — that's the platform fallback and is almost certainly wrong for this therapist.`
-  : `The therapist's timezone is ${therapistTimezone}. Interpret bare local times ("Tuesday at 2pm") in that zone.`}
+  ? `**Timezone clarification needed.** The therapist's country (${therapist.country}) spans multiple timezones and we don't yet have a confirmed timezone on file. Before recording any specific windows, ASK the therapist which city or region they're in. Their country's candidate IANA zones are:
+${candidateZones.map((z) => `  - ${z}`).join('\n')}
+Once they tell you, map their stated city to the matching zone from the list above (e.g. "Seattle" → "America/Los_Angeles"; "Brisbane" → "Australia/Brisbane") and call **record_therapist_timezone** with that IANA identifier to persist it. You only need to do this ONCE; the value is then on file for all future turns and bookings. Do NOT silently use ${therapistTimezone} for resolve_local_time — that's the platform fallback and is almost certainly wrong for this therapist.`
+  : `The therapist's timezone is ${therapistTimezone}${resolvedTz.source === 'explicit' ? ' (explicit, on file)' : ''}. Interpret bare local times ("Tuesday at 2pm") in that zone.`}
 
 When the therapist mentions a specific time, do NOT compute the ISO 8601 offset yourself — call **resolve_local_time** with the calendar parts (year, month, day, hour, minute), the duration in minutes, and the IANA timezone. It returns {starts_at, ends_at} with DST-aware offsets that you pass verbatim to record_availability_window. resolve_local_time also rejects ambiguous (DST fall-back) and non-existent (DST spring-forward) wall-clocks with a specific error you can re-prompt around.
 

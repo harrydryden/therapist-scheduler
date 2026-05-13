@@ -40,11 +40,11 @@ export function buildTimezoneSection(
   const therapistMulti = hasMultipleTimezones(context.therapistCountry);
 
   const userTzLine = userMulti
-    ? `unknown — ${userLabel} spans multiple timezones (${userCountry.timezones.join(', ')}). You MUST ask the client where they are based before quoting any specific time, then use the matching IANA timezone.`
+    ? `unknown — ${userLabel} spans multiple timezones (${userCountry.timezones.join(', ')}). You MUST ask the client where they are based (e.g. "what city are you in?") before quoting any specific time. Once they tell you, map the city to the matching IANA timezone from the list above and call \`record_user_timezone\` to persist it — you only need to ask ONCE per client; subsequent turns and emails will reuse the stored value.`
     : `${userTz} (${userLabel})`;
 
   const therapistTzLine = therapistMulti
-    ? `unknown — ${therapistLabel} spans multiple timezones (${therapistCountry.timezones.join(', ')}). You MUST ask the therapist where they are based before quoting any specific time, then use the matching IANA timezone.`
+    ? `unknown — ${therapistLabel} spans multiple timezones (${therapistCountry.timezones.join(', ')}). You MUST ask the therapist where they are based before quoting any specific time. Once they tell you, map to the matching IANA timezone from the list above and call \`record_therapist_timezone\` to persist it — you only need to ask ONCE per therapist; subsequent turns, emails, and the recurring-schedule stamp will reuse the stored value.`
     : `${therapistTz} (${therapistLabel})`;
 
   return `
