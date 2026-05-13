@@ -2,6 +2,7 @@ export {
   acquireMessageLock,
   markMessageProcessed,
   releaseMessageLock,
+  releaseDbLock,
   isMessageProcessed,
   filterUnprocessed,
   recordUnmatchedAttempt,

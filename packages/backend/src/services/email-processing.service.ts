@@ -12,7 +12,7 @@
 
 import { emailOAuthService, getGmailCircuitStats } from './email-oauth.service';
 import { emailIngestService } from './email-ingest.service';
-import { emailMessageProcessorService } from './email-message-processor.service';
+import { emailMessageProcessorService } from '../core/email';
 
 // Re-export the circuit breaker stats function (was a top-level export)
 export { getGmailCircuitStats } from './email-oauth.service';

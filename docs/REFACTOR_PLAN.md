@@ -139,24 +139,61 @@ was rewritten to assert on `prisma.appointmentRequest.updateMany`'s
 transition path against a mocked DB — more robust and no longer
 coupled to the implementation's class structure.
 
-### Phase 2b — `email-message-processor.service.ts` (1,837 lines)
+### Phase 2b — `email-message-processor.service.ts` (1,837 lines) ✅ DONE
 
-Target: `core/email/inbound/` (kernel — generic email-message handling)
+Landed in PR #238. The original sketch had placeholders that didn't
+map to the actual file (no "restore-state" or "invoke-agent" sub-
+flows here — those live in justin-time.service). The realised
+decomposition reflects the file's actual cohesion lines:
 
 ```
-core/email/inbound/
-  classify.ts             ← email-classifier.service (existing)
-  match.ts                ← thread/recipient matching, hands off to dedup
-  restore-state.ts        ← conversation-state restoration
-  invoke-agent.ts         ← thin shim into the agent loop
-  process.ts              ← top-level orchestrator (~150 lines)
-  lock-renewal.ts         ← createLockRenewal helper
-  index.ts
+core/email/
+├── inbound/
+│   ├── process.ts                top-level orchestrator (the trimmed
+│                                 processMessage — dropped from 720 to ~430
+│                                 lines after extracting branches/helpers)
+│   ├── availability-routing.ts   routeToAvailabilityAgent
+│   ├── nudge-reply.ts            therapist-nudge reply detection
+│                                 (threadId match + sender fallback) + Slack alert
+│   ├── weekly-mailing.ts         isWeeklyMailingReply + processWeeklyMailingReply
+│   ├── closure-auto-dismiss.ts   dismiss-on-incoming-reply branch
+│   ├── divergence-handling.ts    thread-divergence check + retry/abandon
+│   ├── unmatched-attempts.ts     DB-authoritative unmatched-attempt tracking
+│   ├── processing-failures.ts    MessageProcessingFailure CRUD + read helpers
+│   ├── lock-renewal.ts           Redis lock renewal manager
+│   ├── agent-processor.ts        AgentProcessor interface + DI registry
+│   └── index.ts
+├── outbound/
+│   ├── send.ts                   sendEmail via Gmail API
+│   ├── queue.ts                  processPendingEmails — drain with backoff
+│   └── index.ts
+├── index.ts                      emailMessageProcessorService object literal
+└── README.md
 ```
 
-**Dedup migration:** all of this module's direct Redis/Prisma dedup
-calls must move to `core/messaging/message-dedup`. This is the
-single biggest payoff of the dedup facade.
+The `EmailMessageProcessorService` class collapsed into an object
+literal — same Phase 2a pattern; none of the methods used `this`
+state. Three callsites updated.
+
+**Dedup migration done:** direct calls to `redis.eval(ATOMIC_LOCK_CHECK_SCRIPT, ...)`,
+`prisma.processedGmailMessage.upsert(...)`, the Slack-alert dedup
+`SET ... NX`, and the DB-fallback rollback now go through
+`core/messaging/message-dedup`:
+  - `acquireMessageLock` replaces the inline Lua + serializable-tx
+  - `markMessageProcessed` replaces the inline ZSET + upsert
+  - `isMessageProcessed` replaces the inline belt-and-braces DB
+    re-check
+  - `shouldEmitProcessingAlert` replaces `acquireAlertDedupLock`
+  - `releaseDbLock` (new facade export) replaces the inline
+    `processedGmailMessage.delete` in the failure path
+  - `ProcessedContext` type extended to cover the four
+    `availability-agent-*` variants + `therapist-nudge-reply` +
+    `invitation-reply`
+
+The unmatched-attempt path stays DB-authoritative locally
+(`inbound/unmatched-attempts.ts`) — the facade's
+`recordUnmatchedAttempt` is Redis-only with a different reliability
+shape; aligning is a future PR.
 
 ### Phase 2c — `ai-tool-executor.service.ts` (1,789 lines)
 
