@@ -17,7 +17,13 @@ import { getTaskMetrics } from '../utils/background-task';
 import { missedMessageScannerService } from '../services/missed-message-scanner.service';
 
 const setupPushSchema = z.object({
-  topicName: z.string().min(1, 'Pub/Sub topic name is required'),
+  topicName: z.string().min(1, 'Pub/Sub topic name is required').optional(),
+});
+
+const sendEmailSchema = z.object({
+  to: z.string().email().max(320),
+  subject: z.string().min(1).max(998),
+  body: z.string().min(1).max(5_000_000),
 });
 
 export async function adminRoutes(fastify: FastifyInstance) {
@@ -26,7 +32,9 @@ export async function adminRoutes(fastify: FastifyInstance) {
 
   /**
    * POST /api/admin/gmail/setup-push
-   * Set up Gmail push notifications
+   * Set up Gmail push notifications. `topicName` is optional — if omitted,
+   * falls back to the `GOOGLE_PUBSUB_TOPIC` env var. Subsumes the
+   * deprecated `POST /api/webhooks/gmail/watch` (which was env-only).
    */
   fastify.post<{ Body: z.infer<typeof setupPushSchema> }>(
     '/api/admin/gmail/setup-push',
@@ -42,13 +50,21 @@ export async function adminRoutes(fastify: FastifyInstance) {
       const requestId = request.id;
       logger.info({ requestId }, 'Setting up Gmail push notifications');
 
-      const validation = setupPushSchema.safeParse(request.body);
+      const validation = setupPushSchema.safeParse(request.body ?? {});
       if (!validation.success) {
         return Errors.validationFailed(reply, validation.error.errors);
       }
 
+      const topicName = validation.data.topicName ?? config.googlePubsubTopic;
+      if (!topicName) {
+        return Errors.badRequest(
+          reply,
+          'No Pub/Sub topic specified — provide `topicName` in the body or set GOOGLE_PUBSUB_TOPIC',
+        );
+      }
+
       try {
-        const result = await emailProcessingService.setupPushNotifications(validation.data.topicName);
+        const result = await emailProcessingService.setupPushNotifications(topicName);
 
         return sendSuccess(reply, {
           ...result,
@@ -110,6 +126,100 @@ export async function adminRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, requestId }, 'Failed to reset Gmail history ID');
         return Errors.internal(reply, 'Failed to reset history ID');
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/gmail/poll
+   * Manual trigger to poll for new emails. Canonical replacement for the
+   * deprecated `POST /api/webhooks/gmail/poll`.
+   */
+  fastify.post(
+    '/api/admin/gmail/poll',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      logger.info({ requestId }, 'Manual email poll triggered');
+
+      try {
+        const result = await emailProcessingService.pollForNewEmails(requestId);
+        return sendSuccess(reply, result);
+      } catch (err) {
+        logger.error({ err, requestId }, 'Error polling for emails');
+        return Errors.internal(reply, 'Failed to poll emails');
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/gmail/send-pending
+   * Process and send all pending emails in the outbound queue. Canonical
+   * replacement for `POST /api/webhooks/gmail/send-pending`.
+   */
+  fastify.post(
+    '/api/admin/gmail/send-pending',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const requestId = request.id;
+      logger.info({ requestId }, 'Processing pending emails');
+
+      try {
+        const result = await emailProcessingService.processPendingEmails(requestId);
+        return sendSuccess(reply, result);
+      } catch (err) {
+        logger.error({ err, requestId }, 'Error processing pending emails');
+        return Errors.internal(reply, 'Failed to process pending emails');
+      }
+    }
+  );
+
+  /**
+   * POST /api/admin/gmail/send
+   * Send a single email directly via Gmail. Canonical replacement for
+   * `POST /api/webhooks/gmail/send`.
+   */
+  fastify.post<{ Body: z.infer<typeof sendEmailSchema> }>(
+    '/api/admin/gmail/send',
+    {
+      config: {
+        rateLimit: {
+          max: RATE_LIMITS.ADMIN_MUTATIONS.max,
+          timeWindow: RATE_LIMITS.ADMIN_MUTATIONS.timeWindowMs,
+        },
+      },
+    },
+    async (request: FastifyRequest<{ Body: z.infer<typeof sendEmailSchema> }>, reply: FastifyReply) => {
+      const requestId = request.id;
+
+      const validation = sendEmailSchema.safeParse(request.body);
+      if (!validation.success) {
+        return Errors.validationFailed(reply, validation.error.errors);
+      }
+      const { to, subject, body } = validation.data;
+
+      logger.info({ requestId, to, subject }, 'Sending email directly');
+
+      try {
+        const result = await emailProcessingService.sendEmail({ to, subject, body });
+        return sendSuccess(reply, result);
+      } catch (err) {
+        logger.error({ err, requestId }, 'Error sending email');
+        return Errors.internal(reply, 'Failed to send email');
       }
     }
   );
