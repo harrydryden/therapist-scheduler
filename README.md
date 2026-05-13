@@ -221,6 +221,6 @@ should show `pushConfig.oidcToken.serviceAccountEmail` and
 ## Documentation
 
 - [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) — Deployment, monitoring, and operations guide
-- [`docs/ARCHITECTURE_RECOMMENDATIONS.md`](docs/ARCHITECTURE_RECOMMENDATIONS.md) — Scaling roadmap and architectural decisions
-- [`docs/FORENSIC_CODE_REVIEW.md`](docs/FORENSIC_CODE_REVIEW.md) — Detailed code audit with findings and resolutions
-- [`docs/MONOREPO_MIGRATION.md`](docs/MONOREPO_MIGRATION.md) — Historical record of the two-repo consolidation
+- [`docs/MISSED_MESSAGE_RECOVERY.md`](docs/MISSED_MESSAGE_RECOVERY.md) — Recovering messages the agent failed to process
+- [`docs/SCHEMA_MIGRATIONS.md`](docs/SCHEMA_MIGRATIONS.md) — Mandatory workflow for Prisma schema changes
+- [`docs/CLOCK_SOURCES.md`](docs/CLOCK_SOURCES.md) — Timestamp convention reference
