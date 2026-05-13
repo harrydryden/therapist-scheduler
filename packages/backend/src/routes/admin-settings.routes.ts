@@ -7,6 +7,7 @@ import { RATE_LIMITS } from '../constants';
 import { cacheManager } from '../utils/redis';
 import { publishSettingsInvalidation } from '../utils/settings-pubsub';
 import { adminNotificationService } from '../services/admin-notification.service';
+import { sendSuccess, Errors } from '../utils/response';
 import {
   SETTING_DEFINITIONS,
   type SettingKey,
@@ -499,17 +500,10 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       const alerts = await adminNotificationService.getUnacknowledgedAlerts();
-      return reply.send({
-        success: true,
-        alerts,
-        count: alerts.length,
-      });
+      return sendSuccess(reply, { alerts }, { count: alerts.length });
     } catch (error) {
       logger.error({ requestId, error }, 'Failed to get admin alerts');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to get alerts',
-      });
+      return Errors.internal(reply, 'Failed to get alerts');
     }
   });
 
@@ -522,16 +516,10 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       const count = await adminNotificationService.getAlertCount();
-      return reply.send({
-        success: true,
-        count,
-      });
+      return sendSuccess(reply, { count });
     } catch (error) {
       logger.error({ requestId, error }, 'Failed to get alert count');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to get alert count',
-      });
+      return Errors.internal(reply, 'Failed to get alert count');
     }
   });
 
@@ -549,17 +537,11 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       await adminNotificationService.acknowledgeAlert(alertId);
-      return reply.send({
-        success: true,
-        message: 'Alert acknowledged',
-      });
+      return sendSuccess(reply, null, { message: 'Alert acknowledged' });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error({ requestId, alertId, error: errorMessage }, 'Failed to acknowledge alert');
-      return reply.status(400).send({
-        success: false,
-        error: errorMessage,
-      });
+      return Errors.badRequest(reply, errorMessage);
     }
   });
 
@@ -584,18 +566,11 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       const count = await adminNotificationService.acknowledgeAllByType(type);
-      return reply.send({
-        success: true,
-        message: `Acknowledged ${count} alerts`,
-        count,
-      });
+      return sendSuccess(reply, { count }, { message: `Acknowledged ${count} alerts`, count });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       logger.error({ requestId, type, error: errorMessage }, 'Failed to acknowledge alerts');
-      return reply.status(400).send({
-        success: false,
-        error: errorMessage,
-      });
+      return Errors.badRequest(reply, errorMessage);
     }
   });
 
@@ -614,16 +589,10 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       const healthData = await adminNotificationService.getConversationHealthStatuses();
-      return reply.send({
-        success: true,
-        ...healthData,
-      });
+      return sendSuccess(reply, healthData);
     } catch (error) {
       logger.error({ requestId, error }, 'Failed to get health statuses');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to get health statuses',
-      });
+      return Errors.internal(reply, 'Failed to get health statuses');
     }
   });
 
@@ -643,23 +612,13 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
       const health = await adminNotificationService.getAppointmentHealth(appointmentId);
 
       if (!health) {
-        return reply.status(404).send({
-          success: false,
-          error: 'Appointment not found',
-        });
+        return Errors.notFound(reply, 'Appointment');
       }
 
-      return reply.send({
-        success: true,
-        appointmentId,
-        health,
-      });
+      return sendSuccess(reply, { appointmentId, health });
     } catch (error) {
       logger.error({ requestId, appointmentId, error }, 'Failed to get appointment health');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to get health status',
-      });
+      return Errors.internal(reply, 'Failed to get health status');
     }
   });
 
@@ -674,16 +633,10 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
     try {
       const overview = await adminNotificationService.getDashboardOverview();
-      return reply.send({
-        success: true,
-        ...overview,
-      });
+      return sendSuccess(reply, overview);
     } catch (error) {
       logger.error({ requestId, error }, 'Failed to get dashboard overview');
-      return reply.status(500).send({
-        success: false,
-        error: 'Failed to get dashboard overview',
-      });
+      return Errors.internal(reply, 'Failed to get dashboard overview');
     }
   });
 }
