@@ -103,7 +103,11 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
-jest.mock('../services/timezone-section', () => ({
+// Replace just the prompt-section renderer with a marker; keep the
+// real wall-clock + resolve helpers (pure, no I/O) so the rest of
+// the prompt assembly still uses production logic.
+jest.mock('../core/timezone', () => ({
+  ...jest.requireActual('../core/timezone'),
   buildTimezoneSection: jest.fn().mockReturnValue('TEST_TIMEZONE_SECTION_MARKER\n'),
 }));
 

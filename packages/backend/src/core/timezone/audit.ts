@@ -1,12 +1,11 @@
 /**
- * Audit helper for therapist timezone stamps.
+ * Audit helpers for therapist/user timezone stamps.
  *
- * Pure classifier — takes a therapist row's relevant fields and returns
- * a bucket plus a suggested action. Used by the
+ * Pure classifiers — take a row's relevant fields and return a bucket
+ * plus a suggested action. Used by the
  * `scripts/audit-therapist-timezones.ts` backfill tool and by the
- * accompanying tests; lives in `src/services` so it sits alongside the
- * runtime resolver in `therapist-timezone.service.ts` and the two
- * share the same view of "what's a sensible stamp."
+ * accompanying tests; share their view of "what's a sensible stamp"
+ * with the runtime resolver in `./resolve.ts`.
  *
  * The classifier does NOT auto-correct multi-zone countries: when we
  * don't know which US/AU/CA region a therapist is in, the only safe
@@ -57,9 +56,6 @@ export interface TherapistTimezoneAuditRow {
 export function classifyTherapistTimezone(
   row: TherapistTimezoneInput,
 ): TherapistTimezoneAuditRow {
-  // Explicit `Therapist.timezone` column trumps everything — the
-  // canonical agent-confirmed zone. When present, the row is OK and
-  // the legacy stamp is irrelevant for classification.
   const explicit = (row.explicitTimezone ?? '').trim();
   if (explicit) {
     return base(row, explicit, 'OK', '-');
@@ -128,11 +124,6 @@ function base(
 /**
  * User classifier. Simpler than the therapist one — users have only the
  * single `User.timezone` column, no `availability.timezone` fallback.
- *
- * Buckets used:
- *   - OK         explicit zone on file
- *   - AUTO_FIXABLE   single-zone country, no zone — country default is unambiguous
- *   - AMBIGUOUS  multi-zone country, no zone — the booking agent should ask
  */
 export interface UserTimezoneInput {
   id: string;

@@ -13,7 +13,7 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: (...a: unknown[]) => warnSpy(...a), error: jest.fn(), debug: jest.fn() },
 }));
 
-import { resolveTherapistTimezone, resolveUserTimezone } from '../services/therapist-timezone.service';
+import { resolveTherapistTimezone, resolveUserTimezone } from '../core/timezone/resolve';
 
 beforeEach(() => warnSpy.mockClear());
 

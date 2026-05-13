@@ -15,8 +15,9 @@
  * known zone instead. This module reads from both context fields so the prompt
  * matches the actual state of the world, not just the country.
  *
- * Kept in its own module (with no service-level dependencies) so the prompt
- * fragment can be unit-tested without booting config / Redis / settings.
+ * Kept dependency-light (only `@therapist-scheduler/shared` country helpers
+ * and the SchedulingContext type) so the prompt fragment can be unit-tested
+ * without booting config / Redis / settings.
  */
 
 import {
@@ -25,7 +26,7 @@ import {
   getDefaultTimezone,
   hasMultipleTimezones,
 } from '@therapist-scheduler/shared';
-import type { SchedulingContext } from './scheduling-context.service';
+import type { SchedulingContext } from '../../services/scheduling-context.service';
 
 export function buildTimezoneSection(
   context: SchedulingContext,
@@ -40,12 +41,6 @@ export function buildTimezoneSection(
   const userMulti = hasMultipleTimezones(context.userCountry);
   const therapistMulti = hasMultipleTimezones(context.therapistCountry);
 
-  // Branches:
-  //   1. Explicit zone on file (from User.timezone / Therapist.timezone) →
-  //      render the known zone, do NOT ask again.
-  //   2. Single-zone country → render the country default.
-  //   3. Multi-zone country with nothing on file → ASK the agent to ask
-  //      the person + call record_*_timezone to persist.
   const userTzLine = renderUserTzLine({
     explicit: context.userTimezone,
     countryLabel: userLabel,
@@ -97,7 +92,6 @@ function renderUserTzLine(args: RenderTzLineArgs): string {
   if (!args.multiZone) {
     return `${args.countryDefault} (${args.countryLabel})`;
   }
-  // Multi-zone, no explicit zone — the ASK case.
   return `unknown — ${args.countryLabel} spans multiple timezones (${args.countryTimezones.join(', ')}). You MUST ask the client where they are based (e.g. "what city are you in?") before quoting any specific time. Once they tell you, map the city to the matching IANA timezone from the list above and call \`record_user_timezone\` to persist it — you only need to ask ONCE; subsequent turns and emails will reuse the stored value.`;
 }
 

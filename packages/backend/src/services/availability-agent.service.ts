@@ -47,7 +47,7 @@ import {
 import { formatDateLong } from '../utils/date';
 import { getSettingValues, getSettingValue } from './settings.service';
 import { firstName } from '../utils/first-name';
-import { resolveTherapistTimezone } from './therapist-timezone.service';
+import { resolveTherapistTimezone } from '../core/timezone';
 import { getCountry } from '@therapist-scheduler/shared';
 import type { Therapist } from '@prisma/client';
 

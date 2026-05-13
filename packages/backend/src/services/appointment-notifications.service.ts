@@ -19,7 +19,7 @@ import { getSettingValues } from './settings.service';
 import { loadEmailTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { formatEmailDateFromSettings } from '../utils/date';
-import { resolveRecipientTimezone } from './recipient-timezone.service';
+import { resolveRecipientTimezone } from '../core/timezone';
 import { runBackgroundTask } from '../utils/background-task';
 import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-tracker.service';
 import type { TransitionSource } from './appointment-lifecycle.service';

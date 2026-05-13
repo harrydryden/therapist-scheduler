@@ -57,8 +57,7 @@ import {
   recordTherapistTimezoneInputSchema,
   resolveLocalTimeInputSchema,
 } from '../schemas/tool-inputs';
-import { resolveWallClock, formatIsoWithOffset } from '../utils/timezone-resolver';
-import { isValidIanaTimezone } from '../utils/iana-timezone';
+import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../core/timezone';
 import { addNote, addAvailabilityWindow } from './agent-memory.service';
 import {
   addUpcomingAvailability,
@@ -942,7 +941,7 @@ export class AIToolExecutorService {
    *
    * Pure: no DB, no Redis, no audit. Shared with the availability-
    * collection agent's executor — the implementation lives in the
-   * shared `utils/timezone-resolver` module and both executors call
+   * shared `core/timezone` module and both executors call
    * through identically. DST-aware: ambiguous fall-back hours and
    * non-existent spring-forward hours surface as specific errors the
    * model can re-prompt around.
@@ -1497,7 +1496,7 @@ export class AIToolExecutorService {
     // timezone. Falling back to platform default (Europe/London) when
     // the user's country is unknown or multi-timezone (US/CA/AU).
     const { parseConfirmedDateTime } = await import('../utils/date');
-    const { resolveRecipientTimezone } = await import('./recipient-timezone.service');
+    const { resolveRecipientTimezone } = await import('../core/timezone');
     const userTimezone = await resolveRecipientTimezone(context.userEmail);
     const confirmedDateTimeParsed = parseConfirmedDateTime(
       params.confirmed_datetime,

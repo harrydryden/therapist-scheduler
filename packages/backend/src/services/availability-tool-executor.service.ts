@@ -47,8 +47,7 @@ import {
   rememberInputSchema,
   resolveLocalTimeInputSchema,
 } from '../schemas/tool-inputs';
-import { resolveWallClock, formatIsoWithOffset } from '../utils/timezone-resolver';
-import { isValidIanaTimezone } from '../utils/iana-timezone';
+import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../core/timezone';
 import { addUpcomingAvailability, recordTherapistBookingLink } from './therapist-availability.service';
 import { addConversationNote } from './therapist-conversation-memory.service';
 import { emailProcessingService } from './email-processing.service';

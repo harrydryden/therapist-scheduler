@@ -44,8 +44,9 @@ import {
 import {
   resolveTherapistTimezone,
   resolveUserTimezone,
-} from './therapist-timezone.service';
-import { formatInTimezone } from '../utils/timezone-resolver';
+  formatInTimezone,
+  buildTimezoneSection,
+} from '../core/timezone';
 import {
   getUserProfile,
   getTherapistProfile,
@@ -53,7 +54,6 @@ import {
   formatTherapistProfileForPrompt,
 } from './agent-profile.service';
 import type { SchedulingContext } from './scheduling-context.service';
-import { buildTimezoneSection } from './timezone-section';
 
 /**
  * Wraps a promise with a timeout
