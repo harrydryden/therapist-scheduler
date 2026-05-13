@@ -45,8 +45,9 @@ import {
   formatMemoryForPrompt,
 } from './therapist-conversation-memory.service';
 import { formatDateLong } from '../utils/date';
-import { getSettingValues } from './settings.service';
+import { getSettingValues, getSettingValue } from './settings.service';
 import { firstName } from '../utils/first-name';
+import { resolveTherapistTimezone } from './therapist-timezone.service';
 import type { Therapist } from '@prisma/client';
 
 /**
@@ -668,7 +669,20 @@ async function buildAvailabilitySystemPrompt(
   therapist: Pick<Therapist, 'id' | 'name' | 'email' | 'country' | 'availability' | 'bookingLink'>,
   context: AvailabilityAgentContext,
 ): Promise<string> {
-  const today = formatDateLong(new Date(), 'Europe/London');
+  // Resolve the therapist's timezone with confidence labelling so the
+  // prompt can ask when we genuinely don't know (multi-zone country
+  // with no recurring schedule stamped) rather than silently fall
+  // through to the platform default.
+  const platformTimezone =
+    (await getSettingValue<string>('general.timezone')) || 'Europe/London';
+  const stampedTimezone = (therapist.availability as { timezone?: string } | null)?.timezone;
+  const resolvedTz = resolveTherapistTimezone({
+    stampedTimezone,
+    country: therapist.country,
+    platformTimezone,
+  });
+  const therapistTimezone = resolvedTz.timezone;
+  const today = formatDateLong(new Date(), therapistTimezone);
 
   // Show the agent what's already on file so it doesn't waste a turn
   // asking for it. Recurring schedule + per-therapist upcoming windows
@@ -743,8 +757,15 @@ You collect upcoming availability from therapists and write it to their record o
 You only ever talk to one person: the therapist named below. You never email anyone else.
 
 ## Today's date
-${today} (Europe/London)
-When the therapist mentions relative times like "next Friday" or "the week of the 15th", resolve them against today's date to absolute ISO 8601 timestamps before calling record_availability_window.
+${today} (${therapistTimezone}${resolvedTz.source === 'platform_default' ? ' — PLATFORM DEFAULT, may not match the therapist' : resolvedTz.source === 'country_default' ? ' — country default for ' + therapist.country : ''})
+
+${resolvedTz.needsClarification
+  ? `**Timezone clarification needed.** The therapist's country (${therapist.country}) spans multiple timezones and we don't have a stamped timezone for them. Before recording any specific windows, ASK the therapist which timezone they're in (e.g. "Pacific time", "Eastern", "Sydney"). Once they tell you, use the matching IANA timezone (e.g. "America/Los_Angeles", "America/New_York", "Australia/Sydney") in your resolve_local_time calls. Do NOT silently use ${therapistTimezone} — that's the platform fallback and is almost certainly wrong for this therapist.`
+  : `The therapist's timezone is ${therapistTimezone}. Interpret bare local times ("Tuesday at 2pm") in that zone.`}
+
+When the therapist mentions a specific time, do NOT compute the ISO 8601 offset yourself — call **resolve_local_time** with the calendar parts (year, month, day, hour, minute), the duration in minutes, and the IANA timezone. It returns {starts_at, ends_at} with DST-aware offsets that you pass verbatim to record_availability_window. resolve_local_time also rejects ambiguous (DST fall-back) and non-existent (DST spring-forward) wall-clocks with a specific error you can re-prompt around.
+
+For relative phrasing ("next Friday", "the week of the 15th"), do the CALENDAR math yourself against today's date above, then pass the resolved date components to resolve_local_time.
 
 ## Therapist
 - Name: ${therapist.name}

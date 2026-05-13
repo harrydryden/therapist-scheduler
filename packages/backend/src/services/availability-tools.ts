@@ -77,21 +77,47 @@ export const availabilityTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'resolve_local_time',
+    description:
+      'Convert a wall-clock time in a specific IANA timezone into the ISO 8601 timestamp pair (starts_at, ends_at) that record_availability_window expects. ALWAYS call this before record_availability_window — do NOT compute the +HH:MM offset yourself, because it changes across DST and varies by region. Steps: figure out the calendar date (year, month, day) from the relative phrasing using today\'s date, pick the start hour/minute, supply the therapist\'s timezone and the duration in minutes. The executor handles DST-aware offset selection and rejects ambiguous (fall-back) or non-existent (spring-forward) inputs so you can re-prompt the therapist. Returns {starts_at, ends_at} which you then pass through verbatim to record_availability_window.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timezone: {
+          type: 'string',
+          description:
+            'IANA timezone identifier for the wall-clock time (e.g. "Europe/London", "America/New_York", "Australia/Sydney"). Use the therapist\'s timezone shown in their profile; if it\'s ambiguous (country has multiple zones and none is on file), ASK rather than guessing.',
+        },
+        year: { type: 'number', description: 'Four-digit year (e.g. 2026).' },
+        month: { type: 'number', description: 'Month, 1-12 (1 = January).' },
+        day: { type: 'number', description: 'Day of month, 1-31.' },
+        hour: { type: 'number', description: 'Hour in 24-hour clock, 0-23 (e.g. 14 for 2pm).' },
+        minute: { type: 'number', description: 'Minute, 0-59.' },
+        duration_minutes: {
+          type: 'number',
+          description:
+            'Duration of the window in minutes. Use the natural duration the therapist mentioned ("free 2pm-4pm" → 120; "free Tuesday afternoon" → 240 or whatever you interpret afternoon to mean). Min 1, max 14 days.',
+        },
+      },
+      required: ['timezone', 'year', 'month', 'day', 'hour', 'minute', 'duration_minutes'],
+    },
+  },
+  {
     name: 'record_availability_window',
     description:
-      'Capture an upcoming availability window the therapist has shared. Use this whenever they mention specific times they\'re free, e.g. "I\'m free Tuesday and Thursday afternoons", "I have openings the week of the 22nd", or "I\'m out the first week of August so don\'t schedule me then". Resolve relative phrasing ("next week", "the week of the 15th") to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. Past windows are filtered automatically; do NOT submit windows whose endsAt is already in the past. The quote field captures the original phrasing so an admin can verify your date resolution.',
+      'Capture an upcoming availability window the therapist has shared. Use this whenever they mention specific times they\'re free, e.g. "I\'m free Tuesday and Thursday afternoons", "I have openings the week of the 22nd", or "I\'m out the first week of August so don\'t schedule me then". Use resolve_local_time FIRST to compute starts_at and ends_at — do not invent the offset yourself. status="available" for offered slots and status="unavailable" for explicit blocks/holidays. Past windows are filtered automatically; do NOT submit windows whose endsAt is already in the past. The quote field captures the original phrasing so an admin can verify your date resolution.',
     input_schema: {
       type: 'object' as const,
       properties: {
         starts_at: {
           type: 'string',
           description:
-            'Absolute start of the window in ISO 8601 with offset, e.g. "2026-05-19T14:00:00+01:00". Compute from the relative phrasing using today\'s date.',
+            'Absolute start of the window in ISO 8601 with offset, e.g. "2026-05-19T14:00:00+01:00". Use the value returned by resolve_local_time verbatim; do not edit the offset.',
         },
         ends_at: {
           type: 'string',
           description:
-            'Absolute end of the window in ISO 8601 with offset. Must be strictly after starts_at and not entirely in the past.',
+            'Absolute end of the window in ISO 8601 with offset. Use the value returned by resolve_local_time verbatim. Must be strictly after starts_at and not entirely in the past.',
         },
         status: {
           type: 'string',

@@ -35,6 +35,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
+import { canonicalStringify } from '../utils/canonical-json';
 import { TOOL_EXECUTION } from '../constants';
 import {
   availabilityRecordWindowInputSchema,
@@ -43,7 +44,9 @@ import {
   flagForHumanReviewInputSchema,
   recordBookingLinkInputSchema,
   rememberInputSchema,
+  resolveLocalTimeInputSchema,
 } from '../schemas/tool-inputs';
+import { resolveWallClock, formatIsoWithOffset } from '../utils/timezone-resolver';
 import { addUpcomingAvailability, recordTherapistBookingLink } from './therapist-availability.service';
 import { addConversationNote } from './therapist-conversation-memory.service';
 import { emailProcessingService } from './email-processing.service';
@@ -57,7 +60,10 @@ const AVAILABILITY_TOOL_PREFIX = `${TOOL_EXECUTION.PREFIX}avail:`;
 const AVAILABILITY_TOOL_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
 
 function hashToolCall(conversationId: string, toolName: string, input: unknown): string {
-  const data = JSON.stringify({ conversationId, toolName, input });
+  // canonicalStringify sorts keys at every depth so {a,b} and {b,a}
+  // hash identically — important because the Anthropic API doesn't
+  // guarantee property ordering across retries or model versions.
+  const data = canonicalStringify({ conversationId, toolName, input });
   return crypto.createHash('sha256').update(data).digest('hex').substring(0, 32);
 }
 
@@ -119,6 +125,16 @@ export class AvailabilityToolExecutorService {
     context: AvailabilityAgentContext,
   ): Promise<ToolExecutionResult> {
     const { name, input } = toolCall;
+
+    // Pure read-only tools bypass both the side-effect gate and the
+    // Redis idempotency layer. They have no side effects, so the gate
+    // would only deny them spuriously when the conversation is closed,
+    // and the idempotency layer would return `{skipped: true}` (no
+    // resolved value) on every subsequent call with the same input —
+    // which the model then can't use.
+    if (name === 'resolve_local_time') {
+      return this.resolveLocalTime(input);
+    }
 
     // Atomic gate. updateMany returns count=0 when ANY predicate fails
     // (row missing, status≠active, or humanControl=true). One round-trip,
@@ -329,6 +345,66 @@ export class AvailabilityToolExecutorService {
   }
 
   // ─── Tool handlers ──────────────────────────────────────────────────
+
+  /**
+   * Wall-clock → ISO 8601 conversion in the supplied IANA timezone.
+   *
+   * Pure function — no DB, no Redis, no audit. The Zod schema bounds
+   * year (2020-2100), month (1-12), day (1-31), hour (0-23), minute
+   * (0-59), duration (1 .. 14d). The resolver itself rejects ambiguous
+   * (DST fall-back) and non-existent (DST spring-forward) wall-clocks
+   * with a specific error string so the model can re-prompt the
+   * therapist instead of silently encoding a wrong instant.
+   */
+  private async resolveLocalTime(rawInput: unknown): Promise<ToolExecutionResult> {
+    const parsed = resolveLocalTimeInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      return {
+        success: false,
+        toolName: 'resolve_local_time',
+        error: `Invalid input: ${parsed.error.issues.map((i) => i.message).join('; ')}`,
+      };
+    }
+    const { timezone, year, month, day, hour, minute, duration_minutes } = parsed.data;
+
+    const startResult = resolveWallClock(timezone, year, month - 1, day, hour, minute);
+    if (!startResult.ok) {
+      return {
+        success: false,
+        toolName: 'resolve_local_time',
+        error: `${startResult.error}: ${startResult.detail}`,
+      };
+    }
+    const startsAt = formatIsoWithOffset(startResult.resolved);
+
+    // Compute the end by adding the duration to the resolved UTC instant
+    // — this is the right boundary across DST. Re-render in the same
+    // zone so the end's offset matches the post-transition rules if the
+    // duration straddles a transition.
+    const endUtcMs = startResult.resolved.utcMs + duration_minutes * 60000;
+    const offsetAtEnd = (() => {
+      // formatInTimezone-style offset recomputation
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(new Date(endUtcMs));
+      const get = (t: string) => +(parts.find((p) => p.type === t)?.value ?? '0');
+      const wallMs = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'));
+      return Math.round((wallMs - endUtcMs) / 60000);
+    })();
+    const endsAt = formatIsoWithOffset({ utcMs: endUtcMs, offsetMinutes: offsetAtEnd });
+
+    return {
+      success: true,
+      toolName: 'resolve_local_time',
+      resultMessage: JSON.stringify({ starts_at: startsAt, ends_at: endsAt }),
+    };
+  }
 
   /**
    * Record a one-off availability window on the therapist row.

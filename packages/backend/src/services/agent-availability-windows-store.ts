@@ -20,6 +20,7 @@
  */
 
 import crypto from 'crypto';
+import { logger } from '../utils/logger';
 
 /** Cap on the quote string captured from the original message. */
 export const MAX_WINDOW_QUOTE_LENGTH = 280;
@@ -79,12 +80,28 @@ export function windowId(
  * the agent loop. Includes a parseability check on the timestamps
  * because rendering a window with an unparseable startsAt would put
  * garbage in the prompt.
+ *
+ * Dropped entries are warned at WARN level so silent corruption of
+ * the JSON column doesn't go unnoticed (e.g. a hand-edit or a partial
+ * migration leaving one row in a malformed shape).
  */
 export function parseWindows(raw: unknown): AvailabilityWindow[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) {
+    if (raw !== null && raw !== undefined) {
+      logger.warn(
+        { rawType: typeof raw },
+        'agent-availability-windows-store: parseWindows received non-array input — returning []',
+      );
+    }
+    return [];
+  }
   const windows: AvailabilityWindow[] = [];
+  let dropped = 0;
   for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') {
+      dropped++;
+      continue;
+    }
     const w = item as Partial<AvailabilityWindow>;
     if (
       typeof w.id !== 'string' ||
@@ -92,11 +109,22 @@ export function parseWindows(raw: unknown): AvailabilityWindow[] {
       typeof w.endsAt !== 'string' ||
       typeof w.quote !== 'string' ||
       typeof w.recordedAt !== 'string'
-    )
+    ) {
+      dropped++;
       continue;
-    if (w.status !== 'available' && w.status !== 'unavailable') continue;
-    if (w.source !== 'therapist' && w.source !== 'user') continue;
-    if (isNaN(Date.parse(w.startsAt)) || isNaN(Date.parse(w.endsAt))) continue;
+    }
+    if (w.status !== 'available' && w.status !== 'unavailable') {
+      dropped++;
+      continue;
+    }
+    if (w.source !== 'therapist' && w.source !== 'user') {
+      dropped++;
+      continue;
+    }
+    if (isNaN(Date.parse(w.startsAt)) || isNaN(Date.parse(w.endsAt))) {
+      dropped++;
+      continue;
+    }
     windows.push({
       id: w.id,
       startsAt: w.startsAt,
@@ -106,6 +134,12 @@ export function parseWindows(raw: unknown): AvailabilityWindow[] {
       quote: w.quote,
       recordedAt: w.recordedAt,
     });
+  }
+  if (dropped > 0) {
+    logger.warn(
+      { dropped, kept: windows.length },
+      'agent-availability-windows-store: parseWindows dropped malformed entries',
+    );
   }
   return windows;
 }
@@ -224,20 +258,40 @@ export interface FormatWindowsHeaders {
 }
 
 /**
+ * Optional pre-conversion targets so the prompt builder can render each
+ * stored ISO timestamp alongside its local-time rendering in one or two
+ * recipient timezones. The booking agent uses both labels (therapist +
+ * client) so it doesn't have to compute the conversion in-prompt. The
+ * availability-collection agent uses just the therapist label since
+ * it only ever talks to the therapist.
+ *
+ * Each `formatInTimezone` is the same function from
+ * `utils/timezone-resolver` — passed in here so this module stays
+ * dependency-light and the booking agent can supply its own renderer
+ * for tests.
+ */
+export interface FormatWindowsTimezoneTargets {
+  primary?: { label: string; timezone: string };
+  secondary?: { label: string; timezone: string };
+  /** Render an ISO 8601 timestamp in the given IANA timezone. */
+  render: (iso: string, timezone: string) => string;
+}
+
+/**
  * Format the windows for inclusion in a system prompt, filtered to
  * future windows only and sorted by start. Empty string when there
  * are no future windows so the prompt builder can drop the section.
  *
- * Headers/intro are parameterised so the two consumers (per-appointment
- * Layer B vs. per-therapist long-lived) can use different framing —
- * the per-appointment formatter calls it "Ad-hoc availability mentioned
- * in this conversation", the per-therapist formatter calls it
- * "Upcoming availability the therapist has previously shared".
+ * When `tzTargets` is supplied, each bullet is augmented with the
+ * pre-converted wall-clock time in each target zone — the booking
+ * agent uses this so it doesn't compute conversions freehand at
+ * prompt-rendering time.
  */
 export function formatWindowsForPrompt(
   windows: AvailabilityWindow[],
   headers: FormatWindowsHeaders,
   now: Date = new Date(),
+  tzTargets?: FormatWindowsTimezoneTargets,
 ): string {
   const active = getActiveWindows(windows, now);
   if (active.length === 0) return '';
@@ -247,7 +301,20 @@ export function formatWindowsForPrompt(
 
   const fmt = (w: AvailabilityWindow): string => {
     const sourceLabel = w.source === 'therapist' ? 'Therapist' : 'Client';
-    return `- ${w.startsAt} → ${w.endsAt} (recorded from ${sourceLabel}: "${w.quote}")`;
+    const base = `- ${w.startsAt} → ${w.endsAt} (recorded from ${sourceLabel}: "${w.quote}")`;
+    if (!tzTargets) return base;
+    const lines: string[] = [base];
+    if (tzTargets.primary) {
+      lines.push(
+        `    - in ${tzTargets.primary.label} (${tzTargets.primary.timezone}): ${tzTargets.render(w.startsAt, tzTargets.primary.timezone)} → ${tzTargets.render(w.endsAt, tzTargets.primary.timezone)}`,
+      );
+    }
+    if (tzTargets.secondary) {
+      lines.push(
+        `    - in ${tzTargets.secondary.label} (${tzTargets.secondary.timezone}): ${tzTargets.render(w.startsAt, tzTargets.secondary.timezone)} → ${tzTargets.render(w.endsAt, tzTargets.secondary.timezone)}`,
+      );
+    }
+    return lines.join('\n');
   };
 
   const sections: string[] = [];

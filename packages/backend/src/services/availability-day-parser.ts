@@ -51,10 +51,16 @@ export function parseDayStringsToSlots(input: { [day: string]: string } | null |
  * supplies new slots.
  *
  * Timezone selection precedence:
- *   1. The therapist's existing availability.timezone (preserves any prior
- *      admin override).
- *   2. The country's default timezone for single-timezone countries.
- *   3. The platform default (typically Europe/London).
+ *   1. An agent-supplied timezone (e.g. via the `timezone` field on
+ *      update_therapist_availability) — the strongest signal, used when
+ *      the therapist explicitly told the agent their region.
+ *   2. The therapist's existing availability.timezone (prior admin
+ *      override or earlier stamp).
+ *   3. The country's default timezone for single-timezone countries.
+ *   4. The platform default (typically Europe/London) — for multi-
+ *      timezone countries with no prior stamp and no agent-supplied
+ *      timezone, this is almost certainly wrong; the agent prompt is
+ *      instructed to ASK before reaching this case.
  *
  * Existing exceptions (one-off blocked dates etc.) are preserved unchanged
  * — the agent's update only replaces the recurring slots.
@@ -64,8 +70,11 @@ export function buildPersistedAvailability(args: {
   existing: TherapistAvailability | null;
   country: string;
   platformTimezone: string;
+  /** Optional agent-supplied timezone (highest precedence). */
+  suppliedTimezone?: string;
 }): TherapistAvailability {
-  const timezone = args.existing?.timezone
+  const timezone = args.suppliedTimezone
+    || args.existing?.timezone
     || getDefaultTimezone(args.country)
     || args.platformTimezone;
 
