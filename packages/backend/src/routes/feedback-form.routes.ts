@@ -104,6 +104,7 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           max: RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST.max,
           timeWindow: RATE_LIMITS.PUBLIC_APPOINTMENT_REQUEST.timeWindowMs,
           errorResponseBuilder: () => ({
+            success: false,
             error: 'Too many requests. Please wait before trying again.',
           }),
         },
