@@ -42,6 +42,11 @@ import {
   formatUpcomingAvailabilityForPrompt,
 } from './therapist-availability.service';
 import {
+  resolveTherapistTimezone,
+  resolveUserTimezone,
+} from './therapist-timezone.service';
+import { formatInTimezone } from '../utils/timezone-resolver';
+import {
   getUserProfile,
   getTherapistProfile,
   formatUserProfileForPrompt,
@@ -204,13 +209,43 @@ ${getValidActionsForStage(currentStage)}
 `;
   const factsSection = facts ? formatFactsForPrompt(facts) : '';
 
+  // Build pre-conversion targets for the availability windows so the
+  // bullets in the prompt include the wall-clock in both parties'
+  // timezones. The agent then has the conversion deterministically
+  // computed at prompt-render time, rather than reasoning it out.
+  // When a party's timezone is "ambiguous" (multi-zone country, no
+  // explicit stamp) we omit that target — the timezone-section above
+  // already instructs the agent to ASK rather than guess.
+  const userTzResolved = resolveUserTimezone({
+    country: context.userCountry,
+    platformTimezone: timezone,
+  });
+  const therapistTzResolved = resolveTherapistTimezone({
+    stampedTimezone: therapistTimezone,
+    country: context.therapistCountry,
+    platformTimezone: timezone,
+  });
+  const windowTzTargets: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets = {
+    render: formatInTimezone,
+    ...(therapistTzResolved.needsClarification
+      ? {}
+      : { primary: { label: 'therapist time', timezone: therapistTzResolved.timezone } }),
+    ...(userTzResolved.needsClarification
+      ? {}
+      : { secondary: { label: 'client time', timezone: userTzResolved.timezone } }),
+  };
+
   // Agent-curated thread notes (Layer B). Read by primary key so the
   // notes and availability windows shown can ONLY belong to this
   // appointment — there's no cross-thread query path.
   const memory = await getThreadMemory(context.appointmentRequestId);
   const memorySection = formatMemoryForPrompt(memory);
   // Future-only filter: past windows would mislead the agent.
-  const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(memory);
+  const availabilityWindowsSection = formatAvailabilityWindowsForPrompt(
+    memory,
+    undefined,
+    windowTzTargets,
+  );
 
   // Per-therapist data populated by the availability-collection agent.
   // upcomingAvailability complements the recurring schedule with one-off
@@ -227,7 +262,11 @@ ${getValidActionsForStage(currentStage)}
   let bookingLinkSection = '';
   if (context.therapistId) {
     const { windows, bookingLink } = await getTherapistSchedulingDataForPrompt(context.therapistId);
-    perTherapistUpcomingSection = formatUpcomingAvailabilityForPrompt(windows);
+    perTherapistUpcomingSection = formatUpcomingAvailabilityForPrompt(
+      windows,
+      undefined,
+      windowTzTargets,
+    );
     if (bookingLink) {
       bookingLinkSection = `## Therapist's direct booking link
 

@@ -62,5 +62,8 @@ export function buildTimezoneSection(
 - **Trust what people tell you over what's on file.** If a client or therapist mentions they are in a different country, region, or timezone than the one above (e.g. they sign off "writing from New York" or say "I'm currently in Berlin"), treat their statement as authoritative for the rest of the conversation and format times for that location. The country on file may be out of date or default. Only fall back to the on-file country when nothing more specific has been stated.
 - Be explicit about timezone abbreviations (e.g. "BST", "EST", "AEST") when daylight savings could create ambiguity.
 - Never silently convert a time from someone's email into UK time and write that converted value back to them — quote the original time and confirm the timezone.
+
+### Encoding a specific local time into a window
+When you need to call \`record_availability_window\` for a wall-clock time someone mentioned (e.g. "free Tuesday 2pm"), do NOT compute the +HH:MM offset yourself — call **resolve_local_time** with the calendar parts (year, month, day, hour, minute), the duration in minutes, and the IANA timezone of the speaker (therapist's tz for source="therapist", client's tz for source="user"). It returns {starts_at, ends_at} with DST-aware offsets that you pass verbatim to record_availability_window. It also rejects ambiguous (fall-back) and non-existent (spring-forward) wall-clocks with a specific error so you can re-prompt the speaker.
 `;
 }

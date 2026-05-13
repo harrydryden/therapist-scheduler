@@ -285,16 +285,18 @@ export function formatMemoryForPrompt(memory: AgentThreadMemory): string {
 export function formatAvailabilityWindowsForPrompt(
   memory: AgentThreadMemory,
   now: Date = new Date(),
+  tzTargets?: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets,
 ): string {
   return formatWindowsForPrompt(
     memory.availabilityWindows,
     {
       sectionHeader: '## Ad-hoc availability mentioned in this conversation',
       sectionIntro:
-        "These are episodic windows the parties have mentioned in addition to the therapist's base availability above. Times are absolute (ISO 8601 with offset) — render them in the recipient's local timezone when proposing slots. Past windows have already been filtered out.",
+        "These are episodic windows the parties have mentioned in addition to the therapist's base availability above. Times are absolute (ISO 8601 with offset); the lines below each bullet pre-convert the wall-clock for each party's timezone so you can quote them without computing the conversion yourself. Past windows have already been filtered out.",
       availableLabel: 'Mentioned available windows',
       unavailableLabel: 'Mentioned unavailable windows',
     },
     now,
+    tzTargets,
   );
 }

@@ -15,6 +15,21 @@ export const sendEmailInputSchema = z.object({
 
 export const updateAvailabilityInputSchema = z.object({
   availability: z.record(z.string(), z.string()),
+  /**
+   * Optional IANA timezone for the supplied wall-clock ranges. When
+   * provided, takes precedence over the therapist's existing stamped
+   * timezone, the country default, and the platform default. Required
+   * in practice when the therapist is in a multi-zone country (US,
+   * Australia, ...) and no timezone is on file yet — without it the
+   * stamp falls through to the platform default which is almost
+   * certainly wrong.
+   */
+  timezone: z
+    .string()
+    .min(1)
+    .max(64)
+    .refine((s) => /^[A-Za-z_+\-/0-9]+$/.test(s), 'timezone must be an IANA identifier (e.g. "America/New_York")')
+    .optional(),
 });
 
 export const markCompleteInputSchema = z.object({
@@ -139,4 +154,28 @@ export const availabilityMarkCompleteInputSchema = z.object({
 export const flagForHumanReviewInputSchema = z.object({
   reason: z.string().min(1).max(500),
   suggested_action: z.string().max(500).optional(),
+});
+
+/**
+ * Deterministic wall-clock → ISO 8601 resolver. Shared by both agents
+ * so the model never has to compute the offset for a DST date itself.
+ *
+ * The agent supplies an IANA timezone and the calendar components of
+ * the wall-clock time; the executor returns the ISO 8601 string with
+ * the correct offset for that date (DST-aware) plus a `duration_minutes`-
+ * shifted end. Ambiguous (fall-back) and non-existent (spring-forward)
+ * inputs are rejected with specific errors the agent can react to.
+ */
+export const resolveLocalTimeInputSchema = z.object({
+  timezone: z
+    .string()
+    .min(1)
+    .max(64)
+    .refine((s) => /^[A-Za-z_+\-/0-9]+$/.test(s), 'timezone must be an IANA identifier (e.g. "Europe/London", "America/New_York")'),
+  year: z.number().int().gte(2020).lte(2100),
+  month: z.number().int().gte(1).lte(12),
+  day: z.number().int().gte(1).lte(31),
+  hour: z.number().int().gte(0).lte(23),
+  minute: z.number().int().gte(0).lte(59),
+  duration_minutes: z.number().int().gte(1).lte(60 * 24 * 14),
 });

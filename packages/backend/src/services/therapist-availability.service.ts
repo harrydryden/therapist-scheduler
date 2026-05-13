@@ -231,20 +231,27 @@ export function getActiveUpcomingWindows(
  * has previously shared") which makes clear these windows came from
  * a different conversation, distinct from the per-appointment Layer B
  * formatter's "Ad-hoc availability mentioned in this conversation".
+ *
+ * Optional `tzTargets` causes each bullet to be augmented with the
+ * window's wall-clock time pre-converted into one or two recipient
+ * timezones. The booking agent uses this so it doesn't have to do
+ * the conversion freehand inside the prompt.
  */
 export function formatUpcomingAvailabilityForPrompt(
   windows: AvailabilityWindow[],
   now: Date = new Date(),
+  tzTargets?: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets,
 ): string {
   return formatWindowsForPrompt(
     windows,
     {
       sectionHeader: '## Upcoming availability the therapist has previously shared',
       sectionIntro:
-        "Windows here are episodic — they complement the recurring weekly schedule but don't replace it. Times are absolute ISO 8601 with offset; convert to the recipient's local timezone before proposing slots. Past windows have already been filtered.",
+        "Windows here are episodic — they complement the recurring weekly schedule but don't replace it. Times are absolute ISO 8601 with offset; the lines below each bullet pre-convert to the local wall-clock in each party's timezone so you don't have to compute it yourself. Past windows have already been filtered.",
       availableLabel: 'Upcoming availability windows shared by the therapist',
       unavailableLabel: 'Upcoming unavailable windows shared by the therapist',
     },
     now,
+    tzTargets,
   );
 }

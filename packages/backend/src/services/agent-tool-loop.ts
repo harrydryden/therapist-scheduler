@@ -80,6 +80,32 @@ const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_
 /** Scheduling tools definition — passed to Claude */
 export const schedulingTools: Anthropic.Tool[] = [
   {
+    name: 'resolve_local_time',
+    description:
+      'Convert a wall-clock time in a specific IANA timezone into the (starts_at, ends_at) ISO 8601 pair that record_availability_window expects. ALWAYS call this before record_availability_window — do NOT compute the +HH:MM offset yourself, because it changes across DST and varies by region. Supply the wall-clock parts (year, month, day, hour, minute), the duration in minutes, and the IANA timezone (the therapist\'s for therapist-source windows, the user\'s for user-source windows). The executor handles DST-aware offset selection and rejects ambiguous (fall-back) or non-existent (spring-forward) inputs so you can re-prompt the speaker.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        timezone: {
+          type: 'string',
+          description:
+            'IANA timezone identifier for the wall-clock time (e.g. "Europe/London", "America/New_York", "Australia/Sydney"). Use the speaker\'s timezone shown above in the prompt; if the speaker\'s timezone is ambiguous (country has multiple zones and none is on file), ASK rather than guessing.',
+        },
+        year: { type: 'number', description: 'Four-digit year (e.g. 2026).' },
+        month: { type: 'number', description: 'Month, 1-12 (1 = January).' },
+        day: { type: 'number', description: 'Day of month, 1-31.' },
+        hour: { type: 'number', description: 'Hour in 24-hour clock, 0-23 (e.g. 14 for 2pm).' },
+        minute: { type: 'number', description: 'Minute, 0-59.' },
+        duration_minutes: {
+          type: 'number',
+          description:
+            'Duration of the window in minutes. Use the natural duration ("free 2pm-4pm" → 120; "free Tuesday afternoon" → 240 or whatever you interpret afternoon to mean). Min 1, max 14 days.',
+        },
+      },
+      required: ['timezone', 'year', 'month', 'day', 'hour', 'minute', 'duration_minutes'],
+    },
+  },
+  {
     name: 'send_email',
     description: 'Send an email to a recipient',
     input_schema: {
@@ -103,14 +129,18 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
   {
     name: 'update_therapist_availability',
-    description: 'Save therapist availability to the database for future bookings. Use this when a therapist provides their general availability for the first time.',
+    description: 'Save therapist availability to the database for future bookings. Use this when a therapist provides their general availability for the first time. The time ranges are wall-clock times in the therapist\'s local timezone — supply the matching IANA timezone in the optional `timezone` field when the therapist is in a multi-zone country (US, Australia, Canada, etc.) or when their stamped timezone might be wrong. Without it the system falls back to the country\'s default (single-zone countries) or the platform default (multi-zone countries), and the latter is almost certainly wrong.',
     input_schema: {
       type: 'object' as const,
       properties: {
         availability: {
           type: 'object',
-          description: 'Availability by day of week. Keys are day names (Monday, Tuesday, etc.), values are time ranges like "09:00-12:00, 14:00-17:00"',
+          description: 'Availability by day of week. Keys are day names (Monday, Tuesday, etc.), values are time ranges like "09:00-12:00, 14:00-17:00" in the therapist\'s local timezone.',
           additionalProperties: { type: 'string' },
+        },
+        timezone: {
+          type: 'string',
+          description: 'Optional IANA timezone identifier for the supplied wall-clock ranges (e.g. "America/New_York", "Australia/Sydney"). REQUIRED when the therapist is in a multi-zone country and no timezone is on file yet — the Timezones section above flags this case. Omit when the therapist is in a single-zone country (UK, IE, ...).',
         },
       },
       required: ['availability'],
@@ -252,17 +282,17 @@ export const schedulingTools: Anthropic.Tool[] = [
   {
     name: 'record_availability_window',
     description:
-      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself using today\'s date — the system stores what you submit verbatim, so the meaning won\'t drift if the conversation continues for days. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. ROUTING: source="therapist" windows are stored on the therapist\'s permanent record so future bookings see them too; source="user" windows are scoped to THIS booking only (a user\'s "I\'m out next week" doesn\'t apply to other bookings).',
+      'Record an episodic / one-off availability window that someone mentioned in conversation, alongside the therapist\'s recurring base schedule. Use this when you see relative or partial availability phrasings like "I can do Mondays for the next two weeks", "I\'m free this Friday afternoon", "I\'m out the week of the 15th", or "after the school holidays I\'ll have more time". Use resolve_local_time FIRST to compute starts_at and ends_at from the calendar date + wall-clock time + timezone — do NOT invent the offset yourself. Past windows are filtered out automatically when the prompt is rebuilt; do NOT submit windows whose endsAt is already in the past. Use status="available" for offered slots and status="unavailable" for explicit blocks/holidays. ROUTING: source="therapist" windows are stored on the therapist\'s permanent record so future bookings see them too; source="user" windows are scoped to THIS booking only (a user\'s "I\'m out next week" doesn\'t apply to other bookings).',
     input_schema: {
       type: 'object' as const,
       properties: {
         starts_at: {
           type: 'string',
-          description: 'Absolute start of the window in ISO 8601 with offset, e.g. "2026-02-03T10:00:00+00:00". Compute this from the relative phrasing using today\'s date.',
+          description: 'Absolute start of the window in ISO 8601 with offset, e.g. "2026-02-03T10:00:00+00:00". Use the value returned by resolve_local_time verbatim; do not edit the offset.',
         },
         ends_at: {
           type: 'string',
-          description: 'Absolute end of the window in ISO 8601 with offset. Must be strictly after starts_at and not entirely in the past.',
+          description: 'Absolute end of the window in ISO 8601 with offset. Use the value returned by resolve_local_time verbatim. Must be strictly after starts_at and not entirely in the past.',
         },
         status: {
           type: 'string',
