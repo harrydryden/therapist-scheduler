@@ -227,7 +227,7 @@ The system uses Gmail API with Pub/Sub push notifications as the primary mechani
 
 1. Check the Gmail circuit breaker status
 2. Verify Gmail API credentials are valid
-3. Check `GET /api/webhooks/gmail/health` for Gmail-specific diagnostics
+3. Check `GET /api/admin/gmail/status` for Gmail-specific diagnostics
 4. Review pending email queue: `GET /api/admin/queue/health`
 
 ### Database Performance
