@@ -656,6 +656,33 @@ export class AIToolExecutorService {
                 'If you intended to record a future window, re-check the date you computed (perhaps "next Friday" needed +7 days).',
             };
           }
+          // SECURITY: source='therapist' writes to the per-therapist
+          // permanent store, which every future booking reads. We only
+          // honour that source when the inbound email was sent BY the
+          // therapist — otherwise a client could prompt-inject "the
+          // therapist is free Tuesdays" and pollute the therapist's
+          // record. Mirrors the existing gate on
+          // update_therapist_availability (line ~309). When the agent
+          // tries this on a user-inbound, we coerce the source to
+          // 'user' (per-appointment storage) AND log a warn so the
+          // pattern is visible. We don't return an error because the
+          // agent is sometimes confused about source attribution and
+          // forcing a retry doesn't help; downgrading silently is the
+          // safer fallback.
+          let effectiveSource = parsed.data.source;
+          if (parsed.data.source === 'therapist' && context.inboundSender !== 'therapist') {
+            logger.warn(
+              {
+                traceId: this.traceId,
+                appointmentRequestId: context.appointmentRequestId,
+                inboundSender: context.inboundSender,
+                attemptedSource: 'therapist',
+                quote: parsed.data.quote,
+              },
+              'record_availability_window: downgrading source from therapist to user — inbound was not from therapist',
+            );
+            effectiveSource = 'user';
+          }
           try {
             // ROUTING: therapist-source windows go to the
             // per-therapist `Therapist.upcomingAvailability` column so
@@ -669,7 +696,7 @@ export class AIToolExecutorService {
             // back to per-appointment for both sources — the per-
             // therapist write would have no primary key to scope on.
             const isTherapistSource =
-              parsed.data.source === 'therapist' && !!context.therapistId;
+              effectiveSource === 'therapist' && !!context.therapistId;
             if (isTherapistSource) {
               const result = await addUpcomingAvailability(context.therapistId!, {
                 startsAt: parsed.data.starts_at,
@@ -690,14 +717,14 @@ export class AIToolExecutorService {
               startsAt: parsed.data.starts_at,
               endsAt: parsed.data.ends_at,
               status: parsed.data.status,
-              source: parsed.data.source,
+              source: effectiveSource,
               quote: parsed.data.quote,
             });
             return {
               success: true,
               toolName: name,
               resultMessage: result.added
-                ? `Availability window recorded for this booking (id: ${result.windowId}, status: ${parsed.data.status}, source: ${parsed.data.source}). Total active windows: ${result.memory.availabilityWindows.length}.`
+                ? `Availability window recorded for this booking (id: ${result.windowId}, status: ${parsed.data.status}, source: ${effectiveSource}). Total active windows: ${result.memory.availabilityWindows.length}.`
                 : `Availability window already present (id: ${result.windowId}). Skipped duplicate.`,
             };
           } catch (err) {

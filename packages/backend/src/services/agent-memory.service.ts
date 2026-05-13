@@ -33,6 +33,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
+import { withSerializationRetry } from '../utils/serialization-retry';
 import {
   MAX_NOTES_PER_THREAD,
   MAX_NOTE_LENGTH,
@@ -124,48 +125,62 @@ export interface AddNoteResult {
  * identifier this function accepts; there is no path by which a write
  * intended for appointment A can land on appointment B.
  *
- * Read-then-write race: two concurrent calls on the same appointment
- * could both see the same `current.notes` and overwrite each other's
- * latest note. We accept this — the cap is a soft target, the FIFO
- * means the lost note is recoverable on the next agent turn (the
- * agent is prompted to re-remember if needed), and the alternative
- * (Serializable transaction per remember call) is heavy for a
- * non-critical write. If this becomes a real problem we can switch to
- * `update` with a JSONB array append in raw SQL.
+ * CONCURRENCY: The read-modify-write happens inside an interactive
+ * transaction with `SELECT ... FOR UPDATE` on the appointment row, so
+ * a concurrent caller (e.g. an inbound email racing the tool loop)
+ * waits for our update to commit before reading. Without this, both
+ * callers could see the same `current.notes` snapshot and the second
+ * write would clobber the first. The per-appointment conversation
+ * gate prevents most of this surface, but not all — two inbound
+ * webhooks landing within ms of each other can both pass the gate
+ * before either commits, so the row lock is the load-bearing layer.
+ * Same pattern as `therapist-availability.service.ts`.
  */
 export async function addNote(
   appointmentId: string,
   category: AgentNoteCategory,
   rawText: string,
 ): Promise<AddNoteResult> {
-  const current = await getThreadMemory(appointmentId);
-  const result = appendNoteToList(current.notes, category, rawText);
+  return withSerializationRetry(
+    () =>
+      prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM appointment_requests WHERE id = ${appointmentId} FOR UPDATE`;
+        const row = await tx.appointmentRequest.findUnique({
+          where: { id: appointmentId },
+          select: { memory: true },
+        });
+        const current = row ? parseMemory(row.memory) : EMPTY_MEMORY;
+        const result = appendNoteToList(current.notes, category, rawText);
 
-  if (!result.added) {
-    logger.debug(
-      { appointmentId, noteId: result.noteId, category },
-      'agent-memory: note already present, skipping (idempotent remember)',
-    );
-    return { added: false, memory: current, noteId: result.noteId };
-  }
+        if (!result.added) {
+          logger.debug(
+            { appointmentId, noteId: result.noteId, category },
+            'agent-memory: note already present, skipping (idempotent remember)',
+          );
+          return { added: false, memory: current, noteId: result.noteId };
+        }
 
-  const updated: AgentThreadMemory = {
-    notes: result.notes,
-    availabilityWindows: current.availabilityWindows,
-  };
+        const updated: AgentThreadMemory = {
+          notes: result.notes,
+          availabilityWindows: current.availabilityWindows,
+        };
 
-  await prisma.appointmentRequest.update({
-    where: { id: appointmentId },
-    data: { memory: updated as unknown as object },
-    select: { id: true },
-  });
+        await tx.appointmentRequest.update({
+          where: { id: appointmentId },
+          data: { memory: updated as unknown as object },
+          select: { id: true },
+        });
 
-  logger.info(
-    { appointmentId, noteId: result.noteId, category, totalNotes: updated.notes.length },
-    'agent-memory: note added',
+        logger.info(
+          { appointmentId, noteId: result.noteId, category, totalNotes: updated.notes.length },
+          'agent-memory: note added',
+        );
+
+        return { added: true, memory: updated, noteId: result.noteId };
+      }),
+    { appointmentId, op: 'addNote' },
+    (msg, ctx) => logger.warn(ctx, msg),
   );
-
-  return { added: true, memory: updated, noteId: result.noteId };
 }
 
 export interface AddWindowResult {
@@ -197,48 +212,63 @@ export async function addAvailabilityWindow(
     quote: string;
   },
 ): Promise<AddWindowResult> {
-  const current = await getThreadMemory(appointmentId);
-  // Per-appointment lists are short-lived (one booking thread); no
-  // need to compact past windows on every write here, unlike the
-  // per-therapist store.
-  const result = appendWindowToList(current.availabilityWindows, params, {
-    maxSize: MAX_WINDOWS_PER_THREAD,
-    compactPast: false,
-  });
+  return withSerializationRetry(
+    () =>
+      prisma.$transaction(async (tx) => {
+        // Same row-lock contract as addNote — see the note's CONCURRENCY
+        // section for why the gate alone isn't sufficient.
+        await tx.$queryRaw`SELECT id FROM appointment_requests WHERE id = ${appointmentId} FOR UPDATE`;
+        const row = await tx.appointmentRequest.findUnique({
+          where: { id: appointmentId },
+          select: { memory: true },
+        });
+        const current = row ? parseMemory(row.memory) : EMPTY_MEMORY;
 
-  if (!result.added) {
-    logger.debug(
-      { appointmentId, windowId: result.windowId, status: params.status },
-      'agent-memory: availability window already present, skipping (idempotent)',
-    );
-    return { added: false, memory: current, windowId: result.windowId };
-  }
+        // Per-appointment lists are short-lived (one booking thread);
+        // no need to compact past windows on every write here, unlike
+        // the per-therapist store.
+        const result = appendWindowToList(current.availabilityWindows, params, {
+          maxSize: MAX_WINDOWS_PER_THREAD,
+          compactPast: false,
+        });
 
-  const updated: AgentThreadMemory = {
-    notes: current.notes,
-    availabilityWindows: result.windows,
-  };
+        if (!result.added) {
+          logger.debug(
+            { appointmentId, windowId: result.windowId, status: params.status },
+            'agent-memory: availability window already present, skipping (idempotent)',
+          );
+          return { added: false, memory: current, windowId: result.windowId };
+        }
 
-  await prisma.appointmentRequest.update({
-    where: { id: appointmentId },
-    data: { memory: updated as unknown as object },
-    select: { id: true },
-  });
+        const updated: AgentThreadMemory = {
+          notes: current.notes,
+          availabilityWindows: result.windows,
+        };
 
-  logger.info(
-    {
-      appointmentId,
-      windowId: result.windowId,
-      status: params.status,
-      source: params.source,
-      startsAt: params.startsAt,
-      endsAt: params.endsAt,
-      totalWindows: updated.availabilityWindows.length,
-    },
-    'agent-memory: availability window added',
+        await tx.appointmentRequest.update({
+          where: { id: appointmentId },
+          data: { memory: updated as unknown as object },
+          select: { id: true },
+        });
+
+        logger.info(
+          {
+            appointmentId,
+            windowId: result.windowId,
+            status: params.status,
+            source: params.source,
+            startsAt: params.startsAt,
+            endsAt: params.endsAt,
+            totalWindows: updated.availabilityWindows.length,
+          },
+          'agent-memory: availability window added',
+        );
+
+        return { added: true, memory: updated, windowId: result.windowId };
+      }),
+    { appointmentId, op: 'addAvailabilityWindow' },
+    (msg, ctx) => logger.warn(ctx, msg),
   );
-
-  return { added: true, memory: updated, windowId: result.windowId };
 }
 
 /**

@@ -92,4 +92,50 @@ describe('buildTimezoneSection', () => {
     expect(section).toContain('Europe/Paris');
     expect(section).toContain('Europe/Berlin');
   });
+
+  // Once the booking agent has recorded an explicit zone via
+  // record_user_timezone / record_therapist_timezone, the prompt must
+  // STOP asking — otherwise the agent re-asks the same question on
+  // every subsequent turn. These tests pin that behaviour.
+  it('uses the explicit User.timezone when set, and does NOT instruct the agent to ask the client', () => {
+    const section = buildTimezoneSection(
+      makeContext({
+        userCountry: 'US',
+        userTimezone: 'America/Los_Angeles',
+        therapistCountry: 'UK',
+      }),
+      'Europe/London',
+    );
+    // The explicit zone is shown alongside the country label.
+    expect(section).toContain('America/Los_Angeles (United States, on file)');
+    // No ASK directive on the client line.
+    expect(section).not.toMatch(/ask the client where they are based/i);
+  });
+
+  it('uses the explicit Therapist.timezone when set, and does NOT instruct the agent to ask the therapist', () => {
+    const section = buildTimezoneSection(
+      makeContext({
+        userCountry: 'UK',
+        therapistCountry: 'AU',
+        therapistTimezone: 'Australia/Brisbane',
+      }),
+      'Europe/London',
+    );
+    expect(section).toContain('Australia/Brisbane (Australia, on file)');
+    expect(section).not.toMatch(/ask the therapist where they are based/i);
+  });
+
+  it('asks the client but NOT the therapist when only the client is multi-zone-unknown', () => {
+    const section = buildTimezoneSection(
+      makeContext({
+        userCountry: 'US',
+        therapistCountry: 'AU',
+        therapistTimezone: 'Australia/Sydney',
+      }),
+      'Europe/London',
+    );
+    expect(section).toMatch(/ask the client where they are based/i);
+    expect(section).not.toMatch(/ask the therapist where they are based/i);
+    expect(section).toContain('Australia/Sydney (Australia, on file)');
+  });
 });
