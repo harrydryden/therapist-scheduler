@@ -13,7 +13,7 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { slackNotificationService } from './slack-notification.service';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { InvalidTransitionError } from '../errors';
 
 /**

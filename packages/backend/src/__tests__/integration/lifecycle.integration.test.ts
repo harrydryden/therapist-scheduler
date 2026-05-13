@@ -81,7 +81,7 @@ import {
   closeIntegrationDb,
   integrationDescribe,
 } from '../helpers/integration-db';
-import { appointmentLifecycleService } from '../../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../../domain/scheduling/lifecycle';
 import { recordAppointmentEvent } from '../../services/appointment-event.service';
 
 // ============================================

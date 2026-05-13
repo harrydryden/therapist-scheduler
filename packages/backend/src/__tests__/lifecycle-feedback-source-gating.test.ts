@@ -11,6 +11,11 @@
  *
  * After: only `source: 'admin'` keeps the wider allowlist (admin
  * back-fills); the system path requires session_held as the source.
+ *
+ * Assertion strategy: drive `transitionToFeedbackRequested` through
+ * the real (post-Phase-2a) module path with a mocked prisma, then
+ * read the `where.status.in` value the transition passed to
+ * `updateMany`. That set IS the validFromStatuses contract under test.
  */
 
 jest.mock('../utils/logger', () => require('./_global-mocks').loggerMock());
@@ -40,30 +45,45 @@ jest.mock('../services/appointment-notifications.service', () => ({
   },
 }));
 
+const mockFindUnique = jest.fn();
+const mockUpdateMany = jest.fn();
 jest.mock('../utils/database', () => ({
   prisma: {
-    appointmentRequest: { findUnique: jest.fn(), update: jest.fn() },
-    $executeRaw: jest.fn(),
+    appointmentRequest: {
+      findUnique: (...a: unknown[]) => mockFindUnique(...a),
+      updateMany: (...a: unknown[]) => mockUpdateMany(...a),
+      update: jest.fn(),
+    },
+    $executeRaw: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
-
-const mockApplyLightTransition = jest.fn();
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // Spy on the private applyLightTransition — once we've confirmed it
-  // was called with the right validFromStatuses, the real DB pipeline
-  // doesn't need to run for this test.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (appointmentLifecycleService as any).applyLightTransition = mockApplyLightTransition;
-  mockApplyLightTransition.mockResolvedValue({
-    success: true,
-    previousStatus: 'session_held',
-    newStatus: 'feedback_requested',
+  // Pre-stub the findUnique so the transition reads a row in
+  // `session_held` (so it's not the trivial idempotent-skip path).
+  mockFindUnique.mockResolvedValue({
+    id: 'apt-1',
+    status: 'session_held',
+    userEmail: 'client@example.com',
   });
+  // updateMany returns count=1 so the transition continues past the
+  // post-update audit/SSE block — the test only inspects the where
+  // clause, so the rest is moot but must not throw.
+  mockUpdateMany.mockResolvedValue({ count: 1 });
 });
+
+/**
+ * Extract the value of `where.status.in` that the transition passed to
+ * updateMany. That set is the validFromStatuses applied at the DB level.
+ */
+function getWhereStatusIn(): unknown {
+  expect(mockUpdateMany).toHaveBeenCalledTimes(1);
+  const args = mockUpdateMany.mock.calls[0][0];
+  return args.where.status.in;
+}
 
 describe('transitionToFeedbackRequested validFromStatuses', () => {
   it('restricts the system path to session_held (cannot skip from confirmed)', async () => {
@@ -71,10 +91,7 @@ describe('transitionToFeedbackRequested validFromStatuses', () => {
       appointmentId: 'apt-1',
       source: 'system',
     });
-
-    expect(mockApplyLightTransition).toHaveBeenCalledTimes(1);
-    const args = mockApplyLightTransition.mock.calls[0][0];
-    expect(args.validFromStatuses).toEqual(['session_held']);
+    expect(getWhereStatusIn()).toEqual(['session_held']);
   });
 
   it('keeps the wider allowlist for the admin path (back-fill scenarios)', async () => {
@@ -83,10 +100,7 @@ describe('transitionToFeedbackRequested validFromStatuses', () => {
       source: 'admin',
       adminId: 'admin-7',
     });
-
-    expect(mockApplyLightTransition).toHaveBeenCalledTimes(1);
-    const args = mockApplyLightTransition.mock.calls[0][0];
-    expect(args.validFromStatuses).toEqual(['session_held', 'confirmed']);
+    expect(getWhereStatusIn()).toEqual(['session_held', 'confirmed']);
   });
 
   it('agent path is treated like system (no skip permission)', async () => {
@@ -94,9 +108,6 @@ describe('transitionToFeedbackRequested validFromStatuses', () => {
       appointmentId: 'apt-1',
       source: 'agent',
     });
-
-    expect(mockApplyLightTransition).toHaveBeenCalledTimes(1);
-    const args = mockApplyLightTransition.mock.calls[0][0];
-    expect(args.validFromStatuses).toEqual(['session_held']);
+    expect(getWhereStatusIn()).toEqual(['session_held']);
   });
 });

@@ -7,7 +7,7 @@ import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { isTherapistPending, isUserPending } from './stage-groups';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { PRE_BOOKING_STATUSES } from '../constants';

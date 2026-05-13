@@ -28,7 +28,7 @@
  *     "we lose when already claimed".
  *
  * Scope: this helper is intentionally narrow. Status-flip atomic
- * claims in `appointment-lifecycle.service` use a different shape
+ * claims in `domain/scheduling/lifecycle` use a different shape
  * (status-set preconditions, multi-field bumps including the
  * generation counter) and are NOT migrated to this helper.
  */

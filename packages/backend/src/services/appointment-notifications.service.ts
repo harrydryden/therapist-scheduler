@@ -22,7 +22,7 @@ import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { runBackgroundTask } from '../utils/background-task';
 import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-tracker.service';
-import type { TransitionSource } from './appointment-lifecycle.service';
+import type { TransitionSource } from '../domain/scheduling/lifecycle';
 
 // ============================================
 // Notification Settings

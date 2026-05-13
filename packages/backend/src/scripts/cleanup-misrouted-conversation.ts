@@ -28,7 +28,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { appointmentLifecycleService } from '../services/appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { extractConversationMeta } from '../utils/conversation-meta';
 import type { ConversationState, ConversationMessage } from '../types';
 

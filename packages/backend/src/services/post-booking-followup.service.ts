@@ -23,7 +23,7 @@ import {
 } from '../utils/atomic-sentinel-claim';
 import { PeriodicService } from '../utils/periodic-service';
 import { emailProcessingService } from './email-processing.service';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import {
   parseConfirmedDateTime,
   calculateMeetingLinkCheckTime,

@@ -68,7 +68,7 @@ jest.mock('../services/sse.service', () => ({
 
 // Mock all the heavy services pulled in transitively by the route file
 // so route registration completes without real I/O.
-jest.mock('../services/appointment-lifecycle.service', () => ({
+jest.mock('../domain/scheduling/lifecycle', () => ({
   appointmentLifecycleService: {},
   InvalidTransitionError: class InvalidTransitionError extends Error {},
   ConcurrentModificationError: class ConcurrentModificationError extends Error {},

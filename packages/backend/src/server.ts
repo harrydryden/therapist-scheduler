@@ -45,7 +45,7 @@ import { postBookingFollowupService } from './services/post-booking-followup.ser
 import { weeklyMailingListService } from './services/weekly-mailing-list.service';
 import { slackWeeklySummaryService } from './services/slack-weekly-summary.service';
 import { workReportService } from './services/work-report.service';
-import { appointmentLifecycleTickService } from './services/appointment-lifecycle-tick.service';
+import { appointmentLifecycleTickService } from './domain/scheduling/lifecycle';
 import { invitationLifecycleService } from './services/invitation-lifecycle.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';

@@ -28,7 +28,7 @@ jest.mock('../utils/database', () => ({
 }));
 
 const mockTransitionToCancelled = jest.fn();
-jest.mock('../services/appointment-lifecycle.service', () => ({
+jest.mock('../domain/scheduling/lifecycle', () => ({
   appointmentLifecycleService: {
     transitionToCancelled: (...a: unknown[]) => mockTransitionToCancelled(...a),
   },

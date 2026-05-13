@@ -23,7 +23,7 @@ import { APPOINTMENT_STATUS, AppointmentStatus, ACTIVE_STATUSES } from '../const
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { runTrackedSideEffect } from './side-effect-tracker.service';
-import type { TransitionSource, TransitionResult } from './appointment-lifecycle.service';
+import type { TransitionSource, TransitionResult } from '../domain/scheduling/lifecycle';
 
 /**
  * Count this therapist's OTHER active appointments and, if there are none,

@@ -21,7 +21,7 @@ import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { auditEventService } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
-import { appointmentLifecycleService } from './appointment-lifecycle.service';
+import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { InvalidTransitionError } from '../errors';
 import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
 import { EMAIL } from '../constants';
