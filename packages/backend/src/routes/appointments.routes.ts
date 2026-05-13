@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 import { Errors, sendError } from '../utils/response';
 import { JustinTimeService } from '../services/justin-time.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
+import { supersedeActiveTherapistConversationInTx } from '../domain/scheduling/availability/agent/service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';

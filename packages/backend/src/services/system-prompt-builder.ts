@@ -21,7 +21,7 @@ import { firstName } from '../utils/first-name';
 import { TIMEOUTS } from '../constants';
 import { knowledgeService } from './knowledge.service';
 import { getSettingValues } from './settings.service';
-import { formatAvailabilityForUser, type SlotConfig } from '../services/availability-formatter.service';
+import { formatAvailabilityForUser, type SlotConfig } from '../domain/scheduling/availability/windows/formatter';
 import { checkForInjection } from '../utils/content-sanitizer';
 import {
   type ConversationCheckpoint,
@@ -40,7 +40,7 @@ import {
 import {
   getTherapistSchedulingDataForPrompt,
   formatUpcomingAvailabilityForPrompt,
-} from './therapist-availability.service';
+} from '../domain/scheduling/availability/windows/therapist-store';
 import {
   resolveTherapistTimezone,
   resolveUserTimezone,
@@ -236,7 +236,7 @@ ${getValidActionsForStage(currentStage)}
     country: context.therapistCountry,
     platformTimezone: timezone,
   });
-  const windowTzTargets: import('./agent-availability-windows-store').FormatWindowsTimezoneTargets = {
+  const windowTzTargets: import('../domain/scheduling/availability/windows/store').FormatWindowsTimezoneTargets = {
     render: formatInTimezone,
     ...(therapistTzResolved.needsClarification
       ? {}

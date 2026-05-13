@@ -45,7 +45,7 @@ jest.mock('../services/settings.service', () => ({
   getSettingValues: jest.fn().mockResolvedValue(new Map()),
 }));
 
-import { buildAvailabilitySystemPrompt } from '../services/availability-agent.service';
+import { buildAvailabilitySystemPrompt } from '../domain/scheduling/availability/agent/service';
 import type { Therapist } from '@prisma/client';
 
 const baseTherapist: Pick<

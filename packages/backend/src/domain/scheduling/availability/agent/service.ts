@@ -28,26 +28,26 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { Prisma } from '@prisma/client';
-import { logger } from '../utils/logger';
-import { prisma } from '../utils/database';
-import { ConcurrentModificationError } from '../errors';
-import { emailProcessingService } from './email-processing.service';
-import { runAvailabilityToolLoop, type AvailabilityAgentContext } from './agent-tool-loop';
-import { AvailabilityToolExecutorService } from './availability-tool-executor.service';
-import { truncateMessageContent } from './ai-conversation.service';
-import { checkForInjection, wrapUntrustedContent } from '../utils/content-sanitizer';
+import { logger } from '../../../../utils/logger';
+import { prisma } from '../../../../utils/database';
+import { ConcurrentModificationError } from '../../../../errors';
+import { emailProcessingService } from '../../../../services/email-processing.service';
+import { runAvailabilityToolLoop, type AvailabilityAgentContext } from '../../../../services/agent-tool-loop';
+import { AvailabilityToolExecutorService } from './tool-executor';
+import { truncateMessageContent } from '../../../../services/ai-conversation.service';
+import { checkForInjection, wrapUntrustedContent } from '../../../../utils/content-sanitizer';
 import {
   getUpcomingAvailability,
   formatUpcomingAvailabilityForPrompt,
-} from './therapist-availability.service';
+} from '../windows/therapist-store';
 import {
   getConversationMemory,
   formatMemoryForPrompt,
-} from './therapist-conversation-memory.service';
-import { formatDateLong } from '../utils/date';
-import { getSettingValues, getSettingValue } from './settings.service';
-import { firstName } from '../utils/first-name';
-import { resolveTherapistTimezone } from '../core/timezone';
+} from '../../../../services/therapist-conversation-memory.service';
+import { formatDateLong } from '../../../../utils/date';
+import { getSettingValues, getSettingValue } from '../../../../services/settings.service';
+import { firstName } from '../../../../utils/first-name';
+import { resolveTherapistTimezone } from '../../../../core/timezone';
 import { getCountry } from '@therapist-scheduler/shared';
 import type { Therapist } from '@prisma/client';
 

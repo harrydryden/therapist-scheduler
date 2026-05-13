@@ -32,11 +32,11 @@
 
 import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
-import { logger } from '../utils/logger';
-import { prisma } from '../utils/database';
-import { redis } from '../utils/redis';
-import { canonicalStringify } from '../utils/canonical-json';
-import { TOOL_EXECUTION } from '../constants';
+import { logger } from '../../../../utils/logger';
+import { prisma } from '../../../../utils/database';
+import { redis } from '../../../../utils/redis';
+import { canonicalStringify } from '../../../../utils/canonical-json';
+import { TOOL_EXECUTION } from '../../../../constants';
 import {
   availabilityRecordWindowInputSchema,
   availabilityMarkCompleteInputSchema,
@@ -46,13 +46,13 @@ import {
   recordTherapistTimezoneInputSchema,
   rememberInputSchema,
   resolveLocalTimeInputSchema,
-} from '../schemas/tool-inputs';
-import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../core/timezone';
-import { addUpcomingAvailability, recordTherapistBookingLink } from './therapist-availability.service';
-import { addConversationNote } from './therapist-conversation-memory.service';
-import { emailProcessingService } from './email-processing.service';
-import type { ToolExecutionResult } from './scheduling-context.service';
-import type { AvailabilityAgentContext } from './agent-tool-loop';
+} from '../../../../schemas/tool-inputs';
+import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../../../../core/timezone';
+import { addUpcomingAvailability, recordTherapistBookingLink } from '../windows/therapist-store';
+import { addConversationNote } from '../../../../services/therapist-conversation-memory.service';
+import { emailProcessingService } from '../../../../services/email-processing.service';
+import type { ToolExecutionResult } from '../../../../services/scheduling-context.service';
+import type { AvailabilityAgentContext } from '../../../../services/agent-tool-loop';
 
 // Distinct prefix from the booking executor's idempotency namespace
 // (TOOL_EXECUTION.PREFIX, used in ai-tool-executor.service.ts). Same

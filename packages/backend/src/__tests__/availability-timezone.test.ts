@@ -28,7 +28,7 @@ import {
   wallClockToUtc,
   getDateInTimezone,
 } from '../utils/date';
-import { formatAvailabilityForUser } from '../services/availability-formatter.service';
+import { formatAvailabilityForUser } from '../domain/scheduling/availability/windows/formatter';
 import type { TherapistAvailability } from '../types';
 
 describe('wallClockToUtc', () => {

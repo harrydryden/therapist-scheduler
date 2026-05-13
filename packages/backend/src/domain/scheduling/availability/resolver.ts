@@ -15,9 +15,9 @@
  * business-rule validation used by the tool executor.
  */
 
-import { logger } from '../utils/logger';
-import { parseConfirmedDateTime, isTooSoonToBook } from '../utils/date';
-import { getSettingValue } from './settings.service';
+import { logger } from '../../../utils/logger';
+import { parseConfirmedDateTime, isTooSoonToBook } from '../../../utils/date';
+import { getSettingValue } from '../../../services/settings.service';
 
 export class AvailabilityResolverService {
   /**

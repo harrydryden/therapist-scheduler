@@ -44,7 +44,7 @@ import {
   availabilityTools,
   AVAILABILITY_SIDE_EFFECT_TOOLS,
   AVAILABILITY_TERMINAL_TOOLS,
-} from './availability-tools';
+} from '../domain/scheduling/availability/agent/tools';
 
 const MAX_TOOL_ITERATIONS = 5;
 

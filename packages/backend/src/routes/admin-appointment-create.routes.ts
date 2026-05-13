@@ -20,7 +20,7 @@ import { runBackgroundTask } from '../utils/background-task';
 import { getOrCreateUser } from '../utils/unique-id';
 import { getOrCreateTrackingCode } from '../services/tracking-code.service';
 import { JustinTimeService } from '../services/justin-time.service';
-import { supersedeActiveTherapistConversationInTx } from '../services/availability-agent.service';
+import { supersedeActiveTherapistConversationInTx } from '../domain/scheduling/availability/agent/service';
 import { parseTherapistAvailability } from '../utils/json-parser';
 
 const createAppointmentSchema = z.object({

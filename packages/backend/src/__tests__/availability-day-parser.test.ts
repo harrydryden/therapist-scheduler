@@ -8,7 +8,7 @@
 import {
   parseDayStringsToSlots,
   buildPersistedAvailability,
-} from '../services/availability-day-parser';
+} from '../domain/scheduling/availability/windows/parser';
 import type { TherapistAvailability } from '@therapist-scheduler/shared';
 
 describe('parseDayStringsToSlots', () => {

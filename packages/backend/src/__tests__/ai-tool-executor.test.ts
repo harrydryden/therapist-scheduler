@@ -100,7 +100,7 @@ jest.mock('../services/appointment-lifecycle.service', () => ({
   },
 }));
 
-jest.mock('../services/availability-resolver.service', () => ({
+jest.mock('../domain/scheduling/availability/resolver', () => ({
   availabilityResolver: {
     validateMarkComplete: jest.fn().mockResolvedValue(null),
   },
@@ -115,7 +115,7 @@ jest.mock('../core/timezone', () => ({
   resolveRecipientTimezone: jest.fn().mockResolvedValue('Europe/London'),
 }));
 
-jest.mock('../services/availability-day-parser', () => ({
+jest.mock('../domain/scheduling/availability/windows/parser', () => ({
   parseDayStringsToSlots: jest.fn().mockReturnValue([]),
   buildPersistedAvailability: jest.fn().mockReturnValue({}),
 }));

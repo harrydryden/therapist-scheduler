@@ -36,12 +36,19 @@ import {
 import { TOOL_EXECUTION } from '../constants';
 import type { ConversationAction } from '../services/conversation-checkpoint.service';
 import type { SchedulingContext, ToolExecutionResult } from './scheduling-context.service';
-import { availabilityResolver } from './availability-resolver.service';
+import { availabilityResolver } from '../domain/scheduling/availability/resolver';
+import {
+  parseDayStringsToSlots,
+  buildPersistedAvailability,
+} from '../domain/scheduling/availability/windows/parser';
+import {
+  addUpcomingAvailability,
+  recordTherapistBookingLink,
+} from '../domain/scheduling/availability/windows/therapist-store';
 import { generateVoucherUrl } from '../utils/voucher-token';
 import { getSettingValue } from './settings.service';
 import { Prisma } from '@prisma/client';
 import type { TherapistAvailability } from '@therapist-scheduler/shared';
-import { parseDayStringsToSlots, buildPersistedAvailability } from './availability-day-parser';
 import {
   sendEmailInputSchema,
   updateAvailabilityInputSchema,
@@ -59,10 +66,6 @@ import {
 } from '../schemas/tool-inputs';
 import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../core/timezone';
 import { addNote, addAvailabilityWindow } from './agent-memory.service';
-import {
-  addUpcomingAvailability,
-  recordTherapistBookingLink,
-} from './therapist-availability.service';
 
 // ─── Idempotency Helpers ──────────────────────────────────────────────────────
 
