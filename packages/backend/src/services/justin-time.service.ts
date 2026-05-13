@@ -45,7 +45,7 @@ import type { ConversationState } from '../types';
 import { buildSystemPrompt } from './system-prompt-builder';
 import { runToolLoop } from './agent-tool-loop';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
-import { AIToolExecutorService } from './ai-tool-executor.service';
+import { AIToolExecutorService } from '../core/agent/tools';
 import { ConcurrentModificationError } from '../errors';
 import { emailEquals } from '../utils/email-equals';
 import {
