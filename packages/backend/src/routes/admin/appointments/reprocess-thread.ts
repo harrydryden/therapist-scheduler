@@ -21,6 +21,7 @@ import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
 import { emailProcessingService } from '../../../services/email-processing.service';
 import { sendSuccess, Errors } from '../../../utils/response';
+import { isGmail404 } from '../../../utils/gmail-errors';
 
 export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<void> {
   fastify.post(
@@ -182,8 +183,7 @@ export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<vo
               : 'No unprocessed messages found in this thread',
         });
       } catch (err: unknown) {
-        const errAsObj = err as { code?: number; status?: number } | null;
-        if (errAsObj?.code === 404 || errAsObj?.status === 404) {
+        if (isGmail404(err)) {
           return Errors.notFound(reply, 'Gmail thread', 'it may have been deleted');
         }
         logger.error({ err, requestId, appointmentId: id }, 'Failed to reprocess thread');

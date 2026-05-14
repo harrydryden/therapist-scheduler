@@ -8,6 +8,7 @@ import {
   releaseTokenRefreshLock,
 } from '../utils/gmail-auth';
 import { EMAIL_PROCESSING } from '../constants';
+import { isGmail404 } from '../utils/gmail-errors';
 
 // Redis keys
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
@@ -568,8 +569,8 @@ export class EmailIngestService {
       }
 
       return processed;
-    } catch (error: any) {
-      if (error?.code === 404 || error?.status === 404) {
+    } catch (error: unknown) {
+      if (isGmail404(error)) {
         logger.warn({ traceId, threadId }, 'Thread not found during stale recovery check');
         return 0;
       }
@@ -592,11 +593,29 @@ export class EmailIngestService {
   async threadContainsInboundReplies(threadId: string, traceId: string): Promise<boolean> {
     const gmail = await emailOAuthService.ensureGmailClient();
 
-    const threadResponse = await gmail.users.threads.get({
-      userId: 'me',
-      id: threadId,
-      format: 'minimal',
-    });
+    let threadResponse;
+    try {
+      threadResponse = await gmail.users.threads.get({
+        userId: 'me',
+        id: threadId,
+        format: 'minimal',
+      });
+    } catch (err) {
+      // Thread deleted from Gmail (404). The caller is the chase
+      // pre-flight check — bubbling a throw here triggers the
+      // caller's catch-all warn ("Pre-chase thread check failed —
+      // proceeding with chase send"), which is noisy. Returning
+      // `false` (no inbound replies) preserves the same chase-
+      // proceeding behaviour without the misleading log.
+      if (isGmail404(err)) {
+        logger.warn(
+          { traceId, threadId },
+          'Thread not found in Gmail (404) during inbound-reply check — treating as no replies',
+        );
+        return false;
+      }
+      throw err;
+    }
 
     const messages = threadResponse.data.messages || [];
 
@@ -637,13 +656,32 @@ export class EmailIngestService {
   }> {
     const gmail = await emailOAuthService.ensureGmailClient();
 
-    // Fetch thread with full format to get headers for preview
-    const threadResponse = await gmail.users.threads.get({
-      userId: 'me',
-      id: threadId,
-      format: 'metadata',
-      metadataHeaders: ['From', 'Subject', 'Date'],
-    });
+    // Fetch thread with full format to get headers for preview.
+    // If the thread no longer exists in Gmail (404), return an empty
+    // preview rather than letting the throw propagate up to the
+    // admin route's catch-all — which would surface a generic 404
+    // to the operator for ONE deleted thread even when the other
+    // (e.g. therapist-side thread) is still readable. Empty messages
+    // is the same shape as a thread with zero messages, so the
+    // existing admin UI renders "All processed" without changes.
+    let threadResponse;
+    try {
+      threadResponse = await gmail.users.threads.get({
+        userId: 'me',
+        id: threadId,
+        format: 'metadata',
+        metadataHeaders: ['From', 'Subject', 'Date'],
+      });
+    } catch (err) {
+      if (isGmail404(err)) {
+        logger.warn(
+          { traceId, threadId },
+          'Thread not found in Gmail (404) during preview — returning empty preview',
+        );
+        return { messages: [] };
+      }
+      throw err;
+    }
 
     const gmailMessages = threadResponse.data.messages || [];
     if (gmailMessages.length === 0) {

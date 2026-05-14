@@ -155,6 +155,12 @@ export type ProcessedContext =
   | 'unmatched-abandoned'
   | 'divergence-blocked-abandoned'
   | 'processing-failed-abandoned'
+  // The message no longer exists in Gmail (404 on fetch) — typically
+  // because the mailbox owner deleted it, the spam classifier hard-
+  // deleted it, or permissions changed between the watch notification
+  // and our fetch. Distinct from `processing-failed-abandoned` because
+  // there's nothing transient to retry — the entity is gone.
+  | 'message-not-found-in-gmail'
   // Inbound replies routed to the availability-collection agent's
   // TherapistConversation. The four variants correspond to the four
   // lifecycle statuses; admin UI can distinguish them without needing
