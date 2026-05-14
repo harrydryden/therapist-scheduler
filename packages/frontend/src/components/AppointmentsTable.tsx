@@ -303,7 +303,22 @@ export default function AppointmentsTable({
     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
       {/* Sticky header — column template MUST match RowContent's GRID_TEMPLATE */}
       <div className={`sticky top-0 z-10 bg-slate-50 border-b border-slate-200 px-3 py-2 grid ${GRID_TEMPLATE} gap-3 items-center`}>
-        <span className="sr-only">Health</span>
+        {/*
+          Health column placeholder. We can't render just
+          `<span className="sr-only">…</span>` here: `sr-only` uses
+          `position: absolute`, which removes the element from CSS
+          Grid auto-placement entirely. That collapses the header
+          into 8 grid items in 9 columns, shifting every visible
+          header one slot left vs. the row body — visible
+          misalignment.
+
+          The outer `<span aria-hidden>` is a normal-flow element
+          that occupies the 24px health column. The inner
+          `sr-only` span retains the screen-reader label.
+        */}
+        <span aria-hidden="true">
+          <span className="sr-only">Health</span>
+        </span>
         <HeaderCell label="Client" />
         <HeaderCell label="Therapist" />
         <HeaderCell label="Status" />
