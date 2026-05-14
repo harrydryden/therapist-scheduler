@@ -13,6 +13,12 @@ import { logger } from '../../../utils/logger';
 import { buildAppointmentSummary, parseRawConversationState } from '../../../utils/appointment-summary';
 import { parseTherapistAvailability } from '../../../utils/json-parser';
 import { sendSuccess, Errors } from '../../../utils/response';
+import {
+  calculateConversationHealth,
+  getHealthThresholds,
+  toAppointmentForHealth,
+} from '../../../services/conversation-health.service';
+import { deriveAttentionReasons } from '../../../utils/attention-reasons';
 
 export async function detailRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Params: { id: string } }>(
@@ -55,6 +61,18 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
             closureRecommendedAt: true,
             closureRecommendedReason: true,
             closureRecommendationActioned: true,
+            // Health-factor fields — needed to derive `attentionReasons`
+            // on the summary, which powers the "Why this needs attention"
+            // banner on the detail panel.
+            reschedulingInProgress: true,
+            lastToolExecutedAt: true,
+            lastToolExecutionFailed: true,
+            lastToolFailureReason: true,
+            threadDivergedAt: true,
+            threadDivergenceDetails: true,
+            threadDivergenceAcknowledged: true,
+            conversationStallAlertAt: true,
+            conversationStallAcknowledged: true,
           },
         });
 
@@ -67,6 +85,24 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           parseRawConversationState(appointment.conversationState),
           appointment,
         );
+
+        // Compute the per-appointment health result and translate
+        // its red factors (plus the closure-recommendation signal)
+        // into the human-readable "Why this needs attention" reasons
+        // surfaced on the detail panel's banner.
+        const healthThresholds = await getHealthThresholds();
+        const health = calculateConversationHealth(
+          toAppointmentForHealth(appointment),
+          healthThresholds,
+        );
+        if (appointmentSummary) {
+          appointmentSummary.attentionReasons = deriveAttentionReasons({
+            health,
+            closureRecommendedAt: appointment.closureRecommendedAt,
+            closureRecommendedReason: appointment.closureRecommendedReason,
+            closureRecommendationActioned: appointment.closureRecommendationActioned,
+          });
+        }
 
         return sendSuccess(reply, {
           id: appointment.id,

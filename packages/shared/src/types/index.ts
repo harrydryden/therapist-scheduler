@@ -185,6 +185,34 @@ export interface AppointmentListItem {
     /** First ~240 characters of the message content, whitespace-collapsed. */
     snippet: string;
   } | null;
+  /**
+   * Short imperative "what the admin should do or wait for" string,
+   * computed server-side via `deriveNextAction`. Shared with the
+   * appointment detail summary so the dashboard row and the detail
+   * panel never disagree about the recommended next step.
+   */
+  nextAction: string;
+}
+
+/**
+ * Triage reason surfaced on the appointment detail panel when an
+ * appointment is in the "Needs Attention" tile. Each red health
+ * factor (plus the closure-recommended signal) maps to one of
+ * these, with a concrete suggested next step for the admin.
+ *
+ * Empty array means the appointment is healthy.
+ */
+export interface AttentionReason {
+  kind:
+    | 'inactivity'
+    | 'stall'
+    | 'thread_divergence'
+    | 'tool_failure'
+    | 'human_control'
+    | 'closure_recommended';
+  title: string;
+  detail: string;
+  suggestion: string;
 }
 
 export interface AppointmentSummary {
@@ -200,6 +228,12 @@ export interface AppointmentSummary {
   lastActivityAt: string | null;
   /** Warning flags (stalled, chased, closure recommended, etc.) */
   flags: string[];
+  /**
+   * Structured triage reasons explaining WHY this appointment is in
+   * Needs Attention, each paired with a suggested next step. Empty
+   * array when the appointment is healthy.
+   */
+  attentionReasons: AttentionReason[];
 }
 
 export interface AppointmentDetail extends Omit<AppointmentListItem,
@@ -223,7 +257,7 @@ export interface AppointmentFilters {
   dateTo?: string;
   page?: number;
   limit?: number;
-  sortBy?: 'createdAt' | 'updatedAt' | 'status';
+  sortBy?: 'createdAt' | 'updatedAt' | 'status' | 'lastActivityAt';
   sortOrder?: 'asc' | 'desc';
 }
 

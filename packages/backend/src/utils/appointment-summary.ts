@@ -1,5 +1,6 @@
 import { ConversationStage, STAGE_DESCRIPTIONS } from '../services/conversation-checkpoint.service';
 import { PRE_BOOKING_STATUSES } from '../constants';
+import { deriveNextAction } from './next-action';
 
 interface SummaryAppointment {
   status: string;
@@ -16,6 +17,8 @@ interface SummaryAppointment {
   messageCount: number;
 }
 
+import type { AttentionReason } from '@therapist-scheduler/shared';
+
 export interface AppointmentSummaryResult {
   stage: string;
   nextAction: string;
@@ -23,19 +26,20 @@ export interface AppointmentSummaryResult {
   messageCount: number;
   lastActivityAt: string | null;
   flags: string[];
+  /**
+   * Triage reasons for the "Needs Attention" banner. Populated by the
+   * detail endpoint via `deriveAttentionReasons`; defaults to `[]`
+   * here so the field is always present (the summary util doesn't
+   * have the health-factor inputs in scope, by design — keeping it
+   * free of the health service import).
+   */
+  attentionReasons: AttentionReason[];
 }
 
-const STAGE_NEXT_ACTIONS: Record<string, string> = {
-  initial_contact: 'Waiting for initial emails to be sent.',
-  awaiting_therapist_availability: 'Waiting for therapist to reply with available times.',
-  awaiting_user_slot_selection: 'Waiting for client to pick a time slot.',
-  awaiting_therapist_confirmation: 'Waiting for therapist to confirm the selected slot.',
-  awaiting_meeting_link: 'Waiting for therapist to share a meeting link.',
-  rescheduling: 'Rescheduling in progress — waiting for new times.',
-  stalled: 'Conversation stalled. May need manual intervention.',
-  chased: 'Follow-up chase sent. Awaiting response.',
-  closure_recommended: 'Recommended for closure. Admin action needed.',
-};
+// Next-action strings moved to `utils/next-action.ts` and shared
+// with the dashboard list endpoint (single source of truth — the
+// list row and the detail panel must never disagree about what
+// the admin should do next).
 
 /**
  * Parse raw conversation state JSON once, without Zod validation.
@@ -86,27 +90,19 @@ export function buildAppointmentSummary(
     stage = appointment.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
-  // Next action
-  let nextAction: string;
-  if (appointment.status === 'cancelled') {
-    nextAction = 'No action needed — appointment cancelled.';
-  } else if (appointment.status === 'confirmed') {
-    nextAction = appointment.confirmedDateTime
-      ? `Session scheduled for ${appointment.confirmedDateTime}. Awaiting session completion.`
-      : 'Session confirmed. Awaiting session completion.';
-  } else if (appointment.closureRecommendedAt && !appointment.closureRecommendationActioned) {
-    nextAction = 'Admin action needed: cancel or dismiss closure recommendation.';
-  } else if (appointment.chaseSentAt) {
-    nextAction = `Chase sent to ${appointment.chaseSentTo || 'unknown'}. Awaiting response.`;
-  } else if (appointment.humanControlEnabled) {
-    nextAction = `Human control active (${appointment.humanControlTakenBy || 'unknown'}). Agent paused.`;
-  } else if (checkpoint?.pendingAction) {
-    nextAction = String(checkpoint.pendingAction);
-  } else if (checkpointStage) {
-    nextAction = STAGE_NEXT_ACTIONS[checkpointStage] || 'Waiting for next message.';
-  } else {
-    nextAction = 'Waiting for next message.';
-  }
+  // Next action — delegated to the shared util so the dashboard
+  // list row and this detail summary stay in lockstep.
+  const nextAction = deriveNextAction({
+    status: appointment.status,
+    humanControlEnabled: appointment.humanControlEnabled,
+    chaseSentAt: appointment.chaseSentAt,
+    chaseSentTo: appointment.chaseSentTo,
+    closureRecommendedAt: appointment.closureRecommendedAt,
+    closureRecommendationActioned: appointment.closureRecommendationActioned,
+    confirmedDateTime: appointment.confirmedDateTime,
+    checkpointStage: checkpointStage ?? null,
+    pendingAction: checkpoint?.pendingAction ? String(checkpoint.pendingAction) : null,
+  });
 
   // Key facts from conversation facts
   const keyFacts: string[] = [];
@@ -157,5 +153,9 @@ export function buildAppointmentSummary(
     messageCount: resolveMessageCount(rawState, appointment),
     lastActivityAt,
     flags,
+    // Caller is expected to overwrite this in the detail route via
+    // `deriveAttentionReasons`. The summary builder itself doesn't
+    // have the health-factor inputs in scope.
+    attentionReasons: [],
   };
 }
