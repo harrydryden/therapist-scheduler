@@ -62,21 +62,50 @@ export async function addAuditMessage(
     // Use SQL-level JSON append to avoid full blob round-trip.
     // If conversation_state is NULL, initialize it with a new messages array.
     // If it exists, append to the existing messages array using jsonb_set + ||.
-    await prisma.$executeRaw`
-      UPDATE "appointment_requests"
-      SET "conversation_state" = CASE
-        WHEN "conversation_state" IS NULL THEN
-          jsonb_build_object('messages', jsonb_build_array(${newMessage}::jsonb))
-        ELSE
-          jsonb_set(
-            "conversation_state",
-            '{messages}',
-            COALESCE("conversation_state"->'messages', '[]'::jsonb) || ${newMessage}::jsonb
-          )
-        END,
-        "updated_at" = NOW()
-      WHERE "id" = ${appointmentId}
-    `;
+    //
+    // Phase 3a dual-write: the same jsonb_set logic is applied to the
+    // sibling `appointment_conversations` row. Both writes go through
+    // a single $transaction so a partial-write divergence is impossible.
+    // The dual-write is an UPSERT (INSERT ON CONFLICT DO UPDATE) so it
+    // works whether or not the conversation row exists yet — the very
+    // first audit message on a fresh appointment creates the row.
+    await prisma.$transaction([
+      prisma.$executeRaw`
+        UPDATE "appointment_requests"
+        SET "conversation_state" = CASE
+          WHEN "conversation_state" IS NULL THEN
+            jsonb_build_object('messages', jsonb_build_array(${newMessage}::jsonb))
+          ELSE
+            jsonb_set(
+              "conversation_state",
+              '{messages}',
+              COALESCE("conversation_state"->'messages', '[]'::jsonb) || ${newMessage}::jsonb
+            )
+          END,
+          "updated_at" = NOW()
+        WHERE "id" = ${appointmentId}
+      `,
+      prisma.$executeRaw`
+        INSERT INTO "appointment_conversations" ("appointment_id", "conversation_state", "updated_at")
+        VALUES (
+          ${appointmentId},
+          jsonb_build_object('messages', jsonb_build_array(${newMessage}::jsonb)),
+          NOW()
+        )
+        ON CONFLICT ("appointment_id") DO UPDATE
+        SET "conversation_state" = CASE
+          WHEN "appointment_conversations"."conversation_state" IS NULL THEN
+            jsonb_build_object('messages', jsonb_build_array(${newMessage}::jsonb))
+          ELSE
+            jsonb_set(
+              "appointment_conversations"."conversation_state",
+              '{messages}',
+              COALESCE("appointment_conversations"."conversation_state"->'messages', '[]'::jsonb) || ${newMessage}::jsonb
+            )
+          END,
+          "updated_at" = NOW()
+      `,
+    ]);
   } catch (err) {
     logger.error({ err, appointmentId }, 'Failed to add audit message (non-fatal)');
   }

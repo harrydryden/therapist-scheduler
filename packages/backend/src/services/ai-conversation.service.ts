@@ -77,45 +77,68 @@ export class AIConversationService {
     const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
 
     if (expectedUpdatedAt) {
-      // Use optimistic locking - only update if version matches
-      // FIX ST2: Include activity recording in same atomic operation
-      const result = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointmentRequestId,
-          updatedAt: expectedUpdatedAt,
-        },
-        data: {
-          conversationState: stateJson,
-          updatedAt: now,
-          // FIX ST2: Atomic activity recording - no separate call needed
-          lastActivityAt: now,
-          isStale: false,
-          messageCount,
-          checkpointStage,
-        },
-      });
+      // Use optimistic locking - only update if version matches.
+      // FIX ST2: Include activity recording in same atomic operation.
+      //
+      // Phase 3a dual-write: in the same transaction we mirror
+      // `conversationState` to the sibling `appointment_conversations`
+      // row. The cutover (reads switching to the new table) is a
+      // follow-up PR; until then the legacy column is the source of
+      // truth and the mirror is for safety.
+      await prisma.$transaction(async (tx) => {
+        const result = await tx.appointmentRequest.updateMany({
+          where: {
+            id: appointmentRequestId,
+            updatedAt: expectedUpdatedAt,
+          },
+          data: {
+            conversationState: stateJson,
+            updatedAt: now,
+            // FIX ST2: Atomic activity recording - no separate call needed
+            lastActivityAt: now,
+            isStale: false,
+            messageCount,
+            checkpointStage,
+          },
+        });
 
-      if (result.count === 0) {
-        // Version mismatch - another process modified the state.
-        // Use the typed error so callers can `instanceof`-check rather than
-        // string-matching the message (which is fragile across rephrasings).
-        throw new ConcurrentModificationError(appointmentRequestId);
-      }
+        if (result.count === 0) {
+          // Version mismatch - another process modified the state.
+          // Use the typed error so callers can `instanceof`-check rather
+          // than string-matching the message (fragile across rephrasings).
+          throw new ConcurrentModificationError(appointmentRequestId);
+        }
+
+        await tx.appointmentConversation.upsert({
+          where: { appointmentId: appointmentRequestId },
+          create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+          update: { conversationState: stateJson },
+        });
+      });
     } else {
-      // Legacy call without version check (for initial state creation)
-      // FIX ST2: Include activity recording in same atomic operation
-      await prisma.appointmentRequest.update({
-        where: { id: appointmentRequestId },
-        data: {
-          conversationState: stateJson,
-          updatedAt: now,
-          // FIX ST2: Atomic activity recording
-          lastActivityAt: now,
-          isStale: false,
-          messageCount,
-          checkpointStage,
-        },
-        select: { id: true },
+      // Legacy call without version check (for initial state creation).
+      // FIX ST2: Include activity recording in same atomic operation.
+      // Phase 3a dual-write applied as in the optimistic-locked branch.
+      await prisma.$transaction(async (tx) => {
+        await tx.appointmentRequest.update({
+          where: { id: appointmentRequestId },
+          data: {
+            conversationState: stateJson,
+            updatedAt: now,
+            // FIX ST2: Atomic activity recording
+            lastActivityAt: now,
+            isStale: false,
+            messageCount,
+            checkpointStage,
+          },
+          select: { id: true },
+        });
+
+        await tx.appointmentConversation.upsert({
+          where: { appointmentId: appointmentRequestId },
+          create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+          update: { conversationState: stateJson },
+        });
       });
     }
   }
@@ -177,22 +200,43 @@ export class AIConversationService {
       const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
 
       const now = new Date();
-      const result = await prisma.appointmentRequest.updateMany({
-        where: {
-          id: appointmentRequestId,
-          updatedAt: record.updatedAt,
-          ...options?.extraWhere,
-        },
-        data: {
-          conversationState: stateJson,
-          messageCount,
-          checkpointStage,
-          updatedAt: now,
-          ...options?.extraUpdates,
-        },
+
+      // Phase 3a dual-write: applyCheckpointUpdate is one of the four
+      // writers of `conversationState`. Mirror to
+      // `appointment_conversations` in the same transaction.
+      //
+      // The transaction returns the updateMany count so the caller
+      // can distinguish optimistic-lock losses from successes. If the
+      // legacy update misses (count=0) we DON'T touch the mirror
+      // table — the rest of the row state didn't change either.
+      const transactionResult = await prisma.$transaction(async (tx) => {
+        const result = await tx.appointmentRequest.updateMany({
+          where: {
+            id: appointmentRequestId,
+            updatedAt: record.updatedAt,
+            ...options?.extraWhere,
+          },
+          data: {
+            conversationState: stateJson,
+            messageCount,
+            checkpointStage,
+            updatedAt: now,
+            ...options?.extraUpdates,
+          },
+        });
+
+        if (result.count === 1) {
+          await tx.appointmentConversation.upsert({
+            where: { appointmentId: appointmentRequestId },
+            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+            update: { conversationState: stateJson },
+          });
+        }
+
+        return result;
       });
 
-      if (result.count === 1) {
+      if (transactionResult.count === 1) {
         return { applied: true, stage: checkpointStage };
       }
 

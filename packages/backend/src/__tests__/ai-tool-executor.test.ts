@@ -44,6 +44,13 @@ jest.mock('../utils/database', () => {
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    // Phase 3a dual-write target — agent-memory's addNote /
+    // addAvailabilityWindow upserts the mirror row in the same
+    // transaction. No-op stub; the test asserts on appointmentRequest
+    // state, not on the mirror.
+    appointmentConversation: {
+      upsert: jest.fn(async () => ({ appointmentId: 'noop' })),
+    },
     voucherTracking: {
       upsert: jest.fn(),
     },

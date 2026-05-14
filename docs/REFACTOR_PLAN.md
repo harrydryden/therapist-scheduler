@@ -283,96 +283,145 @@ No business logic moved — pure routing split. Two callsites updated:
 
 ---
 
-## Phase 3 — Data model surgery (single PR, expand-only)
+## Phase 3 — Data model surgery (rescoped after Phase 1+2 audit)
 
-`AppointmentRequest` has 56 columns including a 500KB JSON blob and
-many mostly-null booking-time fields. Split into four tables, applied
-via the **expand → dual-write → backfill → cutover → contract**
-pattern. The expand + dual-write + backfill go in one PR; the
-cutover and contract happen in follow-ups after production validation.
+### Why the scope changed
 
-### Target schema
+The original Phase 3 spec proposed a 4-table split
+(`AppointmentRequest` + `AppointmentConversation` +
+`AppointmentBooking` + `AppointmentOps`), motivated primarily by the
+"500KB conversationState blob accidentally loaded" problem. A
+codebase audit at the start of Phase 3 found that **Phase 1 and
+Phase 2 mitigated that problem in the application layer**:
+
+- Every `findUnique` / `findMany` / `findFirst` on
+  `AppointmentRequest` in production code uses `select`. There are
+  zero accidental full-row loads.
+- The dashboard list endpoint uses denormalized `messageCount` and
+  `checkpointStage` columns plus a Postgres JSONB path expression
+  for last-message preview — no blob load at list-time.
+- The hot-path audit-message append uses
+  `$executeRaw` with `jsonb_set` to mutate
+  `conversation_state.messages` server-side without round-tripping
+  the blob.
+
+That leaves Phase 3's remaining motivation — **schema clarity** +
+**future ATS adaptation** — as the only real driver. Against the
+cost (233 Prisma callsites, ~80 dual-write paths, multi-week
+verification, contract several weeks later), the booking/ops splits
+are not currently justified. We narrowed the scope to the one piece
+with concrete ongoing value: **extract `conversationState` + `memory`
+into `AppointmentConversation`**.
+
+### Phase 3a — `AppointmentConversation` (expand + dual-write + backfill) ✅ DONE
+
+Landed in PR #241. The schema is expanded and every writer dual-
+writes to the sibling table; reads still hit the legacy columns.
+
+#### Target schema (current PR)
 
 ```
-AppointmentRequest         ← FSM + identity (~25 columns)
-  id, userId, therapistId, status, transitionGeneration,
-  trackingCode, idempotencyKey, gmailThreadId, therapistGmailThreadId,
-  humanControl*, createdAt, updatedAt, lastActivityAt, isStale,
-  lastToolExecutedAt/Failed/FailureReason
+AppointmentRequest  ← unchanged
+  ... 57 columns including conversationState (JSON) and memory (JSON)
 
-AppointmentConversation    ← was: conversationState JSON + memory
-  id (= appointmentRequestId), conversationState (JSON),
-  memory (JSON), checkpointStage
-
-AppointmentBooking         ← was: booking-time columns
-  id (= appointmentRequestId), confirmedAt, confirmedDateTime,
-  voucherCode, bookingMethod, feedbackForm*, meeting-link checks,
-  reschedule fields
-
-AppointmentOps             ← was: operational counters
-  id (= appointmentRequestId), reminderSentAt, autoEscalatedAt,
-  chaseSentAt*, closureRecommendedAt*, conversation-stall flags
+AppointmentConversation  ← NEW (1:1 with AppointmentRequest)
+  appointmentId (PK + FK ON DELETE CASCADE)
+  conversationState  (JSON, nullable)
+  memory             (JSON, nullable)
+  createdAt, updatedAt
 ```
 
-### Migration sequence (one PR)
+#### What was done
 
-1. **Schema expand.** Prisma migration adds the three new tables with
-   foreign-key cascades. No existing data is touched.
-
-2. **Dual-write helpers.** Introduce
-   `services/appointment-write.service.ts` that wraps every
-   `prisma.appointmentRequest.update` callsite. The helper writes to
-   both the new tables AND the legacy columns. **Every existing
-   update site is migrated to the helper in this PR.** This is
-   the bulk of the work — ~80 callsites.
-
+1. **Schema expand.** New `appointment_conversations` table with
+   `appointment_id` as both PK and FK (1:1 enforced at the schema
+   level). Cascade delete on appointment removal.
+2. **Dual-write at 6 callsites.** Each write to
+   `appointmentRequest.conversationState` or `.memory` is wrapped in
+   a `$transaction` that also upserts the sibling row. Atomic — a
+   partial-write divergence is impossible:
+   - `ai-conversation.service.ts → storeConversationState` (two
+     branches: with + without optimistic lock)
+   - `ai-conversation.service.ts → applyCheckpointUpdate`
+   - `domain/scheduling/lifecycle/audit.ts → addAuditMessage`
+     (raw SQL with `jsonb_set`; dual-writes via two
+     `$executeRaw` calls in a `$transaction`)
+   - `agent-memory.service.ts → addNote`
+   - `agent-memory.service.ts → addAvailabilityWindow`
+   - `scripts/migrate-conversation-state.ts` (historical one-off
+     script — dual-writes for safety in case anyone re-runs it)
 3. **Backfill script.**
-   `src/scripts/backfill-appointment-split-tables.ts` runs idempotently
-   over the full table, copying `conversationState`, memory, and
-   booking/ops columns into the new tables for every row. Resumable
-   via `--start-id`; reports progress.
+   `src/scripts/backfill-appointment-conversation.ts` runs idempotently:
+   - Default mode: skip rows where the mirror row already exists
+     (no overwrites of newer dual-writes with stale legacy data).
+   - `--force-resync`: rebuild every mirror row from the legacy
+     column (used for the cutover-day final reconcile).
+   - `--verify`: read-only divergence check; exits non-zero on any
+     missing or divergent row.
+4. **No reads changed.** Production still reads `conversationState`
+   and `memory` from `appointment_requests`. The sibling table sits
+   alongside, populated.
 
-4. **Read-path stays on legacy columns.** This PR does NOT change
-   reads. Production keeps reading from `AppointmentRequest`. The new
-   tables sit alongside, populated.
+#### Verification window
 
-5. **Verification window.** After deploy, ops checks that the new
-   tables match the legacy columns for every active appointment for
-   at least one full business cycle (one week).
+Before Phase 3b cutover, run for at least one full week:
 
-6. **(Follow-up PR.) Read-path cutover.** Switch all reads to the
-   new tables. Dual-writes continue.
+```bash
+npm run verify:appointment-conversation
+```
 
-7. **(Follow-up PR.) Contraction.** Drop the legacy columns from
-   `AppointmentRequest`. This is reversible (the column data still
-   exists in `AppointmentConversation` etc.) but irreversible w.r.t.
-   the column drop itself.
+Acceptance: 0 missing + 0 divergent + 0 errors across all active
+appointments.
 
-### Why this sequence
+### Phase 3b — Cutover (follow-up PR)
 
-Live data + single instance means we cannot tolerate any window
-where reads see inconsistent state. Dual-write + backfill gives us a
-full verification period before cutover; the cutover itself is a
-read switch with no migration; contraction is decoupled from
-behaviour change.
+When verification has been clean for ≥ 1 week:
 
-### Risk
+1. Switch every read of `conversationState` / `memory` to the
+   sibling table. ~10 callsites (mostly `ai-conversation.service`,
+   `agent-memory.service`, the dashboard detail endpoint).
+2. Dual-write continues unchanged — a one-line rollback is just
+   flipping the read paths back.
+3. Update the raw-SQL writers (`audit.ts`) and the dashboard
+   list-preview raw-SQL reader (`routes/admin/appointments/list-dashboard.ts`)
+   to target `appointment_conversations` for the read side and drop
+   the legacy `appointment_requests.conversation_state` reference.
 
-High. Mitigations:
+### Phase 3c — Contract (follow-up PR)
 
-- Backfill is idempotent (UPSERT semantics on the new tables).
-- A `SELECT count(*)` check between legacy and new columns runs on
-  every deploy of the verification phase.
-- Read-path cutover is gated behind a settings flag
-  (`USE_SPLIT_APPOINTMENT_TABLES`) that can be flipped via
-  `SystemSetting` without redeploy.
-- Contraction is a separate PR, weeks after cutover.
+After ≥ 1 week of cutover proven in production:
 
-### What stays on `AppointmentRequest`
+1. Drop the legacy columns:
+   ```sql
+   ALTER TABLE appointment_requests
+     DROP COLUMN conversation_state,
+     DROP COLUMN memory;
+   ```
+2. Remove the now-dead dual-write branches from the 6 writers.
+3. Remove the legacy fields from the `AppointmentRequest` Prisma
+   model.
 
-Anything queried by the kanban / lifecycle / stale-check hot paths.
-The `JSON` blob and mostly-null booking columns are the bloat;
-identity, status, timestamps, and indexes stay.
+Contract is **irreversible** — once columns are dropped, there's no
+fallback. The verification window in 3a + the production-soaking
+period in 3b are how we earn the confidence to drop.
+
+### What stays on `AppointmentRequest` (final)
+
+After Phase 3c, `AppointmentRequest` is 2 columns lighter. **All
+other fields stay** — the booking-time columns and operational
+counters remain in place, per the audit findings.
+
+### Why we are NOT splitting booking/ops fields
+
+| Field group | Original motivation | Audit finding |
+|---|---|---|
+| Booking fields (`confirmedDateTime`, `voucherCode`, `feedbackForm*`, reschedule, meeting-link) | "Mostly null for non-confirmed rows" | Storage-only, near-zero cost. ~100 appointments/day. No memory or performance impact. |
+| Ops counters (`chaseSentAt`, `closureRecommended*`, `conversationStall*`, `threadDiverg*`, `autoEscalatedAt`) | "Read by background services that don't need the rest" | Already read with `select`. Splitting adds join cost for marginal aesthetic benefit. |
+
+If/when ATS extension actually drives a different shape for these
+fields, the relevant tables can be added then with concrete use
+cases to inform the design. Until then, a deferred split is the
+correct call.
 
 ---
 

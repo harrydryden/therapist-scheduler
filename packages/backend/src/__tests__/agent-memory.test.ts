@@ -40,6 +40,13 @@ jest.mock('../utils/database', () => {
       findUnique: (...a: unknown[]) => mockFindUnique(...(a as [{ where: { id: string } }])),
       update: (...a: unknown[]) => mockUpdate(...(a as [{ where: { id: string }; data: { memory: unknown } }])),
     },
+    // Phase 3a dual-write target. The service upserts the mirror in
+    // the same transaction as the legacy update. This test doesn't
+    // care about mirror state — a no-op stub keeps the production
+    // code path executable.
+    appointmentConversation: {
+      upsert: jest.fn(async () => ({ appointmentId: 'noop' })),
+    },
     // No-op for the row-lock SELECT used by addNote /
     // addAvailabilityWindow — single-threaded test scheduler means the
     // lock is moot, but the production helper expects $queryRaw to
