@@ -224,7 +224,16 @@ export async function transitionToConfirmed(
 
     if (
       current?.status === APPOINTMENT_STATUS.CONFIRMED &&
-      current?.confirmedDateTime === confirmedDateTime
+      // Semantic compare (NOT string compare): two concurrent writes
+      // for the same wall-clock time may have used slightly different
+      // renderings ("Mon 3 Feb 10am" vs "Monday 3rd February at
+      // 10:00am"). A string compare would route them to the
+      // "different datetime → concurrent prevention" branch below,
+      // logging at WARN and returning `atomicSkipped: true`, when
+      // the correct semantics is "same time, idempotent skip"
+      // (success: true). Mirrors the same areDatetimesEqual call
+      // used at the pre-update idempotent-skip check (line ~105).
+      areDatetimesEqual(current?.confirmedDateTime, confirmedDateTime)
     ) {
       logger.info(
         { ...logContext, confirmedDateTime },
