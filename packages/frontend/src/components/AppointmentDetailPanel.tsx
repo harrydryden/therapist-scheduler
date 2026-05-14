@@ -6,6 +6,7 @@ import { useAppointmentControls } from '../hooks/useAppointmentControls';
 import DetailHeader from './detail-panel/DetailHeader';
 import ClosureRecommendationSection from './detail-panel/ClosureRecommendationSection';
 import AppointmentSummarySection from './detail-panel/AppointmentSummarySection';
+import WhyAttentionBanner from './detail-panel/WhyAttentionBanner';
 import CompactControlPanel from './detail-panel/CompactControlPanel';
 import AppointmentDetailSkeleton from './skeletons/AppointmentDetailSkeleton';
 
@@ -95,6 +96,12 @@ export default function AppointmentDetailPanel({
       }>
         <div className="flex flex-col">
           <DetailHeader appointment={appointmentDetail} />
+
+          {/* "Why this needs attention" banner — only renders when the
+              summary carries one or more attention reasons. Sits ABOVE
+              the standard summary so the operator's eye lands on the
+              triage signal before the stage / next-action details. */}
+          <WhyAttentionBanner reasons={appointmentDetail.summary?.attentionReasons ?? []} />
 
           <AppointmentSummarySection summary={appointmentDetail.summary} />
 

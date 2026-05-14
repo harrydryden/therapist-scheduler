@@ -28,7 +28,7 @@ interface AppointmentsTableProps {
   loadingList: boolean;
   selectedAppointment: string | null;
   onSelectAppointment: (id: string) => void;
-  onSortChange: (sortBy: 'updatedAt' | 'createdAt') => void;
+  onSortChange: (sortBy: 'updatedAt' | 'createdAt' | 'lastActivityAt') => void;
   onPageChange: (page: number) => void;
 }
 
@@ -47,6 +47,17 @@ interface RowContentProps {
   onClick: () => void;
 }
 
+// Column template — drives both the row body and the sticky header.
+// Keep them in sync.
+//
+//  Health │ Client │ Therapist │ Status │ Stage │ Next action │ Last activity │ Msgs │ Last message
+//
+// Widths balance the new "Next action" column (deserves real estate
+// because it's the primary triage signal) against keeping client /
+// therapist legible.
+const GRID_TEMPLATE =
+  'grid-cols-[24px_minmax(0,1.7fr)_minmax(0,1.7fr)_110px_minmax(0,1.6fr)_minmax(0,2fr)_minmax(0,1fr)_56px_minmax(0,2.4fr)]';
+
 const RowContent = memo(function RowContent({
   appointment,
   isSelected,
@@ -54,7 +65,7 @@ const RowContent = memo(function RowContent({
 }: RowContentProps) {
   const stageLabel = appointment.checkpointStage ? getStageLabel(appointment.checkpointStage) : '—';
   const lastActivity = formatRelativeTime(appointment.lastActivityAt);
-  const confirmedText = appointment.confirmedDateTime ?? '—';
+  const lastActivityAbsolute = formatAbsoluteTime(appointment.lastActivityAt);
 
   // Stage column annotations: things layered on top of the base stage
   // label that operators need to spot quickly.
@@ -72,8 +83,8 @@ const RowContent = memo(function RowContent({
     annotations.push({ label: 'Human control', tone: 'slate' });
   }
 
-  // Latest message preview labels are short prefixes — keeps the column
-  // scannable. Empty snippet falls back to a dash.
+  // Last-message preview labels are short prefixes — keeps the column
+  // scannable. Empty snippet falls back to a placeholder.
   const latestLabel =
     appointment.lastMessagePreview === null
       ? null
@@ -89,7 +100,7 @@ const RowContent = memo(function RowContent({
       onClick={onClick}
       aria-pressed={isSelected}
       aria-label={`Open appointment for ${appointment.userName || appointment.userEmail} with ${appointment.therapistName}`}
-      className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_minmax(0,2.4fr)] gap-3 items-center transition-colors ${
+      className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid ${GRID_TEMPLATE} gap-3 items-center transition-colors ${
         isSelected ? 'bg-spill-blue-50 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
       }`}
       style={{ height: APPOINTMENT_ROW_HEIGHT }}
@@ -118,7 +129,7 @@ const RowContent = memo(function RowContent({
         <StatusBadge status={appointment.status} />
       </span>
 
-      {/* Stage / next */}
+      {/* Stage (base label + annotation chips) */}
       <span className="min-w-0">
         <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
         {annotations.length > 0 && (
@@ -141,18 +152,28 @@ const RowContent = memo(function RowContent({
         )}
       </span>
 
-      {/* Confirmed */}
-      <span className="min-w-0 text-sm text-slate-700 truncate" title={confirmedText}>
-        {confirmedText}
+      {/* Next action — short imperative; wraps across up to 2 lines */}
+      <span
+        className="min-w-0 text-sm text-slate-700 leading-snug line-clamp-2"
+        title={appointment.nextAction}
+      >
+        {appointment.nextAction}
       </span>
 
-      {/* Activity */}
-      <span className="min-w-0">
-        <span className="block text-sm text-slate-700">{appointment.messageCount} msgs</span>
-        <span className="block text-xs text-slate-500">{lastActivity}</span>
+      {/* Last activity — relative time, with absolute on hover */}
+      <span
+        className="min-w-0 text-sm text-slate-600"
+        title={lastActivityAbsolute ?? undefined}
+      >
+        {lastActivity}
       </span>
 
-      {/* Latest message */}
+      {/* Messages in thread — just the count */}
+      <span className="min-w-0 text-sm text-slate-700 text-right tabular-nums">
+        {appointment.messageCount}
+      </span>
+
+      {/* Last message — role badge + snippet */}
       <span className="min-w-0">
         {latestLabel === null ? (
           <span className="block text-xs text-slate-400">No messages yet</span>
@@ -222,10 +243,10 @@ function HeaderCell({
   className = '',
 }: {
   label: string;
-  sortKey?: 'updatedAt' | 'createdAt';
+  sortKey?: 'updatedAt' | 'createdAt' | 'lastActivityAt';
   currentSort?: string;
   currentOrder?: string;
-  onSort?: (key: 'updatedAt' | 'createdAt') => void;
+  onSort?: (key: 'updatedAt' | 'createdAt' | 'lastActivityAt') => void;
   align?: 'left' | 'right' | 'center';
   className?: string;
 }) {
@@ -280,22 +301,23 @@ export default function AppointmentsTable({
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      {/* Sticky header */}
-      <div className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200 px-3 py-2 grid grid-cols-[24px_minmax(0,2fr)_minmax(0,2fr)_110px_minmax(0,2.2fr)_minmax(0,1.6fr)_minmax(0,1.1fr)_minmax(0,2.4fr)] gap-3 items-center">
+      {/* Sticky header — column template MUST match RowContent's GRID_TEMPLATE */}
+      <div className={`sticky top-0 z-10 bg-slate-50 border-b border-slate-200 px-3 py-2 grid ${GRID_TEMPLATE} gap-3 items-center`}>
         <span className="sr-only">Health</span>
         <HeaderCell label="Client" />
         <HeaderCell label="Therapist" />
         <HeaderCell label="Status" />
-        <HeaderCell label="Stage / next" />
-        <HeaderCell label="Confirmed" />
+        <HeaderCell label="Stage" />
+        <HeaderCell label="Next action" />
         <HeaderCell
-          label="Activity"
-          sortKey="updatedAt"
+          label="Last activity"
+          sortKey="lastActivityAt"
           currentSort={filters.sortBy}
           currentOrder={filters.sortOrder}
           onSort={onSortChange}
         />
-        <HeaderCell label="Latest" />
+        <HeaderCell label="Msgs" align="right" />
+        <HeaderCell label="Last message" />
       </div>
 
       {/* Body */}
@@ -359,4 +381,22 @@ function formatRelativeTime(iso: string | null | undefined): string {
   const weeks = Math.floor(days / 7);
   if (weeks < 5) return `${weeks}w ago`;
   return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+/**
+ * Absolute date+time string for the "Last activity" column's
+ * native tooltip — gives admins the precise timestamp when the
+ * relative form ("2d ago") is too coarse for triage.
+ */
+function formatAbsoluteTime(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }

@@ -21,7 +21,9 @@ export const listAppointmentsSchema = z.object({
   dateTo: z.string().optional(),
   page: z.coerce.number().min(1).default(PAGINATION.DEFAULT_PAGE),
   limit: z.coerce.number().min(1).max(PAGINATION.MAX_LIMIT).default(PAGINATION.DEFAULT_LIMIT),
-  sortBy: z.enum(['createdAt', 'updatedAt', 'status']).default('updatedAt'),
+  // `lastActivityAt` lets the dashboard surface the longest-stuck
+  // conversations first when the operator is triaging Needs Attention.
+  sortBy: z.enum(['createdAt', 'updatedAt', 'status', 'lastActivityAt']).default('updatedAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
 

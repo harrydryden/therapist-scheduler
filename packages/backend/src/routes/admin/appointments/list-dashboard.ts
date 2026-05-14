@@ -24,6 +24,7 @@ import {
 } from '../../../services/conversation-health.service';
 import { sendSuccess, Errors } from '../../../utils/response';
 import { buildLastMessagePreview, listAppointmentsSchema } from './schemas';
+import { deriveNextAction } from '../../../utils/next-action';
 
 export async function dashboardListRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get(
@@ -161,6 +162,16 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
             closureRecommendationActioned: apt.closureRecommendationActioned,
             reschedulingInProgress: apt.reschedulingInProgress,
             lastMessagePreview: buildLastMessagePreview(lastMessageById.get(apt.id)),
+            nextAction: deriveNextAction({
+              status: apt.status,
+              humanControlEnabled: apt.humanControlEnabled,
+              chaseSentAt: apt.chaseSentAt,
+              chaseSentTo: apt.chaseSentTo,
+              closureRecommendedAt: apt.closureRecommendedAt,
+              closureRecommendationActioned: apt.closureRecommendationActioned,
+              confirmedDateTime: apt.confirmedDateTime,
+              checkpointStage,
+            }),
           };
         });
 
