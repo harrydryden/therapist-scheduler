@@ -102,7 +102,7 @@ jest.mock('../services/conversation-health.service', () => ({
 }));
 
 import Fastify, { FastifyInstance } from 'fastify';
-import { adminAppointmentRoutes } from '../routes/admin-appointments.routes';
+import { adminAppointmentRoutes } from '../routes/admin/appointments';
 
 const WEBHOOK_SECRET = 'test-webhook-secret';
 const APPOINTMENT_ID = 'apt-1';
