@@ -45,6 +45,7 @@ import {
 import { runWithTrace, extendTraceContext } from '../../../utils/request-tracing';
 import { ConcurrentModificationError } from '../../../errors';
 import { EMAIL, EMAIL_PROCESSING } from '../../../constants';
+import { isGmail404 } from '../../../utils/gmail-errors';
 import { classifyEmail } from '../../../services/email-classifier.service';
 import { emailBounceService } from '../../../services/email-bounce.service';
 import { slackNotificationService } from '../../../services/slack-notification.service';
@@ -181,15 +182,42 @@ export async function processMessage(messageId: string, traceId: string): Promis
       }
 
       // STEP 4: Gmail fetch + MIME parse.
+      //
+      // Gmail returns 404 ("Requested entity was not found") when the
+      // message has been deleted between the scanner enqueueing it
+      // and us getting here — typically because the mailbox owner
+      // cleared it, the spam classifier hard-deleted it, or
+      // permissions changed. Retrying won't recover an entity that
+      // no longer exists, so short-circuit to abandonment instead
+      // of burning the 3-attempt retry budget AND triggering a
+      // spurious "Message Processing Failed" Slack alert. This is
+      // the same pattern the sibling `services/thread-fetching` +
+      // `services/email-ingest` modules already use for thread 404s.
       const gmail = await emailOAuthService.ensureGmailClient();
-      const messageResponse = await executeGmailWithProtection(
-        'fetch-message',
-        () => gmail.users.messages.get({
-          userId: 'me',
-          id: messageId,
-          format: 'full',
-        }),
-      );
+      let messageResponse;
+      try {
+        messageResponse = await executeGmailWithProtection(
+          'fetch-message',
+          () => gmail.users.messages.get({
+            userId: 'me',
+            id: messageId,
+            format: 'full',
+          }),
+        );
+      } catch (err) {
+        if (isGmail404(err)) {
+          logger.info(
+            { traceId, messageId },
+            'Message no longer exists in Gmail (404) — marking as abandoned without retry',
+          );
+          await markMessageProcessed(messageId, 'message-not-found-in-gmail');
+          if (usingDatabaseFallback) {
+            await releaseDbLock(messageId, traceId);
+          }
+          return false;
+        }
+        throw err;
+      }
 
       const email = parseEmailMessage(messageResponse.data);
       if (!email) {
@@ -481,12 +509,34 @@ export async function processMessage(messageId: string, traceId: string): Promis
       await markMessageProcessed(messageId, 'successfully-processed');
       await clearProcessingFailure(messageId);
 
+      // Removing the UNREAD label is a cosmetic post-success step.
+      // The agent has already finished its work and the dedup row is
+      // committed (`markMessageProcessed` above) — letting an error
+      // here propagate would trigger the outer catch's failure
+      // tracking + Slack alert for a message that processed fine.
+      // Specifically: 404 here means the user deleted the message
+      // between processing and label removal; any other error means
+      // a transient Gmail glitch. Either way, swallow.
       const gmailClient = await emailOAuthService.ensureGmailClient();
-      await gmailClient.users.messages.modify({
-        userId: 'me',
-        id: messageId,
-        requestBody: { removeLabelIds: ['UNREAD'] },
-      });
+      try {
+        await gmailClient.users.messages.modify({
+          userId: 'me',
+          id: messageId,
+          requestBody: { removeLabelIds: ['UNREAD'] },
+        });
+      } catch (err) {
+        if (isGmail404(err)) {
+          logger.info(
+            { traceId, messageId },
+            'Message deleted between processing and UNREAD-label removal — agent work already committed, skipping label modify',
+          );
+        } else {
+          logger.warn(
+            { traceId, messageId, err },
+            'Failed to remove UNREAD label after successful processing (non-fatal — agent work already committed)',
+          );
+        }
+      }
 
       return true;
     } catch (error) {

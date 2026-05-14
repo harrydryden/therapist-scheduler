@@ -14,6 +14,7 @@ import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
 } from '../utils/gmail-auth';
+import { isGmail404 } from '../utils/gmail-errors';
 
 /**
  * Escape context markers in email content to prevent AI confusion
@@ -140,7 +141,7 @@ export class ThreadFetchingService {
       return this.processGmailThread(threadId, traceId, threadResponse.data.messages || []);
     } catch (error: any) {
       // Handle thread not found (404)
-      if (error?.code === 404 || error?.status === 404) {
+      if (isGmail404(error)) {
         logger.warn({ traceId, threadId }, 'Thread not found in Gmail');
         return null;
       }
