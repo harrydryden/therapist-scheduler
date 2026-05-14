@@ -7,7 +7,7 @@ import DetailHeader from './detail-panel/DetailHeader';
 import ClosureRecommendationSection from './detail-panel/ClosureRecommendationSection';
 import AppointmentSummarySection from './detail-panel/AppointmentSummarySection';
 import WhyAttentionBanner from './detail-panel/WhyAttentionBanner';
-import LastMessageSection from './detail-panel/LastMessageSection';
+import LastActionSection from './detail-panel/LastActionSection';
 import CompactControlPanel from './detail-panel/CompactControlPanel';
 import AppointmentDetailSkeleton from './skeletons/AppointmentDetailSkeleton';
 
@@ -106,13 +106,16 @@ export default function AppointmentDetailPanel({
 
           <AppointmentSummarySection summary={appointmentDetail.summary} />
 
-          {/* Last-message preview — moved here from the dashboard
-              table where long messages overflowed the row. Sits
-              between the summary (which says "X messages, last
-              activity Yd ago") and the closure recommendation —
-              the natural visual flow: "here's the count, here's
-              what was actually said, here's what to do next". */}
-          <LastMessageSection preview={appointmentDetail.lastMessagePreview} />
+          {/* Last action — the most recent entry in the
+              conversation log. Sits between the summary
+              ("X messages, last activity Yd ago") and the
+              closure recommendation, so the visual flow is:
+              "here's the count, here's what was last done /
+              said, here's what to do next". Named "Last action"
+              rather than "Last message" because the entry is
+              often the agent's narration of a tool call rather
+              than a literal message body. */}
+          <LastActionSection preview={appointmentDetail.lastMessagePreview} />
 
           <ClosureRecommendationSection
             appointment={appointmentDetail}
