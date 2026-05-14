@@ -24,18 +24,26 @@ import { extractNameFromEmail, type EmailMessage } from '../../../utils/email-mi
 import { EMAIL } from '../../../constants';
 import { getAgentProcessor } from './agent-processor';
 
-const WEEKLY_REPLY_PATTERNS = [
+// "Re:"-prefixed patterns are matched via `includes()` so common
+// variants ("Re: Re: Book ...", auto-prepended forwards, etc.) all
+// route to the inquiry handler.
+const WEEKLY_REPLY_PREFIX_PATTERNS = [
   're: book your therapy session with spill',
   're:book your therapy session with spill',
-  // Direct reply without Re: prefix (some clients)
-  'book your therapy session with spill',
 ] as const;
+
+// The bare phrase (some clients strip the "Re:" prefix on reply)
+// requires STRICT equality. Without this constraint, a subject like
+// "I want to book your therapy session with Spill" would misroute
+// to the weekly-mailing inquiry handler — that's a real false-
+// positive risk because clients sometimes write the phrase verbatim
+// when starting a fresh booking conversation rather than replying.
+const WEEKLY_REPLY_EXACT_PATTERN = 'book your therapy session with spill';
 
 export function isWeeklyMailingReply(email: EmailMessage): boolean {
   const subjectLower = email.subject.toLowerCase().trim();
-  return WEEKLY_REPLY_PATTERNS.some(
-    (p) => p === subjectLower || subjectLower.includes(p),
-  );
+  if (subjectLower === WEEKLY_REPLY_EXACT_PATTERN) return true;
+  return WEEKLY_REPLY_PREFIX_PATTERNS.some((p) => subjectLower.includes(p));
 }
 
 export async function processWeeklyMailingReply(

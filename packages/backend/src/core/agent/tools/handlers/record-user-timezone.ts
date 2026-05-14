@@ -66,6 +66,8 @@ export async function handleRecordUserTimezone(
       success: true,
       toolName: 'record_user_timezone',
       resultMessage: `Note: no User row matched for ${context.userEmail}; the timezone was not persisted (client may not have a User record yet).`,
+      // Informational: see ToolExecutionResult docstring.
+      bypassPostSuccessBookkeeping: true,
     };
   }
   logger.info(
@@ -76,5 +78,9 @@ export async function handleRecordUserTimezone(
     success: true,
     toolName: 'record_user_timezone',
     resultMessage: `Recorded client timezone: ${timezone}.`,
+    // Informational: a corrected timezone might be re-recorded mid-
+    // conversation if the user clarifies their location. Don't burn
+    // ceiling budget on it. See ToolExecutionResult docstring.
+    bypassPostSuccessBookkeeping: true,
   };
 }

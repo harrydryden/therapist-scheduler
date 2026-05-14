@@ -114,6 +114,10 @@ export async function handleRecordAvailabilityWindow(
         resultMessage: result.added
           ? `Therapist availability window recorded on permanent record (id: ${result.windowId}, status: ${parsed.data.status}). Total upcoming windows: ${result.windows.length}.`
           : `Therapist availability window already present (id: ${result.windowId}). Skipped duplicate.`,
+        // Informational: window storage already dedups by content
+        // hash. The agent may legitimately record many windows
+        // across one conversation. See ToolExecutionResult docstring.
+        bypassPostSuccessBookkeeping: true,
       };
     }
 
@@ -130,6 +134,8 @@ export async function handleRecordAvailabilityWindow(
       resultMessage: result.added
         ? `Availability window recorded for this booking (id: ${result.windowId}, status: ${parsed.data.status}, source: ${effectiveSource}). Total active windows: ${result.memory.availabilityWindows.length}.`
         : `Availability window already present (id: ${result.windowId}). Skipped duplicate.`,
+      // Informational — see therapist-source branch above.
+      bypassPostSuccessBookkeeping: true,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

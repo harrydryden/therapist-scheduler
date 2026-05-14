@@ -148,10 +148,15 @@ export async function processMessage(messageId: string, traceId: string): Promis
           // Re-add to Redis ZSET for faster future checks. We only
           // touch the cache here — the DB record is already
           // authoritative with whatever context it was originally
-          // marked under.
-          redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId).catch((err) => {
+          // marked under. Awaited (matches pre-refactor semantics)
+          // so a subsequent processMessage on the same id within
+          // milliseconds is guaranteed to hit the Redis fast-path
+          // rather than racing the backfill.
+          try {
+            await redis.zadd(PROCESSED_MESSAGES_KEY, Date.now(), messageId);
+          } catch (err) {
             logger.debug({ traceId, messageId, err }, 'Failed to backfill Redis ZSET (non-fatal)');
-          });
+          }
           return false;
         }
 
@@ -517,7 +522,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
 
       // Release the DB-fallback lock so the scanner can retry.
       if (usingDatabaseFallback) {
-        await releaseDbLock(messageId);
+        await releaseDbLock(messageId, traceId);
       }
 
       // First-failure visibility: send one Slack alert per (messageId,

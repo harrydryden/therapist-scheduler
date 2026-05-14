@@ -45,6 +45,8 @@ export async function handleRecordTherapistTimezone(
       success: true,
       toolName: 'record_therapist_timezone',
       resultMessage: `Note: no therapistId on this legacy appointment; ${timezone} was not persisted to a Therapist record.`,
+      // Informational: see ToolExecutionResult docstring.
+      bypassPostSuccessBookkeeping: true,
     };
   }
   const r = await prisma.therapist.updateMany({
@@ -60,6 +62,8 @@ export async function handleRecordTherapistTimezone(
       success: true,
       toolName: 'record_therapist_timezone',
       resultMessage: `Note: no Therapist row matched for ${context.therapistId}; the timezone was not persisted.`,
+      // Informational: see ToolExecutionResult docstring.
+      bypassPostSuccessBookkeeping: true,
     };
   }
   logger.info(
@@ -70,5 +74,9 @@ export async function handleRecordTherapistTimezone(
     success: true,
     toolName: 'record_therapist_timezone',
     resultMessage: `Recorded therapist timezone: ${timezone}.`,
+    // Informational: a corrected timezone might be re-recorded
+    // mid-conversation if the therapist clarifies their location.
+    // See ToolExecutionResult docstring.
+    bypassPostSuccessBookkeeping: true,
   };
 }

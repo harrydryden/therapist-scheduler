@@ -36,6 +36,8 @@ export async function handleRecordBookingLink(
       toolName: 'record_booking_link',
       resultMessage:
         'Booking link noted but not persisted (legacy appointment without a linked therapist row).',
+      // Informational: see ToolExecutionResult docstring.
+      bypassPostSuccessBookkeeping: true,
     };
   }
   try {
@@ -44,6 +46,9 @@ export async function handleRecordBookingLink(
       success: true,
       toolName: 'record_booking_link',
       resultMessage: `Booking link recorded on therapist record: ${parsed.data.url}`,
+      // Informational: most-recent-write wins at the storage layer.
+      // See ToolExecutionResult docstring.
+      bypassPostSuccessBookkeeping: true,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

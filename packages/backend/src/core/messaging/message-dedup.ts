@@ -3,18 +3,22 @@
  *
  * Wraps the five existing primitives (Redis ZSET, Redis per-msg lock,
  * Redis unmatched-attempt counter, Redis Slack-alert dedup, DB
- * `ProcessedGmailMessage`) behind a typed API so future callers don't
- * have to remember which key prefix is canonical or what the DB
- * fallback looks like.
+ * `ProcessedGmailMessage`) behind a typed API so callers don't have
+ * to remember which key prefix is canonical or what the DB fallback
+ * looks like.
  *
- * Behaviour mirrors the in-place implementation in
+ * Behaviour mirrors the original in-place implementation in
  * `email-message-processor.processMessage` exactly — the same Lua
  * script, the same serializable-transaction DB fallback, the same
- * upsert pattern for marking processed. The point isn't to change
- * semantics, it's to give the contract a single home.
+ * upsert pattern for marking processed. The point is to give the
+ * contract a single home, not to change semantics.
  *
- * See `core/messaging/README.md` for the migration plan; this PR
- * does NOT migrate existing callsites.
+ * The primary callsites in `core/email/inbound/process.ts` were
+ * migrated to this facade in Phase 2b. `releaseMessageLock` is
+ * available but unused — the email pipeline currently uses the
+ * lower-level `utils/redis-locks.releaseLock` to match the pre-
+ * refactor pattern. Migrating that callsite is a small follow-up
+ * tracked in `docs/REFACTOR_PLAN.md`.
  */
 
 import { prisma } from '../../utils/database';
@@ -210,13 +214,17 @@ export async function releaseMessageLock(messageId: string, traceId: string): Pr
  * Idempotent: P2025 (RecordNotFound) is treated as success. Other errors
  * are logged at WARN but swallowed so failure handling can continue.
  */
-export async function releaseDbLock(messageId: string): Promise<void> {
+export async function releaseDbLock(messageId: string, traceId?: string): Promise<void> {
   try {
     await prisma.processedGmailMessage.delete({ where: { id: messageId } });
   } catch (err: unknown) {
     const code = (err as { code?: string } | null)?.code;
     if (code === 'P2025') return;
-    logger.warn({ messageId, err }, 'Failed to release DB fallback lock');
+    // traceId is also surfaced via the pino mixin when the caller
+    // runs inside runWithTrace (which the email pipeline does), but
+    // pass it explicitly so the log line is self-contained even when
+    // an external caller invokes this outside a trace context.
+    logger.warn({ traceId, messageId, err }, 'Failed to release DB fallback lock');
   }
 }
 

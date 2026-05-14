@@ -467,6 +467,31 @@ describe('remember tool — strict appointment-ID scoping', () => {
     expect(updateCall).toBeDefined();
     expect(updateCall?.[0]?.where).toEqual({ id: 'apt-1' });
   });
+
+  // Regression test for the Phase 2c bookkeeping-bypass.
+  // Pre-refactor, the `remember` tool early-returned from the dispatch
+  // switch and never hit the post-success bookkeeping path. The
+  // bookkeeping path writes a Redis `tool:executed:<hash>` key for
+  // idempotency dedup. If we lose the bypass and the bookkeeping fires
+  // for `remember`, this assertion fails because the redis.set call
+  // shows up for a `tool:executed:` key.
+  it('does NOT mark idempotency for informational tools (bypassPostSuccessBookkeeping)', async () => {
+    getPrismaMock().appointmentRequest.findUnique.mockResolvedValueOnce({ memory: null });
+    getPrismaMock().appointmentRequest.update.mockResolvedValueOnce({ id: 'apt-1' });
+
+    const exec = new AIToolExecutorService('test');
+    await exec.executeToolCall(
+      toolCall('remember', { note: 'user prefers afternoons', category: 'preference' }),
+      baseContext,
+    );
+
+    // No Redis SET to `tool:executed:*` for `remember` — bookkeeping
+    // is bypassed.
+    const toolExecutedSets = mockRedisSet.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && (call[0] as string).startsWith('tool:executed:'),
+    );
+    expect(toolExecutedSets).toHaveLength(0);
+  });
 });
 
 // =============================================================================
