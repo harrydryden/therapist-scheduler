@@ -171,6 +171,16 @@ export async function addNote(
           select: { id: true },
         });
 
+        // Phase 3a dual-write: mirror `memory` to the sibling
+        // appointment_conversations row. Same transaction so a
+        // partial-write divergence is impossible. Cutover (reads
+        // switching to the mirror) is a follow-up PR.
+        await tx.appointmentConversation.upsert({
+          where: { appointmentId },
+          create: { appointmentId, memory: updated as unknown as object },
+          update: { memory: updated as unknown as object },
+        });
+
         logger.info(
           { appointmentId, noteId: result.noteId, category, totalNotes: updated.notes.length },
           'agent-memory: note added',
@@ -249,6 +259,13 @@ export async function addAvailabilityWindow(
           where: { id: appointmentId },
           data: { memory: updated as unknown as object },
           select: { id: true },
+        });
+
+        // Phase 3a dual-write — see the addNote handler for context.
+        await tx.appointmentConversation.upsert({
+          where: { appointmentId },
+          create: { appointmentId, memory: updated as unknown as object },
+          update: { memory: updated as unknown as object },
         });
 
         logger.info(

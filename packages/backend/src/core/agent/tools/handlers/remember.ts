@@ -37,5 +37,10 @@ export async function handleRemember(
     resultMessage: result.added
       ? `Note recorded (category: ${parsed.data.category}, id: ${result.noteId}). Total notes: ${result.memory.notes.length}.`
       : `Note already present (id: ${result.noteId}). Skipped duplicate.`,
+    // Informational: addNote already dedups by content-hash. We want
+    // the agent to be able to call `remember` repeatedly across a
+    // long conversation without burning per-appointment ceiling
+    // budget. See ToolExecutionResult docstring.
+    bypassPostSuccessBookkeeping: true,
   };
 }

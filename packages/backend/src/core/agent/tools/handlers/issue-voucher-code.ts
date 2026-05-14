@@ -86,5 +86,10 @@ export async function handleIssueVoucherCode(
     success: true,
     toolName: 'issue_voucher_code',
     resultMessage: `Voucher issued successfully. Display code: ${voucherResult.displayCode}. Booking URL: ${voucherResult.url}. Expires: ${voucherExpiry}. Share the display code and booking URL with the user.`,
+    // Informational: the upsert into VoucherTracking is keyed on the
+    // user's email so re-issuance overwrites the prior code idempotently.
+    // No need for the dispatch-level idempotency mark / counter increment
+    // / 'executed' audit event. See ToolExecutionResult docstring.
+    bypassPostSuccessBookkeeping: true,
   };
 }

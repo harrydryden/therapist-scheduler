@@ -226,14 +226,31 @@ export async function executeToolCall(
   }
 
   // ─── STEP 5: POST-SUCCESS BOOKKEEPING ─────────────────────────
+  // Informational tools (`remember`, `record_availability_window`,
+  // `record_booking_link`, `record_user_timezone`,
+  // `record_therapist_timezone`, `issue_voucher_code`) opt out via
+  // `bypassPostSuccessBookkeeping`. They have their own at-the-
+  // storage-layer dedup, may legitimately run many times across a
+  // long conversation, and would otherwise push working appointments
+  // into the per-appointment lifetime ceiling prematurely.
+  //
+  // This preserves the pre-Phase-2c behaviour where those tools
+  // early-returned from the dispatch switch, bypassing the post-
+  // switch bookkeeping block. See the `bypassPostSuccessBookkeeping`
+  // docstring on ToolExecutionResult for the full rationale.
+  if (finalResult.bypassPostSuccessBookkeeping) {
+    return finalResult;
+  }
+
   await markToolExecuted(toolHash, traceId);
   logger.debug(
     { traceId, tool: name, toolHash },
     'Tool execution marked as complete (idempotency recorded)',
   );
 
-  // Only successful, non-skipped calls advance the counter. Idempotent
-  // replays, human-control skips, and failures do not inflate it.
+  // Only successful, non-skipped, non-bypassed calls advance the
+  // counter. Idempotent replays, human-control skips, failures,
+  // and informational tools do not inflate it.
   await incrementAppointmentToolCount(context.appointmentRequestId);
 
   auditEventService.logToolExecuted(context.appointmentRequestId, {

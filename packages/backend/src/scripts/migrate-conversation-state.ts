@@ -153,16 +153,27 @@ async function migrateConversationStates() {
         facts,
       };
 
-      // Store updated state and sync denormalized columns
-      await prisma.appointmentRequest.update({
-        where: { id: appointment.id },
-        data: {
-          conversationState: updatedState as object,
-          messageCount: messageCount,
-          checkpointStage: stage,
-        },
-        select: { id: true },
-      });
+      // Store updated state and sync denormalized columns.
+      // Phase 3a dual-write: mirror conversationState to
+      // appointment_conversations so a re-run of this script doesn't
+      // diverge from the new sibling table.
+      const stateJson = updatedState as object;
+      await prisma.$transaction([
+        prisma.appointmentRequest.update({
+          where: { id: appointment.id },
+          data: {
+            conversationState: stateJson,
+            messageCount: messageCount,
+            checkpointStage: stage,
+          },
+          select: { id: true },
+        }),
+        prisma.appointmentConversation.upsert({
+          where: { appointmentId: appointment.id },
+          create: { appointmentId: appointment.id, conversationState: stateJson },
+          update: { conversationState: stateJson },
+        }),
+      ]);
 
       logger.info(
         {

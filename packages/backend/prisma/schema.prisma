@@ -280,6 +280,13 @@ model AppointmentRequest {
   // Relation to pending emails
   pendingEmails PendingEmail[]
 
+  // Relation to the sibling conversation table (Phase 3a expand).
+  // 1:1 — created lazily on first conversation write. During the
+  // expand+dual-write phase, `conversationState` + `memory` are
+  // mirrored to this table; reads still hit the columns on this
+  // row. See docs/REFACTOR_PLAN.md for the cutover plan.
+  conversation AppointmentConversation?
+
   // Relation to feedback submissions
   feedbackSubmissions FeedbackSubmission[]
 
@@ -321,6 +328,62 @@ model AppointmentRequest {
   @@index([status, chaseSentAt]) // For chase follow-up queries
   @@index([closureRecommendedAt]) // For closure recommendation dashboard
   @@map("appointment_requests")
+}
+
+// Conversation state extracted from AppointmentRequest in Phase 3a
+// of the refactor (see docs/REFACTOR_PLAN.md).
+//
+// Why split: `conversationState` is the largest field on the
+// AppointmentRequest row (~500KB in the worst case, typically tens of
+// KB for active conversations) and the booking-FSM column set is
+// hot-read by background services that don't need the blob.
+// `memory` is much smaller but shares the same "read-only by the
+// agent / writer-by-the-tool" access pattern, so it lives here too.
+//
+// Lifecycle: created LAZILY by the first conversation write — both
+// `storeConversationState` and `addNote` upsert into this table. The
+// cascade delete via the FK keeps cleanup automatic when an
+// appointment is removed.
+//
+// Migration phase (current PR — Phase 3a):
+//   - Schema is EXPANDED: the new table exists, but the legacy
+//     `conversationState` + `memory` columns on `appointment_requests`
+//     are STILL the source of truth for reads.
+//   - Every writer now DUAL-WRITES: same JSON to both tables, both
+//     wrapped in the same transaction.
+//   - A backfill script copies pre-existing rows.
+//
+// Follow-up PR (Phase 3b — cutover):
+//   - Reads switch to this table.
+//   - Dual-write continues for safety so a rollback is one-line.
+//
+// Follow-up PR (Phase 3c — contract):
+//   - Once cutover is proven in production for >= 1 week:
+//     legacy columns dropped from `appointment_requests`.
+model AppointmentConversation {
+  // Primary key IS the appointment id — 1:1 enforced at the schema
+  // level. No surrogate row id, so the join is a trivial PK lookup
+  // and there's no chance of orphaned rows.
+  appointmentId String @id @map("appointment_id")
+
+  // Full conversation log (system prompt + messages + checkpoint +
+  // facts). Up to ~500KB in the largest cases.
+  conversationState Json? @map("conversation_state")
+
+  // Agent-curated Layer B thread memory (notes + availability windows).
+  // Distinct from conversationState because the agent writes it via a
+  // separate tool (`remember`) and the eviction model is different
+  // (FIFO with content-hash dedup; see agent-memory.service.ts).
+  memory Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Cascade delete keeps cleanup automatic. The FK is also the PK,
+  // so the relation is unambiguous and 1:1 at the schema level.
+  appointment AppointmentRequest @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@map("appointment_conversations")
 }
 
 // Therapist-only conversations handled by the availability-collection agent.

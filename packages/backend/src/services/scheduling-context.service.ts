@@ -46,6 +46,29 @@ export interface ToolExecutionResult {
   resultMessage?: string;
   /** Response tracking data to merge into conversation state (avoids mid-loop state save conflicts) */
   responseTracking?: { lastEmailSentToTherapist: string; pendingSince: string };
+  /**
+   * Suppress the dispatch orchestrator's post-success bookkeeping
+   * (Redis idempotency mark, per-appointment lifetime-ceiling
+   * increment, `bucket: 'executed'` audit event).
+   *
+   * Set by tools that are "informational" — they may run repeatedly
+   * with the same input (e.g. the agent adds another `remember`
+   * note, records another availability window, persists a corrected
+   * timezone) and have their own at-the-storage-layer dedup, so the
+   * outer Redis idempotency mark is unhelpful and the ceiling
+   * increment would otherwise push working appointments into human-
+   * control prematurely.
+   *
+   * Preserves the pre-Phase-2c behaviour exactly: in the original
+   * monolithic executor those six tools (`issue_voucher_code`,
+   * `remember`, `record_availability_window`, `record_booking_link`,
+   * `record_user_timezone`, `record_therapist_timezone`) early-
+   * returned from the dispatch switch, bypassing the post-switch
+   * bookkeeping block. The refactor surfaces that asymmetry
+   * explicitly via this flag rather than relying on switch-statement
+   * control flow.
+   */
+  bypassPostSuccessBookkeeping?: boolean;
 }
 
 export type BookingMethod = 'agent_negotiated' | 'direct_link';

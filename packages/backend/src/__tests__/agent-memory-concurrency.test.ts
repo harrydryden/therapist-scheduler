@@ -55,8 +55,16 @@ jest.mock('../utils/database', () => {
     return [];
   };
 
+  // Phase 3a dual-write: agent-memory writes mirror to
+  // appointment_conversations in the same transaction. A no-op stub
+  // is enough for this test — concurrency / serialization is what's
+  // under test, and the mirror upsert reuses the same in-memory
+  // tx semantics as the legacy update.
+  const conversationUpsert = jest.fn(async () => ({ appointmentId: 'noop' }));
+
   const tx = {
     appointmentRequest: { findUnique: findUniqueImpl, update: updateImpl },
+    appointmentConversation: { upsert: conversationUpsert },
     $queryRaw: queryRawImpl,
   };
   const $transaction = async (fn: (txArg: unknown) => Promise<unknown>) => {
@@ -67,6 +75,7 @@ jest.mock('../utils/database', () => {
   return {
     prisma: {
       appointmentRequest: { findUnique: findUniqueImpl, update: updateImpl },
+      appointmentConversation: { upsert: conversationUpsert },
       $transaction,
       $queryRaw: queryRawImpl,
     },
