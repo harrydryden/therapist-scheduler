@@ -166,6 +166,37 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
 
       expectNoSideEffectsFired();
     });
+
+    // Regression test for the post-Phase-3a hardening pass — see the
+    // parallel test in the atomic-path describe below for full
+    // context. Both paths share the same race-recovery branch, so
+    // both need explicit semantic-equality coverage.
+    it('returns idempotent skip when re-fetch shows the SAME instant rendered differently (semantic equality)', async () => {
+      mockFindUnique.mockResolvedValueOnce(baseRow);
+      mockUpdate.mockRejectedValueOnce(p2025());
+      // Concurrent caller wrote the same UTC instant with sub-second
+      // precision stripped — different string, same Date when parsed.
+      mockFindUnique.mockResolvedValueOnce({
+        status: 'confirmed',
+        confirmedDateTime: '2026-06-01T10:00:00Z',
+      });
+
+      const result = await appointmentLifecycleService.transitionToConfirmed({
+        appointmentId: 'apt-1',
+        confirmedDateTime: TARGET, // '2026-06-01T10:00:00.000Z'
+        source: 'admin',
+        adminId: 'admin-7',
+      });
+
+      expect(result).toEqual({
+        success: true,
+        previousStatus: 'confirmed',
+        newStatus: 'confirmed',
+        skipped: true,
+      });
+      expectNoSideEffectsFired();
+      expectNoAuditWrites();
+    });
   });
 
   describe('atomic path', () => {
@@ -221,6 +252,49 @@ describe('transitionToConfirmed concurrent reschedule race', () => {
         atomicSkipped: true,
       });
       expectNoSideEffectsFired();
+    });
+
+    // Regression test for the post-Phase-3a hardening pass.
+    // Pre-fix: the P2025 race-recovery path used string equality on
+    // `confirmedDateTime`. Two concurrent confirmations that
+    // serialize to the same instant but use slightly different
+    // renderings (e.g. agent emits "Mon 3 Feb 10am" while another
+    // process wrote "Monday 3rd February at 10:00am") would land in
+    // the "different datetime → concurrent prevention" branch and
+    // return `atomicSkipped: true` — when the semantically-correct
+    // outcome is "same time, idempotent skip" → `success: true`.
+    // Fix uses `areDatetimesEqual` for parity with the pre-update
+    // idempotent-skip check at the top of transitionToConfirmed.
+    it('returns idempotent skip when re-fetch shows the SAME instant rendered differently (semantic equality)', async () => {
+      mockFindUnique.mockResolvedValueOnce({ ...baseRow, status: 'negotiating', confirmedDateTime: null });
+      mockUpdate.mockRejectedValueOnce(p2025());
+      // Concurrent caller wrote the SAME UTC instant but with a
+      // different string form (sub-second precision stripped). The
+      // ISO parser collapses these to the same Date; areDatetimesEqual
+      // returns true. String equality would NOT match — would have
+      // routed to the atomicSkipped branch below.
+      mockFindUnique.mockResolvedValueOnce({
+        status: 'confirmed',
+        humanControlEnabled: false,
+        confirmedDateTime: '2026-06-01T10:00:00Z',
+      });
+
+      const result = await appointmentLifecycleService.transitionToConfirmed({
+        appointmentId: 'apt-1',
+        confirmedDateTime: TARGET, // '2026-06-01T10:00:00.000Z'
+        source: 'admin',
+        adminId: 'admin-7',
+        atomic: { requireStatuses: ['negotiating'] },
+      });
+
+      expect(result).toEqual({
+        success: true,
+        previousStatus: 'negotiating',
+        newStatus: 'confirmed',
+        skipped: true,
+      });
+      expectNoSideEffectsFired();
+      expectNoAuditWrites();
     });
 
     it('returns atomicSkipped when humanControlEnabled flipped on between read and write', async () => {
