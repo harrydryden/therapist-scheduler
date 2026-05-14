@@ -19,6 +19,7 @@ import {
   toAppointmentForHealth,
 } from '../../../services/conversation-health.service';
 import { deriveAttentionReasons } from '../../../utils/attention-reasons';
+import { buildLastMessagePreview } from './schemas';
 
 export async function detailRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Params: { id: string } }>(
@@ -80,10 +81,47 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           return Errors.notFound(reply, 'Appointment');
         }
 
-        // Parse raw conversation state once for summary builder.
+        // Parse raw conversation state once — reused for the summary
+        // builder AND for the last-message preview (avoids parsing the
+        // potentially large JSON blob twice).
+        const rawConversationState = parseRawConversationState(appointment.conversationState);
         const appointmentSummary = buildAppointmentSummary(
-          parseRawConversationState(appointment.conversationState),
+          rawConversationState,
           appointment,
+        );
+
+        // Last-message preview surfaced in the detail panel. The
+        // dashboard list previously rendered this in a table cell;
+        // long agent / admin messages overflowed and bled into
+        // neighbouring rows, so the column moved here where there's
+        // room for the full text. Reuses the same helper as the list
+        // so the role-normalisation (`assistant` → `agent`, etc.)
+        // stays consistent across views.
+        //
+        // Unlike the list endpoint (which caps content to 240 chars
+        // in SQL to avoid loading the full blob), the detail
+        // endpoint already has the parsed conversation state on
+        // hand. Send the full last-message content so the panel can
+        // render it without truncation.
+        const messages = Array.isArray(rawConversationState?.messages)
+          ? (rawConversationState!.messages as Array<{ role?: unknown; content?: unknown }>)
+          : [];
+        const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+        const lastMessagePreview = buildLastMessagePreview(
+          lastMessage
+            ? {
+                role: typeof lastMessage.role === 'string' ? lastMessage.role : null,
+                content: typeof lastMessage.content === 'string'
+                  ? lastMessage.content
+                  // Tool-use / tool-result messages serialise content
+                  // as an array — surface a JSON representation so the
+                  // operator at least sees something. Better than the
+                  // historical "No messages yet" fallback.
+                  : lastMessage.content !== null && lastMessage.content !== undefined
+                    ? JSON.stringify(lastMessage.content)
+                    : null,
+              }
+            : undefined,
         );
 
         // Compute the per-appointment health result and translate
@@ -133,6 +171,7 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           closureRecommendedAt: appointment.closureRecommendedAt,
           closureRecommendedReason: appointment.closureRecommendedReason,
           closureRecommendationActioned: appointment.closureRecommendationActioned,
+          lastMessagePreview,
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to fetch appointment detail');
