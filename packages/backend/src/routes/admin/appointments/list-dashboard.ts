@@ -111,11 +111,33 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
 
         // Last-message preview per appointment via JSONB path expression —
         // capped at 240 chars at the DB layer so we never load the full blob.
+        //
+        // The CASE on `jsonb_typeof` is the reason the entire query is the
+        // shape it is. `storeConversationState` historically writes the
+        // result of `JSON.stringify(state)` into the `conversation_state`
+        // Prisma `Json?` field. Prisma treats a string-typed value as a
+        // JSON value, so it stores a JSON STRING (jsonb_typeof = 'string')
+        // rather than a JSON OBJECT. Applying `->'messages'` directly to
+        // a jsonb string returns NULL — which produced "No messages yet"
+        // for every row that has a real conversation log. The
+        // `(stored #>> '{}')::jsonb` cast unwraps the inner string and
+        // re-parses it as jsonb so the path expression succeeds.
+        //
+        // The `'object'` branch covers any future row that's written via
+        // the object form (e.g. the `migrate-conversation-state` script).
+        // Both paths must stay; switching writes to object form is a
+        // separate cleanup tracked outside this PR.
         const lastMessages = appointments.length > 0
           ? await prisma.$queryRaw<Array<{ id: string; role: string | null; content: string | null }>>`
               SELECT id,
-                     conversation_state->'messages'->-1->>'role' AS role,
-                     LEFT(conversation_state->'messages'->-1->>'content', 240) AS content
+                     CASE jsonb_typeof(conversation_state)
+                       WHEN 'object' THEN conversation_state->'messages'->-1->>'role'
+                       WHEN 'string' THEN ((conversation_state #>> '{}')::jsonb)->'messages'->-1->>'role'
+                     END AS role,
+                     CASE jsonb_typeof(conversation_state)
+                       WHEN 'object' THEN LEFT(conversation_state->'messages'->-1->>'content', 240)
+                       WHEN 'string' THEN LEFT(((conversation_state #>> '{}')::jsonb)->'messages'->-1->>'content', 240)
+                     END AS content
               FROM appointment_requests
               WHERE id IN (${Prisma.join(appointments.map((a) => a.id))})
             `
