@@ -50,13 +50,16 @@ interface RowContentProps {
 // Column template — drives both the row body and the sticky header.
 // Keep them in sync.
 //
-//  Health │ Client │ Therapist │ Status │ Stage │ Next action │ Last activity │ Msgs │ Last message
+//  Health │ Client │ Therapist │ Status │ Stage │ Next action │ Last activity │ Msgs
 //
-// Widths balance the new "Next action" column (deserves real estate
-// because it's the primary triage signal) against keeping client /
-// therapist legible.
+// The "Last message" column previously sat at the right edge but
+// long agent / admin messages overflowed the cell vertically and
+// bled into neighbouring rows. The preview now lives on the
+// appointment detail panel where there's room for the full text.
+// Remaining widths rebalance to give "Next action" more breathing
+// room — it's the primary triage signal.
 const GRID_TEMPLATE =
-  'grid-cols-[24px_minmax(0,1.7fr)_minmax(0,1.7fr)_110px_minmax(0,1.6fr)_minmax(0,2fr)_minmax(0,1fr)_56px_minmax(0,2.4fr)]';
+  'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,1.8fr)_minmax(0,2.4fr)_minmax(0,1fr)_64px]';
 
 const RowContent = memo(function RowContent({
   appointment,
@@ -82,17 +85,6 @@ const RowContent = memo(function RowContent({
   if (appointment.humanControlEnabled) {
     annotations.push({ label: 'Human control', tone: 'slate' });
   }
-
-  // Last-message preview labels are short prefixes — keeps the column
-  // scannable. Empty snippet falls back to a placeholder.
-  const latestLabel =
-    appointment.lastMessagePreview === null
-      ? null
-      : appointment.lastMessagePreview.role === 'agent'
-        ? 'Agent'
-        : appointment.lastMessagePreview.role === 'admin'
-          ? 'Admin'
-          : 'Inbound';
 
   return (
     <button
@@ -168,36 +160,12 @@ const RowContent = memo(function RowContent({
         {lastActivity}
       </span>
 
-      {/* Messages in thread — just the count */}
+      {/* Messages in thread — just the count. Last column; the
+          full last-message preview lives on the detail panel
+          (`LastMessageSection`) where there's room for the body
+          text without overflowing into neighbouring rows. */}
       <span className="min-w-0 text-sm text-slate-700 text-right tabular-nums">
         {appointment.messageCount}
-      </span>
-
-      {/* Last message — role badge + snippet */}
-      <span className="min-w-0">
-        {latestLabel === null ? (
-          <span className="block text-xs text-slate-400">No messages yet</span>
-        ) : (
-          <>
-            <span
-              className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium mb-0.5 ${
-                latestLabel === 'Agent'
-                  ? 'bg-spill-blue-100 text-spill-blue-800'
-                  : latestLabel === 'Admin'
-                    ? 'bg-slate-200 text-slate-700'
-                    : 'bg-emerald-100 text-emerald-800'
-              }`}
-            >
-              {latestLabel}
-            </span>
-            <span
-              className="block text-xs text-slate-600 line-clamp-2 leading-snug"
-              title={appointment.lastMessagePreview?.snippet}
-            >
-              {appointment.lastMessagePreview?.snippet}
-            </span>
-          </>
-        )}
       </span>
     </button>
   );
@@ -332,7 +300,6 @@ export default function AppointmentsTable({
           onSort={onSortChange}
         />
         <HeaderCell label="Msgs" align="right" />
-        <HeaderCell label="Last message" />
       </div>
 
       {/* Body */}
