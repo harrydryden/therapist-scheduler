@@ -33,6 +33,28 @@ import {
 } from '../utils/voucher-token';
 
 /**
+ * Resolve the platform's general booking URL — used as the
+ * fallback target when we can't produce a voucher-personalised
+ * URL (vouchers disabled, DB error, etc.). The same setting the
+ * voucher path uses to build URLs (`weeklyMailing.webAppUrl`),
+ * falling back to `config.frontendUrl` when unset. Centralised
+ * here so the cancellation email's fallback link points to the
+ * same place voucher emails do — no risk of a hardcoded
+ * production URL drifting from a renamed deployment.
+ */
+export async function resolveBookingUrl(): Promise<string> {
+  try {
+    const setting = await getSettingValue<string>('weeklyMailing.webAppUrl');
+    if (setting && typeof setting === 'string' && setting.trim().length > 0) {
+      return setting;
+    }
+  } catch {
+    // Fall through to config default.
+  }
+  return config.frontendUrl;
+}
+
+/**
  * Resolve a usable voucher URL for the given email. See module
  * docstring for the reuse-vs-issue policy.
  */

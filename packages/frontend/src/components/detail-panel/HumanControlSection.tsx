@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AppointmentDetail } from '../../types';
 import type { AppointmentControls } from '../../hooks/useAppointmentControls';
 import ScanResultsPanel from './ScanResultsPanel';
@@ -23,6 +23,16 @@ export default function HumanControlSection({
   // initiated; apology + reassurance to therapist when user initiated;
   // neutral both-ways for admin). Default 'admin' = pre-change behaviour.
   const [cancelledBy, setCancelledBy] = useState<'admin' | 'client' | 'therapist'>('admin');
+
+  // Reset the cancellation-initiator picker when the operator
+  // navigates to a different appointment. Without this, picking
+  // 'therapist' on appointment A and then opening appointment B
+  // leaves the dropdown stuck on 'therapist' — easy mis-attribution.
+  // The parent component re-renders rather than re-mounts on
+  // selection change, so an explicit effect is needed.
+  useEffect(() => {
+    setCancelledBy('admin');
+  }, [appointment.id]);
 
   const handleSendMessage = () => {
     if (!messageSubject.trim() || !messageBody.trim()) return;

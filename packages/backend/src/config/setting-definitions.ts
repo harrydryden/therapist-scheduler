@@ -489,7 +489,7 @@ Justin`,
   'email.clientCancellationByTherapistBody': {
     category: 'emailTemplates',
     label: 'Client Cancellation (Therapist initiated) - Body',
-    description: 'Email body for the client when the THERAPIST initiated cancellation. Apologetic + voucher link. Variables: {userName}, {therapistName}, {confirmedDateTime}, {voucherLine} (rendered as a link line — empty if no voucher available).',
+    description: 'Email body for the client when the THERAPIST initiated cancellation. Apologetic + voucher link. Variables: {userName}, {therapistName}, {confirmedDateTime}, {voucherLine} (always rendered as a markdown booking link), {cancellationReason} (only set when admin attributed via the dashboard picker; otherwise empty — admins can add this placeholder to the template if they want the reason surfaced).',
     valueType: 'string',
     defaultValue: `Hi {userName},
 
@@ -515,7 +515,7 @@ Justin`,
   'email.therapistCancellationByClientBody': {
     category: 'emailTemplates',
     label: 'Therapist Cancellation (Client initiated) - Body',
-    description: 'Email body for the therapist when the CLIENT initiated cancellation. Apologetic + reassurance. Variables: {therapistFirstName}, {clientFirstName}, {confirmedDateTime}',
+    description: 'Email body for the therapist when the CLIENT initiated cancellation. Apologetic + reassurance. Variables: {therapistFirstName}, {clientFirstName}, {confirmedDateTime}, {cancellationReason} (only set when admin attributed via the dashboard picker; otherwise empty — admins can add this placeholder to the template if they want the reason surfaced).',
     valueType: 'string',
     defaultValue: `Hi {therapistFirstName},
 

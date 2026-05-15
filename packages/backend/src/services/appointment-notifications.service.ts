@@ -17,7 +17,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
 import { loadEmailTemplate } from '../utils/email-templates';
-import { ensureVoucherUrlForUser } from './voucher-url.service';
+import { ensureVoucherUrlForUser, resolveBookingUrl } from './voucher-url.service';
 import { firstName } from '../utils/first-name';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from '../core/timezone';
@@ -472,15 +472,21 @@ class AppointmentNotificationsService {
 
             if (cancelledBy === 'therapist') {
               // Therapist-initiated → apology + voucher link.
-              // Look up a usable voucher URL (existing or freshly
-              // issued); render the {voucherLine} placeholder
-              // accordingly. If voucher.enabled is off or we
-              // can't issue, the line is empty — the template
-              // body still makes sense without it.
-              const voucherUrl = await ensureVoucherUrlForUser(userEmail);
-              const voucherLine = voucherUrl
-                ? `[Book another session](${voucherUrl})`
-                : 'You can still book another session at https://free.spill.app.';
+              //
+              // {voucherLine} is ALWAYS a markdown link so the
+              // HTML conversion (`convertPlainTextToHtml`) wraps
+              // it in `<a href>` regardless of which branch fired
+              // — keeps the booking link clickable for the user.
+              // Falls back to the platform's general booking URL
+              // (`weeklyMailing.webAppUrl` → `config.frontendUrl`)
+              // when no voucher can be issued (vouchers disabled,
+              // DB hiccup). The user still gets a working link.
+              const [voucherUrl, fallbackUrl] = await Promise.all([
+                ensureVoucherUrlForUser(userEmail),
+                resolveBookingUrl(),
+              ]);
+              const url = voucherUrl ?? fallbackUrl;
+              const voucherLine = `[Book another session](${url})`;
               const { subject, body } = await loadEmailTemplate(
                 'clientCancellationByTherapist',
                 { therapistName: therapistFirstName },
@@ -489,6 +495,10 @@ class AppointmentNotificationsService {
                   therapistName: therapistFirstName,
                   confirmedDateTime: formattedDateTime,
                   voucherLine,
+                  // Optional placeholder — admins can edit the
+                  // template to include the reason if they want
+                  // it surfaced. Default templates omit it.
+                  cancellationReason: cancellationReasonForClient,
                 },
               );
               return { to: userEmail, subject, body, threadId: gmailThreadId || null };
@@ -558,6 +568,10 @@ class AppointmentNotificationsService {
                   therapistFirstName,
                   clientFirstName,
                   confirmedDateTime: formattedDateTime,
+                  // Optional placeholder — admins can edit the
+                  // template to include the reason if they want
+                  // it surfaced. Default templates omit it.
+                  cancellationReason: cancellationReasonForTherapist,
                 },
               );
               return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
