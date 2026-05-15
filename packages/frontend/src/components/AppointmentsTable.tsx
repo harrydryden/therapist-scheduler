@@ -61,32 +61,25 @@ interface RowContentProps {
 const GRID_TEMPLATE =
   'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,1.8fr)_minmax(0,2.4fr)_minmax(0,1fr)_64px]';
 
-/**
- * Format an appointment status as a human-readable stage label.
- * Used as the fallback for the Stage column when there's no
- * `checkpointStage` set — common for admin-created appointments
- * where the staged-creation flow transitioned the row to e.g.
- * 'negotiating' without the agent ever running. Showing '—' was
- * unhelpful; surfacing the status itself at least tells the
- * operator what lifecycle stage the row is in.
- *
- * `'session_held' → 'Session held'`, etc. Title-case the first
- * letter of each underscore-delimited token.
- */
-function formatStatusAsStage(status: string): string {
-  return status
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 const RowContent = memo(function RowContent({
   appointment,
   isSelected,
   onClick,
 }: RowContentProps) {
+  // Stage label — the conversation FSM's current checkpoint.
+  //
+  // When `checkpointStage` is null the appointment has no agent
+  // checkpoint yet. Most commonly this is the admin-created cohort
+  // (`admin-appointment-create.routes.ts` transitions a row through
+  // statuses before the agent's first kick-off populates a
+  // checkpoint). Showing the lifecycle status here would just
+  // duplicate the adjacent STATUS badge; showing `—` was the
+  // original UX gap the operator flagged. Render an italic muted
+  // "Not started" instead — distinct from a real stage label and
+  // signals to the operator "no agent activity yet".
   const stageLabel = appointment.checkpointStage
     ? getStageLabel(appointment.checkpointStage)
-    : formatStatusAsStage(appointment.status);
+    : null;
   const lastActivity = formatRelativeTime(appointment.lastActivityAt);
   const lastActivityAbsolute = formatAbsoluteTime(appointment.lastActivityAt);
 
@@ -143,7 +136,16 @@ const RowContent = memo(function RowContent({
 
       {/* Stage (base label + annotation chips) */}
       <span className="min-w-0">
-        <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
+        {stageLabel === null ? (
+          <span
+            className="block text-sm italic text-slate-400 truncate"
+            title="No agent checkpoint yet — typically an admin-created appointment or a row where the agent has not advanced the FSM."
+          >
+            Not started
+          </span>
+        ) : (
+          <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
+        )}
         {annotations.length > 0 && (
           <span className="flex flex-wrap gap-1 mt-0.5">
             {annotations.map((a) => (

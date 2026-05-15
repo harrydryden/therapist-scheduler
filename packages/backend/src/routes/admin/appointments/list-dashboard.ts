@@ -155,6 +155,22 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
 
           const healthMeta = computeAppointmentHealthMeta(toAppointmentForHealth(apt), healthThresholds);
 
+          // Single Map lookup, derive both the preview shape and the
+          // raw-vs-normalised role + lastEmailSentTo signals from it.
+          // Previously did 4 separate `lastMessageById.get(apt.id)`
+          // calls per row — and also passed the RAW `'assistant'` role
+          // to `deriveNextAction` whose branches check for the
+          // normalised `'agent'` value, silently disabling the
+          // "Awaiting reply" fallback.
+          const lastMessageData = lastMessageById.get(apt.id);
+          const lastMessagePreview = buildLastMessagePreview(lastMessageData);
+          const lastEmailSentTo: 'user' | 'therapist' | null =
+            lastMessageData?.lastEmailSentTo === 'user'
+              ? 'user'
+              : lastMessageData?.lastEmailSentTo === 'therapist'
+                ? 'therapist'
+                : null;
+
           return {
             id: apt.id,
             userName: apt.userName,
@@ -183,7 +199,7 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
             closureRecommendedReason: apt.closureRecommendedReason,
             closureRecommendationActioned: apt.closureRecommendationActioned,
             reschedulingInProgress: apt.reschedulingInProgress,
-            lastMessagePreview: buildLastMessagePreview(lastMessageById.get(apt.id)),
+            lastMessagePreview,
             nextAction: deriveNextAction({
               status: apt.status,
               humanControlEnabled: apt.humanControlEnabled,
@@ -193,17 +209,13 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
               closureRecommendationActioned: apt.closureRecommendationActioned,
               confirmedDateTime: apt.confirmedDateTime,
               checkpointStage,
-              // Drives the "Awaiting reply from {user|therapist}"
-              // fallback when no checkpoint stage is set (e.g.
-              // admin-created appointments where the agent has yet
-              // to advance the FSM). Extracted from
-              // checkpoint.context.lastEmailSentTo above; null when
-              // the agent has never sent an email on this thread.
-              lastEmailSentTo: (lastMessageById.get(apt.id)?.lastEmailSentTo === 'user'
-                || lastMessageById.get(apt.id)?.lastEmailSentTo === 'therapist')
-                ? lastMessageById.get(apt.id)?.lastEmailSentTo as 'user' | 'therapist'
-                : null,
-              lastMessageRole: lastMessageById.get(apt.id)?.role ?? null,
+              lastEmailSentTo,
+              // The NORMALISED role — `buildLastMessagePreview` maps
+              // `'assistant' → 'agent'` and unknown roles to
+              // `'inbound'`. `deriveNextAction`'s branches check
+              // exactly those values, so passing the raw `apt.role`
+              // string here would silently disable them.
+              lastMessageRole: lastMessagePreview?.role ?? null,
             }),
           };
         });
