@@ -180,7 +180,14 @@ export class AIConversationService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const record = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
-        select: { conversationState: true, updatedAt: true },
+        // checkpointStage is the denormalised column kept in sync
+        // with `conversationState.checkpoint.stage` (see this very
+        // function's docstring for the invariant). We use it
+        // instead of re-parsing the conversation state because the
+        // Zod schema in `parseConversationState` doesn't include
+        // the `checkpoint` field — it strips it on the way out.
+        // Reading the column directly avoids that hazard.
+        select: { conversationState: true, checkpointStage: true, updatedAt: true },
       });
       if (!record) {
         return { applied: false, stage: null };
@@ -195,11 +202,37 @@ export class AIConversationService {
         return { applied: false, stage: null };
       }
 
+      // Capture the OLD stage from the denormalised column so we
+      // can detect a checkpoint advance — when the stage flips
+      // (e.g. therapist replies with availability → row moves to
+      // `awaiting_user_slot_selection`) we reset the chase-sentinel
+      // triplet so the chase scheduler can fire one chase per
+      // STAGE, not one chase per APPOINTMENT. Without this reset,
+      // a row chased earlier on a prior stage stays in the
+      // "already chased" filter forever and the next stage's stale
+      // party never gets nudged.
+      const oldStage = record.checkpointStage;
+
       state.checkpoint = mutate(state.checkpoint ?? null);
       const stateJson = JSON.stringify(state);
       const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
+      const newStage = checkpointStage;
+      const stageChanged = oldStage !== newStage;
 
       const now = new Date();
+
+      // When the checkpoint stage advances, clear the chase sentinel
+      // so the next stage qualifies for its own (single) chase. See
+      // the docstring on this helper + the candidate query in
+      // `chase-email.service.ts` for the full rationale.
+      //
+      // Reset the FULL triplet — `chaseSentAt` is what the candidate
+      // query filters on (`chaseSentAt: null`), and the other two
+      // describe WHO was chased on the prior stage, so leaving them
+      // around would mis-attribute the next stage's chase target.
+      const chaseResetFields = stageChanged
+        ? { chaseSentAt: null, chaseSentTo: null, chaseTargetEmail: null }
+        : {};
 
       // Phase 3a dual-write: applyCheckpointUpdate is one of the four
       // writers of `conversationState`. Mirror to
@@ -221,6 +254,7 @@ export class AIConversationService {
             messageCount,
             checkpointStage,
             updatedAt: now,
+            ...chaseResetFields,
             ...options?.extraUpdates,
           },
         });
