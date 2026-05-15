@@ -61,12 +61,32 @@ interface RowContentProps {
 const GRID_TEMPLATE =
   'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,1.8fr)_minmax(0,2.4fr)_minmax(0,1fr)_64px]';
 
+/**
+ * Format an appointment status as a human-readable stage label.
+ * Used as the fallback for the Stage column when there's no
+ * `checkpointStage` set — common for admin-created appointments
+ * where the staged-creation flow transitioned the row to e.g.
+ * 'negotiating' without the agent ever running. Showing '—' was
+ * unhelpful; surfacing the status itself at least tells the
+ * operator what lifecycle stage the row is in.
+ *
+ * `'session_held' → 'Session held'`, etc. Title-case the first
+ * letter of each underscore-delimited token.
+ */
+function formatStatusAsStage(status: string): string {
+  return status
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 const RowContent = memo(function RowContent({
   appointment,
   isSelected,
   onClick,
 }: RowContentProps) {
-  const stageLabel = appointment.checkpointStage ? getStageLabel(appointment.checkpointStage) : '—';
+  const stageLabel = appointment.checkpointStage
+    ? getStageLabel(appointment.checkpointStage)
+    : formatStatusAsStage(appointment.status);
   const lastActivity = formatRelativeTime(appointment.lastActivityAt);
   const lastActivityAbsolute = formatAbsoluteTime(appointment.lastActivityAt);
 

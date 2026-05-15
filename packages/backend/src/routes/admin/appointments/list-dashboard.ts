@@ -109,26 +109,22 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
           prisma.appointmentRequest.count({ where }),
         ]);
 
-        // Last-message preview per appointment via JSONB path expression —
-        // capped at 240 chars at the DB layer so we never load the full blob.
+        // Last-message preview + last-email-recipient per appointment
+        // via JSONB path expressions — capped at 240 chars at the DB
+        // layer so we never load the full blob.
         //
-        // The CASE on `jsonb_typeof` is the reason the entire query is the
-        // shape it is. `storeConversationState` historically writes the
-        // result of `JSON.stringify(state)` into the `conversation_state`
-        // Prisma `Json?` field. Prisma treats a string-typed value as a
-        // JSON value, so it stores a JSON STRING (jsonb_typeof = 'string')
-        // rather than a JSON OBJECT. Applying `->'messages'` directly to
-        // a jsonb string returns NULL — which produced "No messages yet"
-        // for every row that has a real conversation log. The
-        // `(stored #>> '{}')::jsonb` cast unwraps the inner string and
-        // re-parses it as jsonb so the path expression succeeds.
+        // `lastEmailSentTo` is the recipient ('user' / 'therapist') of
+        // the most recent agent-sent email, surfaced from
+        // `conversation_state.checkpoint.context.lastEmailSentTo`.
+        // Drives the dashboard's "Next action" wording — without it the
+        // fallback is the unhelpfully-generic "Awaiting next message".
         //
-        // The `'object'` branch covers any future row that's written via
-        // the object form (e.g. the `migrate-conversation-state` script).
-        // Both paths must stay; switching writes to object form is a
-        // separate cleanup tracked outside this PR.
+        // The CASE on `jsonb_typeof` is the reason the query is the
+        // shape it is. See PR #245 for the writes-stored-as-JSON-string
+        // bug — same unwrap trick used here so legacy and current rows
+        // both resolve.
         const lastMessages = appointments.length > 0
-          ? await prisma.$queryRaw<Array<{ id: string; role: string | null; content: string | null }>>`
+          ? await prisma.$queryRaw<Array<{ id: string; role: string | null; content: string | null; last_email_sent_to: string | null }>>`
               SELECT id,
                      CASE jsonb_typeof(conversation_state)
                        WHEN 'object' THEN conversation_state->'messages'->-1->>'role'
@@ -137,13 +133,17 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
                      CASE jsonb_typeof(conversation_state)
                        WHEN 'object' THEN LEFT(conversation_state->'messages'->-1->>'content', 240)
                        WHEN 'string' THEN LEFT(((conversation_state #>> '{}')::jsonb)->'messages'->-1->>'content', 240)
-                     END AS content
+                     END AS content,
+                     CASE jsonb_typeof(conversation_state)
+                       WHEN 'object' THEN conversation_state->'checkpoint'->'context'->>'lastEmailSentTo'
+                       WHEN 'string' THEN ((conversation_state #>> '{}')::jsonb)->'checkpoint'->'context'->>'lastEmailSentTo'
+                     END AS last_email_sent_to
               FROM appointment_requests
               WHERE id IN (${Prisma.join(appointments.map((a) => a.id))})
             `
           : [];
         const lastMessageById = new Map(
-          lastMessages.map((m) => [m.id, { role: m.role, content: m.content }]),
+          lastMessages.map((m) => [m.id, { role: m.role, content: m.content, lastEmailSentTo: m.last_email_sent_to }]),
         );
 
         const healthThresholds = await getHealthThresholds();
@@ -193,6 +193,17 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
               closureRecommendationActioned: apt.closureRecommendationActioned,
               confirmedDateTime: apt.confirmedDateTime,
               checkpointStage,
+              // Drives the "Awaiting reply from {user|therapist}"
+              // fallback when no checkpoint stage is set (e.g.
+              // admin-created appointments where the agent has yet
+              // to advance the FSM). Extracted from
+              // checkpoint.context.lastEmailSentTo above; null when
+              // the agent has never sent an email on this thread.
+              lastEmailSentTo: (lastMessageById.get(apt.id)?.lastEmailSentTo === 'user'
+                || lastMessageById.get(apt.id)?.lastEmailSentTo === 'therapist')
+                ? lastMessageById.get(apt.id)?.lastEmailSentTo as 'user' | 'therapist'
+                : null,
+              lastMessageRole: lastMessageById.get(apt.id)?.role ?? null,
             }),
           };
         });
