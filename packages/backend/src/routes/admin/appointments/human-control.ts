@@ -30,9 +30,45 @@ import { aiConversationService } from '../../../services/ai-conversation.service
 import { auditEventService } from '../../../services/audit-event.service';
 import { sseService } from '../../../services/sse.service';
 import { resetAppointmentToolCount } from '../../../services/appointment-tool-counter';
+import { emailProcessingService } from '../../../services/email-processing.service';
+import { runBackgroundTask } from '../../../utils/background-task';
 import { RATE_LIMITS } from '../../../constants';
 import { sendSuccess, sendError, Errors } from '../../../utils/response';
 import { CEILING_TRIPPED_WHERE, takeControlSchema } from './schemas';
+
+/**
+ * Replay any inbound messages that arrived while human control was
+ * on (logged in conversation state but not marked processed —
+ * `'logged-while-paused'` semantics, see process.ts STEP 16).
+ *
+ * Scans the appointment's Gmail threads and triggers the missed-
+ * message recovery path. Runs in the background — the release
+ * endpoints don't block on it, so the operator gets an immediate
+ * 200 OK and the replay happens asynchronously.
+ *
+ * The hourly missed-message-scanner would eventually pick these
+ * up too; this inline call just trims the latency from up-to-1h
+ * down to seconds.
+ */
+function replayPausedMessages(
+  appointmentId: string,
+  threadIds: string[],
+  requestId: string,
+): void {
+  for (const threadId of threadIds) {
+    runBackgroundTask(
+      () => emailProcessingService.checkThreadForUnprocessedReplies(
+        threadId,
+        `release-replay:${appointmentId}`,
+      ),
+      {
+        name: 'replay-paused-messages',
+        context: { requestId, appointmentId, threadId },
+        retry: false,
+      },
+    );
+  }
+}
 
 export async function humanControlRoutes(fastify: FastifyInstance): Promise<void> {
   // ─── take-control ────────────────────────────────────────────────
@@ -176,12 +212,24 @@ export async function humanControlRoutes(fastify: FastifyInstance): Promise<void
             conversationStallAlertAt: null,
             conversationStallAcknowledged: false,
           },
-          select: { id: true },
+          select: {
+            id: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+          },
         });
 
         logger.info({ requestId, appointmentId: id }, 'Human control released for appointment');
 
         sseService.emitHumanControl(id, false);
+
+        // Replay any messages that arrived while paused. See the
+        // `replayPausedMessages` helper for the rationale.
+        const threadIds = [appointment.gmailThreadId, appointment.therapistGmailThreadId]
+          .filter((t): t is string => typeof t === 'string' && t.length > 0);
+        if (threadIds.length > 0) {
+          replayPausedMessages(id, threadIds, requestId);
+        }
 
         return sendSuccess(reply, {
           id: appointment.id,
@@ -238,13 +286,17 @@ export async function humanControlRoutes(fastify: FastifyInstance): Promise<void
       try {
         const candidates = await prisma.appointmentRequest.findMany({
           where: CEILING_TRIPPED_WHERE,
-          select: { id: true },
+          select: {
+            id: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+          },
         });
 
         const released: string[] = [];
         const failed: Array<{ id: string; reason: string }> = [];
 
-        for (const { id } of candidates) {
+        for (const { id, gmailThreadId, therapistGmailThreadId } of candidates) {
           try {
             // Best-effort audit append — same pattern as release-control.
             await aiConversationService
@@ -277,6 +329,17 @@ export async function humanControlRoutes(fastify: FastifyInstance): Promise<void
 
             sseService.emitHumanControl(id, false);
             released.push(id);
+
+            // Replay any messages that arrived while the ceiling
+            // was tripped. Without this, paused replies (logged but
+            // not marked processed — see process.ts STEP 16) wait
+            // up to an hour for the missed-message-scanner. Operators
+            // doing bulk-release expect the agent to resume *now*.
+            const threadIds = [gmailThreadId, therapistGmailThreadId]
+              .filter((t): t is string => typeof t === 'string' && t.length > 0);
+            if (threadIds.length > 0) {
+              replayPausedMessages(id, threadIds, requestId);
+            }
           } catch (err) {
             logger.error(
               { err, requestId, appointmentId: id },
