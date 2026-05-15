@@ -266,6 +266,14 @@ export interface UpdateAppointmentRequest {
   confirmedDateTime?: string | null;
   adminId: string;
   reason?: string;
+  /**
+   * Only meaningful when `status === 'cancelled'`. Lets the admin
+   * attribute the cancellation to therapist or client, which drives
+   * different email copy (apology + voucher to the user when the
+   * therapist initiated; apology + reassurance to the therapist
+   * when the user initiated). Omitted = 'admin' (neutral copy).
+   */
+  cancelledBy?: 'admin' | 'client' | 'therapist';
 }
 
 export interface DashboardStats {

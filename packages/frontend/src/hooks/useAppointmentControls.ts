@@ -32,7 +32,7 @@ export interface AppointmentControls {
   editReason: string;
   setEditReason: (value: string) => void;
   editWarning: string | null;
-  updateAppointmentMutation: ReturnType<typeof useMutation<{ warning?: string }, Error, { id: string; status?: string; confirmedDateTime?: string | null; reason?: string }>>;
+  updateAppointmentMutation: ReturnType<typeof useMutation<{ warning?: string }, Error, { id: string; status?: string; confirmedDateTime?: string | null; reason?: string; cancelledBy?: 'admin' | 'client' | 'therapist' }>>;
 
   // Messaging
   sendMessageMutation: ReturnType<typeof useMutation<unknown, Error, { id: string; to: string; subject: string; body: string }>>;
@@ -182,17 +182,20 @@ export function useAppointmentControls(
       status,
       confirmedDateTime,
       reason,
+      cancelledBy,
     }: {
       id: string;
       status?: string;
       confirmedDateTime?: string | null;
       reason?: string;
+      cancelledBy?: 'admin' | 'client' | 'therapist';
     }) =>
       updateAppointment(id, {
         status: status as 'pending' | 'contacted' | 'negotiating' | 'confirmed' | 'cancelled' | undefined,
         confirmedDateTime,
         adminId,
         reason,
+        cancelledBy,
       }),
     onMutate: () => { setMutationError(null); },
     onSuccess: (data) => {

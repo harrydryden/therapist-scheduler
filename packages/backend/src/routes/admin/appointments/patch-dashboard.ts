@@ -50,7 +50,7 @@ export async function patchDashboardRoute(fastify: FastifyInstance): Promise<voi
         return Errors.validationFailed(reply, validation.error.errors);
       }
 
-      const { status: newStatus, confirmedDateTime, adminId, reason } = validation.data;
+      const { status: newStatus, confirmedDateTime, adminId, reason, cancelledBy } = validation.data;
 
       try {
         const appointment = await prisma.appointmentRequest.findUnique({
@@ -126,6 +126,10 @@ export async function patchDashboardRoute(fastify: FastifyInstance): Promise<voi
               confirmedDateTime: effectiveConfirmedDateTime || undefined,
               confirmedDateTimeParsed,
               sendEmails: true,
+              // Only used when newStatus === 'cancelled' — drives the
+              // initiator-aware email branching in notifyCancelled.
+              // Other transitions ignore this field.
+              cancelledBy,
             },
           );
 

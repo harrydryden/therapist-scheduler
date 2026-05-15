@@ -472,6 +472,62 @@ Best wishes
 Justin`,
   },
 
+  // === CANCELLATION EMAILS — INITIATOR-AWARE VARIANTS ===
+  // Used when the admin marking the cancellation specifies WHO
+  // initiated it (therapist or client). The two templates below
+  // override the neutral clientCancellation / therapistCancellation
+  // bodies for the cancelled-by branch of the conversation. The
+  // OTHER party (i.e. the one who DID initiate) still gets the
+  // neutral confirmation template — see appointment-notifications.
+  'email.clientCancellationByTherapistSubject': {
+    category: 'emailTemplates',
+    label: 'Client Cancellation (Therapist initiated) - Subject',
+    description: 'Subject line for the client when the THERAPIST initiated cancellation. Variables: {therapistName}',
+    valueType: 'string',
+    defaultValue: 'About your Spill session with {therapistName}',
+  },
+  'email.clientCancellationByTherapistBody': {
+    category: 'emailTemplates',
+    label: 'Client Cancellation (Therapist initiated) - Body',
+    description: 'Email body for the client when the THERAPIST initiated cancellation. Apologetic + voucher link. Variables: {userName}, {therapistName}, {confirmedDateTime}, {voucherLine} (always rendered as a markdown booking link), {cancellationReason} (only set when admin attributed via the dashboard picker; otherwise empty — admins can add this placeholder to the template if they want the reason surfaced).',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+I'm sorry — {therapistName} has had to cancel your session on {confirmedDateTime}.
+
+I know that's frustrating. You can still book a session with another therapist using your personal booking link below:
+
+{voucherLine}
+
+If you have any trouble, just reply to this email and I'll sort it out.
+
+Best wishes
+
+Justin`,
+  },
+  'email.therapistCancellationByClientSubject': {
+    category: 'emailTemplates',
+    label: 'Therapist Cancellation (Client initiated) - Subject',
+    description: 'Subject line for the therapist when the CLIENT initiated cancellation. Variables: {clientFirstName}',
+    valueType: 'string',
+    defaultValue: 'Your Spill session with {clientFirstName} has been cancelled',
+  },
+  'email.therapistCancellationByClientBody': {
+    category: 'emailTemplates',
+    label: 'Therapist Cancellation (Client initiated) - Body',
+    description: 'Email body for the therapist when the CLIENT initiated cancellation. Apologetic + reassurance. Variables: {therapistFirstName}, {clientFirstName}, {confirmedDateTime}, {cancellationReason} (only set when admin attributed via the dashboard picker; otherwise empty — admins can add this placeholder to the template if they want the reason surfaced).',
+    valueType: 'string',
+    defaultValue: `Hi {therapistFirstName},
+
+I'm sorry — {clientFirstName} has had to cancel your session on {confirmedDateTime}.
+
+We'll find you a new client soon. Thanks for your patience.
+
+Best wishes
+
+Justin`,
+  },
+
   // === INITIAL AGENT EMAILS ===
   'email.initialClientWithAvailabilitySubject': {
     category: 'emailTemplates',

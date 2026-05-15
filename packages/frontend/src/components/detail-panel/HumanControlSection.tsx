@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { AppointmentDetail } from '../../types';
 import type { AppointmentControls } from '../../hooks/useAppointmentControls';
 import ScanResultsPanel from './ScanResultsPanel';
@@ -17,6 +17,22 @@ export default function HumanControlSection({
   const [messageRecipient, setMessageRecipient] = useState<'client' | 'therapist'>('client');
   const [messageSubject, setMessageSubject] = useState('');
   const [messageBody, setMessageBody] = useState('');
+  // Cancellation initiator (admin / therapist / client) — only shown
+  // when status is being changed to 'cancelled'. Drives email-copy
+  // selection on the backend (apology + voucher to user when therapist
+  // initiated; apology + reassurance to therapist when user initiated;
+  // neutral both-ways for admin). Default 'admin' = pre-change behaviour.
+  const [cancelledBy, setCancelledBy] = useState<'admin' | 'client' | 'therapist'>('admin');
+
+  // Reset the cancellation-initiator picker when the operator
+  // navigates to a different appointment. Without this, picking
+  // 'therapist' on appointment A and then opening appointment B
+  // leaves the dropdown stuck on 'therapist' — easy mis-attribution.
+  // The parent component re-renders rather than re-mounts on
+  // selection change, so an explicit effect is needed.
+  useEffect(() => {
+    setCancelledBy('admin');
+  }, [appointment.id]);
 
   const handleSendMessage = () => {
     if (!messageSubject.trim() || !messageBody.trim()) return;
@@ -174,6 +190,31 @@ export default function HumanControlSection({
                 </div>
               )}
 
+              {/*
+                Initiator picker for cancellations. Drives which email
+                copy each party receives (apology + voucher vs neutral
+                confirmation). Only shown when status is being changed
+                TO cancelled — not when the row is already cancelled
+                or for any non-cancel edit.
+              */}
+              {controls.editStatus === 'cancelled' && appointment.status !== 'cancelled' && (
+                <div className="mb-2">
+                  <label className="text-sm text-slate-600 block mb-1">
+                    Who is cancelling?
+                    <span className="text-red-500 ml-1">*</span>
+                  </label>
+                  <select
+                    value={cancelledBy}
+                    onChange={(e) => setCancelledBy(e.target.value as 'admin' | 'client' | 'therapist')}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+                  >
+                    <option value="admin">Admin (neutral confirmation to both)</option>
+                    <option value="therapist">Therapist — user gets apology + voucher; therapist gets confirmation</option>
+                    <option value="client">Client — therapist gets apology; client gets confirmation</option>
+                  </select>
+                </div>
+              )}
+
               {controls.editWarning && (
                 <div className="mb-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
                   <p className="text-xs text-yellow-800">{controls.editWarning}</p>
@@ -218,6 +259,10 @@ export default function HumanControlSection({
                       status: controls.editStatus || undefined,
                       confirmedDateTime: controls.editStatus === 'confirmed' ? controls.editConfirmedDateTime : undefined,
                       reason: controls.editReason.trim() || undefined,
+                      // Only attach when transitioning to cancelled — the
+                      // backend ignores this field for other transitions
+                      // but cleaner to omit it altogether.
+                      cancelledBy: controls.editStatus === 'cancelled' ? cancelledBy : undefined,
                     });
                   }}
                   disabled={

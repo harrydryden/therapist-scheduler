@@ -17,6 +17,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValues } from './settings.service';
 import { loadEmailTemplate } from '../utils/email-templates';
+import { ensureVoucherUrlForUser, resolveBookingUrl } from './voucher-url.service';
 import { firstName } from '../utils/first-name';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from '../core/timezone';
@@ -419,17 +420,42 @@ class AppointmentNotificationsService {
     }
 
     // Send cancellation emails (non-blocking, tracked).
-    // Same two-fallback pattern as the confirmation path: 'there' for
-    // the client-facing greeting, 'the client' / 'your therapist' for
-    // the body of the *other* party's email.
+    //
+    // Template selection branches on `cancelledBy`:
+    //
+    //   cancelledBy = 'therapist'
+    //     → Client gets `clientCancellationByTherapist`
+    //       (apology + voucher link to book another session).
+    //     → Therapist gets `therapistCancellation` (neutral
+    //       confirmation — the therapist already knows).
+    //
+    //   cancelledBy = 'client'
+    //     → Therapist gets `therapistCancellationByClient`
+    //       (apology + reassurance that we'll find a new client).
+    //     → Client gets `clientCancellation` (neutral confirmation
+    //       — the client already knows).
+    //
+    //   cancelledBy = 'admin' | 'system'
+    //     → Both parties get the neutral templates with the
+    //       cancellation reason injected in the same legacy
+    //       conditional manner. This preserves the pre-change
+    //       behaviour for bounce-handler / cron-driven cancels
+    //       and for admin-initiated cancels where the admin
+    //       didn't attribute the cancellation to either party.
+    //
+    // Same two-fallback pattern as the confirmation path: 'there'
+    // for the client-facing greeting, 'the client' / 'your
+    // therapist' for the body of the *other* party's email.
     const therapistFirstName = firstName(therapistName, 'your therapist');
     const clientGreetingName = firstName(userName);
     const clientFirstName = firstName(userName, 'the client');
-    // Only include reason in the email to the *other* party (empty string hides the line)
+
+    // Legacy reason injection — only used for the neutral
+    // (admin / system) branch where templates carry the line.
     const cancellationReasonForClient = cancelledBy === 'therapist' ? `\nReason: ${reason}` : '';
     const cancellationReasonForTherapist = cancelledBy === 'client' ? `\nReason: ${reason}` : '';
 
-    // Send client cancellation email — replayable.
+    // ─── CLIENT EMAIL ────────────────────────────────────────────
     if (settings.email.clientCancellation && userEmail) {
       runReplayableTrackedSideEffect(
         appointmentId,
@@ -443,6 +469,43 @@ class AppointmentNotificationsService {
               confirmedDateTime,
               recipientTz ?? undefined,
             );
+
+            if (cancelledBy === 'therapist') {
+              // Therapist-initiated → apology + voucher link.
+              //
+              // {voucherLine} is ALWAYS a markdown link so the
+              // HTML conversion (`convertPlainTextToHtml`) wraps
+              // it in `<a href>` regardless of which branch fired
+              // — keeps the booking link clickable for the user.
+              // Falls back to the platform's general booking URL
+              // (`weeklyMailing.webAppUrl` → `config.frontendUrl`)
+              // when no voucher can be issued (vouchers disabled,
+              // DB hiccup). The user still gets a working link.
+              const [voucherUrl, fallbackUrl] = await Promise.all([
+                ensureVoucherUrlForUser(userEmail),
+                resolveBookingUrl(),
+              ]);
+              const url = voucherUrl ?? fallbackUrl;
+              const voucherLine = `[Book another session](${url})`;
+              const { subject, body } = await loadEmailTemplate(
+                'clientCancellationByTherapist',
+                { therapistName: therapistFirstName },
+                {
+                  userName: clientGreetingName,
+                  therapistName: therapistFirstName,
+                  confirmedDateTime: formattedDateTime,
+                  voucherLine,
+                  // Optional placeholder — admins can edit the
+                  // template to include the reason if they want
+                  // it surfaced. Default templates omit it.
+                  cancellationReason: cancellationReasonForClient,
+                },
+              );
+              return { to: userEmail, subject, body, threadId: gmailThreadId || null };
+            }
+
+            // Default branch: neutral template (client-initiated,
+            // admin-initiated, or system-initiated cancellations).
             const { subject, body } = await loadEmailTemplate(
               'clientCancellation',
               { therapistName: therapistFirstName },
@@ -462,7 +525,10 @@ class AppointmentNotificationsService {
               body: payload.body,
               threadId: payload.threadId || undefined,
             });
-            logger.info({ ...logContext, userEmail }, 'Sent cancellation email to client');
+            logger.info(
+              { ...logContext, userEmail, cancelledBy },
+              'Sent cancellation email to client',
+            );
           },
         },
         {
@@ -475,9 +541,10 @@ class AppointmentNotificationsService {
       );
     }
 
-    // Send therapist cancellation email — only if the therapist was already contacted
-    // (i.e. an email thread exists with them, meaning the user's name was shared).
-    // If we never emailed the therapist, there is nothing to notify them about.
+    // ─── THERAPIST EMAIL ─────────────────────────────────────────
+    // Only fires when the therapist was already contacted (i.e. an
+    // email thread exists). If we never emailed the therapist,
+    // there's nothing to notify them about — no surprise outreach.
     if (settings.email.therapistCancellation && therapistEmail && therapistGmailThreadId) {
       runReplayableTrackedSideEffect(
         appointmentId,
@@ -491,6 +558,26 @@ class AppointmentNotificationsService {
               confirmedDateTime,
               recipientTz ?? undefined,
             );
+
+            if (cancelledBy === 'client') {
+              // Client-initiated → apology + reassurance to therapist.
+              const { subject, body } = await loadEmailTemplate(
+                'therapistCancellationByClient',
+                { clientFirstName },
+                {
+                  therapistFirstName,
+                  clientFirstName,
+                  confirmedDateTime: formattedDateTime,
+                  // Optional placeholder — admins can edit the
+                  // template to include the reason if they want
+                  // it surfaced. Default templates omit it.
+                  cancellationReason: cancellationReasonForTherapist,
+                },
+              );
+              return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
+            }
+
+            // Default branch: neutral confirmation.
             const { subject, body } = await loadEmailTemplate(
               'therapistCancellation',
               { clientFirstName },
@@ -510,7 +597,10 @@ class AppointmentNotificationsService {
               body: payload.body,
               threadId: payload.threadId || undefined,
             });
-            logger.info({ ...logContext, therapistEmail }, 'Sent cancellation email to therapist');
+            logger.info(
+              { ...logContext, therapistEmail, cancelledBy },
+              'Sent cancellation email to therapist',
+            );
           },
         },
         {

@@ -31,6 +31,16 @@ export interface UpdateStatusOptions {
   confirmedDateTime?: string;
   confirmedDateTimeParsed?: Date | null;
   sendEmails?: boolean;
+  /**
+   * Only consumed when the new status is `cancelled`. Lets the
+   * admin specify whether the therapist or the client initiated
+   * the cancellation — drives email template selection in
+   * `notifyCancelled`. Defaults to 'admin' when omitted (the
+   * pre-change behaviour for admin-initiated cancels). Ignored
+   * when `source !== 'admin'` to preserve the existing
+   * cancelledBy validation contract.
+   */
+  cancelledBy?: 'admin' | 'client' | 'therapist';
 }
 
 type UpdateStatusDispatcher = (
@@ -101,11 +111,17 @@ const UPDATE_STATUS_DISPATCH: Partial<Record<AppointmentStatus, UpdateStatusDisp
     transitionToCancelled({
       appointmentId,
       reason: opts.reason || 'No reason provided',
-      // updateStatus() is currently only called from admin routes, so source
-      // is always 'admin' in practice. Preserve the original mapping for any
-      // hypothetical 'system' caller; agent-path cancellations call
-      // transitionToCancelled directly with an explicit cancelledBy.
-      cancelledBy: opts.source === 'admin' ? 'admin' : 'system',
+      // Cancellation initiator selection:
+      //   - 'admin' source: honour the admin-supplied cancelledBy
+      //     (the dashboard now asks "who's cancelling — admin /
+      //     therapist / client"); fall back to 'admin' for
+      //     backwards compatibility with callers that don't pass
+      //     the field.
+      //   - 'system' (or anything else): keep the legacy 'system'
+      //     attribution. Agent-path cancellations bypass
+      //     updateStatus entirely and call transitionToCancelled
+      //     directly with their own cancelledBy.
+      cancelledBy: opts.source === 'admin' ? (opts.cancelledBy ?? 'admin') : 'system',
       source: opts.source,
       adminId: opts.adminId,
     })),

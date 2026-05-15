@@ -64,6 +64,15 @@ export const updateAppointmentSchema = z.object({
   confirmedDateTime: z.string().nullable().optional(),
   adminId: z.string().min(1),
   reason: z.string().optional(),
+  /**
+   * Only meaningful when `status === 'cancelled'`. The admin picks
+   * who initiated the cancellation — drives email-template
+   * selection downstream (apology + voucher to the user when the
+   * therapist initiated; apology + reassurance to the therapist
+   * when the user initiated; neutral both-ways for 'admin').
+   * Backwards compatible: omitted = treated as 'admin'.
+   */
+  cancelledBy: z.enum(['admin', 'client', 'therapist']).optional(),
 });
 
 /** PATCH /api/admin/appointments/:id (no human-control requirement). */
