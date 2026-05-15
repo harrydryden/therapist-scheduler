@@ -60,6 +60,7 @@ import {
   markToolExecuted,
   wasToolExecuted,
 } from './idempotency';
+import { isPureTool } from './pure-tools';
 import { handleResolveLocalTime } from './handlers/resolve-local-time';
 import { handleSendEmail } from './handlers/send-email';
 import { handleUpdateTherapistAvailability } from './handlers/update-therapist-availability';
@@ -88,7 +89,11 @@ export async function executeToolCall(
   const { name, input } = toolCall;
 
   // ─── PURE TOOLS BYPASS THE GATE ───────────────────────────────
-  if (name === 'resolve_local_time') {
+  // The PURE_TOOLS set is also consumed by the agent-tool-loop's
+  // turn-budget exclusion — see `core/agent/tools/pure-tools.ts`
+  // for the contract. Single source of truth so the two layers
+  // can't drift on which tools are pure.
+  if (isPureTool(name)) {
     return handleResolveLocalTime(input);
   }
 
