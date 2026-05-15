@@ -133,15 +133,57 @@ describe('deriveNextAction', () => {
     });
   });
 
-  describe('fallback', () => {
-    it('no stage, no signals → awaiting next message', () => {
-      expect(deriveNextAction(input())).toBe('Awaiting next message');
+  describe('fallback when no stage', () => {
+    it('no stage, no signals → awaiting initial outreach', () => {
+      expect(deriveNextAction(input())).toBe('Awaiting initial outreach');
     });
 
-    it('unknown stage falls back to the same string', () => {
+    it('unknown stage with no other signals → awaiting initial outreach', () => {
       expect(
         deriveNextAction(input({ checkpointStage: 'made_up_stage_name' })),
-      ).toBe('Awaiting next message');
+      ).toBe('Awaiting initial outreach');
+    });
+
+    // The next four pin the message-direction + recipient inference
+    // that drives "Awaiting reply from user/therapist" wording when
+    // the checkpoint stage is null (the admin-created-no-agent-yet
+    // cohort, primarily). Operators triaging these rows previously
+    // saw the unhelpful "Awaiting next message" — now they get
+    // concrete who-we're-waiting-on copy.
+    it('agent last emailed the user → awaiting reply from user', () => {
+      expect(
+        deriveNextAction(input({ lastEmailSentTo: 'user' })),
+      ).toBe('Awaiting reply from user');
+    });
+
+    it('agent last emailed the therapist → awaiting reply from therapist', () => {
+      expect(
+        deriveNextAction(input({ lastEmailSentTo: 'therapist' })),
+      ).toBe('Awaiting reply from therapist');
+    });
+
+    it("agent role as last message but no lastEmailSentTo → generic 'awaiting reply'", () => {
+      // Older rows pre-date the lastEmailSentTo capture — we know
+      // the agent acted but not to whom.
+      expect(
+        deriveNextAction(input({ lastMessageRole: 'agent' })),
+      ).toBe('Awaiting reply');
+    });
+
+    it('inbound last message → agent processing inbound message', () => {
+      expect(
+        deriveNextAction(input({ lastMessageRole: 'inbound' })),
+      ).toBe('Agent processing inbound message');
+    });
+
+    it('lastEmailSentTo wins over lastMessageRole inference', () => {
+      // Both signals available — prefer the more specific one.
+      expect(
+        deriveNextAction(input({
+          lastEmailSentTo: 'therapist',
+          lastMessageRole: 'inbound',
+        })),
+      ).toBe('Awaiting reply from therapist');
     });
   });
 

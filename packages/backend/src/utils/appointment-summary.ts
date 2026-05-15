@@ -90,6 +90,38 @@ export function buildAppointmentSummary(
     stage = appointment.status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
+  // Extract the same fallback signals the dashboard list endpoint
+  // surfaces: `lastEmailSentTo` (from checkpoint.context) and the
+  // normalised role of the most recent message. Without these the
+  // detail panel falls through to the generic "Awaiting initial
+  // outreach" wording while the dashboard row right above it shows
+  // "Awaiting reply from user" — the two views drifted before the
+  // explicit pass-through.
+  const context = checkpoint?.context as { lastEmailSentTo?: unknown } | undefined;
+  const rawLastEmailSentTo =
+    context?.lastEmailSentTo === 'user' || context?.lastEmailSentTo === 'therapist'
+      ? context.lastEmailSentTo
+      : null;
+
+  // Normalise the raw `messages[-1].role` to the same enum the
+  // dashboard uses (`'agent' | 'inbound' | 'admin'`). `'assistant'`
+  // maps to `'agent'`; explicit `'admin'` stays; anything else
+  // (typically `'user'`) maps to `'inbound'`. Mirrors the logic in
+  // `buildLastMessagePreview` so the two callers never drift.
+  const messages = Array.isArray(rawState?.messages)
+    ? (rawState!.messages as Array<{ role?: unknown }>)
+    : [];
+  const rawLastRole = typeof messages[messages.length - 1]?.role === 'string'
+    ? (messages[messages.length - 1].role as string)
+    : null;
+  const normalisedLastRole: 'agent' | 'inbound' | 'admin' | null = rawLastRole === null
+    ? null
+    : rawLastRole === 'assistant'
+      ? 'agent'
+      : rawLastRole === 'admin'
+        ? 'admin'
+        : 'inbound';
+
   // Next action — delegated to the shared util so the dashboard
   // list row and this detail summary stay in lockstep.
   const nextAction = deriveNextAction({
@@ -102,6 +134,8 @@ export function buildAppointmentSummary(
     confirmedDateTime: appointment.confirmedDateTime,
     checkpointStage: checkpointStage ?? null,
     pendingAction: checkpoint?.pendingAction ? String(checkpoint.pendingAction) : null,
+    lastEmailSentTo: rawLastEmailSentTo,
+    lastMessageRole: normalisedLastRole,
   });
 
   // Key facts from conversation facts

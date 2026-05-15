@@ -66,7 +66,20 @@ const RowContent = memo(function RowContent({
   isSelected,
   onClick,
 }: RowContentProps) {
-  const stageLabel = appointment.checkpointStage ? getStageLabel(appointment.checkpointStage) : '—';
+  // Stage label — the conversation FSM's current checkpoint.
+  //
+  // When `checkpointStage` is null the appointment has no agent
+  // checkpoint yet. Most commonly this is the admin-created cohort
+  // (`admin-appointment-create.routes.ts` transitions a row through
+  // statuses before the agent's first kick-off populates a
+  // checkpoint). Showing the lifecycle status here would just
+  // duplicate the adjacent STATUS badge; showing `—` was the
+  // original UX gap the operator flagged. Render an italic muted
+  // "Not started" instead — distinct from a real stage label and
+  // signals to the operator "no agent activity yet".
+  const stageLabel = appointment.checkpointStage
+    ? getStageLabel(appointment.checkpointStage)
+    : null;
   const lastActivity = formatRelativeTime(appointment.lastActivityAt);
   const lastActivityAbsolute = formatAbsoluteTime(appointment.lastActivityAt);
 
@@ -123,7 +136,16 @@ const RowContent = memo(function RowContent({
 
       {/* Stage (base label + annotation chips) */}
       <span className="min-w-0">
-        <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
+        {stageLabel === null ? (
+          <span
+            className="block text-sm italic text-slate-400 truncate"
+            title="No agent checkpoint yet — typically an admin-created appointment or a row where the agent has not advanced the FSM."
+          >
+            Not started
+          </span>
+        ) : (
+          <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
+        )}
         {annotations.length > 0 && (
           <span className="flex flex-wrap gap-1 mt-0.5">
             {annotations.map((a) => (
