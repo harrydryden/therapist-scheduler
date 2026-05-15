@@ -12,6 +12,7 @@ import {
 import type { ReprocessPreviewResult, ReprocessThreadResult } from '../api/client';
 import type { AppointmentDetail } from '../types';
 import { getAdminId } from '../utils/admin-id';
+import { useToastContext } from '../components/Toast';
 
 export interface AppointmentControls {
   adminId: string;
@@ -56,6 +57,11 @@ export function useAppointmentControls(
 ): AppointmentControls {
   const queryClient = useQueryClient();
   const adminId = useMemo(() => getAdminId(), []);
+  // Surfaces success / error toasts for mutations the operator
+  // initiates from the detail panel — most importantly, the
+  // post-cancel confirmation that emails went out + agent control
+  // was released. Provided by `<ToastProvider>` at the app root.
+  const { showToast } = useToastContext();
 
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showEditPanel, setShowEditPanel] = useState(false);
@@ -211,6 +217,30 @@ export function useAppointmentControls(
           clearTimeout(editWarningTimeoutRef.current);
         }
         editWarningTimeoutRef.current = setTimeout(() => setEditWarning(null), 5000);
+      }
+      // Confirmation toast — gives the operator visible feedback
+      // that the action completed AND describes the side effects
+      // they should expect (emails out, agent resumed). Especially
+      // important on cancellation where the dashboard tile
+      // transitions are easy to miss.
+      //
+      // The backend cancel flow:
+      //   - sends client + therapist emails (subject to the
+      //     "therapist must have been contacted" guard)
+      //   - auto-releases human control as part of the same
+      //     transition
+      // Mention both so the operator knows it's done.
+      const becameCancelled =
+        data.status === 'cancelled' && data.previousStatus !== 'cancelled';
+      if (becameCancelled) {
+        showToast(
+          'Appointment cancelled. Both parties have been notified and agent control has been released.',
+          'success',
+        );
+      } else if (data.status && data.status !== data.previousStatus) {
+        showToast(`Appointment status updated to ${data.status.replace(/_/g, ' ')}.`, 'success');
+      } else {
+        showToast('Appointment updated.', 'success');
       }
     },
     onError: (error) => {

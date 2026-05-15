@@ -20,7 +20,7 @@ import { InvalidTransitionError } from '../../../../errors';
 import { appointmentNotificationsService } from '../../../../services/appointment-notifications.service';
 import { transitionSideEffectsService } from '../../../../services/transition-side-effects.service';
 import { addAuditMessage } from '../audit';
-import { CLEAR_RESCHEDULING_STATE } from '../update-fragments';
+import { CLEAR_RESCHEDULING_STATE, CLEAR_HUMAN_CONTROL_STATE } from '../update-fragments';
 import { progressionResetsFor } from '../status-order';
 import { fireAndForget, notifyTransition } from '../dispatch-helpers';
 import { runTerminalTransitionTx } from '../terminal-tx';
@@ -144,6 +144,13 @@ export async function transitionToCancelled(
         transitionGeneration: { increment: 1 },
         // Cancellation supersedes any in-progress reschedule.
         ...CLEAR_RESCHEDULING_STATE,
+        // Auto-release human control on cancellation. The admin
+        // typically had to take control to perform the cancel
+        // (the patch-dashboard route enforces it as a guard), and
+        // leaving it on post-cancel inflates the Human Control
+        // dashboard tile with permanently-cancelled rows. See the
+        // fragment docstring for the full rationale.
+        ...CLEAR_HUMAN_CONTROL_STATE,
         // Centralised progression-based field resets (clears isStale).
         ...progressionResetsFor(APPOINTMENT_STATUS.CANCELLED),
       };

@@ -28,3 +28,30 @@ export const RESET_ALL_FOLLOWUP_SENTINELS = {
   feedbackFormSentAt: null,
   feedbackReminderSentAt: null,
 } as const;
+
+/**
+ * Clear all human-control state. Spread into update data on terminal
+ * transitions where the appointment is being moved to a state in which
+ * "who has the helm" is no longer meaningful.
+ *
+ * Currently applied by `transitionToCancelled`:
+ *   - The admin almost always takes human control to perform a manual
+ *     cancellation (the patch route requires it as a guard). Leaving
+ *     `humanControlEnabled` true post-cancel inflates the Human Control
+ *     dashboard tile with a permanently-cancelled appointment and is
+ *     visually confusing — there's no agent to release control TO,
+ *     since the appointment is terminal.
+ *   - Clearing all four fields (not just `humanControlEnabled`) so the
+ *     row's "ghost" attribution doesn't survive past the transition.
+ *
+ * NOT applied by `transitionToCompleted` for now — operators usually
+ * don't take human control to complete an appointment (it auto-
+ * progresses), so the field is naturally false. A future change could
+ * apply this uniformly across terminal transitions.
+ */
+export const CLEAR_HUMAN_CONTROL_STATE = {
+  humanControlEnabled: false,
+  humanControlTakenBy: null,
+  humanControlTakenAt: null,
+  humanControlReason: null,
+} as const;
