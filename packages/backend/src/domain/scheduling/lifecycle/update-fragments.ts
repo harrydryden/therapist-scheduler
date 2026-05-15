@@ -55,3 +55,44 @@ export const CLEAR_HUMAN_CONTROL_STATE = {
   humanControlTakenAt: null,
   humanControlReason: null,
 } as const;
+
+/**
+ * Clear the chase-sentinel triplet. Spread into update data when an
+ * appointment crosses a checkpoint-stage boundary so the chase
+ * scheduler can fire one chase per stage rather than one per
+ * appointment lifetime. See `chaseResetIfStageChanged` below for the
+ * rule, and `services/chase-email.service.ts` candidate query for
+ * what this enables.
+ *
+ * Applied by the two writers of `appointmentRequest.checkpointStage`:
+ *   - `aiConversationService.applyCheckpointUpdate` (chase-send,
+ *     closure-recommend, closure-dismiss)
+ *   - `aiConversationService.storeConversationState` (agent
+ *     end-of-turn save — the dominant path)
+ *
+ * Both writers MUST stay in lock-step on this invariant. Defining
+ * the field set + the trigger rule here is the lock-step mechanism.
+ */
+export const CLEAR_CHASE_STATE = {
+  chaseSentAt: null,
+  chaseSentTo: null,
+  chaseTargetEmail: null,
+} as const;
+
+/**
+ * The "one chase per checkpoint stage" rule. Returns `CLEAR_CHASE_STATE`
+ * when the conversation FSM is crossing into a new stage, otherwise an
+ * empty object that's safe to spread.
+ *
+ * Encapsulating the rule (not just the constant) so a future change
+ * to "what counts as a stage change" — e.g. allowing only forward
+ * transitions to reset, or carving out rescheduling — lands in ONE
+ * place rather than getting tweaked inconsistently across both
+ * column writers.
+ */
+export function chaseResetIfStageChanged(
+  oldStage: string | null,
+  newStage: string | null,
+): typeof CLEAR_CHASE_STATE | Record<string, never> {
+  return oldStage === newStage ? {} : CLEAR_CHASE_STATE;
+}

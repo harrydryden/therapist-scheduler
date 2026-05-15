@@ -19,6 +19,7 @@ import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
 import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
+import { chaseResetIfStageChanged } from '../domain/scheduling/lifecycle/update-fragments';
 import { wrapUntrustedContent } from '../utils/content-sanitizer';
 import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS } from '../constants';
@@ -76,6 +77,34 @@ export class AIConversationService {
     // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries
     const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
 
+    // Detect checkpoint-stage advance — chase-reset invariant.
+    //
+    // The agent loop mutates `state.checkpoint` in memory after a
+    // tool returns a `checkpointAction`, then saves the whole state
+    // here at end-of-turn. That's the DOMINANT path for stage
+    // transitions; `applyCheckpointUpdate` only covers chase-sending
+    // + closure-dismiss callers. Without this read, the agent's
+    // natural advance from `awaiting_therapist_availability` →
+    // `awaiting_user_slot_selection` (etc.) leaves `chaseSentAt`
+    // pinned forever and the next stage never gets chased.
+    //
+    // Same pattern as `applyCheckpointUpdate` — read the OLD stage
+    // from the denormalised column, compare against the new stage
+    // derived from the saved state. Cheap (indexed lookup of one
+    // column; row likely cached because we're about to write it).
+    const existing = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentRequestId },
+      select: { checkpointStage: true },
+    });
+    // Chase-reset on stage advance. The rule + the field set live
+    // together in `update-fragments` so the two writers of
+    // `checkpointStage` (this method + `applyCheckpointUpdate`)
+    // stay in lock-step on the invariant.
+    const chaseResetFields = chaseResetIfStageChanged(
+      existing?.checkpointStage ?? null,
+      checkpointStage,
+    );
+
     if (expectedUpdatedAt) {
       // Use optimistic locking - only update if version matches.
       // FIX ST2: Include activity recording in same atomic operation.
@@ -99,6 +128,9 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            // Chase-reset on stage advance — see the read at the top
+            // of this method for the rationale.
+            ...chaseResetFields,
           },
         });
 
@@ -130,6 +162,9 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            // Chase-reset on stage advance — see the read at the top
+            // of this method for the rationale.
+            ...chaseResetFields,
           },
           select: { id: true },
         });
@@ -180,7 +215,14 @@ export class AIConversationService {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const record = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
-        select: { conversationState: true, updatedAt: true },
+        // checkpointStage is the denormalised column kept in sync
+        // with `conversationState.checkpoint.stage` (see this very
+        // function's docstring for the invariant). We use it
+        // instead of re-parsing the conversation state because the
+        // Zod schema in `parseConversationState` doesn't include
+        // the `checkpoint` field — it strips it on the way out.
+        // Reading the column directly avoids that hazard.
+        select: { conversationState: true, checkpointStage: true, updatedAt: true },
       });
       if (!record) {
         return { applied: false, stage: null };
@@ -195,11 +237,24 @@ export class AIConversationService {
         return { applied: false, stage: null };
       }
 
+      // Capture the OLD stage from the denormalised column so we
+      // can detect a checkpoint advance — when the stage flips
+      // (e.g. therapist replies with availability → row moves to
+      // `awaiting_user_slot_selection`) we reset the chase-sentinel
+      // triplet so the chase scheduler can fire one chase per
+      // STAGE, not one chase per APPOINTMENT.
+      const oldStage = record.checkpointStage;
+
       state.checkpoint = mutate(state.checkpoint ?? null);
       const stateJson = JSON.stringify(state);
       const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
 
       const now = new Date();
+
+      // Chase-reset on stage advance. Rule + field set live in
+      // `update-fragments` — same helper used by
+      // `storeConversationState` so the two writers can't drift.
+      const chaseResetFields = chaseResetIfStageChanged(oldStage, checkpointStage);
 
       // Phase 3a dual-write: applyCheckpointUpdate is one of the four
       // writers of `conversationState`. Mirror to
@@ -221,6 +276,7 @@ export class AIConversationService {
             messageCount,
             checkpointStage,
             updatedAt: now,
+            ...chaseResetFields,
             ...options?.extraUpdates,
           },
         });
