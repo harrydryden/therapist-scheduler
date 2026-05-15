@@ -76,6 +76,31 @@ export class AIConversationService {
     // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries
     const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
 
+    // Detect checkpoint-stage advance — chase-reset invariant.
+    //
+    // The agent loop mutates `state.checkpoint` in memory after a
+    // tool returns a `checkpointAction`, then saves the whole state
+    // here at end-of-turn. That's the DOMINANT path for stage
+    // transitions; `applyCheckpointUpdate` only covers chase-sending
+    // + closure-dismiss callers. Without this read, the agent's
+    // natural advance from `awaiting_therapist_availability` →
+    // `awaiting_user_slot_selection` (etc.) leaves `chaseSentAt`
+    // pinned forever and the next stage never gets chased.
+    //
+    // Same pattern as `applyCheckpointUpdate` — read the OLD stage
+    // from the denormalised column, compare against the new stage
+    // derived from the saved state. Cheap (indexed lookup of one
+    // column; row likely cached because we're about to write it).
+    const existing = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentRequestId },
+      select: { checkpointStage: true },
+    });
+    const oldStage = existing?.checkpointStage ?? null;
+    const stageChanged = oldStage !== checkpointStage;
+    const chaseResetFields = stageChanged
+      ? { chaseSentAt: null, chaseSentTo: null, chaseTargetEmail: null }
+      : {};
+
     if (expectedUpdatedAt) {
       // Use optimistic locking - only update if version matches.
       // FIX ST2: Include activity recording in same atomic operation.
@@ -99,6 +124,9 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            // Chase-reset on stage advance — see the read at the top
+            // of this method for the rationale.
+            ...chaseResetFields,
           },
         });
 
@@ -130,6 +158,9 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            // Chase-reset on stage advance — see the read at the top
+            // of this method for the rationale.
+            ...chaseResetFields,
           },
           select: { id: true },
         });

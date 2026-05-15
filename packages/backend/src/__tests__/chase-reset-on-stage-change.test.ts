@@ -33,6 +33,7 @@ let capturedUpdates: Array<Record<string, unknown>> = [];
 
 const mockFindUnique = jest.fn();
 const mockUpdateMany = jest.fn();
+const mockUpdate = jest.fn();
 const mockUpsert = jest.fn();
 
 jest.mock('../utils/database', () => ({
@@ -46,6 +47,14 @@ jest.mock('../utils/database', () => ({
           updateMany: jest.fn().mockImplementation(async (args: { data: Record<string, unknown> }) => {
             capturedUpdates.push(args.data);
             return mockUpdateMany(args);
+          }),
+          // storeConversationState's "legacy" branch uses `update`
+          // (no optimistic locking) when called without
+          // expectedUpdatedAt — e.g. initial-state creation in
+          // startScheduling.
+          update: jest.fn().mockImplementation(async (args: { data: Record<string, unknown> }) => {
+            capturedUpdates.push(args.data);
+            return mockUpdate(args);
           }),
         },
         appointmentConversation: {
@@ -63,6 +72,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   capturedUpdates = [];
   mockUpdateMany.mockResolvedValue({ count: 1 });
+  mockUpdate.mockResolvedValue({ id: 'apt-1' });
   mockUpsert.mockResolvedValue({ appointmentId: 'apt-1' });
 });
 
@@ -164,6 +174,98 @@ describe('applyCheckpointUpdate — one chase per stage', () => {
     expect(capturedUpdates[0]).toMatchObject({
       checkpointStage: 'awaiting_therapist_availability',
       chaseSentAt: null,
+    });
+  });
+
+  // ─── storeConversationState — the DOMINANT path for agent stage
+  //     transitions. The agent loop mutates checkpoint in memory
+  //     after a tool returns checkpointAction, then saves the full
+  //     state via storeConversationState at end-of-turn. Without
+  //     a reset here, the agent's natural stage advance
+  //     (awaiting_therapist_availability → awaiting_user_slot_selection
+  //     etc.) leaves chase pinned and the next stage never qualifies.
+  describe('via storeConversationState (agent end-of-turn save)', () => {
+    it('clears chase fields when the saved state has a new stage', async () => {
+      // findUnique returns the row's CURRENT stage (the OLD one,
+      // before this write) — same shape the helper expects.
+      mockFindUnique.mockResolvedValue({ checkpointStage: 'awaiting_therapist_availability' });
+
+      await aiConversationService.storeConversationState(
+        'apt-1',
+        {
+          systemPrompt: '',
+          messages: [{ role: 'user', content: 'hi' }],
+          checkpoint: {
+            stage: 'awaiting_user_slot_selection',
+            pendingAction: 'await user choice',
+            checkpoint_at: new Date().toISOString(),
+            lastSuccessfulAction: null,
+          },
+        // The state type is wider than the public method signature;
+        // cast loosely — we don't care about the deeper validation
+        // here, just the column-write behaviour.
+        } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
+        new Date(), // expectedUpdatedAt — exercises the optimistic-locked branch
+      );
+
+      expect(capturedUpdates).toHaveLength(1);
+      expect(capturedUpdates[0]).toMatchObject({
+        checkpointStage: 'awaiting_user_slot_selection',
+        chaseSentAt: null,
+        chaseSentTo: null,
+        chaseTargetEmail: null,
+      });
+    });
+
+    it('does NOT reset chase fields when the saved state stays on the same stage', async () => {
+      mockFindUnique.mockResolvedValue({ checkpointStage: 'awaiting_user_slot_selection' });
+
+      await aiConversationService.storeConversationState(
+        'apt-1',
+        {
+          systemPrompt: '',
+          messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'reply' }],
+          checkpoint: {
+            stage: 'awaiting_user_slot_selection',
+            pendingAction: 'still waiting',
+            checkpoint_at: new Date().toISOString(),
+            lastSuccessfulAction: null,
+          },
+        } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
+        new Date(),
+      );
+
+      expect(capturedUpdates).toHaveLength(1);
+      expect(capturedUpdates[0]).not.toHaveProperty('chaseSentAt');
+      expect(capturedUpdates[0]).not.toHaveProperty('chaseSentTo');
+      expect(capturedUpdates[0]).not.toHaveProperty('chaseTargetEmail');
+    });
+
+    it('clears chase fields on the legacy (no-version-check) branch too', async () => {
+      // startScheduling calls storeConversationState WITHOUT an
+      // expectedUpdatedAt — the "legacy / initial create" path
+      // that uses `update` instead of `updateMany`. Reset still
+      // applies (defensive — usually no chase to reset at this
+      // stage, but the invariant should hold uniformly).
+      mockFindUnique.mockResolvedValue({ checkpointStage: null });
+
+      await aiConversationService.storeConversationState(
+        'apt-1',
+        {
+          systemPrompt: '',
+          messages: [{ role: 'user', content: 'kicking off' }],
+          checkpoint: {
+            stage: 'initial_contact',
+            pendingAction: 'starting',
+            checkpoint_at: new Date().toISOString(),
+            lastSuccessfulAction: null,
+          },
+        } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
+        // No expectedUpdatedAt — legacy branch.
+      );
+
+      expect(capturedUpdates).toHaveLength(1);
+      expect(capturedUpdates[0]).toMatchObject({ chaseSentAt: null });
     });
   });
 
