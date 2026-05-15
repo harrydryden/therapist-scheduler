@@ -36,6 +36,11 @@ import {
 import { truncateMessageContent } from './ai-conversation.service';
 import { auditEventService } from './audit-event.service';
 import { getSettingValue } from './settings.service';
+// `PURE_TOOLS` lives in `core/agent/tools/pure-tools.ts` so the
+// dispatcher (which bypasses the human-control gate + idempotency
+// mark for pure tools) and this loop (which bypasses the turn
+// budget) agree about the set. See that module for the full rationale.
+import { PURE_TOOLS } from '../core/agent/tools/pure-tools';
 import { getToolsForStage } from './tools-for-stage';
 import { buildSkipMessage, computeTurnHash } from './tool-loop-helpers';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
@@ -60,8 +65,17 @@ const TURN_ERROR_LIMIT = 3;
  *  that lets one inbound trigger push 30+ calls into the per-appointment
  *  lifecycle counter. Generous enough for a realistic turn — e.g.
  *  remember + record_availability_window + send_email + record_booking_link
- *  + a follow-up email — but well below any plausible legitimate need. */
-const TURN_TOOL_BUDGET = 8;
+ *  + a follow-up email — but well below any plausible legitimate need.
+ *
+ *  Sized at 12 (was 8) to accommodate therapist replies that list many
+ *  one-off availability windows in a single message — each window is one
+ *  `record_availability_window` call, and operators reported the prior
+ *  budget tripping on ~5-date replies once `resolve_local_time` calls
+ *  were also counted. With pure tools now exempt (see `PURE_TOOLS`
+ *  below) the new budget gates ~12 state-changing calls per turn.
+ *  Loop-style runaway is still caught by the SAME_HASH_TURN_ABORT
+ *  guard, not by this budget. */
+const TURN_TOOL_BUDGET = 12;
 
 /** Number of times the same (toolName, input) hash can appear within one
  *  runToolLoop invocation before the loop aborts. 1st: executes. 2nd:
@@ -528,11 +542,19 @@ export async function runToolLoop(
       let toolResult: string;
       let isError = false;
 
+      // Pure tools (compute-only, no side effects) bypass the turn
+      // budget. See PURE_TOOLS for the contract — `resolve_local_time`
+      // is prompted before EVERY `record_availability_window`, so
+      // counting it doubled the budget pressure on multi-date
+      // therapist replies. Excluding it gates the budget on
+      // state-changing calls only.
+      const isPureTool = PURE_TOOLS.has(toolCall.name);
+
       // Turn budget guard. Once exhausted, push a synthetic result for
       // every remaining tool_use block in this iteration (Anthropic
       // requires one result per use) but do not execute. The trip is
       // flagged after the for-loop completes.
-      if (toolsThisTurn >= TURN_TOOL_BUDGET) {
+      if (!isPureTool && toolsThisTurn >= TURN_TOOL_BUDGET) {
         budgetExhausted = true;
         toolResults.push({
           type: 'tool_result',
@@ -579,8 +601,10 @@ export async function runToolLoop(
 
       if (seenCount > 1) {
         // 2nd occurrence: skip with directive, still costs a budget slot
-        // (a tool_use block was emitted and answered).
-        toolsThisTurn++;
+        // for state-changing tools (a tool_use block was emitted and
+        // answered). Pure tools don't tick the budget — their result
+        // is deterministic, so a repeat call is just wasted compute.
+        if (!isPureTool) toolsThisTurn++;
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
@@ -597,8 +621,11 @@ export async function runToolLoop(
       }
 
       // First occurrence — execute. Increment before the call so a thrown
-      // exception still counts against the budget.
-      toolsThisTurn++;
+      // exception still counts against the budget. Pure tools (see
+      // PURE_TOOLS) don't count — they're side-effect-free and the
+      // prompt mandates calling `resolve_local_time` once per window
+      // recorded, which doubles the budget hit on multi-date replies.
+      if (!isPureTool) toolsThisTurn++;
       const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
@@ -1006,13 +1033,20 @@ export async function runAvailabilityToolLoop(
       let toolResult: string;
       let isError = false;
 
+      // Pure tools (currently just `resolve_local_time`) bypass the
+      // budget — see PURE_TOOLS at the top of this file. The prompt
+      // mandates calling resolve_local_time before every recorded
+      // window, so counting it doubled the budget hit on multi-date
+      // therapist replies.
+      const isPureTool = PURE_TOOLS.has(toolCall.name);
+
       // Turn budget guard (mirrors booking loop). The booking loop writes
       // an audit event via auditEventService.logToolExecuted; the
       // availability loop has no equivalent table (audit events are
       // appointment-scoped, this loop runs on TherapistConversation), so
       // we surface the bucket through structured logging instead. Same
       // searchable signal in logs without a schema lift.
-      if (toolsThisTurn >= TURN_TOOL_BUDGET) {
+      if (!isPureTool && toolsThisTurn >= TURN_TOOL_BUDGET) {
         budgetExhausted = true;
         toolResults.push({
           type: 'tool_result',
@@ -1059,7 +1093,10 @@ export async function runAvailabilityToolLoop(
       }
 
       if (seenCount > 1) {
-        toolsThisTurn++;
+        // Pure tools don't tick the budget on the 2nd occurrence
+        // either — their result is deterministic, so a repeat call
+        // is wasted compute, not a budget concern.
+        if (!isPureTool) toolsThisTurn++;
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
@@ -1079,7 +1116,9 @@ export async function runAvailabilityToolLoop(
         continue;
       }
 
-      toolsThisTurn++;
+      // Pure tools (PURE_TOOLS) don't count against the budget. See
+      // the top of the file for the rationale.
+      if (!isPureTool) toolsThisTurn++;
       const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
