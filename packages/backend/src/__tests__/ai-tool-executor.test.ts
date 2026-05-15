@@ -607,6 +607,63 @@ describe('record_availability_window — dispatch by source', () => {
     expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
     expect(getPrismaMock().appointmentRequest.update.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
+
+  // Regression: a therapist's reply listing 5+ dates included one
+  // already-past date ("Friday 14th" delivered to the agent on the
+  // 15th). The handler used to return `success: false` which burned
+  // the agent's per-turn error budget; with same-message multi-date
+  // replies that easily tripped the 3-failure tool-error circuit
+  // breaker and re-paused the appointment for human review.
+  // The fix returns `success: true` + a skip marker — the prompt
+  // already promises "Past windows are dropped automatically".
+  it('returns success+skip (not error) when ends_at is already in the past', async () => {
+    const PAST_START = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const PAST_END = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString();
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: PAST_START,
+        ends_at: PAST_END,
+        status: 'available',
+        source: 'therapist',
+        quote: 'Friday 14th — anytime after 1pm',
+      }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
+    );
+
+    expect(result.success).toBe(true);
+    // No storage write should have fired — the past date is dropped.
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+    expect(getPrismaMock().appointmentRequest.update.mock.calls.length).toBe(0);
+    // Result message tells the agent the date was skipped so it can
+    // re-check if its resolution was wrong (without burning an error).
+    expect(result.resultMessage).toMatch(/past/i);
+    expect(result.resultMessage).toMatch(/Friday 14th/);
+  });
+
+  it('still rejects ends_at <= starts_at as a validation error', async () => {
+    // Sanity: only the "past" check became non-fatal. A truly
+    // malformed window (end <= start) is still a real validation
+    // error worth surfacing.
+    const FUTURE_END_BEFORE_START = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const FUTURE_START_AFTER_END = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_availability_window', {
+        starts_at: FUTURE_START_AFTER_END,
+        ends_at: FUTURE_END_BEFORE_START,
+        status: 'available',
+        source: 'therapist',
+        quote: 'reversed window',
+      }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/strictly after/);
+  });
 });
 
 // =============================================================================
