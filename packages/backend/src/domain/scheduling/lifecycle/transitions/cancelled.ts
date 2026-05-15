@@ -26,34 +26,52 @@ import { fireAndForget, notifyTransition } from '../dispatch-helpers';
 import { runTerminalTransitionTx } from '../terminal-tx';
 import type { TransitionResult, TransitionToCancelledParams } from '../types';
 
+/**
+ * Cross-validate the cancelledBy ⇄ source pair so callers can't
+ * pass an incoherent combination. Notifications and audit narrative
+ * both use cancelledBy, so a mismatch here propagates a misleading
+ * record.
+ *
+ * Allowed pairings (reflect the actual call sites):
+ *   - source='admin':  cancelledBy ∈ {'admin', 'client', 'therapist'}
+ *                       The 'client' / 'therapist' values drive
+ *                       different email copy in notifyCancelled
+ *                       (apology + voucher to user vs. apology +
+ *                       reassurance to therapist). 'admin' = neutral.
+ *   - source='agent':  cancelledBy ∈ {'client', 'therapist'}
+ *                       (agent is acting on behalf of a party).
+ *   - source='system': cancelledBy ∈ {'system', 'client'}
+ *                       ('system' for cron/bounce/auto-flow;
+ *                       'client' for forwarded auto-replies).
+ *   - source='feedback_sync': cancelledBy must be 'system'.
+ *
+ * Exported for unit tests so the table can be pinned independently
+ * of the full transition flow.
+ */
+export function validateCancellationInitiator(
+  source: TransitionToCancelledParams['source'],
+  cancelledBy: TransitionToCancelledParams['cancelledBy'],
+): void {
+  const valid =
+    (source === 'admin' && (cancelledBy === 'admin' || cancelledBy === 'client' || cancelledBy === 'therapist')) ||
+    (source === 'agent' && (cancelledBy === 'client' || cancelledBy === 'therapist')) ||
+    (source === 'system' && (cancelledBy === 'system' || cancelledBy === 'client')) ||
+    (source === 'feedback_sync' && cancelledBy === 'system');
+  if (!valid) {
+    throw new Error(
+      `Invalid cancelledBy '${cancelledBy}' for source '${source}'. ` +
+        `See transitionToCancelled validation table for allowed pairings.`,
+    );
+  }
+}
+
 export async function transitionToCancelled(
   params: TransitionToCancelledParams,
 ): Promise<TransitionResult> {
   const { appointmentId, reason, cancelledBy, source, adminId, atomic, skipNotifications } = params;
   const logContext = { appointmentId, source, adminId, cancelledBy };
 
-  // Cross-validate the cancelledBy ⇄ source pair so callers can't pass an
-  // incoherent combination (e.g. source='agent' with cancelledBy='admin' —
-  // the agent isn't an admin). Notifications and audit narrative both use
-  // cancelledBy, so a mismatch here propagates a misleading record. Allowed
-  // pairings reflect the actual call sites:
-  //   - 'admin'  source: cancelledBy must be 'admin'
-  //   - 'agent'  source: agent is acting on behalf of a party — cancelledBy
-  //              must be 'client' or 'therapist'
-  //   - 'system' source: cancelledBy is 'system' (cron / bounce / auto-flow)
-  //              or 'client' (e.g. forwarded auto-reply that's effectively
-  //              a client cancellation but wasn't admin-initiated)
-  //   - 'feedback_sync' source: cancelledBy must be 'system'
-  if (
-    (source === 'admin' && cancelledBy !== 'admin') ||
-    (source === 'agent' && cancelledBy !== 'client' && cancelledBy !== 'therapist') ||
-    (source === 'feedback_sync' && cancelledBy !== 'system')
-  ) {
-    throw new Error(
-      `Invalid cancelledBy '${cancelledBy}' for source '${source}'. ` +
-        `See transitionToCancelled validation table for allowed pairings.`,
-    );
-  }
+  validateCancellationInitiator(source, cancelledBy);
 
   type CancelledRow = {
     id: string;
