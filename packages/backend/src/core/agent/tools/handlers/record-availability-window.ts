@@ -59,17 +59,32 @@ export async function handleRecordAvailabilityWindow(
     };
   }
 
-  // Reject windows that have already passed entirely. The agent
-  // sometimes resolves "Friday" to the wrong Friday — a window
-  // ending in the past is almost always a date-resolution bug and
-  // storing it would mislead later turns.
+  // Already-past windows are silently skipped, not treated as errors.
+  //
+  // The system prompt promises operators that "Past windows are
+  // dropped automatically" (`system-prompt-builder.ts`). Returning
+  // `success: false` here contradicted that — the agent saw an
+  // error, burned its per-turn error budget retrying (often with
+  // small variations like "did I mean a different month?"), and
+  // tripped the 3-failure circuit breaker on multi-date therapist
+  // replies that happened to include a date now in the past
+  // (e.g. a reply written on Wednesday referencing "Friday 14th"
+  // delivered to the agent on Saturday 15th).
+  //
+  // The fix: report the skip via `resultMessage` so the agent has
+  // actionable feedback (it can re-check if the resolution was
+  // wrong) without consuming an error slot. A genuinely-past date
+  // can never be booked anyway, so the silent skip loses nothing
+  // operationally.
   if (endMs <= Date.now()) {
     return {
-      success: false,
+      success: true,
       toolName: 'record_availability_window',
-      error:
-        'ends_at is already in the past — this window has no future value. ' +
-        'If you intended to record a future window, re-check the date you computed (perhaps "next Friday" needed +7 days).',
+      resultMessage:
+        `Skipped — ends_at is already in the past. ` +
+        `Quote: "${parsed.data.quote.slice(0, 80)}". ` +
+        `If you intended a future window, re-check the date you computed (perhaps "next Friday" needed +7 days).`,
+      bypassPostSuccessBookkeeping: true,
     };
   }
 
