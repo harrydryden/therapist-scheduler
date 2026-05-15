@@ -221,7 +221,7 @@ export class JustinTimeService {
     fromEmail: string,
     threadContext?: string,
     precomputedClassification?: EmailClassification,
-  ): Promise<{ success: boolean; message: string }> {
+  ): Promise<{ success: boolean; message: string; loggedWhilePaused?: boolean }> {
     logger.info(
       { traceId: this.traceId, appointmentRequestId, fromEmail },
       'Processing email reply'
@@ -359,6 +359,15 @@ export class JustinTimeService {
         return {
           success: true,
           message: 'Email logged but agent response skipped - human control enabled',
+          // Signal to the email pipeline that this message must NOT be
+          // marked as `'successfully-processed'`. Leaving it unmarked
+          // lets the missed-message-scanner OR the release-control
+          // inline replay re-deliver it to the agent once human
+          // control is off — without this flag the message was
+          // marked processed and silently dropped, stalling the
+          // conversation. See `AgentProcessorResult` for the
+          // contract.
+          loggedWhilePaused: true,
         };
       }
 

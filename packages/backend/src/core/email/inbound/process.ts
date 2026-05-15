@@ -496,7 +496,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
 
       // STEP 15: hand to the AI agent.
       const agentProcessor = getAgentProcessor(traceId);
-      await agentProcessor.processEmailReply(
+      const agentResult = await agentProcessor.processEmailReply(
         appointmentRequest.id,
         email.body,
         email.from,
@@ -506,7 +506,26 @@ export async function processMessage(messageId: string, traceId: string): Promis
 
       // STEP 16: success path — mark processed, clear failure record,
       // remove UNREAD label.
-      await markMessageProcessed(messageId, 'successfully-processed');
+      //
+      // EXCEPTION: when the agent paused itself because human control
+      // is on (`loggedWhilePaused: true`), we deliberately DON'T mark
+      // the message as processed. Leaving it unmarked lets the
+      // missed-message-scanner (or the release-control inline replay)
+      // re-deliver it to the agent once human control is off. Marking
+      // it as `'successfully-processed'` here was the bug that
+      // caused stalled-after-bulk-release conversations — the
+      // scanner skips already-marked messages, so paused replies
+      // never reached the agent after release. Failure tracking
+      // stays cleared either way — the message wasn't a failure,
+      // just deferred.
+      if (agentResult?.loggedWhilePaused !== true) {
+        await markMessageProcessed(messageId, 'successfully-processed');
+      } else {
+        logger.info(
+          { traceId, messageId, appointmentId: appointmentRequest.id },
+          'Skipping markMessageProcessed — message logged while paused, will be re-delivered after human-control release',
+        );
+      }
       await clearProcessingFailure(messageId);
 
       // Removing the UNREAD label is a cosmetic post-success step.

@@ -12,6 +12,28 @@
  * `processMessage` calls. Adding more methods would creep the contract.
  */
 
+/**
+ * Result shape returned by `processEmailReply`.
+ *
+ * `loggedWhilePaused` distinguishes "the agent was paused by human
+ * control and the message was logged for admin visibility but not
+ * actually processed" from a normal successful agent run. The email
+ * pipeline uses this flag to SKIP `markMessageProcessed` — the
+ * message stays unmarked, so the missed-message-scanner (or the
+ * release-control inline replay) can re-deliver it to the agent
+ * once human control is off.
+ *
+ * Without this flag the pipeline marks paused messages as
+ * `'successfully-processed'`; the scanner then skips them forever
+ * and the conversation stalls — see the regression that prompted
+ * this contract.
+ */
+export interface AgentProcessorResult {
+  success: boolean;
+  message: string;
+  loggedWhilePaused?: boolean;
+}
+
 export interface AgentProcessor {
   processEmailReply(
     appointmentId: string,
@@ -19,7 +41,7 @@ export interface AgentProcessor {
     from: string,
     threadContext?: unknown,
     precomputedClassification?: unknown,
-  ): Promise<{ success: boolean; message: string } | void>;
+  ): Promise<AgentProcessorResult | void>;
   processInquiryReply(
     inquiryId: string,
     body: string,
