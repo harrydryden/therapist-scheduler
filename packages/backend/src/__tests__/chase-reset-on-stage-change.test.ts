@@ -67,6 +67,53 @@ jest.mock('../utils/database', () => ({
 }));
 
 import { aiConversationService } from '../services/ai-conversation.service';
+import {
+  CLEAR_CHASE_STATE,
+  chaseResetIfStageChanged,
+} from '../domain/scheduling/lifecycle/update-fragments';
+
+// ─── The rule, in one place ──────────────────────────────────────
+// Both `applyCheckpointUpdate` and `storeConversationState` import
+// `chaseResetIfStageChanged` from `update-fragments` and spread
+// its result into their `data:` payload. This block pins the
+// rule's behaviour at the helper level so a future change to the
+// rule (e.g. "only forward transitions reset") is visible without
+// having to re-read both callsites.
+describe('chaseResetIfStageChanged — the consolidated rule', () => {
+  it('returns the chase-clear triplet when stages differ', () => {
+    expect(chaseResetIfStageChanged('awaiting_therapist_availability', 'awaiting_user_slot_selection'))
+      .toEqual(CLEAR_CHASE_STATE);
+  });
+
+  it('returns an empty object when stages match (no-op spread)', () => {
+    expect(chaseResetIfStageChanged('awaiting_user_slot_selection', 'awaiting_user_slot_selection'))
+      .toEqual({});
+  });
+
+  it('treats null → real as a change (early lifecycle)', () => {
+    expect(chaseResetIfStageChanged(null, 'initial_contact')).toEqual(CLEAR_CHASE_STATE);
+  });
+
+  it('treats real → null as a change (defensive — should not happen in practice)', () => {
+    expect(chaseResetIfStageChanged('awaiting_meeting_link', null)).toEqual(CLEAR_CHASE_STATE);
+  });
+
+  it('treats null → null as no change', () => {
+    expect(chaseResetIfStageChanged(null, null)).toEqual({});
+  });
+
+  it('CLEAR_CHASE_STATE has exactly the three known chase columns', () => {
+    // Snapshot the field set — adding a 4th chase column to the
+    // schema should land in this constant, and this test makes
+    // that requirement explicit.
+    expect(Object.keys(CLEAR_CHASE_STATE).sort()).toEqual([
+      'chaseSentAt',
+      'chaseSentTo',
+      'chaseTargetEmail',
+    ]);
+    expect(Object.values(CLEAR_CHASE_STATE)).toEqual([null, null, null]);
+  });
+});
 
 beforeEach(() => {
   jest.clearAllMocks();

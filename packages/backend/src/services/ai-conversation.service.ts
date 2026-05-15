@@ -19,6 +19,7 @@ import { emailProcessingService } from './email-processing.service';
 import { emailQueueService } from './email-queue.service';
 import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
+import { chaseResetIfStageChanged } from '../domain/scheduling/lifecycle/update-fragments';
 import { wrapUntrustedContent } from '../utils/content-sanitizer';
 import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS } from '../constants';
@@ -95,11 +96,14 @@ export class AIConversationService {
       where: { id: appointmentRequestId },
       select: { checkpointStage: true },
     });
-    const oldStage = existing?.checkpointStage ?? null;
-    const stageChanged = oldStage !== checkpointStage;
-    const chaseResetFields = stageChanged
-      ? { chaseSentAt: null, chaseSentTo: null, chaseTargetEmail: null }
-      : {};
+    // Chase-reset on stage advance. The rule + the field set live
+    // together in `update-fragments` so the two writers of
+    // `checkpointStage` (this method + `applyCheckpointUpdate`)
+    // stay in lock-step on the invariant.
+    const chaseResetFields = chaseResetIfStageChanged(
+      existing?.checkpointStage ?? null,
+      checkpointStage,
+    );
 
     if (expectedUpdatedAt) {
       // Use optimistic locking - only update if version matches.
@@ -238,32 +242,19 @@ export class AIConversationService {
       // (e.g. therapist replies with availability → row moves to
       // `awaiting_user_slot_selection`) we reset the chase-sentinel
       // triplet so the chase scheduler can fire one chase per
-      // STAGE, not one chase per APPOINTMENT. Without this reset,
-      // a row chased earlier on a prior stage stays in the
-      // "already chased" filter forever and the next stage's stale
-      // party never gets nudged.
+      // STAGE, not one chase per APPOINTMENT.
       const oldStage = record.checkpointStage;
 
       state.checkpoint = mutate(state.checkpoint ?? null);
       const stateJson = JSON.stringify(state);
       const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
-      const newStage = checkpointStage;
-      const stageChanged = oldStage !== newStage;
 
       const now = new Date();
 
-      // When the checkpoint stage advances, clear the chase sentinel
-      // so the next stage qualifies for its own (single) chase. See
-      // the docstring on this helper + the candidate query in
-      // `chase-email.service.ts` for the full rationale.
-      //
-      // Reset the FULL triplet — `chaseSentAt` is what the candidate
-      // query filters on (`chaseSentAt: null`), and the other two
-      // describe WHO was chased on the prior stage, so leaving them
-      // around would mis-attribute the next stage's chase target.
-      const chaseResetFields = stageChanged
-        ? { chaseSentAt: null, chaseSentTo: null, chaseTargetEmail: null }
-        : {};
+      // Chase-reset on stage advance. Rule + field set live in
+      // `update-fragments` — same helper used by
+      // `storeConversationState` so the two writers can't drift.
+      const chaseResetFields = chaseResetIfStageChanged(oldStage, checkpointStage);
 
       // Phase 3a dual-write: applyCheckpointUpdate is one of the four
       // writers of `conversationState`. Mirror to
