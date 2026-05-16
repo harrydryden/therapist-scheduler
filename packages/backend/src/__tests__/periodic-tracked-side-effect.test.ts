@@ -254,6 +254,78 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(appointmentKey).not.toBe(therapistKey);
   });
 
+  it('therapist-scoped wrapper produces DIFFERENT keys for different scopeGeneration values', async () => {
+    // This is the cycle-isolation guarantee that protects recurring
+    // cadence comms (therapist-nudge fires every 6h/intervalWeeks)
+    // from being permanently disabled by a single 5-retry burst that
+    // ends in `abandoned`. Each cycle's claim timestamp is the
+    // generation; consecutive cycles MUST hash to different keys so
+    // the prior cycle's abandoned row doesn't block the new one.
+    runPeriodicTrackedTherapistSideEffect(
+      'ther-1',
+      'email_therapist_nudge',
+      {
+        renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+      1000,
+    );
+    await capturedTask!();
+    const cycle1Key = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    capturedTask = null;
+    createMock.mockClear();
+
+    runPeriodicTrackedTherapistSideEffect(
+      'ther-1',
+      'email_therapist_nudge',
+      {
+        renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+      2000,
+    );
+    await capturedTask!();
+    const cycle2Key = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    expect(cycle1Key).not.toBe(cycle2Key);
+  });
+
+  it('therapist-scoped wrapper with the SAME scopeGeneration produces the SAME key (idempotency within a cycle)', async () => {
+    runPeriodicTrackedTherapistSideEffect(
+      'ther-2',
+      'email_therapist_nudge',
+      {
+        renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+      42,
+    );
+    await capturedTask!();
+    const firstKey = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    capturedTask = null;
+    createMock.mockClear();
+
+    runPeriodicTrackedTherapistSideEffect(
+      'ther-2',
+      'email_therapist_nudge',
+      {
+        renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+      42,
+    );
+    await capturedTask!();
+    const secondKey = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    expect(firstKey).toBe(secondKey);
+  });
+
   it('stores a paired { user, therapist } payload verbatim for paired-effect retries', async () => {
     // The feedback-dispatch and session-reminder-pair effects use a
     // multi-envelope payload shape. The retry executor reads both

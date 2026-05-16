@@ -202,8 +202,15 @@ class TherapistNudgeService {
         break;
       }
 
+      // Captured here so the same value is written to lastNudgeAt and
+      // passed to the harness as the cycle generation. The harness uses
+      // it to partition the idempotency key per cycle; the retry-runner
+      // abandon hook uses createdAt > this value as the guard against
+      // clobbering a newer cycle's claim when releasing the sentinel.
+      const claimedAt = new Date();
+
       try {
-        // Inter-tick claim: atomically advance lastNudgeAt to "now"
+        // Inter-tick claim: atomically advance lastNudgeAt to claimedAt
         // and skip this therapist if another worker (or a previous
         // run of this loop, racing) already claimed it. Matches the
         // candidate query's filter (lastNudgeAt null OR <= cutoff)
@@ -218,7 +225,7 @@ class TherapistNudgeService {
               { lastNudgeAt: { lte: cutoff } },
             ],
           },
-          data: { lastNudgeAt: new Date() },
+          data: { lastNudgeAt: claimedAt },
         });
 
         if (claimResult.count !== 1) {
@@ -284,6 +291,17 @@ class TherapistNudgeService {
               // per nudge — a permanent txn failure surfaces as a
               // missing/stale TherapistConversation row, not a
               // duplicate-conversation explosion.
+              //
+              // Exhausted-retry recovery: if all 5 attempts fail and
+              // the retry runner marks this cycle's row abandoned,
+              // it ALSO releases lastNudgeAt (see retry service's
+              // post-abandon hook). The next cron tick then opens a
+              // fresh cycle — a new claim timestamp produces a new
+              // idempotency key and a new row with a fresh attempts
+              // budget. So permanent failures are still bounded by
+              // 5 attempts per cycle, but transient outages > 5
+              // minutes can recover at the next 6h tick rather than
+              // being silently dropped.
               await prisma.$transaction(async (tx) => {
                 await tx.therapist.update({
                   where: { id: therapist.id },
@@ -329,6 +347,7 @@ class TherapistNudgeService {
             name: 'therapist-nudge',
             context: { therapistId: therapist.id, email: therapist.email },
           },
+          claimedAt.getTime(),
         );
 
         // Counted at queue time — the harness owns durability + retry.

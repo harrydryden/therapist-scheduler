@@ -139,12 +139,24 @@ class SideEffectTrackerService {
    * the key space cannot collide with appointment-scoped keys (which
    * hash `${id}:${transition}:${effectType}` without the prefix), even
    * if a therapist UUID happens to match an appointment UUID.
+   *
+   * `scopeGeneration` lets callers partition the key space per cadence
+   * cycle. Without it, a single 5-retry burst that exhausts and lands
+   * in `abandoned` would permanently block future cycles (the next
+   * cron tick would re-register with the same hash and short-circuit
+   * on the prior abandoned row). Callers that fire on a recurring
+   * cadence (therapist-nudge) pass their per-cycle claim timestamp so
+   * each cycle gets a fresh row + fresh attempts budget.
    */
   private generateTherapistIdempotencyKey(
     therapistId: string,
     effectType: SideEffectType,
+    scopeGeneration?: number,
   ): string {
-    const input = `therapist:${therapistId}:periodic:${effectType}`;
+    const input =
+      scopeGeneration === undefined
+        ? `therapist:${therapistId}:periodic:${effectType}`
+        : `therapist:${therapistId}:gen${scopeGeneration}:periodic:${effectType}`;
     const hash = createHash('sha256')
       .update(input)
       .digest('hex')
@@ -164,13 +176,14 @@ class SideEffectTrackerService {
   async registerTherapistSideEffects(
     therapistId: string,
     effects: SideEffectDefinition[],
+    scopeGeneration?: number,
   ): Promise<RegisteredSideEffect[]> {
     const registered: RegisteredSideEffect[] = [];
 
     for (const effect of effects) {
       const idempotencyKey =
         effect.idempotencyKey ||
-        this.generateTherapistIdempotencyKey(therapistId, effect.effectType);
+        this.generateTherapistIdempotencyKey(therapistId, effect.effectType, scopeGeneration);
 
       try {
         const existing = await prisma.sideEffectLog.findUnique({
@@ -504,6 +517,10 @@ class SideEffectTrackerService {
     idempotencyKey: string;
     attempts: number;
     payload: unknown;
+    // Surface createdAt so post-abandon cleanup hooks can guard
+    // against clobbering a newer cycle's claim (see the
+    // email_therapist_nudge release path in side-effect-retry).
+    createdAt: Date;
   }>> {
     const failedCutoff = new Date(Date.now() - retryAfterMs);
     const stalePendingCutoff = new Date(Date.now() - stalePendingAfterMs);
@@ -535,6 +552,7 @@ class SideEffectTrackerService {
       idempotencyKey: e.idempotencyKey,
       attempts: e.attempts,
       payload: e.payload as unknown,
+      createdAt: e.createdAt,
     }));
   }
 
@@ -844,6 +862,13 @@ export function runPeriodicTrackedSideEffect<P>(
  * caller's catch handles it (typically resets a sentinel on the
  * Therapist row). On execute failure: row marked failed, retry runner
  * replays via executeTherapistEffect.
+ *
+ * `scopeGeneration` partitions the idempotency key per cadence cycle.
+ * Callers that re-fire periodically (therapist-nudge runs every 6h /
+ * intervalWeeks) MUST pass a per-cycle value (typically the claim
+ * timestamp), otherwise a single 5-retry burst that exhausts and
+ * lands in `abandoned` would permanently block future cycles. See
+ * generateTherapistIdempotencyKey for the hash semantics.
  */
 export function runPeriodicTrackedTherapistSideEffect<P>(
   therapistId: string,
@@ -853,6 +878,7 @@ export function runPeriodicTrackedTherapistSideEffect<P>(
     execute: (payload: P) => Promise<unknown>;
   },
   options: BackgroundTaskOptions,
+  scopeGeneration?: number,
 ): void {
   runBackgroundTask(async () => {
     const payload = await spec.renderPayload();
@@ -862,6 +888,7 @@ export function runPeriodicTrackedTherapistSideEffect<P>(
       const [reg] = await sideEffectTrackerService.registerTherapistSideEffects(
         therapistId,
         [{ effectType, payload }],
+        scopeGeneration,
       );
       registered = reg;
     } catch (regErr) {

@@ -122,6 +122,8 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             'Side effect permanently abandoned'
           );
 
+          await this.postAbandonCleanup(effect);
+
           try {
             await slackNotificationService.sendAlert({
               title: 'Side Effect Abandoned',
@@ -148,6 +150,53 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     }
 
     return { retried, succeeded, failed, abandoned };
+  }
+
+  /**
+   * Effect-type-specific cleanup after an abandon.
+   *
+   * For effects whose parent row carries a sentinel that gates future
+   * cron ticks (currently only Therapist.lastNudgeAt for
+   * email_therapist_nudge), the sentinel must be released here or the
+   * next scheduled tick will see "claim still owned by previous cycle"
+   * and skip the therapist for intervalWeeks — turning a transient
+   * outage that outlasted the 5-attempt budget into a multi-week
+   * silence.
+   *
+   * Guard: only release if the current sentinel value is older than
+   * this row's createdAt. If a newer cycle has already claimed
+   * (Therapist.lastNudgeAt > row.createdAt), some other cycle is in
+   * flight and we must not clobber its claim.
+   */
+  private async postAbandonCleanup(effect: {
+    id: string;
+    effectType: SideEffectType;
+    therapistId: string | null;
+    createdAt: Date;
+  }): Promise<void> {
+    if (effect.effectType !== 'email_therapist_nudge' || !effect.therapistId) {
+      return;
+    }
+    try {
+      const result = await prisma.therapist.updateMany({
+        where: {
+          id: effect.therapistId,
+          lastNudgeAt: { lt: effect.createdAt },
+        },
+        data: { lastNudgeAt: null },
+      });
+      if (result.count > 0) {
+        logger.info(
+          { effectId: effect.id, therapistId: effect.therapistId },
+          'Released therapist nudge sentinel after abandon — next cron tick will re-evaluate',
+        );
+      }
+    } catch (err) {
+      logger.error(
+        { err, effectId: effect.id, therapistId: effect.therapistId },
+        'Failed to release nudge sentinel after abandon — therapist may not be re-considered until intervalWeeks elapses',
+      );
+    }
   }
 
   private async executeEffect(effect: {
