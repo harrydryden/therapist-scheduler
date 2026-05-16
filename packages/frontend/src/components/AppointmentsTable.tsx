@@ -15,7 +15,6 @@
 import { memo, useCallback } from 'react';
 import { List, type RowComponentProps } from 'react-window';
 import type { AppointmentListItem, AppointmentFilters, PaginationInfo } from '../types';
-import { getStageLabel } from '../config/color-mappings';
 import StatusBadge from './StatusBadge';
 import HealthStatusBadge from './HealthStatusBadge';
 import TherapistGroupSkeleton from './skeletons/TherapistGroupSkeleton';
@@ -50,54 +49,25 @@ interface RowContentProps {
 // Column template — drives both the row body and the sticky header.
 // Keep them in sync.
 //
-//  Health │ Client │ Therapist │ Status │ Stage │ Next action │ Last activity │ Msgs
+//  Health │ Client │ Therapist │ Status │ Next action │ Last activity │ Msgs
 //
-// The "Last message" column previously sat at the right edge but
-// long agent / admin messages overflowed the cell vertically and
-// bled into neighbouring rows. The preview now lives on the
-// appointment detail panel where there's room for the full text.
-// Remaining widths rebalance to give "Next action" more breathing
-// room — it's the primary triage signal.
+// The "Stage" column was removed: every meaningful stage transition
+// is already encoded in the Next action string ("Awaiting reply from
+// therapist on slot confirmation" etc.), and the FSM stage label
+// duplicated information operators were already reading from
+// Status + Next action. The freed width flows to Next action, which
+// is the primary triage signal and now carries longer party-plus-
+// context wording.
 const GRID_TEMPLATE =
-  'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,1.8fr)_minmax(0,2.4fr)_minmax(0,1fr)_64px]';
+  'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,3.8fr)_minmax(0,1fr)_64px]';
 
 const RowContent = memo(function RowContent({
   appointment,
   isSelected,
   onClick,
 }: RowContentProps) {
-  // Stage label — the conversation FSM's current checkpoint.
-  //
-  // When `checkpointStage` is null the appointment has no agent
-  // checkpoint yet. Most commonly this is the admin-created cohort
-  // (`admin-appointment-create.routes.ts` transitions a row through
-  // statuses before the agent's first kick-off populates a
-  // checkpoint). Showing the lifecycle status here would just
-  // duplicate the adjacent STATUS badge; showing `—` was the
-  // original UX gap the operator flagged. Render an italic muted
-  // "Not started" instead — distinct from a real stage label and
-  // signals to the operator "no agent activity yet".
-  const stageLabel = appointment.checkpointStage
-    ? getStageLabel(appointment.checkpointStage)
-    : null;
   const lastActivity = formatRelativeTime(appointment.lastActivityAt);
   const lastActivityAbsolute = formatAbsoluteTime(appointment.lastActivityAt);
-
-  // Stage column annotations: things layered on top of the base stage
-  // label that operators need to spot quickly.
-  const annotations: Array<{ label: string; tone: 'amber' | 'red' | 'slate' }> = [];
-  if (appointment.chaseSentAt) {
-    annotations.push({ label: `Chased${appointment.chaseSentTo ? ` (${appointment.chaseSentTo})` : ''}`, tone: 'amber' });
-  }
-  if (appointment.reschedulingInProgress) {
-    annotations.push({ label: 'Rescheduling', tone: 'amber' });
-  }
-  if (appointment.closureRecommendedAt && !appointment.closureRecommendationActioned) {
-    annotations.push({ label: 'Closure recommended', tone: 'red' });
-  }
-  if (appointment.humanControlEnabled) {
-    annotations.push({ label: 'Human control', tone: 'slate' });
-  }
 
   return (
     <button
@@ -134,39 +104,13 @@ const RowContent = memo(function RowContent({
         <StatusBadge status={appointment.status} />
       </span>
 
-      {/* Stage (base label + annotation chips) */}
-      <span className="min-w-0">
-        {stageLabel === null ? (
-          <span
-            className="block text-sm italic text-slate-400 truncate"
-            title="No agent checkpoint yet — typically an admin-created appointment or a row where the agent has not advanced the FSM."
-          >
-            Not started
-          </span>
-        ) : (
-          <span className="block text-sm text-slate-700 truncate">{stageLabel}</span>
-        )}
-        {annotations.length > 0 && (
-          <span className="flex flex-wrap gap-1 mt-0.5">
-            {annotations.map((a) => (
-              <span
-                key={a.label}
-                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                  a.tone === 'amber'
-                    ? 'bg-amber-100 text-amber-800'
-                    : a.tone === 'red'
-                      ? 'bg-red-100 text-red-700'
-                      : 'bg-slate-100 text-slate-600'
-                }`}
-              >
-                {a.label}
-              </span>
-            ))}
-          </span>
-        )}
-      </span>
-
-      {/* Next action — short imperative; wraps across up to 2 lines */}
+      {/* Next action — short imperative; wraps across up to 2 lines.
+          Annotations that used to live under Stage (Chased / Closure
+          recommended / Human control / Rescheduling) are intentionally
+          omitted: deriveNextAction surfaces all four conditions as
+          the action string itself (e.g. "Awaiting reply after chase
+          to therapist", "Review closure recommendation"), so the
+          chips would just repeat what's already in this cell. */}
       <span
         className="min-w-0 text-sm text-slate-700 leading-snug line-clamp-2"
         title={appointment.nextAction}
@@ -297,10 +241,9 @@ export default function AppointmentsTable({
           Health column placeholder. We can't render just
           `<span className="sr-only">…</span>` here: `sr-only` uses
           `position: absolute`, which removes the element from CSS
-          Grid auto-placement entirely. That collapses the header
-          into 8 grid items in 9 columns, shifting every visible
-          header one slot left vs. the row body — visible
-          misalignment.
+          Grid auto-placement entirely. That would leave the header
+          one slot short and shift every visible header one column
+          left vs. the row body — visible misalignment.
 
           The outer `<span aria-hidden>` is a normal-flow element
           that occupies the 24px health column. The inner
@@ -312,7 +255,6 @@ export default function AppointmentsTable({
         <HeaderCell label="Client" />
         <HeaderCell label="Therapist" />
         <HeaderCell label="Status" />
-        <HeaderCell label="Stage" />
         <HeaderCell label="Next action" />
         <HeaderCell
           label="Last activity"

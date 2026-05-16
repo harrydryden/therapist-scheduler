@@ -76,7 +76,7 @@ describe('deriveNextAction', () => {
             checkpointStage: 'awaiting_user_slot_selection',
           }),
         ),
-      ).toBe('Awaiting client slot choice');
+      ).toBe('Awaiting reply from user on availability shared');
     });
 
     it('human control beats waiting states', () => {
@@ -120,10 +120,10 @@ describe('deriveNextAction', () => {
   describe('stage-derived defaults', () => {
     it.each([
       ['initial_contact', 'Awaiting initial outreach'],
-      ['awaiting_therapist_availability', 'Awaiting therapist availability'],
-      ['awaiting_user_slot_selection', 'Awaiting client slot choice'],
-      ['awaiting_therapist_confirmation', 'Awaiting therapist confirmation'],
-      ['awaiting_meeting_link', 'Awaiting meeting link from therapist'],
+      ['awaiting_therapist_availability', 'Awaiting reply from therapist on availability request'],
+      ['awaiting_user_slot_selection', 'Awaiting reply from user on availability shared'],
+      ['awaiting_therapist_confirmation', 'Awaiting reply from therapist on slot confirmation'],
+      ['awaiting_meeting_link', 'Awaiting reply from therapist on meeting link'],
       ['rescheduling', 'Rescheduling in progress'],
       ['stalled', 'Stalled — manual nudge needed'],
       ['chased', 'Awaiting reply after chase'],

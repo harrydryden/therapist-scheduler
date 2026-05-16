@@ -7,12 +7,13 @@
  *   - the appointment detail endpoint (banner under the stage label)
  *
  * Wording rules:
- *   - **Short and imperative.** The string sits in a narrow column.
- *     Aim for ≤ 40 chars where possible.
+ *   - **Carry both party and context** when waiting on someone.
+ *     "Awaiting reply from user on availability shared" tells the
+ *     operator at a glance who we're waiting on AND what they were
+ *     asked for, so they don't need to open the detail panel.
  *   - **Action verb first when the admin is the one acting**
- *     ("Review closure recommendation", "Take over or release").
- *   - **"Awaiting" prefix when the system is the one waiting**
- *     ("Awaiting therapist availability", "Awaiting client choice").
+ *     ("Review closure recommendation", "Reply manually or release
+ *     control").
  *   - **Precedence**: terminal state → admin-required → waiting on
  *     external party → stage-derived → fallback. Earlier branches
  *     are higher-signal so they win over generic stage strings.
@@ -54,16 +55,29 @@ export interface NextActionInput {
 
 /**
  * Per-stage default for the "what are we waiting on" case.
- * Short and consistent in voice — every entry starts with a verb
- * (mostly "Awaiting", occasionally an imperative for admin-action
- * states like `stalled` and `closure_recommended`).
+ *
+ * Wording combines BOTH the party we're waiting on AND the context
+ * (what was last said to them). Operators triaging the dashboard
+ * shouldn't have to open the detail panel to find out "what was the
+ * therapist asked for again?" — the next-action cell should carry
+ * the answer.
+ *
+ * Examples:
+ *   awaiting_therapist_availability → therapist was asked for availability
+ *   awaiting_user_slot_selection    → user was sent options to pick from
+ *   awaiting_therapist_confirmation → therapist was asked to confirm a slot
+ *   awaiting_meeting_link           → therapist was asked for the link
+ *
+ * Admin-action stages (`stalled`, `closure_recommended`) keep their
+ * imperative form — the party-context pattern doesn't apply when the
+ * admin themselves needs to act.
  */
 const STAGE_NEXT_ACTIONS: Record<string, string> = {
   initial_contact: 'Awaiting initial outreach',
-  awaiting_therapist_availability: 'Awaiting therapist availability',
-  awaiting_user_slot_selection: 'Awaiting client slot choice',
-  awaiting_therapist_confirmation: 'Awaiting therapist confirmation',
-  awaiting_meeting_link: 'Awaiting meeting link from therapist',
+  awaiting_therapist_availability: 'Awaiting reply from therapist on availability request',
+  awaiting_user_slot_selection: 'Awaiting reply from user on availability shared',
+  awaiting_therapist_confirmation: 'Awaiting reply from therapist on slot confirmation',
+  awaiting_meeting_link: 'Awaiting reply from therapist on meeting link',
   rescheduling: 'Rescheduling in progress',
   stalled: 'Stalled — manual nudge needed',
   chased: 'Awaiting reply after chase',

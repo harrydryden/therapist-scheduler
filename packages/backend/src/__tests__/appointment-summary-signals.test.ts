@@ -100,7 +100,7 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting therapist availability');
+    expect(result.nextAction).toBe('Awaiting reply from therapist on availability request');
   });
 
   it('handles a malformed checkpoint.context gracefully', () => {
