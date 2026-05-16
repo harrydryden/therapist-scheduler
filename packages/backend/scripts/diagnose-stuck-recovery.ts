@@ -58,6 +58,16 @@ async function main(): Promise<void> {
       therapistName: true,
       checkpointStage: true,
       gmailThreadId: true,
+      therapistEmail: true,
+      userEmail: true,
+      updatedAt: true,
+      chaseSentAt: true,
+      chaseSentTo: true,
+      conversationState: true,
+      messageCount: true,
+      lastToolExecutedAt: true,
+      lastToolExecutionFailed: true,
+      lastToolFailureReason: true,
     },
   });
 
@@ -65,7 +75,47 @@ async function main(): Promise<void> {
     console.log('  (no rows found)');
   } else {
     for (const a of appointments) {
-      console.log(JSON.stringify(a, null, 2));
+      // Print everything except the conversationState blob (separately, summarised).
+      const { conversationState, ...rest } = a;
+      console.log(JSON.stringify(rest, null, 2));
+
+      // Conversation state structural summary (so we don't dump 100KB).
+      console.log('\n--- 1a. conversation_state structural summary ---');
+      if (!conversationState) {
+        console.log('  (null)');
+      } else {
+        const raw = conversationState as unknown;
+        let parsed: any;
+        if (typeof raw === 'string') {
+          try { parsed = JSON.parse(raw); } catch { parsed = null; }
+        } else {
+          parsed = raw;
+        }
+        if (!parsed) {
+          console.log('  (unparseable)');
+        } else {
+          const jsonStr = typeof raw === 'string' ? raw : JSON.stringify(raw);
+          console.log(`  total JSON bytes: ${jsonStr.length}`);
+          console.log(`  has 'messages': ${Array.isArray(parsed.messages)} (len ${parsed.messages?.length ?? 0})`);
+          console.log(`  has 'checkpoint': ${parsed.checkpoint !== undefined}`);
+          if (parsed.checkpoint) {
+            console.log(`    checkpoint.stage: ${parsed.checkpoint.stage ?? '(missing)'}`);
+            console.log(`    checkpoint.lastSuccessfulAction: ${parsed.checkpoint.lastSuccessfulAction ?? '(missing)'}`);
+            console.log(`    checkpoint.pendingAction: ${parsed.checkpoint.pendingAction ?? '(missing)'}`);
+            console.log(`    checkpoint.context: ${JSON.stringify(parsed.checkpoint.context ?? {})}`);
+          }
+          console.log(`  has 'facts': ${parsed.facts !== undefined}`);
+          console.log(`  has 'responseTracking': ${parsed.responseTracking !== undefined}`);
+          console.log(`  has 'systemPrompt': ${typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt.length + ' bytes' : 'no'}`);
+          if (Array.isArray(parsed.messages)) {
+            console.log(`\n  Last 5 messages (role / first 100 chars of content):`);
+            for (const m of parsed.messages.slice(-5)) {
+              const content = typeof m.content === 'string' ? m.content.slice(0, 100).replace(/\s+/g, ' ') : '[non-string]';
+              console.log(`    [${m.role ?? '?'}]  ${content}`);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -101,12 +151,12 @@ async function main(): Promise<void> {
   if (appointments.length > 0) {
     const appointmentId = appointments[0].id;
     console.log(
-      `\n--- 3. Last 20 audit events for appointment ${appointmentId} ---`,
+      `\n--- 3. Last 50 audit events for appointment ${appointmentId} ---`,
     );
     const events = await prisma.appointmentAuditEvent.findMany({
       where: { appointmentRequestId: appointmentId },
       orderBy: { createdAt: 'desc' },
-      take: 20,
+      take: 50,
       select: {
         createdAt: true,
         eventType: true,
@@ -122,6 +172,38 @@ async function main(): Promise<void> {
       console.log(
         `  ${e.createdAt.toISOString()}  ${e.eventType.padEnd(20)}  ${e.actor.padEnd(25)}  ${payloadStr}`,
       );
+    }
+
+    // Event-type histogram so we can see at a glance whether the agent
+    // is actually executing tools or just observing messages.
+    console.log(`\n--- 3a. Audit-event-type histogram (last 50) ---`);
+    const hist = new Map<string, number>();
+    for (const e of events) {
+      hist.set(e.eventType, (hist.get(e.eventType) ?? 0) + 1);
+    }
+    for (const [t, n] of [...hist.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${String(n).padStart(3)}  ${t}`);
+    }
+
+    // 3b. Cross-check: any processed_gmail_messages with IDs matching
+    //     messageIds that appear in the audit_events payload?
+    console.log(`\n--- 3b. processed_gmail_messages mentioned in audit payloads ---`);
+    const messageIdSet = new Set<string>();
+    for (const e of events) {
+      const p = e.payload as Record<string, unknown> | null;
+      if (p && typeof p.gmailMessageId === 'string') messageIdSet.add(p.gmailMessageId);
+    }
+    if (messageIdSet.size === 0) {
+      console.log('  (no gmailMessageId in any audit payload — payloads may not include it)');
+    } else {
+      const processed = await prisma.processedGmailMessage.findMany({
+        where: { id: { in: [...messageIdSet] } },
+        select: { id: true, context: true, processedAt: true },
+      });
+      console.log(`  Messages mentioned in audit: ${messageIdSet.size}, of which marked processed: ${processed.length}`);
+      for (const p of processed) {
+        console.log(`    ${p.id}  context=${p.context}  at=${p.processedAt.toISOString()}`);
+      }
     }
 
     // 4. Any processed-gmail-messages on this thread (to confirm what
