@@ -39,10 +39,11 @@ function baseAppointment(overrides: Record<string, unknown> = {}) {
 }
 
 describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-through', () => {
-  it("surfaces 'Awaiting reply from user' when checkpoint.context.lastEmailSentTo = 'user'", () => {
+  it("surfaces party-plus-context for lastEmailSentTo='user' without a checkpoint stage", () => {
     // Checkpoint stage absent (the admin-created cohort). Without
-    // the pass-through, this used to render "Awaiting initial
-    // outreach".
+    // the pass-through this used to render "Awaiting initial
+    // outreach"; with the heuristic it now mirrors the stage-derived
+    // wording for `awaiting_user_slot_selection`.
     const result = buildAppointmentSummary(
       {
         messages: [{ role: 'assistant', content: 'Email sent to user' }],
@@ -50,10 +51,10 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting reply from user');
+    expect(result.nextAction).toBe('Awaiting reply from user on availability shared');
   });
 
-  it("surfaces 'Awaiting reply from therapist' when checkpoint.context.lastEmailSentTo = 'therapist'", () => {
+  it("surfaces party-plus-context for lastEmailSentTo='therapist' without a checkpoint stage", () => {
     const result = buildAppointmentSummary(
       {
         messages: [{ role: 'assistant', content: 'Email sent to therapist' }],
@@ -61,7 +62,7 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting reply from therapist');
+    expect(result.nextAction).toBe('Awaiting reply from therapist on availability request');
   });
 
   it("falls back to 'Awaiting reply' when only the message role is known", () => {

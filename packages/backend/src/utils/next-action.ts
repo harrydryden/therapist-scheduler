@@ -133,16 +133,31 @@ export function deriveNextAction(input: NextActionInput): string {
   // No checkpoint stage — fall back to message-direction inference.
   // This is the common case for admin-created appointments where
   // the staged-creation flow transitioned the row through
-  // `negotiating` without the agent ever running its FSM. The
-  // dashboard's generic "Awaiting next message" was unhelpful for
-  // operators triaging these rows; the inferences below produce
-  // concrete "from user / from therapist" wording.
-  if (input.lastEmailSentTo === 'user' || input.lastEmailSentTo === 'therapist') {
-    return `Awaiting reply from ${input.lastEmailSentTo}`;
+  // `negotiating` without the agent ever running its FSM, plus
+  // older rows pre-instrumentation.
+  //
+  // The wording below DUPLICATES the stage-derived defaults for
+  // `awaiting_user_slot_selection` / `awaiting_therapist_availability`
+  // on purpose — when `lastEmailSentTo` is set without a stage, the
+  // most common reason at the negotiation phase is exactly that:
+  //   - we last emailed the user → typically we shared availability
+  //   - we last emailed the therapist → typically we asked them for it
+  // It's a heuristic (~80% correct based on typical flow) — wrong
+  // when the agent sent a clarifying question instead of a slot
+  // share, or when the row's true state is `awaiting_therapist_confirmation`.
+  // The dashboard cell is read with that grain of salt; the detail
+  // panel still shows the underlying signals if an operator needs
+  // to disambiguate.
+  if (input.lastEmailSentTo === 'user') {
+    return 'Awaiting reply from user on availability shared';
+  }
+  if (input.lastEmailSentTo === 'therapist') {
+    return 'Awaiting reply from therapist on availability request';
   }
   if (input.lastMessageRole === 'agent') {
     // Agent sent something out but we don't know to whom — likely
-    // an older row written before lastEmailSentTo was captured.
+    // an older row written before lastEmailSentTo was captured. We
+    // can't responsibly guess at the party here.
     return 'Awaiting reply';
   }
   if (input.lastMessageRole === 'inbound') {

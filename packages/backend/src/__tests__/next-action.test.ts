@@ -144,27 +144,35 @@ describe('deriveNextAction', () => {
       ).toBe('Awaiting initial outreach');
     });
 
-    // The next four pin the message-direction + recipient inference
-    // that drives "Awaiting reply from user/therapist" wording when
-    // the checkpoint stage is null (the admin-created-no-agent-yet
-    // cohort, primarily). Operators triaging these rows previously
-    // saw the unhelpful "Awaiting next message" — now they get
-    // concrete who-we're-waiting-on copy.
-    it('agent last emailed the user → awaiting reply from user', () => {
+    // The next five pin the message-direction + recipient inference
+    // that drives the fallback wording when the checkpoint stage is
+    // null (the admin-created-no-agent-yet cohort, plus rows pre-
+    // dating the FSM instrumentation). Operators triaging these rows
+    // previously saw the unhelpful "Awaiting next message" / a copy
+    // that only named the party with no context — now they get the
+    // same party-plus-context shape as the stage-derived defaults.
+    //
+    // It's a heuristic: when only `lastEmailSentTo` is known we
+    // assume the most common reason at the negotiation phase (we
+    // shared availability with the user, OR asked the therapist for
+    // theirs). Wrong in edge cases like the agent asking a
+    // clarifying question — but the dashboard reads with that grain.
+    it('agent last emailed the user → fallback infers availability share', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'user' })),
-      ).toBe('Awaiting reply from user');
+      ).toBe('Awaiting reply from user on availability shared');
     });
 
-    it('agent last emailed the therapist → awaiting reply from therapist', () => {
+    it('agent last emailed the therapist → fallback infers availability request', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'therapist' })),
-      ).toBe('Awaiting reply from therapist');
+      ).toBe('Awaiting reply from therapist on availability request');
     });
 
     it("agent role as last message but no lastEmailSentTo → generic 'awaiting reply'", () => {
       // Older rows pre-date the lastEmailSentTo capture — we know
-      // the agent acted but not to whom.
+      // the agent acted but not to whom, so no party-context guess
+      // is safe.
       expect(
         deriveNextAction(input({ lastMessageRole: 'agent' })),
       ).toBe('Awaiting reply');
@@ -183,7 +191,7 @@ describe('deriveNextAction', () => {
           lastEmailSentTo: 'therapist',
           lastMessageRole: 'inbound',
         })),
-      ).toBe('Awaiting reply from therapist');
+      ).toBe('Awaiting reply from therapist on availability request');
     });
   });
 
