@@ -32,11 +32,35 @@ export type SideEffectType =
   | 'email_therapist_confirmation'
   | 'email_client_cancellation'
   | 'email_therapist_cancellation'
+  | 'email_chase_user'
+  | 'email_chase_therapist'
+  | 'email_meeting_link_check'
+  | 'email_feedback_form'
+  | 'email_therapist_feedback_notification'
+  | 'email_feedback_reminder'
+  | 'email_session_reminder'
   | 'user_sync'
   | 'therapist_freeze_sync'
   | 'therapist_unfreeze_sync';
 
-export type TransitionType = 'requested' | 'confirmed' | 'cancelled' | 'completed' | 'session_held';
+/**
+ * Transition that owns the side effect.
+ *
+ * The five status-driven values (`requested` … `session_held`) match
+ * `appointmentRequest.status` transitions one-for-one. The sixth,
+ * `periodic`, is for time-driven actions that aren't tied to a status
+ * change — chase emails, session reminders, feedback follow-ups, etc.
+ * The runPeriodicTrackedSideEffect wrapper writes this transition for
+ * its callers so the retry executor's existing per-effect handlers
+ * apply uniformly.
+ */
+export type TransitionType =
+  | 'requested'
+  | 'confirmed'
+  | 'cancelled'
+  | 'completed'
+  | 'session_held'
+  | 'periodic';
 
 export interface SideEffectDefinition {
   effectType: SideEffectType;
@@ -630,4 +654,48 @@ export function runReplayableTrackedSideEffect<P>(
       throw err;
     }
   }, options);
+}
+
+/**
+ * Periodic-effect variant of runReplayableTrackedSideEffect.
+ *
+ * Use this for time-driven outbound actions that aren't tied to an
+ * `appointmentRequest.status` transition — chase emails, session
+ * reminders, feedback-form follow-ups. The wrapper hardcodes
+ * `transition: 'periodic'` so callers don't have to invent a status
+ * label and so the retry executor's case-arms can recognise periodic
+ * effects uniformly.
+ *
+ * Idempotency: like the replayable harness, keyed on
+ * `(appointmentId, transition, effectType)`. For a periodic effect the
+ * transition is always `'periodic'`, so the effective key is
+ * `(appointmentId, effectType)` — i.e. "once per appointment, ever".
+ * That matches the existing sentinel-claim semantics: once chased, the
+ * `chaseSentAt` field is stamped and the appointment never re-fires
+ * the chase. Callers that need multiple firings (e.g. recurring
+ * reminders) should layer their own occurrence key in the effect
+ * type or extend the API.
+ *
+ * Concurrency: the harness's `pending` status does NOT block parallel
+ * `execute` calls (two concurrent ticks both see `pending` and both
+ * proceed). Callers that need single-tick-wins protection must still
+ * claim a sentinel BEFORE calling this helper; the harness on top
+ * provides durability + retry, not exclusion.
+ */
+export function runPeriodicTrackedSideEffect<P>(
+  appointmentId: string,
+  effectType: SideEffectType,
+  spec: {
+    renderPayload: () => Promise<P>;
+    execute: (payload: P) => Promise<unknown>;
+  },
+  options: BackgroundTaskOptions,
+): void {
+  runReplayableTrackedSideEffect(
+    appointmentId,
+    'periodic',
+    effectType,
+    spec,
+    options,
+  );
 }

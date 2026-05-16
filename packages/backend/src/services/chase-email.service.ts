@@ -10,6 +10,7 @@ import { isTherapistPending, isUserPending } from './stage-groups';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {
@@ -209,7 +210,12 @@ class ChaseEmailService {
             const userGreetingName = firstName(appointment.userName);
 
             // Build the chase email using templates. Templates address the
-            // recipient by first name only — see utils/first-name.ts.
+            // recipient by first name only — see utils/first-name.ts. Done
+            // synchronously here (still inside the inner try) so a
+            // template-load failure flows through the catch-block sentinel
+            // release; if we deferred it to renderPayload inside the
+            // harness, a render throw would prevent registration and the
+            // sentinel would be stuck at EPOCH with no retry.
             let subject: string;
             let body: string;
 
@@ -231,89 +237,120 @@ class ChaseEmailService {
               });
             }
 
-            // Send the chase email on the existing thread
-            await emailProcessingService.sendEmail({
-              to: email,
-              subject,
-              body,
-              threadId: threadId || undefined,
-            });
+            const inactiveHours = Math.round(
+              (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
+            );
+            const effectType = target === 'user' ? 'email_chase_user' : 'email_chase_therapist';
 
-            const now = new Date();
-
-            // Atomic update via the checkpoint helper: verify sentinel still ours,
-            // advance the JSON checkpoint via `sent_chase_followup` (which derives
-            // stage = 'chased'), record chase metadata. The column `checkpointStage`
-            // is derived from the JSON — do NOT write it directly.
-            const checkpointResult = await aiConversationService.applyCheckpointAction(
+            // Tracked side effect. Send + checkpoint advance + audit
+            // recording all live in execute so retry replays the whole
+            // unit if the process dies mid-flight. The sentinel claim
+            // above still protects against concurrent ticks (the harness's
+            // `pending` state doesn't block parallel execute calls), and
+            // the stored payload lets retry replay the email without
+            // re-rendering against drifted template settings.
+            runPeriodicTrackedSideEffect(
               appointment.id,
-              'sent_chase_followup',
+              effectType,
               {
-                extraWhere: { chaseSentAt: new Date(0) }, // sentinel guard
-                extraUpdates: {
-                  chaseSentAt: now,
-                  chaseSentTo: target,
-                  chaseTargetEmail: email,
-                  lastActivityAt: now,
-                  isStale: false,
+                renderPayload: async () => ({
+                  to: email,
+                  subject,
+                  body,
+                  threadId: threadId || undefined,
+                }),
+                execute: async (payload) => {
+                  await emailProcessingService.sendEmail(payload);
+
+                  const now = new Date();
+
+                  // Atomic update via the checkpoint helper: verify sentinel still ours,
+                  // advance the JSON checkpoint via `sent_chase_followup` (which derives
+                  // stage = 'chased'), record chase metadata. The column `checkpointStage`
+                  // is derived from the JSON — do NOT write it directly.
+                  const checkpointResult = await aiConversationService.applyCheckpointAction(
+                    appointment.id,
+                    'sent_chase_followup',
+                    {
+                      extraWhere: { chaseSentAt: new Date(0) }, // sentinel guard
+                      extraUpdates: {
+                        chaseSentAt: now,
+                        chaseSentTo: target,
+                        chaseTargetEmail: email,
+                        lastActivityAt: now,
+                        isStale: false,
+                      },
+                    }
+                  );
+
+                  if (!checkpointResult.applied) {
+                    logger.error(
+                      { checkId, appointmentId: appointment.id },
+                      'ALERT: Chase email sent but sentinel update failed - possible duplicate'
+                    );
+                    return;
+                  }
+
+                  await recordAppointmentEvent({
+                    appointmentId: appointment.id,
+                    type: 'chase_sent',
+                    actor: 'system',
+                    reason: `Inactive ${inactiveHours}h, chasing ${target}`,
+                    payload: {
+                      target,
+                      chasedEmail: email,
+                      inactiveHours,
+                      userName: appointment.userName,
+                      therapistName: appointment.therapistName,
+                    },
+                    slack: {
+                      // PII discipline: drop the chased email (PII for clients).
+                      // Therapist's full name is fine; client uses first name.
+                      // appointmentId in the alert metadata gives admins a
+                      // click-through to the full record.
+                      title: 'Chase follow-up sent',
+                      severity: 'medium',
+                      details:
+                        `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
+                        `*${inactiveHours}h*. Sent a follow-up nudge.`,
+                      additionalFields: {
+                        'Client': firstName(appointment.userName, '(unknown)'),
+                        'Therapist': appointment.therapistName || '(unknown)',
+                      },
+                    },
+                  });
+
+                  logger.info(
+                    {
+                      checkId,
+                      appointmentId: appointment.id,
+                      target,
+                      email,
+                      userName: appointment.userName,
+                      therapistName: appointment.therapistName,
+                    },
+                    `Sent chase follow-up email to ${target}`
+                  );
                 },
-              }
+              },
+              {
+                name: 'chase-email',
+                context: { appointmentId: appointment.id, target },
+              },
             );
 
-            if (!checkpointResult.applied) {
-              logger.error(
-                { checkId, appointmentId: appointment.id },
-                'ALERT: Chase email sent but sentinel update failed - possible duplicate'
-              );
-            } else {
-              const inactiveHours = Math.round(
-                (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
-              );
-              await recordAppointmentEvent({
-                appointmentId: appointment.id,
-                type: 'chase_sent',
-                actor: 'system',
-                reason: `Inactive ${inactiveHours}h, chasing ${target}`,
-                payload: {
-                  target,
-                  chasedEmail: email,
-                  inactiveHours,
-                  userName: appointment.userName,
-                  therapistName: appointment.therapistName,
-                },
-                slack: {
-                  // PII discipline: drop the chased email (PII for clients).
-                  // Therapist's full name is fine; client uses first name.
-                  // appointmentId in the alert metadata gives admins a
-                  // click-through to the full record.
-                  title: 'Chase follow-up sent',
-                  severity: 'medium',
-                  details:
-                    `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
-                    `*${inactiveHours}h*. Sent a follow-up nudge.`,
-                  additionalFields: {
-                    'Client': firstName(appointment.userName, '(unknown)'),
-                    'Therapist': appointment.therapistName || '(unknown)',
-                  },
-                },
-              });
-
-              logger.info(
-                {
-                  checkId,
-                  appointmentId: appointment.id,
-                  target,
-                  email,
-                  userName: appointment.userName,
-                  therapistName: appointment.therapistName,
-                },
-                `Sent chase follow-up email to ${target}`
-              );
-
-              chasedCount++;
-            }
+            // Counted at queue time, not at completion — the harness is
+            // fire-and-forget. A failure inside execute is logged + retried
+            // by the side-effect-retry runner; this count reflects "chases
+            // queued in this tick", which is what the periodic runner
+            // observability wants.
+            chasedCount++;
           } catch (error) {
-            // On failure, reset sentinel to null so it can be retried
+            // Errors from the pre-send safety check or template render
+            // land here. Reset the sentinel so the appointment can be
+            // re-evaluated on the next tick. Failures inside the harness
+            // execute do NOT flow through this catch — the harness marks
+            // its row failed and the retry runner handles them.
             await prisma.appointmentRequest.update({
               where: { id: appointment.id },
               data: { chaseSentAt: null },
@@ -322,7 +359,7 @@ class ChaseEmailService {
 
             logger.error(
               { checkId, appointmentId: appointment.id, error },
-              'Failed to send chase follow-up email - will retry next cycle'
+              'Failed to prepare chase follow-up email - will retry next cycle'
             );
           }
         } catch (error) {

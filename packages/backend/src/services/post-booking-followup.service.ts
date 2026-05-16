@@ -36,6 +36,7 @@ import { firstName } from '../utils/first-name';
 import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { auditEventService } from './audit-event.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { generateFeedbackToken } from '../utils/feedback-token';
 
@@ -594,46 +595,79 @@ class PostBookingFollowupService extends PeriodicService {
       }
 
       try {
-        await this.sendMeetingLinkCheckEmail(appointment);
+        // Render the email envelope synchronously here (inside the
+        // outer try) so a template-load failure flows through the
+        // catch-block sentinel reset below. If we deferred this into
+        // the harness's renderPayload, a throw there would leave the
+        // sentinel stuck at EPOCH with no retry.
+        const payload = await this.buildMeetingLinkCheckPayload(appointment);
 
-        // Log follow_up_sent audit event
-        auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
-          followUpType: 'meeting_link_check',
-        });
+        const notesSoFar = appointment.notes;
 
-        // FIX B5: Use atomic update with sentinel check to verify we still own the lock
-        // This prevents race condition where update fails silently after email sent
-        const confirmed = await confirmSentinelClaim(appointment.id, 'meetingLinkCheckSentAt', now);
+        runPeriodicTrackedSideEffect(
+          appointment.id,
+          'email_meeting_link_check',
+          {
+            renderPayload: async () => payload,
+            execute: async (envelope) => {
+              await emailProcessingService.sendEmail(envelope);
 
-        // FIX B5: Verify update succeeded
-        if (!confirmed) {
-          // This should never happen - sentinel was taken by another process
-          // or something went wrong. Email was already sent though.
-          logger.error(
-            { checkId, appointmentId: appointment.id },
-            'ALERT: Meeting link check email sent but sentinel update failed - possible duplicate'
-          );
-          // Try to add a note for admin review
-          try {
-            await prisma.appointmentRequest.update({
-              where: { id: appointment.id },
-              data: {
-                notes: `${appointment.notes || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: meetingLinkCheck email sent but tracking update failed - review for duplicates`,
-              },
-              select: { id: true },
-            });
-          } catch {
-            // Ignore error - already logged the main issue
-          }
-        } else {
-          sent++;
-          logger.info(
-            { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
-            'Sent meeting link check email'
-          );
-        }
+              // Log follow_up_sent audit event
+              auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
+                followUpType: 'meeting_link_check',
+              });
+
+              // FIX B5: Use atomic update with sentinel check to verify we still own the lock
+              // This prevents race condition where update fails silently after email sent
+              const confirmed = await confirmSentinelClaim(appointment.id, 'meetingLinkCheckSentAt', now);
+
+              // FIX B5: Verify update succeeded
+              if (!confirmed) {
+                // This should never happen - sentinel was taken by another process
+                // or something went wrong. Email was already sent though.
+                logger.error(
+                  { checkId, appointmentId: appointment.id },
+                  'ALERT: Meeting link check email sent but sentinel update failed - possible duplicate'
+                );
+                // Try to add a note for admin review
+                try {
+                  await prisma.appointmentRequest.update({
+                    where: { id: appointment.id },
+                    data: {
+                      notes: `${notesSoFar || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: meetingLinkCheck email sent but tracking update failed - review for duplicates`,
+                    },
+                    select: { id: true },
+                  });
+                } catch {
+                  // Ignore error - already logged the main issue
+                }
+                return;
+              }
+
+              logger.info(
+                { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
+                'Sent meeting link check email'
+              );
+            },
+          },
+          {
+            name: 'meeting-link-check-email',
+            context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
+          },
+        );
+
+        // Counted at queue time — the harness is fire-and-forget. A
+        // failure inside execute is logged + retried by the
+        // side-effect-retry runner; this reflects "checks queued in
+        // this tick" for the periodic-runner observability.
+        sent++;
       } catch (error) {
-        // On failure, reset to null so it can be retried
+        // Errors from buildMeetingLinkCheckPayload land here (template
+        // render / timezone resolution / settings read). Reset the
+        // sentinel so the appointment can be re-evaluated on the next
+        // tick. Failures inside the harness execute do NOT flow
+        // through this catch — the harness marks its row failed and
+        // the retry runner handles them.
         await prisma.appointmentRequest.update({
           where: { id: appointment.id },
           data: { meetingLinkCheckSentAt: null },
@@ -642,7 +676,7 @@ class PostBookingFollowupService extends PeriodicService {
 
         logger.error(
           { checkId, appointmentId: appointment.id, error },
-          'Failed to send meeting link check email - will retry next cycle'
+          'Failed to prepare meeting link check email - will retry next cycle'
         );
       }
     }
@@ -847,9 +881,15 @@ class PostBookingFollowupService extends PeriodicService {
   }
 
   /**
-   * Send meeting link check email to the user (using configurable template)
+   * Build the meeting-link-check email payload for the user.
+   *
+   * Returns the rendered envelope ({to, subject, body, threadId}) so the
+   * caller can hand it to runPeriodicTrackedSideEffect. The harness
+   * persists this payload at registration time; on retry the executor
+   * replays the stored envelope rather than re-rendering against
+   * potentially-drifted template settings.
    */
-  private async sendMeetingLinkCheckEmail(appointment: {
+  private async buildMeetingLinkCheckPayload(appointment: {
     id: string;
     userName: string | null;
     userEmail: string;
@@ -857,7 +897,7 @@ class PostBookingFollowupService extends PeriodicService {
     confirmedDateTime: string | null;
     confirmedDateTimeParsed: Date | null;
     gmailThreadId: string | null;
-  }): Promise<void> {
+  }): Promise<{ to: string; subject: string; body: string; threadId?: string }> {
     // Address the recipient by first name only — see utils/first-name.ts.
     const userName = firstName(appointment.userName);
     const therapistFirstName = firstName(appointment.therapistName);
@@ -879,12 +919,12 @@ class PostBookingFollowupService extends PeriodicService {
       confirmedDateTime: formattedDateTime,
     });
 
-    await emailProcessingService.sendEmail({
+    return {
       to: appointment.userEmail,
       subject,
       body,
       threadId: appointment.gmailThreadId || undefined,
-    });
+    };
   }
 
   /**
@@ -1059,39 +1099,64 @@ class PostBookingFollowupService extends PeriodicService {
       }
 
       try {
-        await this.sendFeedbackReminderEmail(appointment);
+        // Render the envelope synchronously so template-load failures
+        // (incl. the trackingCode guard inside the builder) reset the
+        // sentinel via the catch-block below. See the parallel comment
+        // in processMeetingLinkChecks for the rationale.
+        const payload = await this.buildFeedbackReminderPayload(appointment);
 
-        // Log follow_up_sent audit event
-        auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
-          followUpType: 'feedback_reminder',
-        });
+        runPeriodicTrackedSideEffect(
+          appointment.id,
+          'email_feedback_reminder',
+          {
+            renderPayload: async () => payload,
+            execute: async (envelope) => {
+              await emailProcessingService.sendEmail(envelope);
 
-        // Atomic confirm — sentinel-still-ours precondition enforced by
-        // the helper.
-        const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
+              // Log follow_up_sent audit event
+              auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
+                followUpType: 'feedback_reminder',
+              });
 
-        if (!confirmed) {
-          logger.error(
-            { checkId, appointmentId: appointment.id },
-            'ALERT: Feedback reminder email sent but sentinel update failed - possible duplicate'
-          );
-        } else {
-          sent++;
-          logger.info(
-            { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
-            'Sent feedback reminder email'
-          );
-        }
+              // Atomic confirm — sentinel-still-ours precondition enforced by
+              // the helper.
+              const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
+
+              if (!confirmed) {
+                logger.error(
+                  { checkId, appointmentId: appointment.id },
+                  'ALERT: Feedback reminder email sent but sentinel update failed - possible duplicate'
+                );
+                return;
+              }
+
+              logger.info(
+                { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
+                'Sent feedback reminder email'
+              );
+            },
+          },
+          {
+            name: 'feedback-reminder-email',
+            context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
+          },
+        );
+
+        // Counted at queue time — see processMeetingLinkChecks for rationale.
+        sent++;
       } catch (error) {
-        // On failure, release the sentinel so it can be retried next
-        // tick. The release helper guards on `=== EPOCH_SENTINEL` so we
-        // can't accidentally null out a real timestamp another writer
-        // just wrote.
+        // Errors from buildFeedbackReminderPayload land here (template
+        // render / missing trackingCode / settings read). Release the
+        // sentinel so the appointment can be re-evaluated on the next
+        // tick once the underlying issue (e.g. trackingCode) is
+        // resolved. Failures inside the harness execute do NOT flow
+        // through this catch — the harness marks its row failed and
+        // the retry runner handles them.
         await releaseSentinelClaim(appointment.id, 'feedbackReminderSentAt');
 
         logger.error(
           { checkId, appointmentId: appointment.id, error },
-          'Failed to send feedback reminder email - will retry next cycle'
+          'Failed to prepare feedback reminder email - will retry next cycle'
         );
       }
     }
@@ -1104,14 +1169,22 @@ class PostBookingFollowupService extends PeriodicService {
   /**
    * Send feedback reminder email to the user
    */
-  private async sendFeedbackReminderEmail(appointment: {
+  /**
+   * Build the feedback-reminder email payload for the user.
+   *
+   * Returns the rendered envelope for runPeriodicTrackedSideEffect to
+   * persist + replay; see buildMeetingLinkCheckPayload for the contract.
+   * Throws on missing trackingCode — the caller's try/catch releases the
+   * sentinel so the appointment can be re-evaluated once the code is set.
+   */
+  private async buildFeedbackReminderPayload(appointment: {
     id: string;
     userName: string | null;
     userEmail: string;
     therapistName: string;
     trackingCode: string | null;
     gmailThreadId: string | null;
-  }): Promise<void> {
+  }): Promise<{ to: string; subject: string; body: string; threadId?: string }> {
     const userName = firstName(appointment.userName);
     const therapistFirstName = firstName(appointment.therapistName);
 
@@ -1138,12 +1211,12 @@ class PostBookingFollowupService extends PeriodicService {
       feedbackFormUrl,
     });
 
-    await emailProcessingService.sendEmail({
+    return {
       to: appointment.userEmail,
       subject,
       body,
       threadId: appointment.gmailThreadId || undefined,
-    });
+    };
   }
 
   /**

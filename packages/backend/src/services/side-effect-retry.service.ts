@@ -234,7 +234,22 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       case 'email_client_confirmation':
       case 'email_therapist_confirmation':
       case 'email_client_cancellation':
-      case 'email_therapist_cancellation': {
+      case 'email_therapist_cancellation':
+      // Periodic (non-transition) emails registered via
+      // runPeriodicTrackedSideEffect. Same payload shape, same replay
+      // path — the renderer captures a fully-rendered {to, subject,
+      // body, threadId?} envelope at original-send time, and we
+      // enqueue it verbatim on retry. We deliberately do NOT re-render
+      // on retry: settings drift (e.g. tracking URL, salutation
+      // template) between original send and retry would produce a
+      // surprising second email.
+      case 'email_chase_user':
+      case 'email_chase_therapist':
+      case 'email_meeting_link_check':
+      case 'email_feedback_form':
+      case 'email_therapist_feedback_notification':
+      case 'email_feedback_reminder':
+      case 'email_session_reminder': {
         // Replay the email using the rendered payload captured at registration
         // time. We never re-render the template on retry — settings could
         // have changed between the original send and the retry, and a stale
