@@ -118,8 +118,12 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
   });
 
   it('falls back to initial outreach with no messages at all', () => {
+    // The true fallback (no stage, no signals) now resolves to the
+    // canonical first move — agent emails therapist — matching the
+    // stage-derived initial_contact label so the dashboard reads
+    // consistently across both shapes.
     const result = buildAppointmentSummary({ messages: [] }, baseAppointment());
-    expect(result.nextAction).toBe('Awaiting initial outreach');
+    expect(result.nextAction).toBe('Awaiting initial outreach to therapist');
   });
 
   it('normalises raw role: "admin" → admin (treated like agent for next-action)', () => {
@@ -127,14 +131,14 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
     // sends a manual message. With no checkpoint stage, that's
     // neither "agent sent" nor "inbound arrived" — the role-based
     // inference currently treats it as no signal, falling through
-    // to "Awaiting initial outreach". Pin that behaviour so a
-    // future change is intentional.
+    // to the canonical initial-outreach label. Pin that behaviour so
+    // a future change is intentional.
     const result = buildAppointmentSummary(
       {
         messages: [{ role: 'admin', content: '[System] note' }],
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting initial outreach');
+    expect(result.nextAction).toBe('Awaiting initial outreach to therapist');
   });
 });
