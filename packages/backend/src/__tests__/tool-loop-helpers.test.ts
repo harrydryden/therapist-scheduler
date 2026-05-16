@@ -12,6 +12,8 @@ import {
   buildBudgetExhaustedMessage,
   buildErrorBreakerAdminMessage,
   buildErrorBreakerFlagReason,
+  buildMaxIterationsAdminMessage,
+  buildMaxIterationsFlagReason,
   buildSameHashAbortMessage,
   buildSameHashBlockedMessage,
   buildSkipMessage,
@@ -235,6 +237,21 @@ describe('turn-guard message builders', () => {
       expect(buildErrorBreakerFlagReason(3)).toBe(
         'Tool error circuit breaker tripped (3 failures in one turn). Agent paused for review.',
       );
+    });
+  });
+
+  describe('max iterations messages', () => {
+    it('admin message names the iteration ceiling', () => {
+      expect(buildMaxIterationsAdminMessage(5)).toBe(
+        '[System: Hit the 5-iteration ceiling with the agent still working — pausing for admin review.]',
+      );
+    });
+
+    it('flag reason names the iteration ceiling and clarifies non-natural exit', () => {
+      const reason = buildMaxIterationsFlagReason(5);
+      expect(reason).toContain('5-iteration ceiling');
+      expect(reason).toContain('not a natural completion');
+      expect(reason).toContain('Agent paused for review');
     });
   });
 });
