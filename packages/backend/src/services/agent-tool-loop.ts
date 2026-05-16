@@ -29,6 +29,7 @@ import {
   type ConversationCheckpoint,
   type ConversationAction,
   type ConversationStage,
+  createCheckpoint,
   updateCheckpoint,
   stageFromAction,
   wouldRegress,
@@ -445,6 +446,22 @@ export async function runToolLoop(
   traceId: string,
   logContext: string,
 ): Promise<{ messages: Anthropic.MessageParam[]; result: ToolLoopResult }> {
+  // Bootstrap checkpoint when entering the loop without one.
+  //
+  // `justin-time.service.ts` initialises checkpoint for first-contact
+  // runs, but inbound-reply runs load whatever's in conversationState —
+  // legacy rows pre-instrumentation, or rows where a prior iteration
+  // returned text-only with no tool call (no checkpointAction → no
+  // stage write at line ~654 below). Without this guard, the loop's
+  // end-of-turn `storeConversationState` writes a null `checkpoint.stage`
+  // back to the denormalised column, which trumps the schema default
+  // and re-surfaces the "Awaiting next message" fallback on the
+  // dashboard. Setting the floor here keeps the column non-null even
+  // if no tool fires this turn.
+  if (!conversationState.checkpoint) {
+    conversationState.checkpoint = createCheckpoint('initial_contact', null);
+  }
+
   let messagesForClaude = [...initialMessages];
   let iteration = 0;
   let totalToolErrors = 0;
@@ -652,7 +669,11 @@ export async function runToolLoop(
 
           // Update checkpoint after successful tool execution
           if (result.checkpointAction) {
-            const currentCheckpoint = conversationState.checkpoint;
+            // Explicit annotation: the runToolLoop entry-side bootstrap
+            // mutates `conversationState.checkpoint`, which knocks TS's
+            // narrowing here back to implicit `any` (TS7022) without it.
+            const currentCheckpoint: ConversationCheckpoint | undefined =
+              conversationState.checkpoint;
             const newStage = stageFromAction(result.checkpointAction);
 
             // Prevent send_email from regressing the checkpoint stage.

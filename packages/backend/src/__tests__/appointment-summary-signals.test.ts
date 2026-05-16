@@ -51,7 +51,7 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting reply from user on availability shared');
+    expect(result.nextAction).toBe('Awaiting time/date selection from user');
   });
 
   it("surfaces party-plus-context for lastEmailSentTo='therapist' without a checkpoint stage", () => {
@@ -62,7 +62,7 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting reply from therapist on availability request');
+    expect(result.nextAction).toBe('Awaiting availability from therapist');
   });
 
   it("falls back to 'Awaiting reply' when only the message role is known", () => {
@@ -101,7 +101,7 @@ describe('buildAppointmentSummary — lastEmailSentTo / lastMessageRole pass-thr
       },
       baseAppointment(),
     );
-    expect(result.nextAction).toBe('Awaiting reply from therapist on availability request');
+    expect(result.nextAction).toBe('Awaiting availability from therapist');
   });
 
   it('handles a malformed checkpoint.context gracefully', () => {

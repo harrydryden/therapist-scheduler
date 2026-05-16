@@ -56,29 +56,25 @@ export interface NextActionInput {
 /**
  * Per-stage default for the "what are we waiting on" case.
  *
- * Wording combines BOTH the party we're waiting on AND the context
- * (what was last said to them). Operators triaging the dashboard
- * shouldn't have to open the detail panel to find out "what was the
- * therapist asked for again?" — the next-action cell should carry
- * the answer.
+ * Canonical, finite set: one label per `ConversationStage`. Wording is
+ * "Awaiting {object} from {party}" — object-first so the dashboard cell
+ * answers "what are we waiting for" at a glance without an "on X"
+ * suffix. Admin-action stages (`stalled`, `closure_recommended`) use
+ * imperative form because the admin is the one expected to act.
  *
- * Examples:
- *   awaiting_therapist_availability → therapist was asked for availability
- *   awaiting_user_slot_selection    → user was sent options to pick from
- *   awaiting_therapist_confirmation → therapist was asked to confirm a slot
- *   awaiting_meeting_link           → therapist was asked for the link
- *
- * Admin-action stages (`stalled`, `closure_recommended`) keep their
- * imperative form — the party-context pattern doesn't apply when the
- * admin themselves needs to act.
+ * For nuanced sub-states the canonical labels don't cover (e.g.
+ * "request more availability after first slots didn't work"), the
+ * agent sets `checkpoint.pendingAction` — the override branch below
+ * surfaces it directly. Keeping the stage labels canonical avoids
+ * dashboard drift; one-off phrasings live in `pendingAction`.
  */
 const STAGE_NEXT_ACTIONS: Record<string, string> = {
   initial_contact: 'Awaiting initial outreach',
-  awaiting_therapist_availability: 'Awaiting reply from therapist on availability request',
-  awaiting_user_slot_selection: 'Awaiting reply from user on availability shared',
-  awaiting_therapist_confirmation: 'Awaiting reply from therapist on slot confirmation',
-  awaiting_meeting_link: 'Awaiting reply from therapist on meeting link',
-  rescheduling: 'Rescheduling in progress',
+  awaiting_therapist_availability: 'Awaiting availability from therapist',
+  awaiting_user_slot_selection: 'Awaiting time/date selection from user',
+  awaiting_therapist_confirmation: 'Awaiting confirmation from therapist',
+  awaiting_meeting_link: 'Awaiting meeting link from therapist',
+  rescheduling: 'Rescheduling — awaiting new availability',
   stalled: 'Stalled — manual nudge needed',
   chased: 'Awaiting reply after chase',
   closure_recommended: 'Review closure recommendation',
@@ -131,15 +127,16 @@ export function deriveNextAction(input: NextActionInput): string {
   }
 
   // No checkpoint stage — fall back to message-direction inference.
-  // This is the common case for admin-created appointments where
-  // the staged-creation flow transitioned the row through
-  // `negotiating` without the agent ever running its FSM, plus
-  // older rows pre-instrumentation.
+  // Covers legacy rows pre-instrumentation and any future path that
+  // somehow persists messages without advancing the checkpoint. New
+  // rows pick up the `initial_contact` schema default and the agent
+  // tool-loop bootstraps a checkpoint on entry, so this branch
+  // shouldn't fire for fresh appointments — it's the safety net.
   //
-  // The wording below DUPLICATES the stage-derived defaults for
-  // `awaiting_user_slot_selection` / `awaiting_therapist_availability`
-  // on purpose — when `lastEmailSentTo` is set without a stage, the
-  // most common reason at the negotiation phase is exactly that:
+  // The wording mirrors `awaiting_user_slot_selection` /
+  // `awaiting_therapist_availability` on purpose — when `lastEmailSentTo`
+  // is set without a stage, the most common reason at the negotiation
+  // phase is exactly that:
   //   - we last emailed the user → typically we shared availability
   //   - we last emailed the therapist → typically we asked them for it
   // It's a heuristic (~80% correct based on typical flow) — wrong
@@ -149,10 +146,10 @@ export function deriveNextAction(input: NextActionInput): string {
   // panel still shows the underlying signals if an operator needs
   // to disambiguate.
   if (input.lastEmailSentTo === 'user') {
-    return 'Awaiting reply from user on availability shared';
+    return 'Awaiting time/date selection from user';
   }
   if (input.lastEmailSentTo === 'therapist') {
-    return 'Awaiting reply from therapist on availability request';
+    return 'Awaiting availability from therapist';
   }
   if (input.lastMessageRole === 'agent') {
     // Agent sent something out but we don't know to whom — likely

@@ -76,7 +76,7 @@ describe('deriveNextAction', () => {
             checkpointStage: 'awaiting_user_slot_selection',
           }),
         ),
-      ).toBe('Awaiting reply from user on availability shared');
+      ).toBe('Awaiting time/date selection from user');
     });
 
     it('human control beats waiting states', () => {
@@ -118,13 +118,16 @@ describe('deriveNextAction', () => {
   });
 
   describe('stage-derived defaults', () => {
+    // Canonical, finite mapping — one label per `ConversationStage`.
+    // Stages omitted here (`confirmed`, `cancelled`) are covered by
+    // the terminal-status branch.
     it.each([
       ['initial_contact', 'Awaiting initial outreach'],
-      ['awaiting_therapist_availability', 'Awaiting reply from therapist on availability request'],
-      ['awaiting_user_slot_selection', 'Awaiting reply from user on availability shared'],
-      ['awaiting_therapist_confirmation', 'Awaiting reply from therapist on slot confirmation'],
-      ['awaiting_meeting_link', 'Awaiting reply from therapist on meeting link'],
-      ['rescheduling', 'Rescheduling in progress'],
+      ['awaiting_therapist_availability', 'Awaiting availability from therapist'],
+      ['awaiting_user_slot_selection', 'Awaiting time/date selection from user'],
+      ['awaiting_therapist_confirmation', 'Awaiting confirmation from therapist'],
+      ['awaiting_meeting_link', 'Awaiting meeting link from therapist'],
+      ['rescheduling', 'Rescheduling — awaiting new availability'],
       ['stalled', 'Stalled — manual nudge needed'],
       ['chased', 'Awaiting reply after chase'],
       ['closure_recommended', 'Review closure recommendation'],
@@ -160,13 +163,13 @@ describe('deriveNextAction', () => {
     it('agent last emailed the user → fallback infers availability share', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'user' })),
-      ).toBe('Awaiting reply from user on availability shared');
+      ).toBe('Awaiting time/date selection from user');
     });
 
     it('agent last emailed the therapist → fallback infers availability request', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'therapist' })),
-      ).toBe('Awaiting reply from therapist on availability request');
+      ).toBe('Awaiting availability from therapist');
     });
 
     it("agent role as last message but no lastEmailSentTo → generic 'awaiting reply'", () => {
@@ -191,7 +194,7 @@ describe('deriveNextAction', () => {
           lastEmailSentTo: 'therapist',
           lastMessageRole: 'inbound',
         })),
-      ).toBe('Awaiting reply from therapist on availability request');
+      ).toBe('Awaiting availability from therapist');
     });
   });
 
