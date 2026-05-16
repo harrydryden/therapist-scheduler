@@ -36,7 +36,7 @@ import { firstName } from '../utils/first-name';
 import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { auditEventService } from './audit-event.service';
-import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { generateFeedbackToken } from '../utils/feedback-token';
 

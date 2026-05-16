@@ -311,52 +311,36 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     // `undefined` for the param, so a regression wouldn't trip the
     // type checker.
     //
-    // We spyOn the actual singleton (rather than reading the mock
-    // factory's replacement) because the harness's closure was bound
-    // to the original module's sideEffectTrackerService at load time
-    // and doesn't pick up the factory's swap.
+    // The harness (in side-effect-harness.ts) imports
+    // sideEffectTrackerService from the tracker module. Because the
+    // tracker module is mocked at file scope (see the jest.mock
+    // factory above), the harness sees that mock object when it calls
+    // registerTherapistSideEffects — so we can assert directly on the
+    // mock's call history.
     seedTherapist();
 
-    const actualTracker = jest.requireActual<{
-      sideEffectTrackerService: typeof sideEffectTrackerService;
-    }>('../services/side-effect-tracker.service').sideEffectTrackerService;
-    const registerSpy = jest
-      .spyOn(actualTracker, 'registerTherapistSideEffects')
-      .mockResolvedValue([
-        { id: 'log-spy', effectType: 'email_therapist_nudge', idempotencyKey: 'spy-key', status: 'pending' },
-      ]);
-    // The harness also calls markCompleted/markFailed on the real
-    // singleton; those would touch prisma.sideEffectLog which the
-    // test's database mock doesn't stub. Replace them with no-ops so
-    // the harness completes cleanly after the execute body runs.
-    const completedSpy = jest.spyOn(actualTracker, 'markCompleted').mockResolvedValue(undefined);
-    const failedSpy = jest.spyOn(actualTracker, 'markFailed').mockResolvedValue(undefined);
+    const registerMock =
+      sideEffectTrackerService.registerTherapistSideEffects as jest.Mock;
 
-    try {
-      const beforeRun = Date.now();
-      await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
-        () => true,
-      );
-      await Promise.all(backgroundTaskPromises);
-      const afterRun = Date.now();
+    const beforeRun = Date.now();
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+    await Promise.all(backgroundTaskPromises);
+    const afterRun = Date.now();
 
-      expect(registerSpy).toHaveBeenCalledTimes(1);
-      const [therapistId, effects, scopeGen] = registerSpy.mock.calls[0];
-      expect(therapistId).toBe('tx-1');
-      expect(effects).toEqual([
-        expect.objectContaining({ effectType: 'email_therapist_nudge' }),
-      ]);
-      expect(typeof scopeGen).toBe('number');
-      // The claim happens before the harness's runBackgroundTask fires,
-      // so the cycle gen falls in the window between sendNudges entry
-      // and the awaited drain returning.
-      expect(scopeGen).toBeGreaterThanOrEqual(beforeRun);
-      expect(scopeGen).toBeLessThanOrEqual(afterRun);
-    } finally {
-      registerSpy.mockRestore();
-      completedSpy.mockRestore();
-      failedSpy.mockRestore();
-    }
+    expect(registerMock).toHaveBeenCalledTimes(1);
+    const [therapistId, effects, scopeGen] = registerMock.mock.calls[0];
+    expect(therapistId).toBe('tx-1');
+    expect(effects).toEqual([
+      expect.objectContaining({ effectType: 'email_therapist_nudge' }),
+    ]);
+    expect(typeof scopeGen).toBe('number');
+    // The claim happens before the harness's runBackgroundTask fires,
+    // so the cycle gen falls in the window between sendNudges entry
+    // and the awaited drain returning.
+    expect(scopeGen).toBeGreaterThanOrEqual(beforeRun);
+    expect(scopeGen).toBeLessThanOrEqual(afterRun);
   });
 
   it('abandons any prior active nudge_reply row for the therapist when sending a fresh nudge', async () => {

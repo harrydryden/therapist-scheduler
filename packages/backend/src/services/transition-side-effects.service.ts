@@ -22,7 +22,7 @@ import { therapistBookingStatusService } from './therapist-booking-status.servic
 import { APPOINTMENT_STATUS, AppointmentStatus, ACTIVE_STATUSES } from '../constants';
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
-import { runTrackedSideEffect } from './side-effect-tracker.service';
+import { runTrackedSideEffect } from './side-effect-harness';
 import type { TransitionSource, TransitionResult } from '../domain/scheduling/lifecycle';
 
 /**

@@ -7,7 +7,7 @@ import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { ACTIVE_STATUSES } from '../constants';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 
 // Check every 6 hours whether any therapists are due a nudge
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
