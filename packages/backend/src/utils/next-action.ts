@@ -62,13 +62,20 @@ export interface NextActionInput {
  * suffix. Admin-action stages (`stalled`, `closure_recommended`) use
  * imperative form because the admin is the one expected to act.
  *
+ * `confirmed` / `cancelled` map to empty strings because the terminal
+ * branches at the top of `deriveNextAction` already handle them — the
+ * stage-derived branch never sees them. The keys are present to keep
+ * the `Record<ConversationStage, ...>` exhaustive: adding a new stage
+ * to the enum will fail compilation here until it's mapped, blocking
+ * the "silently falls through to fallback" failure mode.
+ *
  * For nuanced sub-states the canonical labels don't cover (e.g.
  * "request more availability after first slots didn't work"), the
  * agent sets `checkpoint.pendingAction` — the override branch below
  * surfaces it directly. Keeping the stage labels canonical avoids
  * dashboard drift; one-off phrasings live in `pendingAction`.
  */
-const STAGE_NEXT_ACTIONS: Record<string, string> = {
+const STAGE_NEXT_ACTIONS: Record<ConversationStage, string> = {
   initial_contact: 'Awaiting initial outreach',
   awaiting_therapist_availability: 'Awaiting availability from therapist',
   awaiting_user_slot_selection: 'Awaiting time/date selection from user',
@@ -78,6 +85,10 @@ const STAGE_NEXT_ACTIONS: Record<string, string> = {
   stalled: 'Stalled — manual nudge needed',
   chased: 'Awaiting reply after chase',
   closure_recommended: 'Review closure recommendation',
+  // Terminal stages — unreachable here (handled by `status` branches
+  // at the top of `deriveNextAction`). Present for exhaustiveness only.
+  confirmed: '',
+  cancelled: '',
 };
 
 export function deriveNextAction(input: NextActionInput): string {
@@ -122,8 +133,19 @@ export function deriveNextAction(input: NextActionInput): string {
   }
 
   // Stage-derived default.
-  if (input.checkpointStage && STAGE_NEXT_ACTIONS[input.checkpointStage]) {
-    return STAGE_NEXT_ACTIONS[input.checkpointStage];
+  //
+  // `checkpointStage` is typed as `ConversationStage | string | null`
+  // because the value originates from a denormalised DB column. The
+  // `as ConversationStage` here narrows for the lookup; if the row
+  // carries a stage value outside the enum (legacy / hand-edited / a
+  // stage that was renamed without a migration), the lookup returns
+  // undefined and the `&&` falls through to the heuristic — the same
+  // behaviour as the prior loose-typed map.
+  const stageLabel = input.checkpointStage
+    ? STAGE_NEXT_ACTIONS[input.checkpointStage as ConversationStage]
+    : undefined;
+  if (stageLabel) {
+    return stageLabel;
   }
 
   // No checkpoint stage — fall back to message-direction inference.
