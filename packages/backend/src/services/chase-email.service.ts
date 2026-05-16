@@ -250,7 +250,7 @@ class ChaseEmailService {
             // the stored payload lets retry replay the email without
             // re-rendering against drifted template settings.
             runPeriodicTrackedSideEffect(
-              appointment.id,
+              { kind: 'appointment', appointmentId: appointment.id },
               effectType,
               {
                 renderPayload: async () => ({

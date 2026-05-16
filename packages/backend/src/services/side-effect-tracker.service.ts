@@ -78,6 +78,18 @@ export type TransitionType =
   | 'session_held'
   | 'periodic';
 
+/**
+ * Parent of a periodic tracked side effect. Mirrors the DB's
+ * polymorphism — every side_effect_logs row points at EXACTLY ONE of
+ * an appointment or a therapist (enforced by
+ * side_effect_logs_scope_check). The discriminated union is the
+ * single boundary type all periodic harness callers cross; downstream
+ * (register / executor / abandon hook) all branch on `kind`.
+ */
+export type SideEffectScope =
+  | { kind: 'appointment'; appointmentId: string }
+  | { kind: 'therapist'; therapistId: string };
+
 export interface SideEffectDefinition {
   effectType: SideEffectType;
   /** Unique key for idempotency (automatically generated if not provided) */
@@ -806,72 +818,43 @@ export function runReplayableTrackedSideEffect<P>(
 }
 
 /**
- * Periodic-effect variant of runReplayableTrackedSideEffect.
+ * Periodic-effect harness — the only public entry point for time-driven
+ * outbound actions that aren't tied to an `appointmentRequest.status`
+ * transition. Used by chase emails, session reminders, feedback-form
+ * follow-ups (appointment-scoped) and the weekly therapist-nudge
+ * (therapist-scoped). Both scopes converge here so the
+ * register → completed-check → abandoned-check → execute →
+ * mark-completed/failed plumbing lives in exactly one place.
  *
- * Use this for time-driven outbound actions that aren't tied to an
- * `appointmentRequest.status` transition — chase emails, session
- * reminders, feedback-form follow-ups. The wrapper hardcodes
- * `transition: 'periodic'` so callers don't have to invent a status
- * label and so the retry executor's case-arms can recognise periodic
- * effects uniformly.
+ * Scope: discriminated on `kind`. Appointment-scoped writes
+ * `(appointmentId, transition='periodic')` to side_effect_logs;
+ * therapist-scoped writes `(therapistId, transition='periodic')`. The
+ * DB CHECK constraint side_effect_logs_scope_check guarantees exactly
+ * one parent is set.
  *
- * Idempotency: like the replayable harness, keyed on
- * `(appointmentId, transition, effectType)`. For a periodic effect the
- * transition is always `'periodic'`, so the effective key is
- * `(appointmentId, effectType)` — i.e. "once per appointment, ever".
- * That matches the existing sentinel-claim semantics: once chased, the
- * `chaseSentAt` field is stamped and the appointment never re-fires
- * the chase. Callers that need multiple firings (e.g. recurring
- * reminders) should layer their own occurrence key in the effect
- * type or extend the API.
+ * Idempotency: keyed on `(scopeId, [scopeGeneration?], effectType)`.
+ * Without `scopeGeneration` the effective key is "once per parent,
+ * ever" — matches sentinel-claim semantics like `chaseSentAt` where
+ * the parent row's own field already gates re-firing. With
+ * `scopeGeneration` set (typically a per-cycle claim timestamp), each
+ * cadence cycle gets its own row + its own attempts budget, so a
+ * single 5-retry burst that exhausts can't permanently disable
+ * future cycles. The therapist-nudge service uses this.
  *
  * Concurrency: the harness's `pending` status does NOT block parallel
  * `execute` calls (two concurrent ticks both see `pending` and both
  * proceed). Callers that need single-tick-wins protection must still
  * claim a sentinel BEFORE calling this helper; the harness on top
  * provides durability + retry, not exclusion.
+ *
+ * Sequencing: render → register → execute (uses rendered payload).
+ * On render failure: nothing registers, caller's surrounding catch
+ * handles it (typically releases the sentinel so the next tick
+ * re-evaluates). On execute failure: row marked failed, retry runner
+ * replays via the per-effectType branch in side-effect-retry.
  */
 export function runPeriodicTrackedSideEffect<P>(
-  appointmentId: string,
-  effectType: SideEffectType,
-  spec: {
-    renderPayload: () => Promise<P>;
-    execute: (payload: P) => Promise<unknown>;
-  },
-  options: BackgroundTaskOptions,
-): void {
-  runReplayableTrackedSideEffect(
-    appointmentId,
-    'periodic',
-    effectType,
-    spec,
-    options,
-  );
-}
-
-/**
- * Therapist-scoped periodic-effect harness.
- *
- * Same shape as runPeriodicTrackedSideEffect but writes to the
- * therapist-scoped half of the side_effect_logs polymorphism. Use for
- * cadence comms that aren't tied to a specific appointment — e.g. the
- * weekly therapist-nudge email.
- *
- * Sequencing: render → register (therapist-scoped row) → execute
- * (uses rendered payload). On render failure: nothing registers,
- * caller's catch handles it (typically resets a sentinel on the
- * Therapist row). On execute failure: row marked failed, retry runner
- * replays via executeTherapistEffect.
- *
- * `scopeGeneration` partitions the idempotency key per cadence cycle.
- * Callers that re-fire periodically (therapist-nudge runs every 6h /
- * intervalWeeks) MUST pass a per-cycle value (typically the claim
- * timestamp), otherwise a single 5-retry burst that exhausts and
- * lands in `abandoned` would permanently block future cycles. See
- * generateTherapistIdempotencyKey for the hash semantics.
- */
-export function runPeriodicTrackedTherapistSideEffect<P>(
-  therapistId: string,
+  scope: SideEffectScope,
   effectType: SideEffectType,
   spec: {
     renderPayload: () => Promise<P>;
@@ -882,19 +865,15 @@ export function runPeriodicTrackedTherapistSideEffect<P>(
 ): void {
   runBackgroundTask(async () => {
     const payload = await spec.renderPayload();
+    const logContext = scopeLogContext(scope, effectType);
 
     let registered;
     try {
-      const [reg] = await sideEffectTrackerService.registerTherapistSideEffects(
-        therapistId,
-        [{ effectType, payload }],
-        scopeGeneration,
-      );
-      registered = reg;
+      registered = await registerForScope(scope, effectType, payload, scopeGeneration);
     } catch (regErr) {
       logger.warn(
-        { err: regErr, therapistId, effectType },
-        'Therapist side-effect registration failed; running untracked',
+        { err: regErr, ...logContext },
+        'Side-effect registration failed; running untracked',
       );
       await spec.execute(payload);
       return;
@@ -902,16 +881,16 @@ export function runPeriodicTrackedTherapistSideEffect<P>(
 
     if (registered.status === 'completed') {
       logger.debug(
-        { therapistId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Therapist side effect already completed; skipping',
+        { ...logContext, idempotencyKey: registered.idempotencyKey },
+        'Side effect already completed; skipping',
       );
       return;
     }
 
     if (registered.status === 'abandoned') {
       logger.warn(
-        { therapistId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Therapist side effect previously abandoned; not retrying',
+        { ...logContext, idempotencyKey: registered.idempotencyKey },
+        'Side effect previously abandoned; not retrying',
       );
       return;
     }
@@ -924,11 +903,40 @@ export function runPeriodicTrackedTherapistSideEffect<P>(
         .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
         .catch((markErr) => {
           logger.error(
-            { err: markErr, therapistId, effectType },
-            'Failed to mark therapist side effect as failed (will retry next run)',
+            { err: markErr, ...logContext },
+            'Failed to mark side effect as failed (will retry next run)',
           );
         });
       throw err;
     }
   }, options);
+}
+
+async function registerForScope<P>(
+  scope: SideEffectScope,
+  effectType: SideEffectType,
+  payload: P,
+  scopeGeneration: number | undefined,
+): Promise<RegisteredSideEffect> {
+  if (scope.kind === 'appointment') {
+    const [reg] = await sideEffectTrackerService.registerSideEffects(
+      scope.appointmentId,
+      'periodic',
+      [{ effectType, payload }],
+      scopeGeneration,
+    );
+    return reg;
+  }
+  const [reg] = await sideEffectTrackerService.registerTherapistSideEffects(
+    scope.therapistId,
+    [{ effectType, payload }],
+    scopeGeneration,
+  );
+  return reg;
+}
+
+function scopeLogContext(scope: SideEffectScope, effectType: SideEffectType): Record<string, unknown> {
+  return scope.kind === 'appointment'
+    ? { appointmentId: scope.appointmentId, effectType }
+    : { therapistId: scope.therapistId, effectType };
 }

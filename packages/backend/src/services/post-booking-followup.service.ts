@@ -374,7 +374,7 @@ class PostBookingFollowupService extends PeriodicService {
         const notesSoFar = appointment.notes;
 
         runPeriodicTrackedSideEffect(
-          appointment.id,
+          { kind: 'appointment', appointmentId: appointment.id },
           'email_session_reminder_pair',
           {
             renderPayload: async () => ({
@@ -639,7 +639,7 @@ class PostBookingFollowupService extends PeriodicService {
         const notesSoFar = appointment.notes;
 
         runPeriodicTrackedSideEffect(
-          appointment.id,
+          { kind: 'appointment', appointmentId: appointment.id },
           'email_meeting_link_check',
           {
             renderPayload: async () => payload,
@@ -840,7 +840,7 @@ class PostBookingFollowupService extends PeriodicService {
         const notesSoFar = appointment.notes;
 
         runPeriodicTrackedSideEffect(
-          appointment.id,
+          { kind: 'appointment', appointmentId: appointment.id },
           'email_feedback_dispatch',
           {
             renderPayload: async () => ({
@@ -1165,7 +1165,7 @@ class PostBookingFollowupService extends PeriodicService {
         const payload = await this.buildFeedbackReminderPayload(appointment);
 
         runPeriodicTrackedSideEffect(
-          appointment.id,
+          { kind: 'appointment', appointmentId: appointment.id },
           'email_feedback_reminder',
           {
             renderPayload: async () => payload,

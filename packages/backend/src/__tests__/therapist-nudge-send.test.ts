@@ -193,8 +193,8 @@ jest.mock('../utils/locked-task-runner', () => ({
 }));
 
 // The nudge service hands its send + transaction to
-// runPeriodicTrackedTherapistSideEffect, which wraps it in
-// runBackgroundTask (fire-and-forget). For tests we run the task
+// runPeriodicTrackedSideEffect with a therapist scope, which wraps it
+// in runBackgroundTask (fire-and-forget). For tests we run the task
 // synchronously and capture any promise so the test can await it.
 const backgroundTaskPromises: Promise<unknown>[] = [];
 jest.mock('../utils/background-task', () => ({

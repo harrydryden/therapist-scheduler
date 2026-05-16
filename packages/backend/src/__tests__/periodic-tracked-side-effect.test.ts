@@ -61,7 +61,6 @@ jest.mock('../utils/background-task', () => ({
 
 import {
   runPeriodicTrackedSideEffect,
-  runPeriodicTrackedTherapistSideEffect,
   sideEffectTrackerService,
 } from '../services/side-effect-tracker.service';
 
@@ -77,7 +76,7 @@ describe('runPeriodicTrackedSideEffect', () => {
 
   it('writes transition: "periodic" to the side_effect_log row', async () => {
     runPeriodicTrackedSideEffect(
-      'apt-1',
+      { kind: 'appointment', appointmentId: 'apt-1' },
       'email_chase_user',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
@@ -100,7 +99,7 @@ describe('runPeriodicTrackedSideEffect', () => {
     const envelope = { to: 'u@x', subject: 'hi', body: 'body', threadId: 't123' };
 
     runPeriodicTrackedSideEffect(
-      'apt-1',
+      { kind: 'appointment', appointmentId: 'apt-1' },
       'email_meeting_link_check',
       {
         renderPayload: async () => envelope,
@@ -117,7 +116,7 @@ describe('runPeriodicTrackedSideEffect', () => {
 
   it('produces a stable idempotency key for repeat calls with the same (appointmentId, effectType)', async () => {
     runPeriodicTrackedSideEffect(
-      'apt-2',
+      { kind: 'appointment', appointmentId: 'apt-2' },
       'email_chase_therapist',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -135,7 +134,7 @@ describe('runPeriodicTrackedSideEffect', () => {
     createMock.mockClear();
 
     runPeriodicTrackedSideEffect(
-      'apt-2',
+      { kind: 'appointment', appointmentId: 'apt-2' },
       'email_chase_therapist',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -153,7 +152,7 @@ describe('runPeriodicTrackedSideEffect', () => {
   it('produces a different idempotency key from a status-transition registration of the same effectType', async () => {
     // Periodic registration of email_chase_user
     runPeriodicTrackedSideEffect(
-      'apt-3',
+      { kind: 'appointment', appointmentId: 'apt-3' },
       'email_chase_user',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
@@ -186,7 +185,7 @@ describe('runPeriodicTrackedSideEffect', () => {
     const execute = jest.fn().mockResolvedValue(undefined);
 
     runPeriodicTrackedSideEffect(
-      'apt-4',
+      { kind: 'appointment', appointmentId: 'apt-4' },
       'email_feedback_reminder',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
@@ -200,9 +199,9 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(createMock).not.toHaveBeenCalled();
   });
 
-  it('therapist-scoped wrapper writes therapistId (not appointmentId) on the row', async () => {
-    runPeriodicTrackedTherapistSideEffect(
-      'ther-1',
+  it('therapist scope writes therapistId (not appointmentId) on the row', async () => {
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'ther-1' },
       'email_therapist_nudge',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -221,9 +220,9 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(createCall.data.effectType).toBe('email_therapist_nudge');
   });
 
-  it('therapist-scoped wrapper produces a key that does NOT collide with the same-id appointment-scoped key', async () => {
+  it('produces disjoint keys for appointment-scoped vs therapist-scoped registrations with the same id', async () => {
     runPeriodicTrackedSideEffect(
-      'shared-uuid',
+      { kind: 'appointment', appointmentId: 'shared-uuid' },
       'email_chase_user',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
@@ -237,8 +236,8 @@ describe('runPeriodicTrackedSideEffect', () => {
     capturedTask = null;
     createMock.mockClear();
 
-    runPeriodicTrackedTherapistSideEffect(
-      'shared-uuid',
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'shared-uuid' },
       'email_chase_user',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
@@ -254,15 +253,15 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(appointmentKey).not.toBe(therapistKey);
   });
 
-  it('therapist-scoped wrapper produces DIFFERENT keys for different scopeGeneration values', async () => {
+  it('therapist scope with different scopeGeneration values produces DIFFERENT keys', async () => {
     // This is the cycle-isolation guarantee that protects recurring
     // cadence comms (therapist-nudge fires every 6h/intervalWeeks)
     // from being permanently disabled by a single 5-retry burst that
     // ends in `abandoned`. Each cycle's claim timestamp is the
     // generation; consecutive cycles MUST hash to different keys so
     // the prior cycle's abandoned row doesn't block the new one.
-    runPeriodicTrackedTherapistSideEffect(
-      'ther-1',
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'ther-1' },
       'email_therapist_nudge',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -277,8 +276,8 @@ describe('runPeriodicTrackedSideEffect', () => {
     capturedTask = null;
     createMock.mockClear();
 
-    runPeriodicTrackedTherapistSideEffect(
-      'ther-1',
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'ther-1' },
       'email_therapist_nudge',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -293,9 +292,9 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(cycle1Key).not.toBe(cycle2Key);
   });
 
-  it('therapist-scoped wrapper with the SAME scopeGeneration produces the SAME key (idempotency within a cycle)', async () => {
-    runPeriodicTrackedTherapistSideEffect(
-      'ther-2',
+  it('therapist scope with the SAME scopeGeneration produces the SAME key (idempotency within a cycle)', async () => {
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'ther-2' },
       'email_therapist_nudge',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -310,8 +309,8 @@ describe('runPeriodicTrackedSideEffect', () => {
     capturedTask = null;
     createMock.mockClear();
 
-    runPeriodicTrackedTherapistSideEffect(
-      'ther-2',
+    runPeriodicTrackedSideEffect(
+      { kind: 'therapist', therapistId: 'ther-2' },
       'email_therapist_nudge',
       {
         renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
@@ -337,7 +336,7 @@ describe('runPeriodicTrackedSideEffect', () => {
     };
 
     runPeriodicTrackedSideEffect(
-      'apt-5',
+      { kind: 'appointment', appointmentId: 'apt-5' },
       'email_feedback_dispatch',
       {
         renderPayload: async () => pairedPayload,
