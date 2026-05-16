@@ -349,11 +349,41 @@ export class JustinTimeService {
           // we can't drift from the bounce/freeze check on line 321.
           const senderType =
             emailEquals(fromEmail, appointmentRequest.userEmail) ? 'user' : 'therapist';
-          stateWithoutVersion.messages.push({
-            role: 'user',
-            content: `[Received while paused] Email from ${senderType} (${fromEmail}):\n\n${emailContent}`,
-          });
-          await this.aiConversation.storeConversationState(appointmentRequestId, stateWithoutVersion, _version);
+          const pausedMessage = `[Received while paused] Email from ${senderType} (${fromEmail}):\n\n${emailContent}`;
+          // Deduplicate against the tail. The same messageId can hit this
+          // branch multiple times — original Gmail push, release-replay
+          // racing with a re-pause, manual reprocess — and each prior
+          // run already pushed an identical entry. Without this check the
+          // messages array fills with copies, the agent's context gets
+          // noisier each cycle, and (more practically) the recover-flow
+          // can't tell whether progress is being made.
+          const lastMessage = stateWithoutVersion.messages[stateWithoutVersion.messages.length - 1];
+          const alreadyLogged = lastMessage?.role === 'user' && lastMessage.content === pausedMessage;
+          if (!alreadyLogged) {
+            stateWithoutVersion.messages.push({ role: 'user', content: pausedMessage });
+            try {
+              await this.aiConversation.storeConversationState(appointmentRequestId, stateWithoutVersion, _version);
+            } catch (err) {
+              if (err instanceof ConcurrentModificationError) {
+                // Concurrent writer bumped updatedAt since we fetched
+                // state. The log-while-paused store is best-effort — if
+                // it fails the agent can still rely on Gmail's thread
+                // history for context. Critically, we must NOT propagate
+                // this to the caller: it would surface as a benign-but-
+                // silent "COMod returned false" in the email pipeline
+                // and prevent the message from being re-delivered after
+                // human-control release (the whole point of the pause
+                // branch). Same shape as the storeConversationStateWithRetry
+                // catch in the booking flow.
+                logger.warn(
+                  { traceId: this.traceId, appointmentRequestId, fromEmail },
+                  'Optimistic-lock conflict logging paused message — continuing; message stays unmarked for redelivery',
+                );
+              } else {
+                throw err;
+              }
+            }
+          }
         }
 
         return {
@@ -508,11 +538,34 @@ ${formatClassificationForPrompt(emailClassification)}`;
               );
             } catch (checkpointError) {
               if (checkpointError instanceof ConcurrentModificationError) {
+                // Previously this re-threw, which propagated up through
+                // runToolLoop → processEmailReply → process.ts, where
+                // the outer catch treats COMod as benign and returns
+                // false WITHOUT marking the message processed. The
+                // missed-message scanner then picked it up again the
+                // next hour, hit the same race, and the message stayed
+                // stuck in an infinite re-process loop (audit log shows
+                // hourly email_received + facts_extracted but no
+                // tool_executed and no failure record).
+                //
+                // The intermediate checkpoint save is best-effort. Tools
+                // about to run carry their own atomic writes
+                // (dispatch.ts:104-112 humanControlEnabled gate, send.ts
+                // outboundCount idempotency, etc.); they do not depend
+                // on this save landing. Refresh currentStateVersion so
+                // the FINAL save (storeConversationStateWithRetry) uses
+                // the latest updatedAt and either succeeds or fails-
+                // gracefully through its existing retry+catch.
                 logger.warn(
                   { traceId: this.traceId, appointmentRequestId },
-                  'Optimistic lock conflict at checkpoint - another process modified state'
+                  'Checkpoint COMod — skipping intermediate save, refreshing version for the final save',
                 );
-                throw checkpointError;
+                const updated = await prisma.appointmentRequest.findUnique({
+                  where: { id: appointmentRequestId },
+                  select: { updatedAt: true },
+                });
+                currentStateVersion = updated?.updatedAt ?? new Date();
+                return;
               }
               throw checkpointError;
             }
@@ -524,10 +577,18 @@ ${formatClassificationForPrompt(emailClassification)}`;
 
       const executedTools = loopResult.executedTools;
 
-      // If flagged for human review, save final state
-      if (loopResult.flaggedForHumanReview) {
-        await this.aiConversation.storeConversationState(appointmentRequestId, conversationState, currentStateVersion);
-      }
+      // Previously: if `loopResult.flaggedForHumanReview` was true, we
+      // did an extra naked `storeConversationState` here BEFORE the
+      // retry-wrapped save below. That extra save (a) was redundant —
+      // the final save persists the same object with the same version
+      // — and (b) threw COMod on the very common case where the
+      // flag_for_human_review tool's own DB write (humanControlEnabled
+      // = true via core/agent/tools/handlers/human-control.ts) had
+      // already bumped updatedAt. The throw propagated up to process.ts
+      // which silently returned false on COMod, leaving the message
+      // unmarked and stuck in a scanner-replay loop. Removing the
+      // duplicate save lets the retry-wrapped save below handle the
+      // version mismatch the way it does for every other tool.
 
       // FIX RSA-4: Final state save with retry and compensation
       const saveResult = await this.aiConversation.storeConversationStateWithRetry(
