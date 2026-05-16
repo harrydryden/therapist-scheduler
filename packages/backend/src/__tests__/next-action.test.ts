@@ -122,7 +122,7 @@ describe('deriveNextAction', () => {
     // Stages omitted here (`confirmed`, `cancelled`) are covered by
     // the terminal-status branch.
     it.each([
-      ['initial_contact', 'Awaiting initial outreach'],
+      ['initial_contact', 'Awaiting initial outreach to therapist'],
       ['awaiting_therapist_availability', 'Awaiting availability from therapist'],
       ['awaiting_user_slot_selection', 'Awaiting time/date selection from user'],
       ['awaiting_therapist_confirmation', 'Awaiting confirmation from therapist'],
@@ -137,14 +137,19 @@ describe('deriveNextAction', () => {
   });
 
   describe('fallback when no stage', () => {
-    it('no stage, no signals → awaiting initial outreach', () => {
-      expect(deriveNextAction(input())).toBe('Awaiting initial outreach');
+    it('no stage, no signals → awaiting initial outreach to therapist', () => {
+      // The truly-empty case (brand-new row, no messages, no signals)
+      // resolves to the canonical first move: agent emails the
+      // therapist. Matches the stage-derived initial_contact label so
+      // the dashboard reads the same whether the row carries the
+      // bootstrap stage or no stage at all.
+      expect(deriveNextAction(input())).toBe('Awaiting initial outreach to therapist');
     });
 
-    it('unknown stage with no other signals → awaiting initial outreach', () => {
+    it('unknown stage with no other signals → awaiting initial outreach to therapist', () => {
       expect(
         deriveNextAction(input({ checkpointStage: 'made_up_stage_name' })),
-      ).toBe('Awaiting initial outreach');
+      ).toBe('Awaiting initial outreach to therapist');
     });
 
     // The next five pin the message-direction + recipient inference

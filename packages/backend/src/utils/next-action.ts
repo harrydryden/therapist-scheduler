@@ -76,7 +76,13 @@ export interface NextActionInput {
  * dashboard drift; one-off phrasings live in `pendingAction`.
  */
 const STAGE_NEXT_ACTIONS: Record<ConversationStage, string> = {
-  initial_contact: 'Awaiting initial outreach',
+  // Canonical first move for initial_contact: the agent emails the
+  // therapist with the user's request. The "to therapist" suffix
+  // is correct for the typical (and overwhelmingly common) flow and
+  // matches the party-aware shape of every other stage label. Edge
+  // cases (admin-initiated user-first flows) are rare and the row
+  // moves out of initial_contact as soon as the agent acts.
+  initial_contact: 'Awaiting initial outreach to therapist',
   awaiting_therapist_availability: 'Awaiting availability from therapist',
   awaiting_user_slot_selection: 'Awaiting time/date selection from user',
   awaiting_therapist_confirmation: 'Awaiting confirmation from therapist',
@@ -186,6 +192,9 @@ export function deriveNextAction(input: NextActionInput): string {
   }
 
   // True fallback: no messages, no signals. Brand-new appointment
-  // or empty conversation state.
-  return 'Awaiting initial outreach';
+  // or empty conversation state. Matches the stage-derived
+  // initial_contact label so the same row reads consistently whether
+  // the row has stage='initial_contact' or no stage at all (legacy /
+  // mid-bootstrap).
+  return 'Awaiting initial outreach to therapist';
 }
