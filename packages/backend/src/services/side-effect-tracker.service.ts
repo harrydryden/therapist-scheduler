@@ -648,6 +648,79 @@ class SideEffectTrackerService {
 export const sideEffectTrackerService = new SideEffectTrackerService();
 
 /**
+ * Shared body for every harness wrapper.
+ *
+ * Sequence (identical for all three public wrappers — the only thing
+ * that differs is what `register` does):
+ *   register -> (on-error: log + run execute untracked, return)
+ *            -> if status is 'completed' or 'abandoned': skip
+ *            -> execute -> markCompleted
+ *            -> (on-execute-error: markFailed + re-throw)
+ *
+ * Locking this in one place means a behaviour change (e.g. a new
+ * completed/abandoned branch, or a different way of logging
+ * registration failures) hits all three wrappers and can't drift.
+ */
+async function runWithTrackedRegistration(
+  register: () => Promise<RegisteredSideEffect>,
+  execute: () => Promise<unknown>,
+  logContext: Record<string, unknown>,
+): Promise<void> {
+  let registered;
+  try {
+    registered = await register();
+  } catch (regErr) {
+    // Registration failure (DB outage, etc.) — fall back to running the
+    // task untracked rather than dropping the side effect entirely.
+    logger.warn(
+      { err: regErr, ...logContext },
+      'Side-effect registration failed; running untracked',
+    );
+    await execute();
+    return;
+  }
+
+  if (registered.status === 'completed') {
+    // Prior invocation already completed (e.g. process restart between
+    // mark-complete and runBackgroundTask exit). Idempotency: skip.
+    logger.debug(
+      { ...logContext, idempotencyKey: registered.idempotencyKey },
+      'Side effect already completed; skipping',
+    );
+    return;
+  }
+
+  if (registered.status === 'abandoned') {
+    logger.warn(
+      { ...logContext, idempotencyKey: registered.idempotencyKey },
+      'Side effect previously abandoned; not retrying',
+    );
+    return;
+  }
+
+  try {
+    await execute();
+    await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
+  } catch (err) {
+    // Persist the failure so the periodic retry service picks it up.
+    // Re-throw so runBackgroundTask still records the metric and runs
+    // its short in-process retry sequence.
+    await sideEffectTrackerService
+      .markFailed(
+        registered.idempotencyKey,
+        err instanceof Error ? err.message : String(err),
+      )
+      .catch((markErr) => {
+        logger.error(
+          { err: markErr, ...logContext },
+          'Failed to mark side effect as failed (will retry next run)',
+        );
+      });
+    throw err;
+  }
+}
+
+/**
  * Fire-and-forget a side effect with persistent retry coverage.
  *
  * Registers the effect in `side_effect_logs` (idempotency key = hash of
@@ -655,10 +728,6 @@ export const sideEffectTrackerService = new SideEffectTrackerService();
  * for in-process retries, and marks the row completed/failed. If the
  * in-process retries are exhausted, the row stays in `failed` status and
  * the periodic `sideEffectRetryService` picks it up across restarts.
- *
- * If the effect was already completed (e.g. on a duplicate trigger or a
- * post-restart re-trigger) the task is skipped — that's the idempotency
- * the tracker exists to provide.
  *
  * Use this for effects whose retry executor in `side-effect-retry.service`
  * can re-derive state from the appointment row (Slack notifications,
@@ -674,66 +743,23 @@ export function runTrackedSideEffect(
   options: BackgroundTaskOptions,
   transitionGeneration?: number,
 ): void {
-  runBackgroundTask(async () => {
-    let registered;
-    try {
-      const [reg] = await sideEffectTrackerService.registerSideEffects(
-        appointmentId,
-        transition,
-        [{ effectType }],
-        transitionGeneration,
-      );
-      registered = reg;
-    } catch (regErr) {
-      // Registration failure (DB outage, etc.) — fall back to running the
-      // task untracked rather than dropping the side effect entirely.
-      logger.warn(
-        { err: regErr, appointmentId, transition, effectType },
-        'Side-effect registration failed; running untracked'
-      );
-      await task();
-      return;
-    }
-
-    // If a prior invocation already completed (e.g. process restart between
-    // mark-complete and runBackgroundTask exit), skip — that's idempotency.
-    if (registered.status === 'completed') {
-      logger.debug(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping'
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying'
-      );
-      return;
-    }
-
-    try {
-      await task();
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      // Persist the failure so the periodic retry service picks it up.
-      // We then re-throw so runBackgroundTask still records the metric and
-      // can run its short in-process retry sequence.
-      await sideEffectTrackerService
-        .markFailed(
-          registered.idempotencyKey,
-          err instanceof Error ? err.message : String(err),
-        )
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, appointmentId, effectType },
-            'Failed to mark side effect as failed (will retry next run)'
+  runBackgroundTask(
+    () =>
+      runWithTrackedRegistration(
+        async () => {
+          const [reg] = await sideEffectTrackerService.registerSideEffects(
+            appointmentId,
+            transition,
+            [{ effectType }],
+            transitionGeneration,
           );
-        });
-      throw err;
-    }
-  }, options);
+          return reg;
+        },
+        task,
+        { appointmentId, transition, effectType },
+      ),
+    options,
+  );
 }
 
 /**
@@ -765,55 +791,19 @@ export function runReplayableTrackedSideEffect<P>(
 ): void {
   runBackgroundTask(async () => {
     const payload = await spec.renderPayload();
-
-    let registered;
-    try {
-      const [reg] = await sideEffectTrackerService.registerSideEffects(
-        appointmentId,
-        transition,
-        [{ effectType, payload }],
-        transitionGeneration,
-      );
-      registered = reg;
-    } catch (regErr) {
-      logger.warn(
-        { err: regErr, appointmentId, transition, effectType },
-        'Side-effect registration failed; running untracked',
-      );
-      await spec.execute(payload);
-      return;
-    }
-
-    if (registered.status === 'completed') {
-      logger.debug(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping',
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying',
-      );
-      return;
-    }
-
-    try {
-      await spec.execute(payload);
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      await sideEffectTrackerService
-        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, appointmentId, effectType },
-            'Failed to mark side effect as failed (will retry next run)',
-          );
-        });
-      throw err;
-    }
+    await runWithTrackedRegistration(
+      async () => {
+        const [reg] = await sideEffectTrackerService.registerSideEffects(
+          appointmentId,
+          transition,
+          [{ effectType, payload }],
+          transitionGeneration,
+        );
+        return reg;
+      },
+      () => spec.execute(payload),
+      { appointmentId, transition, effectType },
+    );
   }, options);
 }
 
@@ -865,50 +855,11 @@ export function runPeriodicTrackedSideEffect<P>(
 ): void {
   runBackgroundTask(async () => {
     const payload = await spec.renderPayload();
-    const logContext = scopeLogContext(scope, effectType);
-
-    let registered;
-    try {
-      registered = await registerForScope(scope, effectType, payload, scopeGeneration);
-    } catch (regErr) {
-      logger.warn(
-        { err: regErr, ...logContext },
-        'Side-effect registration failed; running untracked',
-      );
-      await spec.execute(payload);
-      return;
-    }
-
-    if (registered.status === 'completed') {
-      logger.debug(
-        { ...logContext, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping',
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { ...logContext, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying',
-      );
-      return;
-    }
-
-    try {
-      await spec.execute(payload);
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      await sideEffectTrackerService
-        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, ...logContext },
-            'Failed to mark side effect as failed (will retry next run)',
-          );
-        });
-      throw err;
-    }
+    await runWithTrackedRegistration(
+      () => registerForScope(scope, effectType, payload, scopeGeneration),
+      () => spec.execute(payload),
+      scopeLogContext(scope, effectType),
+    );
   }, options);
 }
 
