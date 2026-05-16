@@ -50,6 +50,11 @@ export type SideEffectType =
   // and lets the harness retry — an improvement over today's
   // sentinel-stuck-at-EPOCH behaviour.
   | 'email_session_reminder_pair'
+  // Therapist-scoped: periodic nudge email to a therapist who hasn't
+  // been picked for an appointment in a while. Stored on a row scoped
+  // by therapistId rather than appointmentId — there's no single
+  // appointment context to attach it to.
+  | 'email_therapist_nudge'
   | 'user_sync'
   | 'therapist_freeze_sync'
   | 'therapist_unfreeze_sync';
@@ -125,6 +130,116 @@ class SideEffectTrackerService {
       .digest('hex')
       .substring(0, 32);
     return hash;
+  }
+
+  /**
+   * Idempotency key for therapist-scoped effects.
+   *
+   * Uses a literal "therapist:" prefix in the hash input to guarantee
+   * the key space cannot collide with appointment-scoped keys (which
+   * hash `${id}:${transition}:${effectType}` without the prefix), even
+   * if a therapist UUID happens to match an appointment UUID.
+   */
+  private generateTherapistIdempotencyKey(
+    therapistId: string,
+    effectType: SideEffectType,
+  ): string {
+    const input = `therapist:${therapistId}:periodic:${effectType}`;
+    const hash = createHash('sha256')
+      .update(input)
+      .digest('hex')
+      .substring(0, 32);
+    return hash;
+  }
+
+  /**
+   * Register therapist-scoped side effects.
+   *
+   * Mirrors registerSideEffects for therapists: writes a row with
+   * therapistId set + appointmentId left null. The DB CHECK constraint
+   * side_effect_logs_scope_check enforces that exactly one of the two
+   * is set, so a coding error that fills both would surface as a 500
+   * at registration time rather than silently corrupting the schema.
+   */
+  async registerTherapistSideEffects(
+    therapistId: string,
+    effects: SideEffectDefinition[],
+  ): Promise<RegisteredSideEffect[]> {
+    const registered: RegisteredSideEffect[] = [];
+
+    for (const effect of effects) {
+      const idempotencyKey =
+        effect.idempotencyKey ||
+        this.generateTherapistIdempotencyKey(therapistId, effect.effectType);
+
+      try {
+        const existing = await prisma.sideEffectLog.findUnique({
+          where: { idempotencyKey },
+        });
+
+        if (existing) {
+          registered.push({
+            id: existing.id,
+            effectType: effect.effectType,
+            idempotencyKey,
+            status: existing.status as RegisteredSideEffect['status'],
+          });
+
+          if (existing.status === 'completed') {
+            logger.debug(
+              { therapistId, effectType: effect.effectType },
+              'Therapist-scoped side effect already completed - skipping'
+            );
+          }
+          continue;
+        }
+
+        const created = await prisma.sideEffectLog.create({
+          data: {
+            therapistId,
+            effectType: effect.effectType,
+            transition: 'periodic',
+            status: 'pending',
+            idempotencyKey,
+            payload: effect.payload === undefined
+              ? undefined
+              : (effect.payload as Prisma.InputJsonValue),
+          },
+        });
+
+        registered.push({
+          id: created.id,
+          effectType: effect.effectType,
+          idempotencyKey,
+          status: 'pending',
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message.includes('Unique constraint')
+        ) {
+          const existing = await prisma.sideEffectLog.findUnique({
+            where: { idempotencyKey },
+          });
+          if (existing) {
+            registered.push({
+              id: existing.id,
+              effectType: effect.effectType,
+              idempotencyKey,
+              status: existing.status as RegisteredSideEffect['status'],
+            });
+          }
+        } else {
+          logger.error(
+            { error, therapistId, effectType: effect.effectType },
+            'Failed to register therapist-scoped side effect'
+          );
+          throw error;
+        }
+      }
+    }
+
+    return registered;
   }
 
   /**
@@ -380,7 +495,11 @@ class SideEffectTrackerService {
     stalePendingAfterMs: number = 10 * 60 * 1000, // 10 minutes
   ): Promise<Array<{
     id: string;
-    appointmentId: string;
+    // Scope: exactly one of these is non-null per row (DB CHECK
+    // constraint side_effect_logs_scope_check). Callers dispatch on
+    // which one is set to decide how to fetch the parent + replay.
+    appointmentId: string | null;
+    therapistId: string | null;
     effectType: SideEffectType;
     idempotencyKey: string;
     attempts: number;
@@ -411,6 +530,7 @@ class SideEffectTrackerService {
     return effects.map((e) => ({
       id: e.id,
       appointmentId: e.appointmentId,
+      therapistId: e.therapistId,
       effectType: e.effectType as SideEffectType,
       idempotencyKey: e.idempotencyKey,
       attempts: e.attempts,
@@ -709,4 +829,79 @@ export function runPeriodicTrackedSideEffect<P>(
     spec,
     options,
   );
+}
+
+/**
+ * Therapist-scoped periodic-effect harness.
+ *
+ * Same shape as runPeriodicTrackedSideEffect but writes to the
+ * therapist-scoped half of the side_effect_logs polymorphism. Use for
+ * cadence comms that aren't tied to a specific appointment — e.g. the
+ * weekly therapist-nudge email.
+ *
+ * Sequencing: render → register (therapist-scoped row) → execute
+ * (uses rendered payload). On render failure: nothing registers,
+ * caller's catch handles it (typically resets a sentinel on the
+ * Therapist row). On execute failure: row marked failed, retry runner
+ * replays via executeTherapistEffect.
+ */
+export function runPeriodicTrackedTherapistSideEffect<P>(
+  therapistId: string,
+  effectType: SideEffectType,
+  spec: {
+    renderPayload: () => Promise<P>;
+    execute: (payload: P) => Promise<unknown>;
+  },
+  options: BackgroundTaskOptions,
+): void {
+  runBackgroundTask(async () => {
+    const payload = await spec.renderPayload();
+
+    let registered;
+    try {
+      const [reg] = await sideEffectTrackerService.registerTherapistSideEffects(
+        therapistId,
+        [{ effectType, payload }],
+      );
+      registered = reg;
+    } catch (regErr) {
+      logger.warn(
+        { err: regErr, therapistId, effectType },
+        'Therapist side-effect registration failed; running untracked',
+      );
+      await spec.execute(payload);
+      return;
+    }
+
+    if (registered.status === 'completed') {
+      logger.debug(
+        { therapistId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Therapist side effect already completed; skipping',
+      );
+      return;
+    }
+
+    if (registered.status === 'abandoned') {
+      logger.warn(
+        { therapistId, effectType, idempotencyKey: registered.idempotencyKey },
+        'Therapist side effect previously abandoned; not retrying',
+      );
+      return;
+    }
+
+    try {
+      await spec.execute(payload);
+      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
+    } catch (err) {
+      await sideEffectTrackerService
+        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
+        .catch((markErr) => {
+          logger.error(
+            { err: markErr, therapistId, effectType },
+            'Failed to mark therapist side effect as failed (will retry next run)',
+          );
+        });
+      throw err;
+    }
+  }, options);
 }

@@ -98,6 +98,16 @@ jest.mock('../utils/database', () => ({
     therapist: {
       findMany: (...a: unknown[]) => therapistFindMany(...a),
       update: (...a: unknown[]) => therapistUpdate(...(a as [{ where: { id: string }; data: Partial<TherapistRow> }])),
+      // Inter-tick claim path: the service uses updateMany to atomically
+      // advance lastNudgeAt only if it was null OR <= cutoff. For this
+      // test we just route the update through the same update() mock
+      // and return a count of 1 so the claim succeeds.
+      updateMany: jest.fn(async (args: { where: { id: string }; data: Partial<TherapistRow> }) => {
+        const row = therapists[args.where.id];
+        if (!row) return { count: 0 };
+        Object.assign(row, args.data);
+        return { count: 1 };
+      }),
     },
     appointmentRequest: {
       findMany: (...a: unknown[]) => appointmentFindMany(...a),
@@ -182,6 +192,34 @@ jest.mock('../utils/locked-task-runner', () => ({
   },
 }));
 
+// The nudge service hands its send + transaction to
+// runPeriodicTrackedTherapistSideEffect, which wraps it in
+// runBackgroundTask (fire-and-forget). For tests we run the task
+// synchronously and capture any promise so the test can await it.
+const backgroundTaskPromises: Promise<unknown>[] = [];
+jest.mock('../utils/background-task', () => ({
+  runBackgroundTask: (task: () => Promise<unknown>) => {
+    backgroundTaskPromises.push(task());
+  },
+}));
+
+// Stub the harness's side-effect-log registration. The phase-5 test
+// is about the email + conversation rows, not the harness's tracking
+// row, so we hand back a "pending" registration that lets execute run.
+jest.mock('../services/side-effect-tracker.service', () => {
+  const actual = jest.requireActual('../services/side-effect-tracker.service');
+  return {
+    ...actual,
+    sideEffectTrackerService: {
+      registerTherapistSideEffects: jest.fn().mockResolvedValue([
+        { id: 'log-stub', effectType: 'email_therapist_nudge', idempotencyKey: 'stub-key', status: 'pending' },
+      ]),
+      markCompleted: jest.fn().mockResolvedValue(undefined),
+      markFailed: jest.fn().mockResolvedValue(undefined),
+    },
+  };
+});
+
 import { therapistNudgeService } from '../services/therapist-nudge.service';
 
 function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
@@ -199,6 +237,7 @@ function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  backgroundTaskPromises.length = 0;
   for (const k of Object.keys(therapists)) delete therapists[k];
   for (const k of Object.keys(conversations)) delete conversations[k];
   nextConvoId = 1;
@@ -230,6 +269,9 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
       () => true,
     );
+    // sendNudges hands the send+txn to the harness via runBackgroundTask
+    // — drain those background tasks before asserting their side effects.
+    await Promise.all(backgroundTaskPromises);
 
     expect(mockSendEmail).toHaveBeenCalledTimes(1);
     // Row stamped with thread id + activity timestamp.
@@ -272,6 +314,7 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
       () => true,
     );
+    await Promise.all(backgroundTaskPromises);
 
     // Old row was abandoned, not deleted — audit trail preserved.
     expect(conversations['old-convo'].status).toBe('abandoned');

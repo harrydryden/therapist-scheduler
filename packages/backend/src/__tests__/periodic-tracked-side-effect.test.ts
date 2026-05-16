@@ -61,6 +61,7 @@ jest.mock('../utils/background-task', () => ({
 
 import {
   runPeriodicTrackedSideEffect,
+  runPeriodicTrackedTherapistSideEffect,
   sideEffectTrackerService,
 } from '../services/side-effect-tracker.service';
 
@@ -197,6 +198,60 @@ describe('runPeriodicTrackedSideEffect', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('therapist-scoped wrapper writes therapistId (not appointmentId) on the row', async () => {
+    runPeriodicTrackedTherapistSideEffect(
+      'ther-1',
+      'email_therapist_nudge',
+      {
+        renderPayload: async () => ({ to: 't@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+    );
+
+    await capturedTask!();
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const createCall = createMock.mock.calls[0][0];
+    expect(createCall.data.therapistId).toBe('ther-1');
+    expect(createCall.data.appointmentId).toBeUndefined();
+    expect(createCall.data.transition).toBe('periodic');
+    expect(createCall.data.effectType).toBe('email_therapist_nudge');
+  });
+
+  it('therapist-scoped wrapper produces a key that does NOT collide with the same-id appointment-scoped key', async () => {
+    runPeriodicTrackedSideEffect(
+      'shared-uuid',
+      'email_chase_user',
+      {
+        renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+    );
+    await capturedTask!();
+    const appointmentKey = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    capturedTask = null;
+    createMock.mockClear();
+
+    runPeriodicTrackedTherapistSideEffect(
+      'shared-uuid',
+      'email_chase_user',
+      {
+        renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+    );
+    await capturedTask!();
+    const therapistKey = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    // The "therapist:" prefix in the hash input guarantees disjoint
+    // key spaces — see generateTherapistIdempotencyKey.
+    expect(appointmentKey).not.toBe(therapistKey);
   });
 
   it('stores a paired { user, therapist } payload verbatim for paired-effect retries', async () => {

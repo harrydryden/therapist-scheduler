@@ -126,8 +126,11 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             await slackNotificationService.sendAlert({
               title: 'Side Effect Abandoned',
               severity: 'high',
-              appointmentId: effect.appointmentId,
-              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned. Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
+              // Therapist-scoped effects have no appointmentId — surface the
+              // therapist ID in the details body so the alert is still
+              // actionable.
+              appointmentId: effect.appointmentId ?? undefined,
+              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned.${effect.therapistId ? ` (therapistId: ${effect.therapistId})` : ''} Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
             });
           } catch {
             // Don't let Slack failure mask the original error
@@ -149,12 +152,32 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
 
   private async executeEffect(effect: {
     id: string;
-    appointmentId: string;
+    appointmentId: string | null;
+    therapistId: string | null;
     effectType: SideEffectType;
     idempotencyKey: string;
     attempts: number;
     payload: unknown;
   }): Promise<void> {
+    // Dispatch on scope (DB CHECK enforces exactly one set). Therapist-
+    // scoped retries don't need an appointment row — they re-fetch the
+    // therapist and replay the rendered payload.
+    if (effect.therapistId && !effect.appointmentId) {
+      await this.executeTherapistEffect({
+        id: effect.id,
+        therapistId: effect.therapistId,
+        effectType: effect.effectType,
+        idempotencyKey: effect.idempotencyKey,
+        attempts: effect.attempts,
+        payload: effect.payload,
+      });
+      return;
+    }
+
+    if (!effect.appointmentId) {
+      throw new Error(`Side effect ${effect.id} has neither appointmentId nor therapistId`);
+    }
+
     const appointment = await prisma.appointmentRequest.findUnique({
       where: { id: effect.appointmentId },
       select: {
@@ -419,6 +442,71 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
 
       default:
         throw new Error(`Unknown side effect type: ${effect.effectType}`);
+    }
+  }
+
+  /**
+   * Replay a therapist-scoped tracked side effect.
+   *
+   * Therapist scope is used by cadence comms that aren't tied to any
+   * one appointment (e.g. the periodic therapist-nudge email). The
+   * payload shape mirrors appointment-scoped periodic emails — a fully
+   * rendered { to, subject, body } envelope captured at registration
+   * time — but the therapist row is the parent, so we don't enqueue
+   * with an appointmentId.
+   */
+  private async executeTherapistEffect(effect: {
+    id: string;
+    therapistId: string;
+    effectType: SideEffectType;
+    idempotencyKey: string;
+    attempts: number;
+    payload: unknown;
+  }): Promise<void> {
+    const therapist = await prisma.therapist.findUnique({
+      where: { id: effect.therapistId },
+      select: { id: true, email: true, name: true, active: true },
+    });
+
+    if (!therapist) {
+      throw new Error(`Therapist ${effect.therapistId} not found - cannot retry side effect`);
+    }
+
+    // A therapist deactivated between original send and retry: skip
+    // the replay rather than send. The retry runner will mark this
+    // effect completed, suppressing further attempts.
+    if (!therapist.active) {
+      logger.info(
+        { effectId: effect.id, therapistId: effect.therapistId, effectType: effect.effectType },
+        'Therapist is inactive - skipping replay'
+      );
+      return;
+    }
+
+    switch (effect.effectType) {
+      case 'email_therapist_nudge': {
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload`,
+          );
+        }
+        // Therapist-nudge has no appointment context, so we enqueue
+        // without one. The email-queue accepts that — the appointmentId
+        // is optional and only used for status linkage.
+        await emailQueueService.enqueue({
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
+        });
+        break;
+      }
+
+      default:
+        throw new Error(`Unknown therapist-scoped side effect type: ${effect.effectType}`);
     }
   }
 
