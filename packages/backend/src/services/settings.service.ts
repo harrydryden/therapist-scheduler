@@ -49,10 +49,6 @@ export function memoryCacheInvalidate(key: string): void {
   memoryCache.delete(key);
 }
 
-export function memoryCacheInvalidateAll(): void {
-  memoryCache.clear();
-}
-
 // Subscribe at module load so peer instances' admin updates clear THIS
 // instance's in-memory cache. Without this, a setting change took up to
 // 30 s to propagate across instances (the memory-cache TTL); during that

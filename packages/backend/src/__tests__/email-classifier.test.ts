@@ -419,7 +419,6 @@ describe('classifyEmail', () => {
         );
         expect(result.flags.isAutoReply).toBe(true);
         expect(result.flags.mentionsFutureAbsence).toBe(false); // Don't double-flag
-        expect(result.flags.isOutOfOffice).toBe(true); // Backward compat
       });
 
       it('detects auto-reply from automatic reply header', () => {
@@ -430,7 +429,6 @@ describe('classifyEmail', () => {
           USER_EMAIL
         );
         expect(result.flags.isAutoReply).toBe(true);
-        expect(result.flags.isOutOfOffice).toBe(true);
       });
 
       it('detects future absence when sender mentions upcoming holiday', () => {
@@ -442,7 +440,6 @@ describe('classifyEmail', () => {
         );
         expect(result.flags.isAutoReply).toBe(false);
         expect(result.flags.mentionsFutureAbsence).toBe(true);
-        expect(result.flags.isOutOfOffice).toBe(false); // Not an auto-reply
       });
 
       it('detects future absence for "I will be away"', () => {
@@ -465,7 +462,6 @@ describe('classifyEmail', () => {
         );
         expect(result.flags.isAutoReply).toBe(false);
         expect(result.flags.mentionsFutureAbsence).toBe(false);
-        expect(result.flags.isOutOfOffice).toBe(false);
       });
 
       it('does NOT flag normal scheduling email as auto-reply or future absence', () => {
@@ -588,14 +584,13 @@ describe('needsSpecialHandling', () => {
       mentionsCancellation: false,
       isAutoReply: false,
       mentionsFutureAbsence: false,
-      isOutOfOffice: false,
     },
     ...overrides,
   });
 
   it('flags auto-reply as out_of_office', () => {
     const result = needsSpecialHandling(
-      makeClassification({ flags: { ...makeClassification({}).flags, isAutoReply: true, isOutOfOffice: true } })
+      makeClassification({ flags: { ...makeClassification({}).flags, isAutoReply: true } })
     );
     expect(result.needsAttention).toBe(true);
     expect(result.reason).toBe('out_of_office');

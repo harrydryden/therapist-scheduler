@@ -4,15 +4,6 @@
  */
 export { HEADERS } from '@therapist-scheduler/shared';
 
-// Input validation limits
-export const INPUT_LIMITS = {
-  MAX_EMAIL_SUBJECT_LENGTH: 1000,
-  MAX_EMAIL_BODY_LENGTH: 500000, // 500KB
-  MAX_CHUNK_ACCUMULATION_BYTES: 15 * 1024 * 1024, // 15MB
-  MAX_NAME_LENGTH: 255,
-  MAX_EMAIL_LENGTH: 320, // RFC 5321 max
-} as const;
-
 // Rate limiting
 export const RATE_LIMITS = {
   PUBLIC_APPOINTMENT_REQUEST: {
@@ -92,13 +83,6 @@ export const TIMEOUTS = {
   FILE_IO_MS: 30000, // 30 seconds for file operations
 } as const;
 
-// Redis keys
-export const REDIS_KEYS = {
-  EMAIL_LOCK_PREFIX: 'email-lock:',
-  EMAIL_PROCESSING_PREFIX: 'email-processing:',
-  EMAIL_LOCK_TTL_MS: 30000, // 30 seconds
-} as const;
-
 // Email settings
 export const EMAIL = {
   FROM_NAME: 'Justin Time',
@@ -127,12 +111,9 @@ export const PAGINATION = {
 export type { AppointmentStatus } from '@therapist-scheduler/shared';
 export {
   APPOINTMENT_STATUS,
-  STATUS_LABELS,
-  ALL_STATUSES,
   ACTIVE_STATUSES,
   PRE_BOOKING_STATUSES,
   POST_BOOKING_STATUSES,
-  POST_SESSION_STATUSES,
   TERMINAL_STATUSES,
   CONFIRMED_ACTIVE_STATUSES,
 } from '@therapist-scheduler/shared';

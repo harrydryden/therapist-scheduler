@@ -64,8 +64,6 @@ export interface EmailClassification {
     mentionsCancellation: boolean;
     isAutoReply: boolean;          // Actual auto-reply/OOO response — sender is unreachable
     mentionsFutureAbsence: boolean; // Sender mentions upcoming absence — scheduling context only
-    /** @deprecated Use isAutoReply instead */
-    isOutOfOffice: boolean;
   };
 }
 
@@ -608,7 +606,6 @@ export function classifyEmail(
     mentionsCancellation: /(?:cancel|call off|no longer)/i.test(textLower),
     isAutoReply: autoReply,
     mentionsFutureAbsence: futureAbsence && !autoReply, // Don't double-flag auto-replies
-    isOutOfOffice: autoReply, // Deprecated: kept for backward compat, use isAutoReply
   };
 
   const baseClassification: Omit<EmailClassification, 'suggestedAction'> = {

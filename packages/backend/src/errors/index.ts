@@ -41,18 +41,6 @@ export class BadRequestError extends AppError {
   }
 }
 
-export class UnauthorizedError extends AppError {
-  constructor(message = 'Unauthorized', code = 'UNAUTHORIZED') {
-    super(message, { code, statusCode: 401 });
-  }
-}
-
-export class ForbiddenError extends AppError {
-  constructor(message = 'Forbidden', code = 'FORBIDDEN') {
-    super(message, { code, statusCode: 403 });
-  }
-}
-
 export class NotFoundError extends AppError {
   constructor(message: string, code = 'NOT_FOUND') {
     super(message, { code, statusCode: 404 });
@@ -97,34 +85,6 @@ export class ConcurrentModificationError extends ConflictError {
       `Appointment ${appointmentId} is being modified by another process`,
       'CONCURRENT_MODIFICATION'
     );
-  }
-}
-
-// ─── Domain Errors: External Services ────────────────────────────────────────
-
-export class ExternalServiceError extends AppError {
-  public readonly service: string;
-
-  constructor(service: string, message: string) {
-    super(message, {
-      code: 'EXTERNAL_SERVICE_ERROR',
-      statusCode: 502,
-      isOperational: true,
-    });
-    this.service = service;
-  }
-}
-
-export class CircuitOpenError extends AppError {
-  public readonly service: string;
-
-  constructor(service: string) {
-    super(`${service} circuit breaker is open — service temporarily unavailable`, {
-      code: 'CIRCUIT_OPEN',
-      statusCode: 503,
-      isOperational: true,
-    });
-    this.service = service;
   }
 }
 
