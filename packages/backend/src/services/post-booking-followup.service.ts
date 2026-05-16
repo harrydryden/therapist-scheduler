@@ -16,11 +16,7 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import {
-  tryClaimSentinel,
-  confirmSentinelClaim,
-  releaseSentinelClaim,
-} from '../utils/atomic-sentinel-claim';
+import { confirmSentinelClaim } from '../utils/atomic-sentinel-claim';
 import { PeriodicService } from '../utils/periodic-service';
 import { emailProcessingService } from './email-processing.service';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
@@ -37,6 +33,7 @@ import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { auditEventService } from './audit-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
+import { processSentinelBatch } from './sentinel-batch-runner';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { generateFeedbackToken } from '../utils/feedback-token';
 
@@ -291,80 +288,51 @@ class PostBookingFollowupService extends PeriodicService {
   private async processSessionReminders(checkId: string): Promise<void> {
     const now = new Date();
 
-    // Get configurable reminder window (default 4 hours before session)
     const reminderHoursBefore = await getSettingValue<number>('postBooking.sessionReminderHoursBefore');
     const reminderWindowMs = reminderHoursBefore * 60 * 60 * 1000;
     const reminderWindowEnd = new Date(now.getTime() + reminderWindowMs);
 
-    // Find confirmed appointments that:
-    // - Have a parsed datetime within the reminder window
-    // - Haven't had reminder sent
-    // - Status is still confirmed (not cancelled)
-    const candidates = await prisma.appointmentRequest.findMany({
-      where: {
-        status: APPOINTMENT_STATUS.CONFIRMED,
-        confirmedDateTimeParsed: {
-          not: null,
-          gt: now, // Future appointments only
-          lte: reminderWindowEnd, // Within reminder window
-        },
-        reminderSentAt: null,
+    await processSentinelBatch({
+      checkId,
+      effectName: 'session reminder',
+      sentinelField: 'reminderSentAt',
+      claimPrecondition: { status: APPOINTMENT_STATUS.CONFIRMED },
+      fetchCandidates: () =>
+        prisma.appointmentRequest.findMany({
+          where: {
+            status: APPOINTMENT_STATUS.CONFIRMED,
+            confirmedDateTimeParsed: {
+              not: null,
+              gt: now,
+              lte: reminderWindowEnd,
+            },
+            reminderSentAt: null,
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            therapistEmail: true,
+            confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+            status: true,
+            notes: true,
+          },
+          take: BATCH_SIZE,
+          orderBy: { confirmedDateTimeParsed: 'asc' },
+        }),
+      preCheck: async (appointment) => {
+        if (!appointment.confirmedDateTimeParsed) return { kind: 'wait' };
+        if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) return { kind: 'skip' };
+        if (isInPast(appointment.confirmedDateTimeParsed)) {
+          return { kind: 'skip', debugLog: 'Skipping session reminder - appointment already passed' };
+        }
+        return { kind: 'proceed' };
       },
-      select: {
-        id: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        therapistEmail: true,
-        confirmedDateTime: true,
-        confirmedDateTimeParsed: true,
-        gmailThreadId: true,
-        therapistGmailThreadId: true,
-        status: true,
-        notes: true,
-      },
-      take: BATCH_SIZE,
-      orderBy: { confirmedDateTimeParsed: 'asc' }, // Process soonest appointments first
-    });
-
-    if (candidates.length === 0) return;
-
-    let sent = 0;
-    let skipped = 0;
-
-    for (const appointment of candidates) {
-      if (!appointment.confirmedDateTimeParsed) continue;
-
-      // Double-check status hasn't changed to cancelled
-      if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
-        skipped++;
-        continue;
-      }
-
-      // Double-check appointment hasn't passed
-      if (isInPast(appointment.confirmedDateTimeParsed)) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Skipping session reminder - appointment already passed'
-        );
-        skipped++;
-        continue;
-      }
-
-      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
-      // status precondition aborts the claim if the appointment drifted
-      // out of `confirmed` between the candidate query and the claim.
-      if (!(await tryClaimSentinel(appointment.id, 'reminderSentAt', {
-        extraWhere: { status: APPOINTMENT_STATUS.CONFIRMED },
-      }))) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Session reminder already being processed or appointment status changed'
-        );
-        continue;
-      }
-
-      try {
+      schedule: async (appointment) => {
         // Render both envelopes synchronously here — template-load
         // failures hit the catch-block sentinel reset rather than
         // stalling at EPOCH inside the harness's render phase.
@@ -408,10 +376,7 @@ class PostBookingFollowupService extends PeriodicService {
               }
 
               // Neither side landed — throw so the harness retries the
-              // pair (bounded by MAX_RETRY_ATTEMPTS). Previously the
-              // sentinel got stuck at EPOCH and nothing ever retried
-              // because confirmSentinelClaim wasn't called in this
-              // branch. The migration closes that hole.
+              // pair (bounded by MAX_RETRY_ATTEMPTS).
               if (!userSent && !therapistSent) {
                 throw new Error('Session reminder failed for both user and therapist');
               }
@@ -475,10 +440,6 @@ class PostBookingFollowupService extends PeriodicService {
                 { checkId, appointmentId: appointment.id, userSent, therapistSent, failedRecipient },
                 'Partial session reminder send - flagged as stale for admin follow-up'
               );
-              // Neither branch throws — partial is a settled outcome.
-              // The "both failed" branch above threw earlier so the
-              // harness retry runner picks up failed effects up to
-              // MAX_RETRY_ATTEMPTS.
             },
           },
           {
@@ -486,33 +447,8 @@ class PostBookingFollowupService extends PeriodicService {
             context: { appointmentId: appointment.id },
           },
         );
-
-        // Counted at queue time — see processMeetingLinkChecks for rationale.
-        sent++;
-      } catch (error) {
-        // Errors from buildSessionReminderPayload (template render or
-        // timezone resolution) land here. Reset the sentinel so the
-        // appointment can be re-evaluated on the next tick. Failures
-        // inside the harness execute (one or both sends failing) do
-        // NOT flow through this catch — the execute itself either
-        // throws (both-failed → harness retries) or returns
-        // (partial/full success → no retry needed).
-        await prisma.appointmentRequest.update({
-          where: { id: appointment.id },
-          data: { reminderSentAt: null },
-          select: { id: true },
-        });
-
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to prepare session reminder emails - will retry next cycle'
-        );
-      }
-    }
-
-    if (sent > 0 || skipped > 0) {
-      logger.info({ checkId, sent, skipped, checked: candidates.length }, 'Session reminder processing complete');
-    }
+      },
+    });
   }
 
   /**
@@ -537,103 +473,75 @@ class PostBookingFollowupService extends PeriodicService {
     const sessionReminderHoursBefore = await getSettingValue<number>('postBooking.sessionReminderHoursBefore');
     const sessionReminderWindowMs = sessionReminderHoursBefore * 60 * 60 * 1000;
 
-    // Find confirmed appointments that:
-    // - Have a parsed datetime
-    // - Haven't had meeting link check sent
-    // - Appointment hasn't passed yet
-    // - Status is still confirmed (not cancelled)
-    const candidates = await prisma.appointmentRequest.findMany({
-      where: {
-        status: APPOINTMENT_STATUS.CONFIRMED,
-        confirmedDateTimeParsed: { not: null, gt: now }, // Future appointments only
-        meetingLinkCheckSentAt: null,
-        confirmedAt: { not: null },
+    await processSentinelBatch({
+      checkId,
+      effectName: 'meeting link check',
+      sentinelField: 'meetingLinkCheckSentAt',
+      claimPrecondition: { status: APPOINTMENT_STATUS.CONFIRMED },
+      fetchCandidates: () =>
+        prisma.appointmentRequest.findMany({
+          where: {
+            status: APPOINTMENT_STATUS.CONFIRMED,
+            confirmedDateTimeParsed: { not: null, gt: now },
+            meetingLinkCheckSentAt: null,
+            confirmedAt: { not: null },
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
+            confirmedAt: true,
+            gmailThreadId: true,
+            status: true,
+            notes: true,
+          },
+          take: BATCH_SIZE,
+          orderBy: { confirmedDateTimeParsed: 'asc' },
+        }),
+      preCheck: async (appointment) => {
+        // Defensive — the candidate query already filters these to non-null.
+        if (!appointment.confirmedAt || !appointment.confirmedDateTimeParsed) {
+          return { kind: 'wait' };
+        }
+
+        // Status drift between candidate query and pre-check.
+        if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
+          return { kind: 'skip' };
+        }
+
+        // Not yet due — silent (would log per-appointment otherwise).
+        const sendTime = calculateMeetingLinkCheckTime(
+          appointment.confirmedAt,
+          appointment.confirmedDateTimeParsed,
+        );
+        if (sendTime > now) return { kind: 'wait' };
+
+        // Clock-skew defence — candidate query says future, but recheck.
+        if (isInPast(appointment.confirmedDateTimeParsed)) {
+          return { kind: 'skip', debugLog: 'Skipping meeting link check - appointment already passed' };
+        }
+
+        // Defer to the session reminder when we're already inside its window.
+        // Short-notice bookings (confirmed <4h before the slot) would otherwise
+        // produce both the meeting-link nudge and the session reminder within
+        // the same 15-minute tick. The reminder covers the "session is soon"
+        // beat for the user; the meeting-link nudge is the wrong tool when the
+        // session is imminent anyway. The candidate filter
+        // (`confirmedDateTimeParsed > now`) ages this appointment out naturally
+        // once the slot passes, so leaving the sentinel as null is fine.
+        if (appointment.confirmedDateTimeParsed.getTime() - now.getTime() <= sessionReminderWindowMs) {
+          return {
+            kind: 'skip',
+            debugLog: 'Skipping meeting link check — session reminder window already open',
+          };
+        }
+
+        return { kind: 'proceed' };
       },
-      select: {
-        id: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        confirmedDateTime: true,
-        confirmedDateTimeParsed: true,
-        confirmedAt: true,
-        gmailThreadId: true,
-        status: true, // Include status for double-check
-        notes: true, // FIX B5: Include notes for error logging
-      },
-      take: BATCH_SIZE, // Limit batch size
-      orderBy: { confirmedDateTimeParsed: 'asc' }, // Process soonest appointments first
-    });
-
-    if (candidates.length === 0) return;
-
-    let sent = 0;
-    let skipped = 0;
-
-    for (const appointment of candidates) {
-      if (!appointment.confirmedAt || !appointment.confirmedDateTimeParsed) continue;
-
-      // Double-check status hasn't changed to cancelled
-      if (appointment.status !== APPOINTMENT_STATUS.CONFIRMED) {
-        skipped++;
-        continue;
-      }
-
-      const sendTime = calculateMeetingLinkCheckTime(
-        appointment.confirmedAt,
-        appointment.confirmedDateTimeParsed
-      );
-
-      // Is it time to send?
-      if (sendTime > now) {
-        continue; // Not yet due, no need to log each one
-      }
-
-      // Double-check appointment hasn't passed (edge case with clock skew)
-      if (isInPast(appointment.confirmedDateTimeParsed)) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Skipping meeting link check - appointment already passed'
-        );
-        skipped++;
-        continue;
-      }
-
-      // Defer to the session reminder when we're already inside its window.
-      // Short-notice bookings (confirmed <4h before the slot) would otherwise
-      // produce both the meeting-link nudge and the session reminder within
-      // the same 15-minute tick. The reminder covers the "session is soon"
-      // beat for the user; the meeting-link nudge is the wrong tool when the
-      // session is imminent anyway. The candidate filter
-      // (`confirmedDateTimeParsed > now`) ages this appointment out naturally
-      // once the slot passes, so leaving the sentinel as null is fine.
-      if (appointment.confirmedDateTimeParsed.getTime() - now.getTime() <= sessionReminderWindowMs) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Skipping meeting link check — session reminder window already open',
-        );
-        skipped++;
-        continue;
-      }
-
-      // OPTIMISTIC LOCKING: Try to mark as "sending" first
-      // This prevents duplicates if another instance or the same instance processes this
-      if (!(await tryClaimSentinel(appointment.id, 'meetingLinkCheckSentAt', {
-        extraWhere: { status: APPOINTMENT_STATUS.CONFIRMED },
-      }))) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Meeting link check already being processed or appointment status changed'
-        );
-        continue;
-      }
-
-      try {
-        // Render the email envelope synchronously here (inside the
-        // outer try) so a template-load failure flows through the
-        // catch-block sentinel reset below. If we deferred this into
-        // the harness's renderPayload, a throw there would leave the
-        // sentinel stuck at EPOCH with no retry.
+      schedule: async (appointment) => {
         const payload = await this.buildMeetingLinkCheckPayload(appointment);
 
         const notesSoFar = appointment.notes;
@@ -646,24 +554,18 @@ class PostBookingFollowupService extends PeriodicService {
             execute: async (envelope) => {
               await emailProcessingService.sendEmail(envelope);
 
-              // Log follow_up_sent audit event
               auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
                 followUpType: 'meeting_link_check',
               });
 
-              // FIX B5: Use atomic update with sentinel check to verify we still own the lock
-              // This prevents race condition where update fails silently after email sent
               const confirmed = await confirmSentinelClaim(appointment.id, 'meetingLinkCheckSentAt', now);
 
-              // FIX B5: Verify update succeeded
               if (!confirmed) {
-                // This should never happen - sentinel was taken by another process
-                // or something went wrong. Email was already sent though.
+                // Sentinel taken by another process — email was already sent though.
                 logger.error(
                   { checkId, appointmentId: appointment.id },
                   'ALERT: Meeting link check email sent but sentinel update failed - possible duplicate'
                 );
-                // Try to add a note for admin review
                 try {
                   await prisma.appointmentRequest.update({
                     where: { id: appointment.id },
@@ -673,7 +575,7 @@ class PostBookingFollowupService extends PeriodicService {
                     select: { id: true },
                   });
                 } catch {
-                  // Ignore error - already logged the main issue
+                  // Ignore - already logged main issue
                 }
                 return;
               }
@@ -689,35 +591,8 @@ class PostBookingFollowupService extends PeriodicService {
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
         );
-
-        // Counted at queue time — the harness is fire-and-forget. A
-        // failure inside execute is logged + retried by the
-        // side-effect-retry runner; this reflects "checks queued in
-        // this tick" for the periodic-runner observability.
-        sent++;
-      } catch (error) {
-        // Errors from buildMeetingLinkCheckPayload land here (template
-        // render / timezone resolution / settings read). Reset the
-        // sentinel so the appointment can be re-evaluated on the next
-        // tick. Failures inside the harness execute do NOT flow
-        // through this catch — the harness marks its row failed and
-        // the retry runner handles them.
-        await prisma.appointmentRequest.update({
-          where: { id: appointment.id },
-          data: { meetingLinkCheckSentAt: null },
-          select: { id: true },
-        });
-
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to prepare meeting link check email - will retry next cycle'
-        );
-      }
-    }
-
-    if (sent > 0 || skipped > 0) {
-      logger.info({ checkId, sent, skipped, checked: candidates.length }, 'Meeting link check processing complete');
-    }
+      },
+    });
   }
 
   /**
@@ -736,82 +611,56 @@ class PostBookingFollowupService extends PeriodicService {
   private async processFeedbackForms(checkId: string): Promise<void> {
     const now = new Date();
 
-    // Find appointments that:
-    // - Have a parsed datetime
-    // - Haven't had feedback form sent
-    // - Status is session_held (FIX #11: require session_held only to prevent skipping this status)
-    const candidates = await prisma.appointmentRequest.findMany({
-      where: {
-        status: APPOINTMENT_STATUS.SESSION_HELD,
-        confirmedDateTimeParsed: { not: null },
-        feedbackFormSentAt: null,
+    await processSentinelBatch({
+      checkId,
+      effectName: 'feedback form',
+      sentinelField: 'feedbackFormSentAt',
+      claimPrecondition: { status: APPOINTMENT_STATUS.SESSION_HELD },
+      fetchCandidates: () =>
+        prisma.appointmentRequest.findMany({
+          where: {
+            status: APPOINTMENT_STATUS.SESSION_HELD,
+            confirmedDateTimeParsed: { not: null },
+            feedbackFormSentAt: null,
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            therapistEmail: true,
+            confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+            trackingCode: true,
+            status: true,
+            notes: true,
+          },
+          take: BATCH_SIZE,
+          orderBy: { confirmedDateTimeParsed: 'asc' },
+        }),
+      preCheck: async (appointment) => {
+        if (!appointment.confirmedDateTimeParsed) return { kind: 'wait' };
+        // FIX #11: require session_held — drift away is a skip, not a wait.
+        if (appointment.status !== APPOINTMENT_STATUS.SESSION_HELD) return { kind: 'skip' };
+        // Not yet due — silent wait until the 50min+10min window opens.
+        const feedbackTime = calculateFeedbackFormTime(appointment.confirmedDateTimeParsed);
+        if (feedbackTime > now) return { kind: 'wait' };
+        return { kind: 'proceed' };
       },
-      select: {
-        id: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        therapistEmail: true,
-        confirmedDateTime: true,
-        confirmedDateTimeParsed: true,
-        gmailThreadId: true,
-        therapistGmailThreadId: true,
-        trackingCode: true, // Include for native feedback form URL
-        status: true, // Include status for double-check
-        notes: true, // FIX B5: Include notes for error logging
-      },
-      take: BATCH_SIZE, // Limit batch size
-      orderBy: { confirmedDateTimeParsed: 'asc' }, // Process oldest appointments first
-    });
-
-    if (candidates.length === 0) return;
-
-    let sent = 0;
-    let skipped = 0;
-
-    for (const appointment of candidates) {
-      if (!appointment.confirmedDateTimeParsed) continue;
-
-      // Double-check status is session_held (FIX #11)
-      if (appointment.status !== APPOINTMENT_STATUS.SESSION_HELD) {
-        skipped++;
-        continue;
-      }
-
-      const feedbackTime = calculateFeedbackFormTime(appointment.confirmedDateTimeParsed);
-
-      // Is it time to send?
-      if (feedbackTime > now) {
-        continue; // Not yet due
-      }
-
-      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
-      // status precondition (FIX #11) restricts the claim to rows still
-      // in `session_held`.
-      const claimed = await tryClaimSentinel(appointment.id, 'feedbackFormSentAt', {
-        extraWhere: { status: APPOINTMENT_STATUS.SESSION_HELD },
-      });
-
-      // If no rows updated, another process got there first or status changed
-      if (!claimed) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Feedback form already being processed or appointment status changed'
-        );
-        continue;
-      }
-
-      try {
-        // FIX #23: If trackingCode is null, skip the email send to avoid infinite retry loop.
-        // Set sentinel to prevent retry and add a note for admin visibility.
+      schedule: async (appointment) => {
+        // FIX #23: trackingCode tombstone. We've claimed the sentinel; if
+        // there's no tracking code we can't generate a usable feedback URL,
+        // so flip the sentinel to a real timestamp (preventing infinite
+        // retries) and leave an admin note. Return 'skipped' so the helper
+        // counts this toward the summary log's `skipped` bucket rather
+        // than `sent`.
         if (!appointment.trackingCode) {
           logger.error(
             { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
             'Appointment missing tracking code - skipping feedback form email to prevent infinite retry'
           );
-          // No tracking code → skip the send; flip the sentinel to a
-          // real timestamp so we don't retry next tick (admin notes
-          // surface the manual-send required state).
           await confirmSentinelClaim(appointment.id, 'feedbackFormSentAt', now);
           try {
             await prisma.appointmentRequest.update({
@@ -825,15 +674,13 @@ class PostBookingFollowupService extends PeriodicService {
           } catch {
             // Ignore - already logged main issue
           }
-          skipped++;
-          continue;
+          return 'skipped';
         }
 
-        // Render BOTH envelopes synchronously here (inside the outer
-        // try) so a template-load failure flows through the catch-block
-        // sentinel reset below. The setting check for the therapist
-        // notification is also captured at render time — see
-        // buildTherapistFeedbackNotificationPayload for why.
+        // Render BOTH envelopes synchronously here so template-load
+        // failures flow through the helper's catch-block sentinel reset.
+        // The setting check for the therapist notification is also
+        // captured at render time — see buildTherapistFeedbackNotificationPayload.
         const userPayload = await this.buildFeedbackFormPayload(appointment);
         const therapistPayload = await this.buildTherapistFeedbackNotificationPayload(appointment);
 
@@ -863,13 +710,10 @@ class PostBookingFollowupService extends PeriodicService {
                 );
               }
 
-              // Log follow_up_sent audit event
               auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
                 followUpType: 'feedback_form',
               });
 
-              // FIX B5: confirm via the helper so the sentinel-still-ours
-              // precondition is enforced.
               const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackFormSentAt', now);
 
               if (!confirmed) {
@@ -893,10 +737,6 @@ class PostBookingFollowupService extends PeriodicService {
 
               // Status transition. If it throws, we re-throw so the
               // harness retries the whole unit (replaying both sends).
-              // That's the same "next cycle retries" semantics the
-              // pre-migration code had, just bounded by
-              // MAX_RETRY_ATTEMPTS instead of running indefinitely
-              // through processFeedbackForms ticks.
               await appointmentLifecycleService.transitionToFeedbackRequested({
                 appointmentId: appointment.id,
                 source: 'system',
@@ -913,32 +753,8 @@ class PostBookingFollowupService extends PeriodicService {
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
         );
-
-        // Counted at queue time — see processMeetingLinkChecks for rationale.
-        sent++;
-      } catch (error) {
-        // Errors from build*Payload land here (template render,
-        // missing trackingCode, settings read). Reset the sentinel so
-        // the appointment can be re-evaluated on the next tick.
-        // Failures inside the harness execute do NOT flow through this
-        // catch — the harness marks its row failed and the retry
-        // runner replays the paired payload up to MAX_RETRY_ATTEMPTS.
-        await prisma.appointmentRequest.update({
-          where: { id: appointment.id },
-          data: { feedbackFormSentAt: null },
-          select: { id: true },
-        });
-
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to prepare feedback form email - will retry next cycle'
-        );
-      }
-    }
-
-    if (sent > 0 || skipped > 0) {
-      logger.info({ checkId, sent, skipped, checked: candidates.length }, 'Feedback form processing complete');
-    }
+      },
+    });
   }
 
   /**
@@ -1098,70 +914,45 @@ class PostBookingFollowupService extends PeriodicService {
   private async processFeedbackReminders(checkId: string): Promise<void> {
     const now = new Date();
 
-    // Check if feedback reminders are enabled
+    // Gate read at the top — keep this outside processSentinelBatch so the
+    // candidate query doesn't fire when the feature is off.
     const feedbackReminderEnabled = await getSettingValue<boolean>('notifications.email.feedbackReminder');
     if (!feedbackReminderEnabled) {
       logger.debug({ checkId }, 'Feedback reminders disabled - skipping');
       return;
     }
 
-    // Get configurable delay (default 48 hours after feedback form sent)
     const reminderDelayHours = await getSettingValue<number>('postBooking.feedbackReminderDelayHours');
     const reminderDelayMs = reminderDelayHours * 60 * 60 * 1000;
 
-    // Find appointments that:
-    // - Are in feedback_requested status (feedback form sent, no response yet)
-    // - Had feedback form sent more than X hours ago
-    // - Haven't had reminder sent yet
-    const candidates = await prisma.appointmentRequest.findMany({
-      where: {
-        status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-        feedbackFormSentAt: {
-          not: null,
-          lt: new Date(now.getTime() - reminderDelayMs), // Sent more than X hours ago
-        },
-        feedbackReminderSentAt: null,
-      },
-      select: {
-        id: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        gmailThreadId: true,
-        trackingCode: true,
-        feedbackFormSentAt: true,
-      },
-      take: BATCH_SIZE,
-      orderBy: { feedbackFormSentAt: 'asc' }, // Process oldest first
-    });
-
-    if (candidates.length === 0) {
-      return;
-    }
-
-    let sent = 0;
-    let skipped = 0;
-
-    for (const appointment of candidates) {
-      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
-      // status precondition keeps the claim scoped to rows still
-      // waiting for feedback.
-      const claimed = await tryClaimSentinel(appointment.id, 'feedbackReminderSentAt', {
-        extraWhere: { status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED },
-      });
-      if (!claimed) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Feedback reminder already being processed or status changed'
-        );
-        continue;
-      }
-
-      try {
-        // Render the envelope synchronously so template-load failures
-        // (incl. the trackingCode guard inside the builder) reset the
-        // sentinel via the catch-block below. See the parallel comment
-        // in processMeetingLinkChecks for the rationale.
+    await processSentinelBatch({
+      checkId,
+      effectName: 'feedback reminder',
+      sentinelField: 'feedbackReminderSentAt',
+      claimPrecondition: { status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED },
+      fetchCandidates: () =>
+        prisma.appointmentRequest.findMany({
+          where: {
+            status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+            feedbackFormSentAt: {
+              not: null,
+              lt: new Date(now.getTime() - reminderDelayMs),
+            },
+            feedbackReminderSentAt: null,
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            gmailThreadId: true,
+            trackingCode: true,
+            feedbackFormSentAt: true,
+          },
+          take: BATCH_SIZE,
+          orderBy: { feedbackFormSentAt: 'asc' },
+        }),
+      schedule: async (appointment) => {
         const payload = await this.buildFeedbackReminderPayload(appointment);
 
         runPeriodicTrackedSideEffect(
@@ -1172,13 +963,10 @@ class PostBookingFollowupService extends PeriodicService {
             execute: async (envelope) => {
               await emailProcessingService.sendEmail(envelope);
 
-              // Log follow_up_sent audit event
               auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
                 followUpType: 'feedback_reminder',
               });
 
-              // Atomic confirm — sentinel-still-ours precondition enforced by
-              // the helper.
               const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
 
               if (!confirmed) {
@@ -1200,29 +988,8 @@ class PostBookingFollowupService extends PeriodicService {
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
         );
-
-        // Counted at queue time — see processMeetingLinkChecks for rationale.
-        sent++;
-      } catch (error) {
-        // Errors from buildFeedbackReminderPayload land here (template
-        // render / missing trackingCode / settings read). Release the
-        // sentinel so the appointment can be re-evaluated on the next
-        // tick once the underlying issue (e.g. trackingCode) is
-        // resolved. Failures inside the harness execute do NOT flow
-        // through this catch — the harness marks its row failed and
-        // the retry runner handles them.
-        await releaseSentinelClaim(appointment.id, 'feedbackReminderSentAt');
-
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to prepare feedback reminder email - will retry next cycle'
-        );
-      }
-    }
-
-    if (sent > 0 || skipped > 0) {
-      logger.info({ checkId, sent, skipped, checked: candidates.length }, 'Feedback reminder processing complete');
-    }
+      },
+    });
   }
 
   /**

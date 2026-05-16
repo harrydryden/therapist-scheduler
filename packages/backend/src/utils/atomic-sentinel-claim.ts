@@ -44,7 +44,7 @@ import { prisma } from './database';
  */
 export const EPOCH_SENTINEL = new Date(0);
 
-type AppointmentSentinelField =
+export type AppointmentSentinelField =
   | 'chaseSentAt'
   | 'reminderSentAt'
   | 'meetingLinkCheckSentAt'
