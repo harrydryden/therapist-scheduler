@@ -186,7 +186,7 @@ describe('runPeriodicTrackedSideEffect', () => {
 
     runPeriodicTrackedSideEffect(
       'apt-4',
-      'email_feedback_form',
+      'email_feedback_reminder',
       {
         renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
         execute,
@@ -197,5 +197,32 @@ describe('runPeriodicTrackedSideEffect', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('stores a paired { user, therapist } payload verbatim for paired-effect retries', async () => {
+    // The feedback-dispatch and session-reminder-pair effects use a
+    // multi-envelope payload shape. The retry executor reads both
+    // envelopes back from this row, so the registration step has to
+    // store the structure as-is.
+    const pairedPayload = {
+      user: { to: 'u@x', subject: 'user subj', body: 'user body', threadId: 't1' },
+      therapist: { to: 't@x', subject: 'thx subj', body: 'thx body' },
+    };
+
+    runPeriodicTrackedSideEffect(
+      'apt-5',
+      'email_feedback_dispatch',
+      {
+        renderPayload: async () => pairedPayload,
+        execute: jest.fn().mockResolvedValue(undefined),
+      },
+      { name: 'test' },
+    );
+
+    await capturedTask!();
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(createMock.mock.calls[0][0].data.payload).toEqual(pairedPayload);
+    expect(createMock.mock.calls[0][0].data.effectType).toBe('email_feedback_dispatch');
   });
 });

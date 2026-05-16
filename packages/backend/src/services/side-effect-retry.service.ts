@@ -246,10 +246,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       case 'email_chase_user':
       case 'email_chase_therapist':
       case 'email_meeting_link_check':
-      case 'email_feedback_form':
-      case 'email_therapist_feedback_notification':
-      case 'email_feedback_reminder':
-      case 'email_session_reminder': {
+      case 'email_feedback_reminder': {
         // Replay the email using the rendered payload captured at registration
         // time. We never re-render the template on retry — settings could
         // have changed between the original send and the retry, and a stale
@@ -271,6 +268,56 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
           body: payload.body,
           appointmentId: appointment.id,
           ...(payload.threadId ? { threadId: payload.threadId } : {}),
+        });
+        break;
+      }
+
+      case 'email_feedback_dispatch':
+      case 'email_session_reminder_pair': {
+        // Paired periodic effect: two emails registered as one tracked
+        // row. Payload carries both envelopes so retry replays both,
+        // matching the original execute's atomicity (the pair is the
+        // unit of work). Same "never re-render" contract as the single
+        // case above.
+        //
+        // Duplicate-on-retry risk: if the first attempt sent one of
+        // the two and then crashed, retry sends BOTH again — the
+        // already-delivered recipient gets a duplicate. We accept this
+        // bounded-by-MAX_RETRY_ATTEMPTS cost in exchange for
+        // sequencing the lifecycle transition (feedback_dispatch only)
+        // and partial-success annotation (session_reminder_pair only)
+        // correctly relative to the sends.
+        const payload = effect.payload as
+          | {
+              user: { to: string; subject: string; body: string; threadId?: string | null };
+              therapist: { to: string; subject: string; body: string; threadId?: string | null };
+            }
+          | null
+          | undefined;
+        if (
+          !payload ||
+          !payload.user ||
+          !payload.therapist ||
+          typeof payload.user.to !== 'string' ||
+          typeof payload.therapist.to !== 'string'
+        ) {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid paired payload — expected { user, therapist } envelopes`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.user.to,
+          subject: payload.user.subject,
+          body: payload.user.body,
+          appointmentId: appointment.id,
+          ...(payload.user.threadId ? { threadId: payload.user.threadId } : {}),
+        });
+        await emailQueueService.enqueue({
+          to: payload.therapist.to,
+          subject: payload.therapist.subject,
+          body: payload.therapist.body,
+          appointmentId: appointment.id,
+          ...(payload.therapist.threadId ? { threadId: payload.therapist.threadId } : {}),
         });
         break;
       }

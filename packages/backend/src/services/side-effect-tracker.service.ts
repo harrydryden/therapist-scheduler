@@ -35,10 +35,21 @@ export type SideEffectType =
   | 'email_chase_user'
   | 'email_chase_therapist'
   | 'email_meeting_link_check'
-  | 'email_feedback_form'
-  | 'email_therapist_feedback_notification'
+  // Paired effect: sends BOTH the user-feedback-form email and the
+  // therapist-feedback-notification email in one execute. Stored as a
+  // single tracked row so retry replays the pair atomically; the
+  // lifecycle transition to `feedback_requested` lives inside the same
+  // execute. Accepts the small duplicate-on-retry risk in exchange for
+  // preserving the current "advance status only after both sends"
+  // sequence point.
+  | 'email_feedback_dispatch'
   | 'email_feedback_reminder'
-  | 'email_session_reminder'
+  // Paired effect: session reminder to user AND therapist. Same single-
+  // row shape as email_feedback_dispatch. Partial-success annotation
+  // (isStale + notes) lives inside execute; "neither succeeded" throws
+  // and lets the harness retry — an improvement over today's
+  // sentinel-stuck-at-EPOCH behaviour.
+  | 'email_session_reminder_pair'
   | 'user_sync'
   | 'therapist_freeze_sync'
   | 'therapist_unfreeze_sync';
