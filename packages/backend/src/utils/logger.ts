@@ -31,27 +31,6 @@ export function maskEmail(email: string | undefined | null): string {
   return `${maskedLocal}@${maskedDomain}`;
 }
 
-/**
- * Mask multiple emails in an object for safe logging
- * Returns a new object with email fields masked
- */
-export function maskSensitiveData<T extends Record<string, unknown>>(obj: T): T {
-  const result = { ...obj };
-
-  const emailFields = [
-    'email', 'userEmail', 'therapistEmail', 'fromEmail', 'toEmail',
-    'from', 'to', 'emailAddress', 'schedulerEmail'
-  ];
-
-  for (const field of emailFields) {
-    if (field in result && typeof result[field] === 'string') {
-      (result as Record<string, unknown>)[field] = maskEmail(result[field] as string);
-    }
-  }
-
-  return result;
-}
-
 // Redaction paths for pino — automatically masks these fields in every
 // environment. Previously this was production-only, but staging logs and
 // any non-local sink (e.g. a developer ssh'd into a dev VM tailing a

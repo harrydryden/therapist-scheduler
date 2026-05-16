@@ -214,10 +214,3 @@ export async function verifyWebhookSecret(
     return;
   }
 }
-
-/**
- * Create a preHandler hook for protected routes
- */
-export const adminAuthHook = {
-  preHandler: verifyWebhookSecret,
-};

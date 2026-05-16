@@ -445,22 +445,6 @@ function generateHealthSummary(factors: HealthFactor[], status: HealthStatus): s
 }
 
 /**
- * Batch calculate health for multiple appointments
- */
-export function calculateBatchHealth(
-  appointments: AppointmentForHealth[],
-  thresholds: HealthThresholds = DEFAULT_HEALTH_THRESHOLDS
-): Map<string, ConversationHealth> {
-  const healthMap = new Map<string, ConversationHealth>();
-
-  for (const apt of appointments) {
-    healthMap.set(apt.id, calculateConversationHealth(apt, thresholds));
-  }
-
-  return healthMap;
-}
-
-/**
  * Get health statistics summary
  */
 export interface HealthSummaryStats {
