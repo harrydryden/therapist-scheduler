@@ -7,6 +7,7 @@ import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { ACTIVE_STATUSES } from '../constants';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
 
 // Check every 6 hours whether any therapists are due a nudge
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -201,7 +202,40 @@ class TherapistNudgeService {
         break;
       }
 
+      // Captured here so the same value is written to lastNudgeAt and
+      // passed to the harness as the cycle generation. The harness uses
+      // it to partition the idempotency key per cycle; the retry-runner
+      // abandon hook uses createdAt > this value as the guard against
+      // clobbering a newer cycle's claim when releasing the sentinel.
+      const claimedAt = new Date();
+
       try {
+        // Inter-tick claim: atomically advance lastNudgeAt to claimedAt
+        // and skip this therapist if another worker (or a previous
+        // run of this loop, racing) already claimed it. Matches the
+        // candidate query's filter (lastNudgeAt null OR <= cutoff)
+        // so the claim removes the row from future candidate sets
+        // for at least intervalWeeks. The harness's intra-effect
+        // retry is the second layer; this is the first.
+        const claimResult = await prisma.therapist.updateMany({
+          where: {
+            id: therapist.id,
+            OR: [
+              { lastNudgeAt: null },
+              { lastNudgeAt: { lte: cutoff } },
+            ],
+          },
+          data: { lastNudgeAt: claimedAt },
+        });
+
+        if (claimResult.count !== 1) {
+          logger.debug(
+            { therapistId: therapist.id },
+            'Nudge sentinel already claimed by another worker - skipping'
+          );
+          continue;
+        }
+
         const therapistFirstName = firstName(therapist.name);
         const variables = {
           therapistFirstName,
@@ -216,72 +250,127 @@ class TherapistNudgeService {
         const subject = renderTemplate(subjectTemplate, variables);
         const body = renderTemplate(bodyTemplate, variables);
 
-        const { threadId, messageId } = await emailProcessingService.sendEmail({
-          to: therapist.email,
-          subject,
-          body,
-        });
+        runPeriodicTrackedSideEffect(
+          { kind: 'therapist', therapistId: therapist.id },
+          'email_therapist_nudge',
+          {
+            renderPayload: async () => ({
+              to: therapist.email,
+              subject,
+              body,
+            }),
+            execute: async (envelope) => {
+              const { threadId, messageId } = await emailProcessingService.sendEmail({
+                to: envelope.to,
+                subject: envelope.subject,
+                body: envelope.body,
+              });
 
-        // Two state mutations bundled in a transaction:
-        //   1. Stamp Therapist.lastNudgeAt + lastNudgeThreadId (preserved
-        //      as a fallback path for the pre-phase-5 nudge slack-alert
-        //      dispatcher branch — see email-message-processor).
-        //   2. Abandon any prior active nudge_reply conversation for this
-        //      therapist, then create a fresh one. Each nudge supersedes
-        //      the previous one's untouched ask. Seeding the new row's
-        //      conversationState with the outbound body as an 'assistant'
-        //      message means when the therapist replies, the availability
-        //      agent's processReply sees a coherent [assistant, user]
-        //      history rather than processing an orphaned inbound.
-        await prisma.$transaction(async (tx) => {
-          await tx.therapist.update({
-            where: { id: therapist.id },
-            data: {
-              lastNudgeAt: new Date(),
-              lastNudgeThreadId: threadId || null,
+              // Two state mutations bundled in a transaction:
+              //   1. Stamp Therapist.lastNudgeAt + lastNudgeThreadId
+              //      (preserved as a fallback path for the
+              //      pre-phase-5 nudge slack-alert dispatcher branch
+              //      — see email-message-processor).
+              //   2. Abandon any prior active nudge_reply
+              //      conversation for this therapist, then create a
+              //      fresh one. Each nudge supersedes the previous
+              //      one's untouched ask. Seeding the new row's
+              //      conversationState with the outbound body as an
+              //      'assistant' message means when the therapist
+              //      replies, the availability agent's processReply
+              //      sees a coherent [assistant, user] history
+              //      rather than processing an orphaned inbound.
+              //
+              // Retry semantics: if this txn throws, the harness
+              // marks the row failed and the retry runner replays
+              // executeTherapistEffect which only re-sends the
+              // email (see side-effect-retry.service.ts). The next
+              // 6h cron tick will NOT re-fire the full execute
+              // because the sentinel claim above moved lastNudgeAt
+              // out of candidate range. So at most one txn attempt
+              // per nudge — a permanent txn failure surfaces as a
+              // missing/stale TherapistConversation row, not a
+              // duplicate-conversation explosion.
+              //
+              // Exhausted-retry recovery: if all 5 attempts fail and
+              // the retry runner marks this cycle's row abandoned,
+              // it ALSO releases lastNudgeAt (see retry service's
+              // post-abandon hook). The next cron tick then opens a
+              // fresh cycle — a new claim timestamp produces a new
+              // idempotency key and a new row with a fresh attempts
+              // budget. So permanent failures are still bounded by
+              // 5 attempts per cycle, but transient outages > 5
+              // minutes can recover at the next 6h tick rather than
+              // being silently dropped.
+              await prisma.$transaction(async (tx) => {
+                await tx.therapist.update({
+                  where: { id: therapist.id },
+                  data: {
+                    lastNudgeAt: new Date(),
+                    lastNudgeThreadId: threadId || null,
+                  },
+                });
+
+                await tx.therapistConversation.updateMany({
+                  where: {
+                    therapistId: therapist.id,
+                    kind: 'nudge_reply',
+                    status: 'active',
+                  },
+                  data: { status: 'abandoned' },
+                });
+
+                await tx.therapistConversation.create({
+                  data: {
+                    therapistId: therapist.id,
+                    kind: 'nudge_reply',
+                    status: 'active',
+                    gmailThreadId: threadId || null,
+                    initialMessageId: messageId || null,
+                    conversationState: {
+                      messages: [
+                        { role: 'assistant', content: envelope.body },
+                      ],
+                    } as unknown as object,
+                    messageCount: 1,
+                  },
+                });
+              });
+
+              logger.info(
+                { therapistId: therapist.id, name: therapist.name, threadId },
+                'Sent therapist nudge email + opened availability conversation',
+              );
             },
-          });
-
-          await tx.therapistConversation.updateMany({
-            where: {
-              therapistId: therapist.id,
-              kind: 'nudge_reply',
-              status: 'active',
-            },
-            data: { status: 'abandoned' },
-          });
-
-          await tx.therapistConversation.create({
-            data: {
-              therapistId: therapist.id,
-              kind: 'nudge_reply',
-              status: 'active',
-              gmailThreadId: threadId || null,
-              initialMessageId: messageId || null,
-              conversationState: {
-                messages: [
-                  // The outbound nudge body, recorded as an assistant
-                  // turn so the agent's first response sees the full
-                  // back-and-forth on inbound.
-                  { role: 'assistant', content: body },
-                ],
-              } as unknown as object,
-              messageCount: 1,
-            },
-          });
-        });
-
-        sent++;
-        logger.info(
-          { therapistId: therapist.id, name: therapist.name, threadId },
-          'Sent therapist nudge email + opened availability conversation',
+          },
+          {
+            name: 'therapist-nudge',
+            context: { therapistId: therapist.id, email: therapist.email },
+          },
+          claimedAt.getTime(),
         );
+
+        // Counted at queue time — the harness owns durability + retry.
+        sent++;
       } catch (err) {
         failed++;
         logger.error(
           { err, therapistId: therapist.id, name: therapist.name },
-          'Failed to send therapist nudge email'
+          'Failed to prepare therapist nudge email'
         );
+        // Release the claim so the next tick can re-evaluate.
+        try {
+          await prisma.therapist.update({
+            where: { id: therapist.id },
+            data: { lastNudgeAt: null },
+            select: { id: true },
+          });
+        } catch (resetErr) {
+          logger.error(
+            { err: resetErr, therapistId: therapist.id },
+            'Failed to release nudge sentinel after prep failure'
+          );
+        }
       }
     }
 

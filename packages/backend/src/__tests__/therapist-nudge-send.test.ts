@@ -98,6 +98,16 @@ jest.mock('../utils/database', () => ({
     therapist: {
       findMany: (...a: unknown[]) => therapistFindMany(...a),
       update: (...a: unknown[]) => therapistUpdate(...(a as [{ where: { id: string }; data: Partial<TherapistRow> }])),
+      // Inter-tick claim path: the service uses updateMany to atomically
+      // advance lastNudgeAt only if it was null OR <= cutoff. For this
+      // test we just route the update through the same update() mock
+      // and return a count of 1 so the claim succeeds.
+      updateMany: jest.fn(async (args: { where: { id: string }; data: Partial<TherapistRow> }) => {
+        const row = therapists[args.where.id];
+        if (!row) return { count: 0 };
+        Object.assign(row, args.data);
+        return { count: 1 };
+      }),
     },
     appointmentRequest: {
       findMany: (...a: unknown[]) => appointmentFindMany(...a),
@@ -182,7 +192,36 @@ jest.mock('../utils/locked-task-runner', () => ({
   },
 }));
 
+// The nudge service hands its send + transaction to
+// runPeriodicTrackedSideEffect with a therapist scope, which wraps it
+// in runBackgroundTask (fire-and-forget). For tests we run the task
+// synchronously and capture any promise so the test can await it.
+const backgroundTaskPromises: Promise<unknown>[] = [];
+jest.mock('../utils/background-task', () => ({
+  runBackgroundTask: (task: () => Promise<unknown>) => {
+    backgroundTaskPromises.push(task());
+  },
+}));
+
+// Stub the harness's side-effect-log registration. The phase-5 test
+// is about the email + conversation rows, not the harness's tracking
+// row, so we hand back a "pending" registration that lets execute run.
+jest.mock('../services/side-effect-tracker.service', () => {
+  const actual = jest.requireActual('../services/side-effect-tracker.service');
+  return {
+    ...actual,
+    sideEffectTrackerService: {
+      registerTherapistSideEffects: jest.fn().mockResolvedValue([
+        { id: 'log-stub', effectType: 'email_therapist_nudge', idempotencyKey: 'stub-key', status: 'pending' },
+      ]),
+      markCompleted: jest.fn().mockResolvedValue(undefined),
+      markFailed: jest.fn().mockResolvedValue(undefined),
+    },
+  };
+});
+
 import { therapistNudgeService } from '../services/therapist-nudge.service';
+import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 
 function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
   const row: TherapistRow = {
@@ -199,6 +238,7 @@ function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  backgroundTaskPromises.length = 0;
   for (const k of Object.keys(therapists)) delete therapists[k];
   for (const k of Object.keys(conversations)) delete conversations[k];
   nextConvoId = 1;
@@ -230,6 +270,9 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
       () => true,
     );
+    // sendNudges hands the send+txn to the harness via runBackgroundTask
+    // — drain those background tasks before asserting their side effects.
+    await Promise.all(backgroundTaskPromises);
 
     expect(mockSendEmail).toHaveBeenCalledTimes(1);
     // Row stamped with thread id + activity timestamp.
@@ -255,6 +298,67 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     expect(state.messages[0].content).toContain('share your availability');
   });
 
+  it('passes claimedAt.getTime() as the cycle generation to the harness', async () => {
+    // Pins the contract that protects therapist-nudge from permanent
+    // failure: each cron cycle must produce a distinct idempotency
+    // key, otherwise a single 5-retry burst that ends in `abandoned`
+    // blocks all future cycles for this therapist. The cycle key is
+    // the claim timestamp (Date.now() at the moment the inter-tick
+    // updateMany claims the sentinel), passed as the third arg to
+    // registerTherapistSideEffects. Without this arg the harness
+    // hashes a static "therapist:{id}:periodic:{type}" key and the
+    // cycle-isolation guarantee disappears silently — TS allows
+    // `undefined` for the param, so a regression wouldn't trip the
+    // type checker.
+    //
+    // We spyOn the actual singleton (rather than reading the mock
+    // factory's replacement) because the harness's closure was bound
+    // to the original module's sideEffectTrackerService at load time
+    // and doesn't pick up the factory's swap.
+    seedTherapist();
+
+    const actualTracker = jest.requireActual<{
+      sideEffectTrackerService: typeof sideEffectTrackerService;
+    }>('../services/side-effect-tracker.service').sideEffectTrackerService;
+    const registerSpy = jest
+      .spyOn(actualTracker, 'registerTherapistSideEffects')
+      .mockResolvedValue([
+        { id: 'log-spy', effectType: 'email_therapist_nudge', idempotencyKey: 'spy-key', status: 'pending' },
+      ]);
+    // The harness also calls markCompleted/markFailed on the real
+    // singleton; those would touch prisma.sideEffectLog which the
+    // test's database mock doesn't stub. Replace them with no-ops so
+    // the harness completes cleanly after the execute body runs.
+    const completedSpy = jest.spyOn(actualTracker, 'markCompleted').mockResolvedValue(undefined);
+    const failedSpy = jest.spyOn(actualTracker, 'markFailed').mockResolvedValue(undefined);
+
+    try {
+      const beforeRun = Date.now();
+      await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+        () => true,
+      );
+      await Promise.all(backgroundTaskPromises);
+      const afterRun = Date.now();
+
+      expect(registerSpy).toHaveBeenCalledTimes(1);
+      const [therapistId, effects, scopeGen] = registerSpy.mock.calls[0];
+      expect(therapistId).toBe('tx-1');
+      expect(effects).toEqual([
+        expect.objectContaining({ effectType: 'email_therapist_nudge' }),
+      ]);
+      expect(typeof scopeGen).toBe('number');
+      // The claim happens before the harness's runBackgroundTask fires,
+      // so the cycle gen falls in the window between sendNudges entry
+      // and the awaited drain returning.
+      expect(scopeGen).toBeGreaterThanOrEqual(beforeRun);
+      expect(scopeGen).toBeLessThanOrEqual(afterRun);
+    } finally {
+      registerSpy.mockRestore();
+      completedSpy.mockRestore();
+      failedSpy.mockRestore();
+    }
+  });
+
   it('abandons any prior active nudge_reply row for the therapist when sending a fresh nudge', async () => {
     seedTherapist();
     // Pre-existing active nudge_reply from a previous nudge cycle.
@@ -272,6 +376,7 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
       () => true,
     );
+    await Promise.all(backgroundTaskPromises);
 
     // Old row was abandoned, not deleted — audit trail preserved.
     expect(conversations['old-convo'].status).toBe('abandoned');

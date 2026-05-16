@@ -216,7 +216,10 @@ class MessageQueueHealthService {
         subsystem: 'side_effect',
         type: effect.effectType,
         status: effect.status,
-        appointmentId: effect.appointmentId,
+        // Either appointment-scoped (most rows) or therapist-scoped
+        // (e.g. therapist-nudge); coalesce to undefined for the
+        // health-report shape which doesn't distinguish.
+        appointmentId: effect.appointmentId ?? effect.therapistId ?? undefined,
         attempts: effect.attempts,
         createdAt: effect.createdAt.toISOString(),
         lastAttemptAt: effect.lastAttempt?.toISOString(),

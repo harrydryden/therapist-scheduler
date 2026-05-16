@@ -122,12 +122,17 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             'Side effect permanently abandoned'
           );
 
+          await this.postAbandonCleanup(effect);
+
           try {
             await slackNotificationService.sendAlert({
               title: 'Side Effect Abandoned',
               severity: 'high',
-              appointmentId: effect.appointmentId,
-              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned. Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
+              // Therapist-scoped effects have no appointmentId — surface the
+              // therapist ID in the details body so the alert is still
+              // actionable.
+              appointmentId: effect.appointmentId ?? undefined,
+              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned.${effect.therapistId ? ` (therapistId: ${effect.therapistId})` : ''} Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
             });
           } catch {
             // Don't let Slack failure mask the original error
@@ -147,14 +152,81 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     return { retried, succeeded, failed, abandoned };
   }
 
+  /**
+   * Effect-type-specific cleanup after an abandon.
+   *
+   * For effects whose parent row carries a sentinel that gates future
+   * cron ticks (currently only Therapist.lastNudgeAt for
+   * email_therapist_nudge), the sentinel must be released here or the
+   * next scheduled tick will see "claim still owned by previous cycle"
+   * and skip the therapist for intervalWeeks — turning a transient
+   * outage that outlasted the 5-attempt budget into a multi-week
+   * silence.
+   *
+   * Guard: only release if the current sentinel value is older than
+   * this row's createdAt. If a newer cycle has already claimed
+   * (Therapist.lastNudgeAt > row.createdAt), some other cycle is in
+   * flight and we must not clobber its claim.
+   */
+  private async postAbandonCleanup(effect: {
+    id: string;
+    effectType: SideEffectType;
+    therapistId: string | null;
+    createdAt: Date;
+  }): Promise<void> {
+    if (effect.effectType !== 'email_therapist_nudge' || !effect.therapistId) {
+      return;
+    }
+    try {
+      const result = await prisma.therapist.updateMany({
+        where: {
+          id: effect.therapistId,
+          lastNudgeAt: { lt: effect.createdAt },
+        },
+        data: { lastNudgeAt: null },
+      });
+      if (result.count > 0) {
+        logger.info(
+          { effectId: effect.id, therapistId: effect.therapistId },
+          'Released therapist nudge sentinel after abandon — next cron tick will re-evaluate',
+        );
+      }
+    } catch (err) {
+      logger.error(
+        { err, effectId: effect.id, therapistId: effect.therapistId },
+        'Failed to release nudge sentinel after abandon — therapist may not be re-considered until intervalWeeks elapses',
+      );
+    }
+  }
+
   private async executeEffect(effect: {
     id: string;
-    appointmentId: string;
+    appointmentId: string | null;
+    therapistId: string | null;
     effectType: SideEffectType;
     idempotencyKey: string;
     attempts: number;
     payload: unknown;
   }): Promise<void> {
+    // Dispatch on scope (DB CHECK enforces exactly one set). Therapist-
+    // scoped retries don't need an appointment row — they re-fetch the
+    // therapist and replay the rendered payload.
+    if (effect.therapistId && !effect.appointmentId) {
+      await this.executeTherapistEffect({
+        id: effect.id,
+        therapistId: effect.therapistId,
+        effectType: effect.effectType,
+        idempotencyKey: effect.idempotencyKey,
+        attempts: effect.attempts,
+        payload: effect.payload,
+      });
+      return;
+    }
+
+    if (!effect.appointmentId) {
+      throw new Error(`Side effect ${effect.id} has neither appointmentId nor therapistId`);
+    }
+
     const appointment = await prisma.appointmentRequest.findUnique({
       where: { id: effect.appointmentId },
       select: {
@@ -234,7 +306,19 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       case 'email_client_confirmation':
       case 'email_therapist_confirmation':
       case 'email_client_cancellation':
-      case 'email_therapist_cancellation': {
+      case 'email_therapist_cancellation':
+      // Periodic (non-transition) emails registered via
+      // runPeriodicTrackedSideEffect. Same payload shape, same replay
+      // path — the renderer captures a fully-rendered {to, subject,
+      // body, threadId?} envelope at original-send time, and we
+      // enqueue it verbatim on retry. We deliberately do NOT re-render
+      // on retry: settings drift (e.g. tracking URL, salutation
+      // template) between original send and retry would produce a
+      // surprising second email.
+      case 'email_chase_user':
+      case 'email_chase_therapist':
+      case 'email_meeting_link_check':
+      case 'email_feedback_reminder': {
         // Replay the email using the rendered payload captured at registration
         // time. We never re-render the template on retry — settings could
         // have changed between the original send and the retry, and a stale
@@ -256,6 +340,56 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
           body: payload.body,
           appointmentId: appointment.id,
           ...(payload.threadId ? { threadId: payload.threadId } : {}),
+        });
+        break;
+      }
+
+      case 'email_feedback_dispatch':
+      case 'email_session_reminder_pair': {
+        // Paired periodic effect: two emails registered as one tracked
+        // row. Payload carries both envelopes so retry replays both,
+        // matching the original execute's atomicity (the pair is the
+        // unit of work). Same "never re-render" contract as the single
+        // case above.
+        //
+        // Duplicate-on-retry risk: if the first attempt sent one of
+        // the two and then crashed, retry sends BOTH again — the
+        // already-delivered recipient gets a duplicate. We accept this
+        // bounded-by-MAX_RETRY_ATTEMPTS cost in exchange for
+        // sequencing the lifecycle transition (feedback_dispatch only)
+        // and partial-success annotation (session_reminder_pair only)
+        // correctly relative to the sends.
+        const payload = effect.payload as
+          | {
+              user: { to: string; subject: string; body: string; threadId?: string | null };
+              therapist: { to: string; subject: string; body: string; threadId?: string | null };
+            }
+          | null
+          | undefined;
+        if (
+          !payload ||
+          !payload.user ||
+          !payload.therapist ||
+          typeof payload.user.to !== 'string' ||
+          typeof payload.therapist.to !== 'string'
+        ) {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid paired payload — expected { user, therapist } envelopes`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.user.to,
+          subject: payload.user.subject,
+          body: payload.user.body,
+          appointmentId: appointment.id,
+          ...(payload.user.threadId ? { threadId: payload.user.threadId } : {}),
+        });
+        await emailQueueService.enqueue({
+          to: payload.therapist.to,
+          subject: payload.therapist.subject,
+          body: payload.therapist.body,
+          appointmentId: appointment.id,
+          ...(payload.therapist.threadId ? { threadId: payload.therapist.threadId } : {}),
         });
         break;
       }
@@ -357,6 +491,71 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
 
       default:
         throw new Error(`Unknown side effect type: ${effect.effectType}`);
+    }
+  }
+
+  /**
+   * Replay a therapist-scoped tracked side effect.
+   *
+   * Therapist scope is used by cadence comms that aren't tied to any
+   * one appointment (e.g. the periodic therapist-nudge email). The
+   * payload shape mirrors appointment-scoped periodic emails — a fully
+   * rendered { to, subject, body } envelope captured at registration
+   * time — but the therapist row is the parent, so we don't enqueue
+   * with an appointmentId.
+   */
+  private async executeTherapistEffect(effect: {
+    id: string;
+    therapistId: string;
+    effectType: SideEffectType;
+    idempotencyKey: string;
+    attempts: number;
+    payload: unknown;
+  }): Promise<void> {
+    const therapist = await prisma.therapist.findUnique({
+      where: { id: effect.therapistId },
+      select: { id: true, email: true, name: true, active: true },
+    });
+
+    if (!therapist) {
+      throw new Error(`Therapist ${effect.therapistId} not found - cannot retry side effect`);
+    }
+
+    // A therapist deactivated between original send and retry: skip
+    // the replay rather than send. The retry runner will mark this
+    // effect completed, suppressing further attempts.
+    if (!therapist.active) {
+      logger.info(
+        { effectId: effect.id, therapistId: effect.therapistId, effectType: effect.effectType },
+        'Therapist is inactive - skipping replay'
+      );
+      return;
+    }
+
+    switch (effect.effectType) {
+      case 'email_therapist_nudge': {
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload`,
+          );
+        }
+        // Therapist-nudge has no appointment context, so we enqueue
+        // without one. The email-queue accepts that — the appointmentId
+        // is optional and only used for status linkage.
+        await emailQueueService.enqueue({
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
+        });
+        break;
+      }
+
+      default:
+        throw new Error(`Unknown therapist-scoped side effect type: ${effect.effectType}`);
     }
   }
 

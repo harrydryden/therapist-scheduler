@@ -142,8 +142,13 @@ model Therapist {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  appointments  AppointmentRequest[]
-  conversations TherapistConversation[]
+  appointments   AppointmentRequest[]
+  conversations  TherapistConversation[]
+  // Therapist-scoped tracked side effects (e.g. therapist-nudge
+  // periodic emails). Appointment-scoped rows live under the
+  // matching reverse-relation on AppointmentRequest. The CHECK
+  // constraint on side_effect_logs guarantees exactly one parent.
+  sideEffectLogs SideEffectLog[]
 
   @@index([odId])
   @@index([notionId])
@@ -743,8 +748,14 @@ model FeedbackSubmission {
 model SideEffectLog {
   id String @id @default(uuid())
 
-  // Link to the appointment
-  appointmentId String @map("appointment_id")
+  // Scope: EXACTLY ONE of appointmentId / therapistId is non-null.
+  // Enforced at the DB layer by side_effect_logs_scope_check.
+  // Appointment-scoped is the common case (status-transition emails,
+  // periodic chases for a specific booking). Therapist-scoped covers
+  // cadence comms that aren't tied to an appointment, e.g. the weekly
+  // therapist-nudge.
+  appointmentId String? @map("appointment_id")
+  therapistId   String? @map("therapist_id")
 
   // Type of side effect
   effectType String @map("effect_type") // 'slack_notify', 'email_client', 'email_therapist', 'user_sync', 'therapist_freeze_sync'
@@ -771,11 +782,14 @@ model SideEffectLog {
   // Idempotency - prevent duplicate execution
   idempotencyKey String @unique @map("idempotency_key")
 
-  // Foreign key relation to ensure referential integrity
-  // Cascade delete: side effect logs are deleted when appointment is deleted
-  appointment AppointmentRequest @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  // Foreign key relations — at most one will be non-null per row (see
+  // CHECK constraint above). Cascade delete: side effect logs are
+  // deleted when the parent appointment or therapist is deleted.
+  appointment AppointmentRequest? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  therapist   Therapist?          @relation(fields: [therapistId], references: [id], onDelete: Cascade)
 
   @@index([appointmentId])
+  @@index([therapistId])
   @@index([status])
   @@index([effectType, status])
   @@index([status, lastAttempt]) // For retry queries
