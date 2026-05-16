@@ -589,8 +589,19 @@ export class EmailIngestService {
    *
    * Used as a pre-flight check before sending chase follow-ups to avoid chasing
    * someone who already replied (even if our system failed to handle their reply).
+   *
+   * When `sinceMs` is provided, only inbound messages with `internalDate >= sinceMs`
+   * count. Replies older than the cutoff are assumed to have already been accounted
+   * for (e.g. they're what advanced the checkpoint into its current stage), so a
+   * fresh chase against the OTHER party is legitimate even though they sit on the
+   * thread. Pass the current checkpoint's `checkpoint_at` epoch ms to scope the
+   * abandonment check to replies that arrived after the latest stage transition.
    */
-  async threadContainsInboundReplies(threadId: string, traceId: string): Promise<boolean> {
+  async threadContainsInboundReplies(
+    threadId: string,
+    traceId: string,
+    sinceMs?: number,
+  ): Promise<boolean> {
     const gmail = await emailOAuthService.ensureGmailClient();
 
     let threadResponse;
@@ -625,7 +636,17 @@ export class EmailIngestService {
       // Messages with SENT (but not INBOX) are our outgoing emails — skip.
       // Anything else is an inbound reply.
       if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
-      return true; // Found at least one inbound message
+
+      // Optional stage-scoped filter: ignore inbound messages that pre-date
+      // the cutoff. Gmail returns `internalDate` as a string of epoch ms;
+      // if it's missing or unparseable, fall back to counting the message
+      // (preserves the old safety-first behaviour for malformed data).
+      if (sinceMs !== undefined) {
+        const internalMs = message.internalDate ? Number(message.internalDate) : NaN;
+        if (Number.isFinite(internalMs) && internalMs < sinceMs) continue;
+      }
+
+      return true; // Found at least one inbound message after the cutoff
     }
 
     return false;
