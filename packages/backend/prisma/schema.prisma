@@ -187,7 +187,14 @@ model AppointmentRequest {
   // FIX #21: Denormalized columns to avoid loading full conversationState blob (up to 500KB)
   // in list queries. Updated whenever conversationState is written.
   messageCount      Int        @default(0) @map("message_count")
-  checkpointStage   String?    @map("checkpoint_stage")
+  // Default to `initial_contact` so freshly-created rows (admin-create
+  // flows, ATS hand-offs) carry a valid stage before the agent's first
+  // tool run. Without this, list-view rows show null next-action until
+  // the first inbound triggers `storeConversationState`. The agent
+  // tool-loop's entry-side checkpoint bootstrap (`runToolLoop`) keeps
+  // the JSONB blob's `checkpoint.stage` in sync with this column so
+  // the next `storeConversationState` write doesn't null it.
+  checkpointStage   String?    @default("initial_contact") @map("checkpoint_stage")
   // Agent-curated thread memory (Layer B in the agent memory design).
   // Free-form observations the agent retains via the `remember` tool —
   // preferences, constraints, prior decisions, situational context the

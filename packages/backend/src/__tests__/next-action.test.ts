@@ -76,7 +76,7 @@ describe('deriveNextAction', () => {
             checkpointStage: 'awaiting_user_slot_selection',
           }),
         ),
-      ).toBe('Awaiting client slot choice');
+      ).toBe('Awaiting time/date selection from user');
     });
 
     it('human control beats waiting states', () => {
@@ -118,13 +118,16 @@ describe('deriveNextAction', () => {
   });
 
   describe('stage-derived defaults', () => {
+    // Canonical, finite mapping — one label per `ConversationStage`.
+    // Stages omitted here (`confirmed`, `cancelled`) are covered by
+    // the terminal-status branch.
     it.each([
       ['initial_contact', 'Awaiting initial outreach'],
-      ['awaiting_therapist_availability', 'Awaiting therapist availability'],
-      ['awaiting_user_slot_selection', 'Awaiting client slot choice'],
-      ['awaiting_therapist_confirmation', 'Awaiting therapist confirmation'],
+      ['awaiting_therapist_availability', 'Awaiting availability from therapist'],
+      ['awaiting_user_slot_selection', 'Awaiting time/date selection from user'],
+      ['awaiting_therapist_confirmation', 'Awaiting confirmation from therapist'],
       ['awaiting_meeting_link', 'Awaiting meeting link from therapist'],
-      ['rescheduling', 'Rescheduling in progress'],
+      ['rescheduling', 'Rescheduling — awaiting new availability'],
       ['stalled', 'Stalled — manual nudge needed'],
       ['chased', 'Awaiting reply after chase'],
       ['closure_recommended', 'Review closure recommendation'],
@@ -144,27 +147,35 @@ describe('deriveNextAction', () => {
       ).toBe('Awaiting initial outreach');
     });
 
-    // The next four pin the message-direction + recipient inference
-    // that drives "Awaiting reply from user/therapist" wording when
-    // the checkpoint stage is null (the admin-created-no-agent-yet
-    // cohort, primarily). Operators triaging these rows previously
-    // saw the unhelpful "Awaiting next message" — now they get
-    // concrete who-we're-waiting-on copy.
-    it('agent last emailed the user → awaiting reply from user', () => {
+    // The next five pin the message-direction + recipient inference
+    // that drives the fallback wording when the checkpoint stage is
+    // null (the admin-created-no-agent-yet cohort, plus rows pre-
+    // dating the FSM instrumentation). Operators triaging these rows
+    // previously saw the unhelpful "Awaiting next message" / a copy
+    // that only named the party with no context — now they get the
+    // same party-plus-context shape as the stage-derived defaults.
+    //
+    // It's a heuristic: when only `lastEmailSentTo` is known we
+    // assume the most common reason at the negotiation phase (we
+    // shared availability with the user, OR asked the therapist for
+    // theirs). Wrong in edge cases like the agent asking a
+    // clarifying question — but the dashboard reads with that grain.
+    it('agent last emailed the user → fallback infers availability share', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'user' })),
-      ).toBe('Awaiting reply from user');
+      ).toBe('Awaiting time/date selection from user');
     });
 
-    it('agent last emailed the therapist → awaiting reply from therapist', () => {
+    it('agent last emailed the therapist → fallback infers availability request', () => {
       expect(
         deriveNextAction(input({ lastEmailSentTo: 'therapist' })),
-      ).toBe('Awaiting reply from therapist');
+      ).toBe('Awaiting availability from therapist');
     });
 
     it("agent role as last message but no lastEmailSentTo → generic 'awaiting reply'", () => {
       // Older rows pre-date the lastEmailSentTo capture — we know
-      // the agent acted but not to whom.
+      // the agent acted but not to whom, so no party-context guess
+      // is safe.
       expect(
         deriveNextAction(input({ lastMessageRole: 'agent' })),
       ).toBe('Awaiting reply');
@@ -183,7 +194,7 @@ describe('deriveNextAction', () => {
           lastEmailSentTo: 'therapist',
           lastMessageRole: 'inbound',
         })),
-      ).toBe('Awaiting reply from therapist');
+      ).toBe('Awaiting availability from therapist');
     });
   });
 
