@@ -118,20 +118,35 @@ class ChaseEmailService {
           }
 
           try {
-            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for ANY inbound
-            // reply — not just unprocessed ones. This catches cases where the
-            // reply was received but abandoned after MAX_UNMATCHED_ATTEMPTS or
-            // MAX_PROCESSING_FAILURES (typically within ~3 hours). In that
-            // scenario the message is permanently in processedGmailMessage and
-            // checkThreadForUnprocessedReplies would find nothing, yet the
-            // therapist/user DID reply and should not be chased.
+            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for an inbound
+            // reply that arrived AFTER the current checkpoint stage was entered.
+            // The cutoff is the checkpoint's `checkpoint_at` — older inbound
+            // messages are the very replies that advanced the conversation INTO
+            // this stage (or pre-existed it) and have already been accounted
+            // for. Per-checkpoint chasers (one chase per stage) would otherwise
+            // false-positive against those legitimately-processed replies.
             //
-            // We check both the therapist and user threads — a reply on either
-            // side means the conversation is not truly stale.
+            // A reply newer than the cutoff is genuinely concerning: either it
+            // was abandoned after MAX_UNMATCHED_ATTEMPTS / MAX_PROCESSING_FAILURES,
+            // or the recipient replied without our processing catching up. We
+            // block the chase and alert so admins can recover by hand.
+            //
+            // If no checkpoint_at is present (legacy/malformed state), fall back
+            // to the old "any inbound reply blocks" safety-first behaviour.
+            //
+            // We check both the therapist and user threads — a fresh reply on
+            // either side means the conversation is not truly stale.
             const threadIdsToCheck = new Set<string>();
             if (threadId) threadIdsToCheck.add(threadId);
             if (appointment.therapistGmailThreadId) threadIdsToCheck.add(appointment.therapistGmailThreadId);
             if (appointment.gmailThreadId) threadIdsToCheck.add(appointment.gmailThreadId);
+
+            const checkpointAt = (appointment.conversationState as
+              | { checkpoint?: { checkpoint_at?: string } }
+              | null
+            )?.checkpoint?.checkpoint_at;
+            const checkpointMs = checkpointAt ? Date.parse(checkpointAt) : NaN;
+            const sinceMs = Number.isFinite(checkpointMs) ? checkpointMs : undefined;
 
             if (threadIdsToCheck.size > 0) {
               try {
@@ -139,7 +154,8 @@ class ChaseEmailService {
                 for (const tid of threadIdsToCheck) {
                   if (await emailProcessingService.threadContainsInboundReplies(
                     tid,
-                    `chase-presend:${appointment.id}`
+                    `chase-presend:${appointment.id}`,
+                    sinceMs,
                   )) {
                     hasReply = true;
                     break;
@@ -152,8 +168,9 @@ class ChaseEmailService {
                       checkId,
                       appointmentId: appointment.id,
                       target,
+                      sinceMs,
                     },
-                    'Thread contains inbound reply — skipping chase (reply may have been abandoned during processing)'
+                    'Thread contains inbound reply newer than current stage — skipping chase'
                   );
 
                   // Release the sentinel so the appointment can be re-evaluated.
@@ -181,9 +198,9 @@ class ChaseEmailService {
                     appointmentId: appointment.id,
                     therapistName: appointment.therapistName,
                     details:
-                      `Blocked chase to *${target}* because the Gmail thread already ` +
-                      `contains an inbound reply. The reply was likely abandoned ` +
-                      `after processing failures — investigate and manually recover.`,
+                      `Blocked chase to *${target}* because the Gmail thread received ` +
+                      `an inbound reply after the current checkpoint stage was entered ` +
+                      `and our system hasn't acted on it — investigate and manually recover.`,
                     additionalFields: {
                       'Client': firstName(appointment.userName, '(unknown)'),
                       'Chase target': target,
