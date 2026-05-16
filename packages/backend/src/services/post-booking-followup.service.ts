@@ -37,6 +37,7 @@ import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { auditEventService } from './audit-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
+import { processSentinelBatch } from './sentinel-batch-runner';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { generateFeedbackToken } from '../utils/feedback-token';
 
@@ -1098,70 +1099,45 @@ class PostBookingFollowupService extends PeriodicService {
   private async processFeedbackReminders(checkId: string): Promise<void> {
     const now = new Date();
 
-    // Check if feedback reminders are enabled
+    // Gate read at the top — keep this outside processSentinelBatch so the
+    // candidate query doesn't fire when the feature is off.
     const feedbackReminderEnabled = await getSettingValue<boolean>('notifications.email.feedbackReminder');
     if (!feedbackReminderEnabled) {
       logger.debug({ checkId }, 'Feedback reminders disabled - skipping');
       return;
     }
 
-    // Get configurable delay (default 48 hours after feedback form sent)
     const reminderDelayHours = await getSettingValue<number>('postBooking.feedbackReminderDelayHours');
     const reminderDelayMs = reminderDelayHours * 60 * 60 * 1000;
 
-    // Find appointments that:
-    // - Are in feedback_requested status (feedback form sent, no response yet)
-    // - Had feedback form sent more than X hours ago
-    // - Haven't had reminder sent yet
-    const candidates = await prisma.appointmentRequest.findMany({
-      where: {
-        status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
-        feedbackFormSentAt: {
-          not: null,
-          lt: new Date(now.getTime() - reminderDelayMs), // Sent more than X hours ago
-        },
-        feedbackReminderSentAt: null,
-      },
-      select: {
-        id: true,
-        userName: true,
-        userEmail: true,
-        therapistName: true,
-        gmailThreadId: true,
-        trackingCode: true,
-        feedbackFormSentAt: true,
-      },
-      take: BATCH_SIZE,
-      orderBy: { feedbackFormSentAt: 'asc' }, // Process oldest first
-    });
-
-    if (candidates.length === 0) {
-      return;
-    }
-
-    let sent = 0;
-    let skipped = 0;
-
-    for (const appointment of candidates) {
-      // OPTIMISTIC LOCKING: claim via the shared sentinel helper. The
-      // status precondition keeps the claim scoped to rows still
-      // waiting for feedback.
-      const claimed = await tryClaimSentinel(appointment.id, 'feedbackReminderSentAt', {
-        extraWhere: { status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED },
-      });
-      if (!claimed) {
-        logger.debug(
-          { checkId, appointmentId: appointment.id },
-          'Feedback reminder already being processed or status changed'
-        );
-        continue;
-      }
-
-      try {
-        // Render the envelope synchronously so template-load failures
-        // (incl. the trackingCode guard inside the builder) reset the
-        // sentinel via the catch-block below. See the parallel comment
-        // in processMeetingLinkChecks for the rationale.
+    await processSentinelBatch({
+      checkId,
+      effectName: 'feedback reminder',
+      sentinelField: 'feedbackReminderSentAt',
+      claimPrecondition: { status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED },
+      fetchCandidates: () =>
+        prisma.appointmentRequest.findMany({
+          where: {
+            status: APPOINTMENT_STATUS.FEEDBACK_REQUESTED,
+            feedbackFormSentAt: {
+              not: null,
+              lt: new Date(now.getTime() - reminderDelayMs),
+            },
+            feedbackReminderSentAt: null,
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            gmailThreadId: true,
+            trackingCode: true,
+            feedbackFormSentAt: true,
+          },
+          take: BATCH_SIZE,
+          orderBy: { feedbackFormSentAt: 'asc' },
+        }),
+      schedule: async (appointment) => {
         const payload = await this.buildFeedbackReminderPayload(appointment);
 
         runPeriodicTrackedSideEffect(
@@ -1172,13 +1148,10 @@ class PostBookingFollowupService extends PeriodicService {
             execute: async (envelope) => {
               await emailProcessingService.sendEmail(envelope);
 
-              // Log follow_up_sent audit event
               auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
                 followUpType: 'feedback_reminder',
               });
 
-              // Atomic confirm — sentinel-still-ours precondition enforced by
-              // the helper.
               const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
 
               if (!confirmed) {
@@ -1200,29 +1173,8 @@ class PostBookingFollowupService extends PeriodicService {
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
         );
-
-        // Counted at queue time — see processMeetingLinkChecks for rationale.
-        sent++;
-      } catch (error) {
-        // Errors from buildFeedbackReminderPayload land here (template
-        // render / missing trackingCode / settings read). Release the
-        // sentinel so the appointment can be re-evaluated on the next
-        // tick once the underlying issue (e.g. trackingCode) is
-        // resolved. Failures inside the harness execute do NOT flow
-        // through this catch — the harness marks its row failed and
-        // the retry runner handles them.
-        await releaseSentinelClaim(appointment.id, 'feedbackReminderSentAt');
-
-        logger.error(
-          { checkId, appointmentId: appointment.id, error },
-          'Failed to prepare feedback reminder email - will retry next cycle'
-        );
-      }
-    }
-
-    if (sent > 0 || skipped > 0) {
-      logger.info({ checkId, sent, skipped, checked: candidates.length }, 'Feedback reminder processing complete');
-    }
+      },
+    });
   }
 
   /**
