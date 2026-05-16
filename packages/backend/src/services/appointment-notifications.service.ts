@@ -22,7 +22,7 @@ import { firstName } from '../utils/first-name';
 import { formatEmailDateFromSettings } from '../utils/date';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { runBackgroundTask } from '../utils/background-task';
-import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-tracker.service';
+import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-harness';
 import type { TransitionSource } from '../domain/scheduling/lifecycle';
 
 // ============================================

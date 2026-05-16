@@ -10,7 +10,7 @@ import { isTherapistPending, isUserPending } from './stage-groups';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
-import { runPeriodicTrackedSideEffect } from './side-effect-tracker.service';
+import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {

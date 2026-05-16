@@ -48,7 +48,7 @@ jest.mock('../utils/email-templates', () => ({
 const pendingSideEffects: Promise<void>[] = [];
 const mockReplayableSideEffect = jest.fn();
 const mockTrackedSideEffect = jest.fn();
-jest.mock('../services/side-effect-tracker.service', () => ({
+jest.mock('../services/side-effect-harness', () => ({
   runReplayableTrackedSideEffect: (...args: unknown[]) =>
     mockReplayableSideEffect(...args),
   runTrackedSideEffect: (...args: unknown[]) => mockTrackedSideEffect(...args),

@@ -59,10 +59,8 @@ jest.mock('../utils/background-task', () => ({
   },
 }));
 
-import {
-  runPeriodicTrackedSideEffect,
-  sideEffectTrackerService,
-} from '../services/side-effect-tracker.service';
+import { runPeriodicTrackedSideEffect } from '../services/side-effect-harness';
+import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 
 describe('runPeriodicTrackedSideEffect', () => {
   beforeEach(() => {

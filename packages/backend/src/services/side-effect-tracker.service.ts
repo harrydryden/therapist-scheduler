@@ -1,26 +1,31 @@
 /**
- * Side Effect Tracker Service
+ * Side Effect Tracker Service — Data Layer
  *
- * Implements a two-phase commit pattern for appointment status transitions.
- * Ensures all side effects (notifications, syncs, etc.) are tracked and can be:
- * - Retried if they fail
- * - Monitored for completion
- * - Idempotent (no duplicate execution)
+ * Owns the `side_effect_logs` table: registration, lifecycle
+ * (completed / failed / abandoned), idempotency-key generation, retry
+ * candidate queries, stats, cleanup.
  *
- * This solves the problem where an appointment might be marked "confirmed" in the
- * database, but the user never receives the confirmation email due to a transient failure.
+ * Higher-level orchestration (binding tracked-side-effect semantics to
+ * runBackgroundTask, render-then-register sequencing, scope dispatch)
+ * lives in side-effect-harness.ts. The retry runner lives in
+ * side-effect-retry.service.ts.
+ *
+ * Two-phase commit pattern: an effect is registered BEFORE it executes,
+ * then marked completed/failed AFTER. A row that's stuck in `pending`
+ * (or recently `failed`) gets picked up by the retry runner on its
+ * periodic tick, so transient outages don't drop side effects.
  *
  * Usage:
  * 1. Before executing side effects, register them with registerSideEffects()
  * 2. Execute each side effect and call markCompleted() or markFailed()
- * 3. A background job can retry failed effects via retryPendingEffects()
+ * 3. A background job retries pending/failed effects via the
+ *    sideEffectRetryService.
  */
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { createHash } from 'crypto';
-import { runBackgroundTask, type BackgroundTaskOptions } from '../utils/background-task';
 
 // Side effect types
 export type SideEffectType =
@@ -77,18 +82,6 @@ export type TransitionType =
   | 'completed'
   | 'session_held'
   | 'periodic';
-
-/**
- * Parent of a periodic tracked side effect. Mirrors the DB's
- * polymorphism — every side_effect_logs row points at EXACTLY ONE of
- * an appointment or a therapist (enforced by
- * side_effect_logs_scope_check). The discriminated union is the
- * single boundary type all periodic harness callers cross; downstream
- * (register / executor / abandon hook) all branch on `kind`.
- */
-export type SideEffectScope =
-  | { kind: 'appointment'; appointmentId: string }
-  | { kind: 'therapist'; therapistId: string };
 
 export interface SideEffectDefinition {
   effectType: SideEffectType;
@@ -646,297 +639,3 @@ class SideEffectTrackerService {
 
 // Singleton instance
 export const sideEffectTrackerService = new SideEffectTrackerService();
-
-/**
- * Fire-and-forget a side effect with persistent retry coverage.
- *
- * Registers the effect in `side_effect_logs` (idempotency key = hash of
- * appointmentId+transition+effectType), runs it via `runBackgroundTask`
- * for in-process retries, and marks the row completed/failed. If the
- * in-process retries are exhausted, the row stays in `failed` status and
- * the periodic `sideEffectRetryService` picks it up across restarts.
- *
- * If the effect was already completed (e.g. on a duplicate trigger or a
- * post-restart re-trigger) the task is skipped — that's the idempotency
- * the tracker exists to provide.
- *
- * Use this for effects whose retry executor in `side-effect-retry.service`
- * can re-derive state from the appointment row (Slack notifications,
- * Notion syncs). For replay-sensitive effects like settings-driven emails,
- * use `runReplayableTrackedSideEffect` so the rendered payload is captured
- * at registration time and the retry replays it verbatim.
- */
-export function runTrackedSideEffect(
-  appointmentId: string,
-  transition: TransitionType,
-  effectType: SideEffectType,
-  task: () => Promise<unknown>,
-  options: BackgroundTaskOptions,
-  transitionGeneration?: number,
-): void {
-  runBackgroundTask(async () => {
-    let registered;
-    try {
-      const [reg] = await sideEffectTrackerService.registerSideEffects(
-        appointmentId,
-        transition,
-        [{ effectType }],
-        transitionGeneration,
-      );
-      registered = reg;
-    } catch (regErr) {
-      // Registration failure (DB outage, etc.) — fall back to running the
-      // task untracked rather than dropping the side effect entirely.
-      logger.warn(
-        { err: regErr, appointmentId, transition, effectType },
-        'Side-effect registration failed; running untracked'
-      );
-      await task();
-      return;
-    }
-
-    // If a prior invocation already completed (e.g. process restart between
-    // mark-complete and runBackgroundTask exit), skip — that's idempotency.
-    if (registered.status === 'completed') {
-      logger.debug(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping'
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying'
-      );
-      return;
-    }
-
-    try {
-      await task();
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      // Persist the failure so the periodic retry service picks it up.
-      // We then re-throw so runBackgroundTask still records the metric and
-      // can run its short in-process retry sequence.
-      await sideEffectTrackerService
-        .markFailed(
-          registered.idempotencyKey,
-          err instanceof Error ? err.message : String(err),
-        )
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, appointmentId, effectType },
-            'Failed to mark side effect as failed (will retry next run)'
-          );
-        });
-      throw err;
-    }
-  }, options);
-}
-
-/**
- * Variant of `runTrackedSideEffect` for replay-sensitive effects (e.g. emails
- * whose templates are settings-driven). The renderer runs first and produces
- * the rendered payload, which is persisted on the registration row. The
- * retry executor uses the persisted payload verbatim, so retries can't drift
- * from the original send even if templates or settings change between runs.
- *
- * Sequencing on a fresh process:
- *   render → register (with payload) → execute (uses same payload).
- * If render throws: nothing registers (matches the previous untracked
- * behaviour where a template-load failure dropped the email).
- * If execute throws: row is marked failed and the periodic retry runner
- * picks it up using the stored payload.
- */
-export function runReplayableTrackedSideEffect<P>(
-  appointmentId: string,
-  transition: TransitionType,
-  effectType: SideEffectType,
-  spec: {
-    /** Render the payload once at original send time. Failure aborts. */
-    renderPayload: () => Promise<P>;
-    /** Execute the side effect using the rendered payload. */
-    execute: (payload: P) => Promise<unknown>;
-  },
-  options: BackgroundTaskOptions,
-  transitionGeneration?: number,
-): void {
-  runBackgroundTask(async () => {
-    const payload = await spec.renderPayload();
-
-    let registered;
-    try {
-      const [reg] = await sideEffectTrackerService.registerSideEffects(
-        appointmentId,
-        transition,
-        [{ effectType, payload }],
-        transitionGeneration,
-      );
-      registered = reg;
-    } catch (regErr) {
-      logger.warn(
-        { err: regErr, appointmentId, transition, effectType },
-        'Side-effect registration failed; running untracked',
-      );
-      await spec.execute(payload);
-      return;
-    }
-
-    if (registered.status === 'completed') {
-      logger.debug(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping',
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { appointmentId, effectType, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying',
-      );
-      return;
-    }
-
-    try {
-      await spec.execute(payload);
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      await sideEffectTrackerService
-        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, appointmentId, effectType },
-            'Failed to mark side effect as failed (will retry next run)',
-          );
-        });
-      throw err;
-    }
-  }, options);
-}
-
-/**
- * Periodic-effect harness — the only public entry point for time-driven
- * outbound actions that aren't tied to an `appointmentRequest.status`
- * transition. Used by chase emails, session reminders, feedback-form
- * follow-ups (appointment-scoped) and the weekly therapist-nudge
- * (therapist-scoped). Both scopes converge here so the
- * register → completed-check → abandoned-check → execute →
- * mark-completed/failed plumbing lives in exactly one place.
- *
- * Scope: discriminated on `kind`. Appointment-scoped writes
- * `(appointmentId, transition='periodic')` to side_effect_logs;
- * therapist-scoped writes `(therapistId, transition='periodic')`. The
- * DB CHECK constraint side_effect_logs_scope_check guarantees exactly
- * one parent is set.
- *
- * Idempotency: keyed on `(scopeId, [scopeGeneration?], effectType)`.
- * Without `scopeGeneration` the effective key is "once per parent,
- * ever" — matches sentinel-claim semantics like `chaseSentAt` where
- * the parent row's own field already gates re-firing. With
- * `scopeGeneration` set (typically a per-cycle claim timestamp), each
- * cadence cycle gets its own row + its own attempts budget, so a
- * single 5-retry burst that exhausts can't permanently disable
- * future cycles. The therapist-nudge service uses this.
- *
- * Concurrency: the harness's `pending` status does NOT block parallel
- * `execute` calls (two concurrent ticks both see `pending` and both
- * proceed). Callers that need single-tick-wins protection must still
- * claim a sentinel BEFORE calling this helper; the harness on top
- * provides durability + retry, not exclusion.
- *
- * Sequencing: render → register → execute (uses rendered payload).
- * On render failure: nothing registers, caller's surrounding catch
- * handles it (typically releases the sentinel so the next tick
- * re-evaluates). On execute failure: row marked failed, retry runner
- * replays via the per-effectType branch in side-effect-retry.
- */
-export function runPeriodicTrackedSideEffect<P>(
-  scope: SideEffectScope,
-  effectType: SideEffectType,
-  spec: {
-    renderPayload: () => Promise<P>;
-    execute: (payload: P) => Promise<unknown>;
-  },
-  options: BackgroundTaskOptions,
-  scopeGeneration?: number,
-): void {
-  runBackgroundTask(async () => {
-    const payload = await spec.renderPayload();
-    const logContext = scopeLogContext(scope, effectType);
-
-    let registered;
-    try {
-      registered = await registerForScope(scope, effectType, payload, scopeGeneration);
-    } catch (regErr) {
-      logger.warn(
-        { err: regErr, ...logContext },
-        'Side-effect registration failed; running untracked',
-      );
-      await spec.execute(payload);
-      return;
-    }
-
-    if (registered.status === 'completed') {
-      logger.debug(
-        { ...logContext, idempotencyKey: registered.idempotencyKey },
-        'Side effect already completed; skipping',
-      );
-      return;
-    }
-
-    if (registered.status === 'abandoned') {
-      logger.warn(
-        { ...logContext, idempotencyKey: registered.idempotencyKey },
-        'Side effect previously abandoned; not retrying',
-      );
-      return;
-    }
-
-    try {
-      await spec.execute(payload);
-      await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
-    } catch (err) {
-      await sideEffectTrackerService
-        .markFailed(registered.idempotencyKey, err instanceof Error ? err.message : String(err))
-        .catch((markErr) => {
-          logger.error(
-            { err: markErr, ...logContext },
-            'Failed to mark side effect as failed (will retry next run)',
-          );
-        });
-      throw err;
-    }
-  }, options);
-}
-
-async function registerForScope<P>(
-  scope: SideEffectScope,
-  effectType: SideEffectType,
-  payload: P,
-  scopeGeneration: number | undefined,
-): Promise<RegisteredSideEffect> {
-  if (scope.kind === 'appointment') {
-    const [reg] = await sideEffectTrackerService.registerSideEffects(
-      scope.appointmentId,
-      'periodic',
-      [{ effectType, payload }],
-      scopeGeneration,
-    );
-    return reg;
-  }
-  const [reg] = await sideEffectTrackerService.registerTherapistSideEffects(
-    scope.therapistId,
-    [{ effectType, payload }],
-    scopeGeneration,
-  );
-  return reg;
-}
-
-function scopeLogContext(scope: SideEffectScope, effectType: SideEffectType): Record<string, unknown> {
-  return scope.kind === 'appointment'
-    ? { appointmentId: scope.appointmentId, effectType }
-    : { therapistId: scope.therapistId, effectType };
-}
