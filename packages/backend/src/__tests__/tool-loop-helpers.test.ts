@@ -6,7 +6,19 @@
  * pinning them here protects against silent drift.
  */
 
-import { buildSkipMessage, computeTurnHash } from '../services/tool-loop-helpers';
+import type Anthropic from '@anthropic-ai/sdk';
+import {
+  appendToolRoundTrip,
+  buildBudgetExhaustedMessage,
+  buildErrorBreakerAdminMessage,
+  buildErrorBreakerFlagReason,
+  buildSameHashAbortMessage,
+  buildSameHashBlockedMessage,
+  buildSkipMessage,
+  buildTurnBreakerReason,
+  computeTurnHash,
+  parseClaudeResponse,
+} from '../services/tool-loop-helpers';
 
 describe('buildSkipMessage', () => {
   it('names the outcome for idempotent skips and directs the model to the next step', () => {
@@ -91,5 +103,171 @@ describe('computeTurnHash', () => {
     expect(a).toBe(b);
     expect(a).toContain('record_availability_window');
     expect(a).toContain('2026-01-01T10:00:00');
+  });
+});
+
+describe('parseClaudeResponse', () => {
+  function makeResponse(
+    content: Anthropic.ContentBlock[],
+  ): Anthropic.Message {
+    return {
+      id: 'msg_test',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-opus',
+      content,
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 } as Anthropic.Usage,
+    } as unknown as Anthropic.Message;
+  }
+
+  it('separates tool_use blocks from text blocks', () => {
+    const response = makeResponse([
+      { type: 'text', text: 'Thinking out loud.' } as Anthropic.TextBlock,
+      {
+        type: 'tool_use',
+        id: 'call_1',
+        name: 'send_email',
+        input: { to: 'x@y' },
+      } as Anthropic.ToolUseBlock,
+    ]);
+
+    const parsed = parseClaudeResponse(response);
+
+    expect(parsed.toolCalls).toHaveLength(1);
+    expect(parsed.toolCalls[0].name).toBe('send_email');
+    expect(parsed.assistantText).toBe('Thinking out loud.');
+  });
+
+  it('joins multiple text blocks with newlines', () => {
+    const response = makeResponse([
+      { type: 'text', text: 'First.' } as Anthropic.TextBlock,
+      { type: 'text', text: 'Second.' } as Anthropic.TextBlock,
+    ]);
+
+    expect(parseClaudeResponse(response).assistantText).toBe('First.\nSecond.');
+  });
+
+  it('returns empty toolCalls + empty text for a response with no recognised blocks', () => {
+    const parsed = parseClaudeResponse(makeResponse([]));
+    expect(parsed.toolCalls).toEqual([]);
+    expect(parsed.assistantText).toBe('');
+  });
+
+  it('returns an empty string (not undefined) when only tool_use blocks are present', () => {
+    const response = makeResponse([
+      {
+        type: 'tool_use',
+        id: 'call_1',
+        name: 'remember',
+        input: {},
+      } as Anthropic.ToolUseBlock,
+    ]);
+    const parsed = parseClaudeResponse(response);
+    expect(parsed.assistantText).toBe('');
+    expect(parsed.toolCalls).toHaveLength(1);
+  });
+});
+
+describe('turn-guard message builders', () => {
+  // The loops emit these strings verbatim into tool_result `content` and
+  // admin `messages.push` bodies. Pin the exact format so a wording
+  // change is a conscious test update, not silent drift between loops.
+
+  describe('buildBudgetExhaustedMessage', () => {
+    it('names the tool, the budget, and the next action', () => {
+      const msg = buildBudgetExhaustedMessage('send_email', 12);
+      expect(msg).toBe(
+        'Tool send_email not executed: turn tool budget exhausted (12 calls). The conversation is being paused for admin review.',
+      );
+    });
+  });
+
+  describe('buildSameHashAbortMessage', () => {
+    it('names the tool, the repeat count, and the abort outcome', () => {
+      const msg = buildSameHashAbortMessage('record_availability_window', 3);
+      expect(msg).toBe(
+        'Tool record_availability_window attempted 3 times with identical arguments in this turn — aborting to prevent a loop. An admin will review.',
+      );
+    });
+  });
+
+  describe('buildSameHashBlockedMessage', () => {
+    it('tells the model to pivot or escalate on a 2nd-occurrence skip', () => {
+      const msg = buildSameHashBlockedMessage('send_email');
+      expect(msg).toBe(
+        'Tool send_email with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.',
+      );
+    });
+  });
+
+  describe('buildTurnBreakerReason', () => {
+    it('formats the budget-exhausted variant with the limit number', () => {
+      const reason = buildTurnBreakerReason('budget', {
+        budget: 12,
+        sameHashAbortLimit: 3,
+      });
+      expect(reason).toBe(
+        'Turn tool budget exhausted (12 tool calls in one inbound trigger). Agent paused for admin review.',
+      );
+    });
+
+    it('formats the same-hash variant with the abort limit', () => {
+      const reason = buildTurnBreakerReason('same_hash', {
+        budget: 12,
+        sameHashAbortLimit: 3,
+      });
+      expect(reason).toBe(
+        'Same tool called 3+ times with identical arguments in one turn — agent thrashing on a duplicate call. Paused for review.',
+      );
+    });
+  });
+
+  describe('error breaker messages', () => {
+    it('admin message names the total failure count', () => {
+      expect(buildErrorBreakerAdminMessage(3)).toBe(
+        '[System: 3 tool failures in this turn — pausing for admin review.]',
+      );
+    });
+
+    it('flag reason names the total failure count', () => {
+      expect(buildErrorBreakerFlagReason(3)).toBe(
+        'Tool error circuit breaker tripped (3 failures in one turn). Agent paused for review.',
+      );
+    });
+  });
+});
+
+describe('appendToolRoundTrip', () => {
+  it('appends an assistant message (response content) and a user message (tool results) in order', () => {
+    const prior: Anthropic.MessageParam[] = [
+      { role: 'user', content: 'hello' },
+    ];
+    const response = {
+      content: [{ type: 'text', text: 'hi' } as Anthropic.TextBlock],
+    } as Anthropic.Message;
+    const toolResults: Anthropic.ToolResultBlockParam[] = [
+      {
+        type: 'tool_result',
+        tool_use_id: 'call_1',
+        content: 'ok',
+        is_error: false,
+      },
+    ];
+
+    const next = appendToolRoundTrip(prior, response, toolResults);
+
+    expect(next).toHaveLength(3);
+    expect(next[0]).toEqual({ role: 'user', content: 'hello' });
+    expect(next[1]).toEqual({ role: 'assistant', content: response.content });
+    expect(next[2]).toEqual({ role: 'user', content: toolResults });
+  });
+
+  it('does not mutate the input array', () => {
+    const prior: Anthropic.MessageParam[] = [{ role: 'user', content: 'a' }];
+    const before = prior.slice();
+    appendToolRoundTrip(prior, { content: [] } as unknown as Anthropic.Message, []);
+    expect(prior).toEqual(before);
   });
 });

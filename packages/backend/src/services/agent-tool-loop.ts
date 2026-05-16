@@ -43,7 +43,18 @@ import { getSettingValue } from './settings.service';
 // budget) agree about the set. See that module for the full rationale.
 import { PURE_TOOLS } from '../core/agent/tools/pure-tools';
 import { getToolsForStage } from './tools-for-stage';
-import { buildSkipMessage, computeTurnHash } from './tool-loop-helpers';
+import {
+  appendToolRoundTrip,
+  buildBudgetExhaustedMessage,
+  buildErrorBreakerAdminMessage,
+  buildErrorBreakerFlagReason,
+  buildSameHashAbortMessage,
+  buildSameHashBlockedMessage,
+  buildSkipMessage,
+  buildTurnBreakerReason,
+  computeTurnHash,
+  parseClaudeResponse,
+} from './tool-loop-helpers';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
 import type { ConversationState } from '../types';
 import {
@@ -88,9 +99,41 @@ const SAME_HASH_TURN_ABORT = 3;
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
-// Pure helpers (computeTurnHash, buildSkipMessage) live in
+// Pure helpers (computeTurnHash, buildSkipMessage, parseClaudeResponse,
+// the turn-guard message builders, and appendToolRoundTrip) live in
 // tool-loop-helpers.ts so they can be unit-tested without dragging in
 // the loop's anthropic + prisma + settings module graph.
+
+/**
+ * Shared Anthropic call shape used by both tool loops. Centralises model
+ * selection, max_tokens, and circuit-breaker config so changing any of
+ * them is a one-line edit. Stays in this module (not in tool-loop-helpers)
+ * because it imports anthropic + circuit-breaker — the helpers file is
+ * deliberately import-free of runtime side-effects so its tests stay fast.
+ *
+ * `system` accepts either a plain string (booking loop) or a
+ * `TextBlockParam[]` (availability loop, which uses cache_control on the
+ * stable system + tool prefix). The Anthropic SDK accepts both shapes.
+ */
+async function callAgentClaude(args: {
+  system: string | Anthropic.TextBlockParam[];
+  tools: Anthropic.Tool[];
+  messages: Anthropic.MessageParam[];
+  context: string;
+  traceId: string;
+}): Promise<Anthropic.Message> {
+  return resilientCall(
+    () =>
+      anthropicClient.messages.create({
+        model: CLAUDE_MODELS.AGENT,
+        max_tokens: MODEL_CONFIG.agent.maxTokens,
+        system: args.system,
+        tools: args.tools,
+        messages: args.messages,
+      }),
+    { context: args.context, traceId: args.traceId, circuitBreaker: claudeCircuitBreaker },
+  );
+}
 
 /** Scheduling tools definition — passed to Claude */
 export const schedulingTools: Anthropic.Tool[] = [
@@ -508,25 +551,15 @@ export async function runToolLoop(
         )
       : schedulingTools;
 
-    const response = await resilientCall(
-      () => anthropicClient.messages.create({
-        model: CLAUDE_MODELS.AGENT,
-        max_tokens: MODEL_CONFIG.agent.maxTokens,
-        system: systemPrompt,
-        tools,
-        messages: messagesForClaude,
-      }),
-      { context: logContext, traceId, circuitBreaker: claudeCircuitBreaker }
-    );
+    const response = await callAgentClaude({
+      system: systemPrompt,
+      tools,
+      messages: messagesForClaude,
+      context: logContext,
+      traceId,
+    });
 
-    // Extract tool calls and text
-    const toolCalls = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
-    );
-    const textBlocks = response.content.filter(
-      (block): block is Anthropic.TextBlock => block.type === 'text'
-    );
-    const assistantText = textBlocks.map((b) => b.text).join('\n');
+    const { toolCalls, assistantText } = parseClaudeResponse(response);
 
     // Save assistant response to conversation state
     if (assistantText) {
@@ -576,7 +609,7 @@ export async function runToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
+          content: buildBudgetExhaustedMessage(toolCall.name, TURN_TOOL_BUDGET),
           is_error: false,
         });
         // Audit the short-circuit. The executor never sees this tool_use
@@ -604,7 +637,7 @@ export async function runToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
+          content: buildSameHashAbortMessage(toolCall.name, seenCount),
           is_error: false,
         });
         auditEventService.logToolExecuted(context.appointmentRequestId, {
@@ -625,7 +658,7 @@ export async function runToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
+          content: buildSameHashBlockedMessage(toolCall.name),
           is_error: false,
         });
         auditEventService.logToolExecuted(context.appointmentRequestId, {
@@ -780,9 +813,10 @@ export async function runToolLoop(
     // iteration are collected (Anthropic requires one result per use)
     // before the while loop exits without feeding them back to Claude.
     if (!stopLoop && !flaggedForHumanReview && (budgetExhausted || sameHashAborted)) {
-      const reason = budgetExhausted
-        ? `Turn tool budget exhausted (${TURN_TOOL_BUDGET} tool calls in one inbound trigger). Agent paused for admin review.`
-        : `Same tool called ${SAME_HASH_TURN_ABORT}+ times with identical arguments in one turn — agent thrashing on a duplicate call. Paused for review.`;
+      const reason = buildTurnBreakerReason(
+        budgetExhausted ? 'budget' : 'same_hash',
+        { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
+      );
       logger.warn(
         {
           traceId,
@@ -836,13 +870,11 @@ export async function runToolLoop(
       );
       conversationState.messages.push({
         role: 'admin' as const,
-        content: `[System: ${totalToolErrors} tool failures in this turn — pausing for admin review.]`,
+        content: buildErrorBreakerAdminMessage(totalToolErrors),
       });
       if (callbacks.flagForHumanReview) {
         try {
-          await callbacks.flagForHumanReview(
-            `Tool error circuit breaker tripped (${totalToolErrors} failures in one turn). Agent paused for review.`,
-          );
+          await callbacks.flagForHumanReview(buildErrorBreakerFlagReason(totalToolErrors));
         } catch (flagErr) {
           logger.error(
             { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
@@ -859,11 +891,7 @@ export async function runToolLoop(
     }
 
     // Feed tool results back to Claude for the next iteration
-    messagesForClaude = [
-      ...messagesForClaude,
-      { role: 'assistant' as const, content: response.content },
-      { role: 'user' as const, content: toolResults },
-    ];
+    messagesForClaude = appendToolRoundTrip(messagesForClaude, response, toolResults);
 
     logger.info(
       { traceId, appointmentRequestId: context.appointmentRequestId, toolCount: toolCalls.length, iteration },
@@ -1007,25 +1035,15 @@ export async function runAvailabilityToolLoop(
       `${logContext} - availability agent Claude API call iteration`,
     );
 
-    const response = await resilientCall(
-      () =>
-        anthropicClient.messages.create({
-          model: CLAUDE_MODELS.AGENT,
-          max_tokens: MODEL_CONFIG.agent.maxTokens,
-          system: systemBlocks,
-          tools: availabilityTools,
-          messages: messagesForClaude,
-        }),
-      { context: logContext, traceId, circuitBreaker: claudeCircuitBreaker },
-    );
+    const response = await callAgentClaude({
+      system: systemBlocks,
+      tools: availabilityTools,
+      messages: messagesForClaude,
+      context: logContext,
+      traceId,
+    });
 
-    const toolCalls = response.content.filter(
-      (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use',
-    );
-    const textBlocks = response.content.filter(
-      (block): block is Anthropic.TextBlock => block.type === 'text',
-    );
-    const assistantText = textBlocks.map((b) => b.text).join('\n');
+    const { toolCalls, assistantText } = parseClaudeResponse(response);
 
     if (assistantText) {
       conversationState.messages.push({
@@ -1072,7 +1090,7 @@ export async function runAvailabilityToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} not executed: turn tool budget exhausted (${TURN_TOOL_BUDGET} calls). The conversation is being paused for admin review.`,
+          content: buildBudgetExhaustedMessage(toolCall.name, TURN_TOOL_BUDGET),
           is_error: false,
         });
         logger.warn(
@@ -1097,7 +1115,7 @@ export async function runAvailabilityToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} attempted ${seenCount} times with identical arguments in this turn — aborting to prevent a loop. An admin will review.`,
+          content: buildSameHashAbortMessage(toolCall.name, seenCount),
           is_error: false,
         });
         logger.warn(
@@ -1121,7 +1139,7 @@ export async function runAvailabilityToolLoop(
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: `Tool ${toolCall.name} with these exact arguments was already attempted earlier in this turn. Try a different approach, change the arguments, or call flag_for_human_review.`,
+          content: buildSameHashBlockedMessage(toolCall.name),
           is_error: false,
         });
         logger.info(
@@ -1197,9 +1215,10 @@ export async function runAvailabilityToolLoop(
     // Turn-level circuit breakers (budget / same-hash). Mirror the booking
     // loop and fire before the error breaker so the right cause is logged.
     if (!stopLoop && !flaggedForHumanReview && !markedComplete && (budgetExhausted || sameHashAborted)) {
-      const reason = budgetExhausted
-        ? `Turn tool budget exhausted (${TURN_TOOL_BUDGET} tool calls in one inbound trigger). Agent paused for admin review.`
-        : `Same tool called ${SAME_HASH_TURN_ABORT}+ times with identical arguments in one turn — agent thrashing on a duplicate call. Paused for review.`;
+      const reason = buildTurnBreakerReason(
+        budgetExhausted ? 'budget' : 'same_hash',
+        { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
+      );
       logger.warn(
         {
           traceId,
@@ -1246,13 +1265,11 @@ export async function runAvailabilityToolLoop(
       );
       conversationState.messages.push({
         role: 'admin' as const,
-        content: `[System: ${totalToolErrors} tool failures in this turn — pausing for admin review.]`,
+        content: buildErrorBreakerAdminMessage(totalToolErrors),
       });
       if (callbacks.flagForHumanReview) {
         try {
-          await callbacks.flagForHumanReview(
-            `Tool error circuit breaker tripped (${totalToolErrors} failures in one turn). Agent paused for review.`,
-          );
+          await callbacks.flagForHumanReview(buildErrorBreakerFlagReason(totalToolErrors));
         } catch (flagErr) {
           logger.error(
             { traceId, conversationId: context.conversationId, err: flagErr },
@@ -1266,11 +1283,7 @@ export async function runAvailabilityToolLoop(
 
     if (stopLoop) break;
 
-    messagesForClaude = [
-      ...messagesForClaude,
-      { role: 'assistant' as const, content: response.content },
-      { role: 'user' as const, content: toolResults },
-    ];
+    messagesForClaude = appendToolRoundTrip(messagesForClaude, response, toolResults);
 
     logger.info(
       {
