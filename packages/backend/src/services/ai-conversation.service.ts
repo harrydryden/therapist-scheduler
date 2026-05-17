@@ -74,8 +74,9 @@ export class AIConversationService {
     const trimmedState = this.trimConversationState(state);
     const stateJson = JSON.stringify(trimmedState);
     const now = new Date();
-    // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries
-    const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
+    // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries.
+    // checkpointAt was added to drop the chase candidate query's conversationState fetch.
+    const { messageCount, checkpointStage, checkpointAt } = extractConversationMeta(stateJson);
 
     // Detect checkpoint-stage advance — chase-reset invariant.
     //
@@ -128,6 +129,7 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            checkpointAt,
             // Chase-reset on stage advance — see the read at the top
             // of this method for the rationale.
             ...chaseResetFields,
@@ -162,6 +164,7 @@ export class AIConversationService {
             isStale: false,
             messageCount,
             checkpointStage,
+            checkpointAt,
             // Chase-reset on stage advance — see the read at the top
             // of this method for the rationale.
             ...chaseResetFields,
@@ -247,7 +250,7 @@ export class AIConversationService {
 
       state.checkpoint = mutate(state.checkpoint ?? null);
       const stateJson = JSON.stringify(state);
-      const { messageCount, checkpointStage } = extractConversationMeta(stateJson);
+      const { messageCount, checkpointStage, checkpointAt } = extractConversationMeta(stateJson);
 
       const now = new Date();
 
@@ -275,6 +278,7 @@ export class AIConversationService {
             conversationState: stateJson,
             messageCount,
             checkpointStage,
+            checkpointAt,
             updatedAt: now,
             ...chaseResetFields,
             ...options?.extraUpdates,
