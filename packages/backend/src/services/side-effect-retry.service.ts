@@ -95,6 +95,23 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         break;
       }
 
+      // Atomic claim before execute. Without this, two retry runners
+      // (or a retry runner racing the original in-process worker on a
+      // stale-pending row) would both run executeEffect — producing
+      // duplicate user-visible side effects. The CAS in tryClaimEffect
+      // ensures only one worker proceeds. If we lose the race, skip
+      // silently: the winning worker will mark the row's terminal state.
+      const claimed = await sideEffectTrackerService.tryClaimEffect(
+        effect.idempotencyKey,
+      );
+      if (!claimed) {
+        logger.debug(
+          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId },
+          'Side effect retry skipped — execute-lease held by another worker',
+        );
+        continue;
+      }
+
       retried++;
 
       try {

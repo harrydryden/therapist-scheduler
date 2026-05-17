@@ -101,8 +101,19 @@ export interface RegisteredSideEffect {
   id: string;
   effectType: SideEffectType;
   idempotencyKey: string;
-  status: 'pending' | 'completed' | 'failed' | 'abandoned';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'abandoned';
 }
+
+/**
+ * How long a worker is allowed to hold the execute lease before another
+ * worker can steal the row. Set above the slowest expected execute time
+ * (Anthropic+Gmail spikes are typically <60s; 10 min is generous and
+ * matches the existing stale-pending pickup window). A worker that holds
+ * the lease but dies mid-execute will leave the row in `running` status;
+ * `getEffectsToRetry` returns those rows once the lease has expired so
+ * another worker can re-claim and re-execute.
+ */
+const CLAIM_LEASE_MS = 10 * 60 * 1000;
 
 class SideEffectTrackerService {
   /**
@@ -400,6 +411,43 @@ class SideEffectTrackerService {
   }
 
   /**
+   * Atomically claim a side-effect row for execution. Transitions the row
+   * to `status='running'` and sets `lastAttempt` to now, but only if the
+   * current state is either:
+   *   - pending (the row was freshly registered — first execute attempt)
+   *   - failed (the row failed previously and is eligible for retry)
+   *   - running with an expired lease (a previous worker died mid-execute)
+   *
+   * Returns true if this worker won the claim; false if another worker
+   * has the lease, or the row has moved to completed/abandoned.
+   *
+   * Race-safety: a single Postgres `updateMany` with the eligible-state
+   * filter is atomic. If two workers call this concurrently, only one
+   * sees `count === 1`. This is the gate that prevents the retry runner
+   * from firing a duplicate execute while the original is still in-flight
+   * — the long-standing concurrency hole called out by the audit and
+   * acknowledged in the harness comments (#side-effect-harness.ts:233).
+   */
+  async tryClaimEffect(idempotencyKey: string): Promise<boolean> {
+    const leaseExpiry = new Date(Date.now() - CLAIM_LEASE_MS);
+    const result = await prisma.sideEffectLog.updateMany({
+      where: {
+        idempotencyKey,
+        OR: [
+          { status: 'pending' },
+          { status: 'failed' },
+          { status: 'running', lastAttempt: { lt: leaseExpiry } },
+        ],
+      },
+      data: {
+        status: 'running',
+        lastAttempt: new Date(),
+      },
+    });
+    return result.count === 1;
+  }
+
+  /**
    * Mark a side effect as completed
    */
   async markCompleted(idempotencyKey: string): Promise<void> {
@@ -529,6 +577,13 @@ class SideEffectTrackerService {
   }>> {
     const failedCutoff = new Date(Date.now() - retryAfterMs);
     const stalePendingCutoff = new Date(Date.now() - stalePendingAfterMs);
+    // Stuck-running cutoff matches the claim lease — a row in `running`
+    // with `lastAttempt` older than this means the original worker died
+    // mid-execute (or got network-partitioned) and another worker should
+    // re-claim. The CAS in tryClaimEffect uses the same window, so
+    // including these rows here is harmless when the original worker is
+    // still alive: the CAS will simply lose the race.
+    const stuckRunningCutoff = new Date(Date.now() - CLAIM_LEASE_MS);
 
     const effects = await prisma.sideEffectLog.findMany({
       where: {
@@ -542,6 +597,15 @@ class SideEffectTrackerService {
             status: 'pending',
             attempts: 0,
             createdAt: { lt: stalePendingCutoff },
+          },
+          {
+            // Stuck-running recovery: original worker died mid-execute.
+            // Bounded by maxAttempts so we don't loop forever on a row
+            // whose execute is genuinely hung in a way that finishes
+            // just-after the lease expires (rare but possible).
+            status: 'running',
+            attempts: { lt: maxAttempts },
+            lastAttempt: { lt: stuckRunningCutoff },
           },
         ],
       },
