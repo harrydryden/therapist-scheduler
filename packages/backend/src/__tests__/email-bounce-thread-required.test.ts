@@ -127,13 +127,13 @@ describe('handleBounce — thread-id requirement', () => {
 
     await handleBounce(bounceInfo, { threadId: APPOINTMENT_THREAD_ID, messageId: 'msg-1' });
 
-    expect(mockNotifyEmailBounce).toHaveBeenCalledWith(
-      'apt-real',
-      'Victim',
-      'Therapist',
-      'client',
-      expect.any(String),
-    );
+    expect(mockNotifyEmailBounce).toHaveBeenCalledWith({
+      appointmentId: 'apt-real',
+      userName: 'Victim',
+      therapistName: 'Therapist',
+      bouncedRole: 'client',
+      bounceReason: expect.any(String),
+    });
   });
 
   it('reports therapist role when therapistGmailThreadId is the one that matched', async () => {
@@ -148,13 +148,13 @@ describe('handleBounce — thread-id requirement', () => {
       messageId: 'msg-1',
     });
 
-    expect(mockNotifyEmailBounce).toHaveBeenCalledWith(
-      'apt-real',
-      'Victim',
-      'Therapist',
-      'therapist',
-      expect.any(String),
-    );
+    expect(mockNotifyEmailBounce).toHaveBeenCalledWith({
+      appointmentId: 'apt-real',
+      userName: 'Victim',
+      therapistName: 'Therapist',
+      bouncedRole: 'therapist',
+      bounceReason: expect.any(String),
+    });
   });
 });
 

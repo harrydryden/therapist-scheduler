@@ -26,6 +26,7 @@
 
 import { logger } from '../../../utils/logger';
 import { prisma } from '../../../utils/database';
+import { slackNotificationService } from '../../../services/slack-notification.service';
 import { markMessageProcessed } from '../../messaging/message-dedup';
 import {
   detectThreadDivergence,
@@ -112,6 +113,28 @@ export async function checkAndHandleDivergence(args: {
     );
     await markMessageProcessed(messageId, 'divergence-blocked-abandoned');
     await markFailureAbandoned(messageId);
+
+    // Surface the terminal state to admins. The attempt-1 alert only said
+    // "divergence detected"; without this follow-up, the abandonment is
+    // invisible until someone notices the message stayed unprocessed.
+    // Caught + logged: alerting is best-effort, must not block the
+    // abandonment write that breaks the scanner loop.
+    slackNotificationService
+      .notifyDivergenceAbandoned({
+        appointmentId,
+        therapistName: appointmentContext.therapistName,
+        divergenceType: divergence.type,
+        attempts,
+        from: email.from,
+        subject: email.subject,
+      })
+      .catch((err) => {
+        logger.warn(
+          { traceId, messageId, err },
+          'Failed to send Slack alert for divergence abandonment',
+        );
+      });
+
     return 'abandoned';
   }
 

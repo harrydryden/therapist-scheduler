@@ -90,12 +90,11 @@ export async function flagForHumanReview(
     reason: controlReason,
   });
 
-  await slackNotificationService.notifyHumanReviewFlagged(
-    context.appointmentRequestId,
-    context.userName,
-    context.therapistName,
-    params.reason,
-  );
+  await slackNotificationService.notifyHumanReviewFlagged({
+    appointmentId: context.appointmentRequestId,
+    therapistName: context.therapistName,
+    reason: params.reason,
+  });
 }
 
 // ─── recommend_cancel_match ─────────────────────────────────────────
@@ -158,10 +157,10 @@ async function recommendCancelMatch(
     reason: `Cancel match recommended: ${reason}`,
   });
 
-  await slackNotificationService.notifyCancelMatchRecommended(
-    context.appointmentRequestId,
-    context.userName,
-    context.therapistName,
+  await slackNotificationService.notifyCancelMatchRecommended({
+    appointmentId: context.appointmentRequestId,
+    userName: context.userName,
+    therapistName: context.therapistName,
     reason,
-  );
+  });
 }

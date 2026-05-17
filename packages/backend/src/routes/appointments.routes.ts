@@ -521,12 +521,10 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           .then((enabled) => {
             if (enabled !== false) {
               runBackgroundTask(
-                () => slackNotificationService.notifyAppointmentCreated(
-                  appointmentRequest.id,
-                  userName,
+                () => slackNotificationService.notifyAppointmentCreated({
+                  appointmentId: appointmentRequest.id,
                   therapistName,
-                  userEmail
-                ),
+                }),
                 {
                   name: 'slack-notify-requested',
                   context: { requestId, appointmentId: appointmentRequest.id },

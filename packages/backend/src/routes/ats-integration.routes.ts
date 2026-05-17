@@ -551,9 +551,10 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           .then((enabled) => {
             if (enabled !== false) {
               runBackgroundTask(
-                () => slackNotificationService.notifyAppointmentCreated(
-                  appointmentRequest.id, userName, therapistName, userEmail
-                ),
+                () => slackNotificationService.notifyAppointmentCreated({
+                  appointmentId: appointmentRequest.id,
+                  therapistName,
+                }),
                 { name: 'slack-notify-requested', context: { requestId, appointmentId: appointmentRequest.id }, retry: true, maxRetries: 2 }
               );
             }

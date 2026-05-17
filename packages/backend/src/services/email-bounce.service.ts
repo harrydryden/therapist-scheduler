@@ -285,13 +285,13 @@ export async function handleBounce(
       appointment.therapistGmailThreadId === originalEmail.threadId
         ? 'therapist'
         : 'client';
-    await slackNotificationService.notifyEmailBounce(
-      appointment.id,
-      appointment.userName,
-      appointment.therapistName,
+    await slackNotificationService.notifyEmailBounce({
+      appointmentId: appointment.id,
+      userName: appointment.userName,
+      therapistName: appointment.therapistName,
       bouncedRole,
-      `${bounceInfo.bounceType ?? 'unknown'} bounce`,
-    );
+      bounceReason: `${bounceInfo.bounceType ?? 'unknown'} bounce`,
+    });
 
     return result;
   } catch (error) {
