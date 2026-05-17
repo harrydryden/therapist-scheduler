@@ -16,6 +16,12 @@
 
 import { logger } from './logger';
 import { DEFAULT_TIMEOUTS } from './timeout';
+import {
+  getTraceContext,
+  runWithTrace,
+  generateTraceId,
+  type TraceContext,
+} from './request-tracing';
 
 export interface BackgroundTaskOptions {
   /** Name of the task for logging/metrics */
@@ -214,6 +220,26 @@ export function runBackgroundTask(
   const metrics = getOrCreateMetrics(name);
   metrics.total++;
 
+  // Snapshot the active trace context so the deferred task runs under the
+  // same traceId/appointmentId as the work that scheduled it. Pino's mixin
+  // reads from AsyncLocalStorage on every log call; without this snapshot,
+  // every fire-and-forget task logs with no traceId, making it impossible
+  // to follow a failure from an inbound email through the side effects it
+  // spawned (slack notifications, side-effect retries, sync jobs).
+  //
+  // Shallow copy so the task's own extendTraceContext calls don't bleed
+  // back into the scheduling scope (and concurrent sibling tasks don't
+  // see each other's mutations). `source` is overwritten to `bg:${name}`
+  // so log lines from inside the task body identify themselves as
+  // background work — the traceId still links them to the originator.
+  // If no parent trace is active (e.g. tasks scheduled at server
+  // startup before the first request), mint a fresh background trace ID
+  // so the task's logs still have structured trace data.
+  const parentTrace = getTraceContext();
+  const taskTrace: TraceContext = parentTrace
+    ? { ...parentTrace, source: `bg:${name}` }
+    : { traceId: generateTraceId(), source: `bg:${name}` };
+
   const executeTask = async (attempt: number = 1): Promise<void> => {
     const startTime = Date.now();
 
@@ -284,15 +310,19 @@ export function runBackgroundTask(
     }
   };
 
-  // Start execution without blocking
-  // Use setImmediate to ensure we don't block the event loop
+  // Start execution without blocking. setImmediate yields to the event
+  // loop; runWithTrace re-enters the snapshotted scope so the task and
+  // everything it awaits — pino mixin lookups, inner runWithTrace calls,
+  // nested side-effect scheduling — see the originator's trace context.
   setImmediate(() => {
-    executeTask().catch((err) => {
-      // This catch should never trigger, but just in case
-      logger.error(
-        { taskName: name, error: err, ...context },
-        'Unexpected error in background task execution'
-      );
+    runWithTrace(taskTrace, () => {
+      executeTask().catch((err) => {
+        // This catch should never trigger, but just in case
+        logger.error(
+          { taskName: name, error: err, ...context },
+          'Unexpected error in background task execution'
+        );
+      });
     });
   });
 }
