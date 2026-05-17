@@ -48,6 +48,8 @@ import {
   buildBudgetExhaustedMessage,
   buildErrorBreakerAdminMessage,
   buildErrorBreakerFlagReason,
+  buildMaxIterationsAdminMessage,
+  buildMaxIterationsFlagReason,
   buildSameHashAbortMessage,
   buildSameHashBlockedMessage,
   buildSkipMessage,
@@ -519,6 +521,13 @@ export async function runToolLoop(
   let budgetExhausted = false;
   let sameHashAborted = false;
 
+  // Set to true when the loop exits because Claude returned no tool calls
+  // (the canonical "I'm done" signal). Used to distinguish a natural finish
+  // from an iteration-cap exhaustion in the post-loop block — iteration may
+  // legitimately equal MAX_TOOL_ITERATIONS on the last natural-exit
+  // iteration, but only the cap-exhaustion case should escalate.
+  let loopFinishedNaturally = false;
+
   // Read the stage-gate setting once per invocation. The tool surface is
   // still re-derived per iteration (since the checkpoint can advance
   // mid-loop), but the on/off switch is stable within a single inbound.
@@ -575,6 +584,7 @@ export async function runToolLoop(
         { traceId, appointmentRequestId: context.appointmentRequestId, iterations: iteration },
         `${logContext} - Claude finished responding (no more tool calls)`
       );
+      loopFinishedNaturally = true;
       break;
     }
 
@@ -899,11 +909,43 @@ export async function runToolLoop(
     );
   }
 
-  if (iteration >= MAX_TOOL_ITERATIONS && !flaggedForHumanReview) {
+  // Iteration-ceiling escalation. Mirrors the budget / same-hash / error-
+  // breaker blocks inside the while-loop: log + admin message + flag for
+  // human review. Only fires when the cap was reached with the agent still
+  // working (toolCalls on the last iteration); a natural finish on
+  // iteration MAX is NOT a runaway and should not escalate. Without this
+  // the loop just exited silently and the user saw whatever mid-thought
+  // Claude managed to emit before iterations ran out.
+  if (
+    iteration >= MAX_TOOL_ITERATIONS &&
+    !flaggedForHumanReview &&
+    !loopFinishedNaturally
+  ) {
+    const reason = buildMaxIterationsFlagReason(MAX_TOOL_ITERATIONS);
     logger.warn(
-      { traceId, appointmentRequestId: context.appointmentRequestId, iterations: iteration },
-      `${logContext} - Hit max tool iterations — conversation may be incomplete`
+      {
+        traceId,
+        appointmentRequestId: context.appointmentRequestId,
+        iterations: iteration,
+        bucket: 'max_iterations',
+      },
+      `${logContext} - Max tool iterations reached without natural completion — flagging for review`,
     );
+    conversationState.messages.push({
+      role: 'admin' as const,
+      content: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+    });
+    if (callbacks.flagForHumanReview) {
+      try {
+        await callbacks.flagForHumanReview(reason);
+      } catch (flagErr) {
+        logger.error(
+          { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
+          `${logContext} - Failed to flag for human review at iteration ceiling`,
+        );
+      }
+    }
+    flaggedForHumanReview = true;
   }
 
   return {
@@ -1016,6 +1058,11 @@ export async function runAvailabilityToolLoop(
   let budgetExhausted = false;
   let sameHashAborted = false;
 
+  // Mirrors the booking loop: true when Claude returns no tool calls (the
+  // canonical "I'm done" signal), distinguishing a natural finish from
+  // iteration-cap exhaustion in the post-loop block.
+  let loopFinishedNaturally = false;
+
   // cache_control on the system block caches both tool definitions and
   // system prompt (tools render before system in the request prefix).
   // Both are stable for the lifetime of one conversation, so every
@@ -1057,6 +1104,7 @@ export async function runAvailabilityToolLoop(
         { traceId, conversationId: context.conversationId, iterations: iteration },
         `${logContext} - availability agent finished responding (no more tool calls)`,
       );
+      loopFinishedNaturally = true;
       break;
     }
 
@@ -1296,11 +1344,41 @@ export async function runAvailabilityToolLoop(
     );
   }
 
-  if (iteration >= MAX_TOOL_ITERATIONS && !flaggedForHumanReview && !markedComplete) {
+  // Iteration-ceiling escalation. Mirrors the booking loop: a cap hit
+  // with the agent still working is a runaway and should flag for review;
+  // a natural finish on the last iteration is not. `markedComplete` is the
+  // availability loop's equivalent terminal-tool signal — also exempt.
+  if (
+    iteration >= MAX_TOOL_ITERATIONS &&
+    !flaggedForHumanReview &&
+    !markedComplete &&
+    !loopFinishedNaturally
+  ) {
+    const reason = buildMaxIterationsFlagReason(MAX_TOOL_ITERATIONS);
     logger.warn(
-      { traceId, conversationId: context.conversationId, iterations: iteration },
-      `${logContext} - availability agent hit max tool iterations`,
+      {
+        traceId,
+        conversationId: context.conversationId,
+        iterations: iteration,
+        bucket: 'max_iterations',
+      },
+      `${logContext} - availability agent hit max tool iterations without natural completion — flagging for review`,
     );
+    conversationState.messages.push({
+      role: 'admin' as const,
+      content: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+    });
+    if (callbacks.flagForHumanReview) {
+      try {
+        await callbacks.flagForHumanReview(reason);
+      } catch (flagErr) {
+        logger.error(
+          { traceId, conversationId: context.conversationId, err: flagErr },
+          `${logContext} - Failed to flag for human review at availability iteration ceiling`,
+        );
+      }
+    }
+    flaggedForHumanReview = true;
   }
 
   return {

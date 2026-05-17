@@ -114,6 +114,14 @@ export function buildErrorBreakerFlagReason(totalToolErrors: number): string {
   return `Tool error circuit breaker tripped (${totalToolErrors} failures in one turn). Agent paused for review.`;
 }
 
+export function buildMaxIterationsAdminMessage(maxIterations: number): string {
+  return `[System: Hit the ${maxIterations}-iteration ceiling with the agent still working — pausing for admin review.]`;
+}
+
+export function buildMaxIterationsFlagReason(maxIterations: number): string {
+  return `Tool loop hit the ${maxIterations}-iteration ceiling with the agent still working (not a natural completion). Agent paused for review.`;
+}
+
 // ─── Message round-trip ─────────────────────────────────────────────
 
 /**
