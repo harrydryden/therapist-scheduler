@@ -723,13 +723,21 @@ class StaleCheckService extends LockedPeriodicService {
       return 0;
     }
 
-    // Batch update all candidates in a single query instead of N individual updates
+    // Batch update all candidates in a single query instead of N individual updates.
+    // The `humanControlEnabled: false` precondition closes the race where the agent
+    // flipped the row to human control between our candidate query above and the
+    // update — without it, we'd auto-escalate a row that's already under agent-
+    // initiated review, double-writing audit + Slack alert for the same root cause.
     const now = new Date();
     const candidateIds = candidates.map(c => c.id);
 
     try {
       const batchResult = await prisma.appointmentRequest.updateMany({
-        where: { id: { in: candidateIds } },
+        where: {
+          id: { in: candidateIds },
+          humanControlEnabled: false,
+          autoEscalatedAt: null,
+        },
         data: {
           humanControlEnabled: true,
           humanControlTakenBy: 'system-auto-escalation',
@@ -738,16 +746,43 @@ class StaleCheckService extends LockedPeriodicService {
         },
       });
 
-      // Log human_control audit events for auto-escalated appointments
-      for (const appointment of candidates) {
+      // Resolve which rows actually flipped. In the common case (no race), every
+      // candidate flipped and we audit/alert for all of them. In the rare case
+      // where batchResult.count < candidates.length, the agent (or another path)
+      // beat us on some rows; we re-query for `autoEscalatedAt: now` to identify
+      // exactly which rows we own and skip the rest — preventing the duplicate-
+      // alert noise the operability audit flagged.
+      let flippedAppointments = candidates;
+      if (batchResult.count < candidates.length) {
+        const flippedRows = await prisma.appointmentRequest.findMany({
+          where: { id: { in: candidateIds }, autoEscalatedAt: now },
+          select: { id: true },
+        });
+        const flippedIds = new Set(flippedRows.map((r) => r.id));
+        flippedAppointments = candidates.filter((c) => flippedIds.has(c.id));
+        logger.info(
+          {
+            checkId,
+            queried: candidates.length,
+            flipped: flippedAppointments.length,
+            raced: candidates.length - flippedAppointments.length,
+          },
+          'Auto-escalation race-loss: some rows were already under human control before the update landed',
+        );
+      }
+
+      // Log human_control audit events ONLY for rows we actually flipped.
+      for (const appointment of flippedAppointments) {
         auditEventService.log(appointment.id, 'human_control', 'system', {
           enabled: true,
           reason: 'Auto-escalated: stalled conversation with no tool execution progress',
         });
       }
 
-      // Send Slack notifications concurrently (fire-and-forget with error isolation)
-      const notificationPromises = candidates.map(async (appointment) => {
+      // Send Slack notifications concurrently (fire-and-forget with error isolation).
+      // Same flippedAppointments restriction — don't alert on rows where another
+      // path won the race.
+      const notificationPromises = flippedAppointments.map(async (appointment) => {
         try {
           const aptStallHours = Math.round(
             (Date.now() - (appointment.conversationStallAlertAt?.getTime() || 0)) / (60 * 60 * 1000)
@@ -778,7 +813,9 @@ class StaleCheckService extends LockedPeriodicService {
       });
 
       await Promise.all(notificationPromises);
-      return batchResult.count;
+      // Return the count we actually flipped (matches batchResult.count in the
+      // common case; smaller if we lost the race on some rows).
+      return flippedAppointments.length;
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to batch auto-escalate appointments');
       return 0;
