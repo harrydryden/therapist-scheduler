@@ -43,6 +43,10 @@ const therapistFindUniqueMock = jest.fn();
 const therapistUpdateManyMock = jest.fn();
 const sideEffectFindManyMock = jest.fn();
 const sideEffectUpdateMock = jest.fn();
+// CAS-claim issued by retry runner before executeEffect. Default
+// `count: 1` so retry tests drive the execute branch; tests for the
+// "another worker holds the lease" path override to `{ count: 0 }`.
+const sideEffectUpdateManyMock = jest.fn().mockResolvedValue({ count: 1 });
 
 jest.mock('../utils/database', () => ({
   prisma: {
@@ -50,6 +54,7 @@ jest.mock('../utils/database', () => ({
       findMany: (...args: unknown[]) => sideEffectFindManyMock(...args),
       findUnique: jest.fn(),
       update: (...args: unknown[]) => sideEffectUpdateMock(...args),
+      updateMany: (...args: unknown[]) => sideEffectUpdateManyMock(...args),
     },
     appointmentRequest: {
       findUnique: (...args: unknown[]) => appointmentFindUniqueMock(...args),

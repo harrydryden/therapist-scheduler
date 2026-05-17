@@ -96,6 +96,25 @@ async function runWithTrackedRegistration(
     return;
   }
 
+  // Atomic execute-lease claim. Without this, the periodic retry runner
+  // can pick up a still-in-flight row (status='pending', age >10min) and
+  // fire a parallel execute — duplicate emails were the documented risk.
+  // tryClaimEffect CAS-transitions pending/failed/stuck-running to
+  // running with a fresh lease. A `false` return means another worker
+  // holds the lease (or the row drifted to completed/abandoned between
+  // register and claim), so we silently skip — that other worker will
+  // mark the row's terminal state.
+  const claimed = await sideEffectTrackerService.tryClaimEffect(
+    registered.idempotencyKey,
+  );
+  if (!claimed) {
+    logger.info(
+      { ...logContext, idempotencyKey: registered.idempotencyKey },
+      'Side effect execute-lease held by another worker; skipping',
+    );
+    return;
+  }
+
   try {
     await execute();
     await sideEffectTrackerService.markCompleted(registered.idempotencyKey);

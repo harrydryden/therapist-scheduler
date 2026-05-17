@@ -34,6 +34,9 @@ const sideEffectFindUniqueMock = jest.fn();
 const appointmentFindUniqueMock = jest.fn();
 const updateMock = jest.fn();
 const txCreateMock = jest.fn();
+// CAS-claim used by tryClaimEffect before execute. Default `count: 1`
+// so existing tests continue to take the execute branch.
+const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
 
 jest.mock('../utils/database', () => ({
   prisma: {
@@ -41,6 +44,7 @@ jest.mock('../utils/database', () => ({
       findMany: (...args: unknown[]) => findManyMock(...args),
       findUnique: (...args: unknown[]) => sideEffectFindUniqueMock(...args),
       update: (...args: unknown[]) => updateMock(...args),
+      updateMany: (...args: unknown[]) => updateManyMock(...args),
     },
     appointmentRequest: {
       findUnique: (...args: unknown[]) => appointmentFindUniqueMock(...args),
@@ -145,14 +149,23 @@ describe('appointment-creation outbox: getEffectsToRetry stale-pending pickup', 
     const where = findManyMock.mock.calls[0][0].where;
     expect(where).toHaveProperty('OR');
     expect(Array.isArray(where.OR)).toBe(true);
-    expect(where.OR).toHaveLength(2);
+    // Three eligible-status branches: failed (retry), pending (stuck-
+    // pending recovery), running (stuck-running recovery added when
+    // tryClaimEffect's execute-lease was introduced — a worker that
+    // died mid-execute leaves the row in `running` indefinitely without
+    // this branch).
+    expect(where.OR).toHaveLength(3);
 
     const failedClause = where.OR.find((c: any) => c.status === 'failed');
     const pendingClause = where.OR.find((c: any) => c.status === 'pending');
+    const runningClause = where.OR.find((c: any) => c.status === 'running');
     expect(failedClause).toBeDefined();
     expect(pendingClause).toBeDefined();
+    expect(runningClause).toBeDefined();
     expect(pendingClause.attempts).toBe(0);
     expect(pendingClause.createdAt).toHaveProperty('lt');
+    expect(runningClause.lastAttempt).toHaveProperty('lt');
+    expect(runningClause.attempts).toHaveProperty('lt');
   });
 
   it('returns mapped rows from the combined query', async () => {

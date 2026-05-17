@@ -38,6 +38,13 @@ jest.mock('../config', () => ({
 const findUniqueMock = jest.fn();
 const createMock = jest.fn();
 
+// updateMany is the CAS-claim issued by tryClaimEffect before execute
+// (added to close the retry-while-in-flight concurrency hole). Default
+// is `count: 1` so the harness's claim succeeds and the existing tests
+// continue to drive the execute branch. Individual tests can override
+// to `{ count: 0 }` to exercise the claim-lost path.
+const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+
 jest.mock('../utils/database', () => ({
   prisma: {
     sideEffectLog: {
@@ -45,6 +52,7 @@ jest.mock('../utils/database', () => ({
       create: (...args: unknown[]) => createMock(...args),
       findMany: jest.fn(),
       update: jest.fn(),
+      updateMany: (...args: unknown[]) => updateManyMock(...args),
     },
   },
 }));

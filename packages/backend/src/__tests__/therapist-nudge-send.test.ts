@@ -214,6 +214,10 @@ jest.mock('../services/side-effect-tracker.service', () => {
       registerTherapistSideEffects: jest.fn().mockResolvedValue([
         { id: 'log-stub', effectType: 'email_therapist_nudge', idempotencyKey: 'stub-key', status: 'pending' },
       ]),
+      // CAS-claim issued by the harness before execute. Default true so
+      // these tests drive the execute branch; the claim-lost path is
+      // pinned in side-effect-claim-lease.test.ts.
+      tryClaimEffect: jest.fn().mockResolvedValue(true),
       markCompleted: jest.fn().mockResolvedValue(undefined),
       markFailed: jest.fn().mockResolvedValue(undefined),
     },
