@@ -102,6 +102,10 @@ import type { ConversationState } from '../types';
 // ─── Test fixtures ────────────────────────────────────────────────
 
 function makeContext(overrides: Partial<SchedulingContext> = {}): SchedulingContext {
+  // Minimal happy-path context — only the required fields. Optional
+  // fields (userTimezone, therapistTimezone, inboundSender, etc.) are
+  // omitted because the safety-circuit code paths never read them; if a
+  // future scenario does, override here.
   return {
     appointmentRequestId: 'apt-test',
     userName: 'Test User',
@@ -109,18 +113,10 @@ function makeContext(overrides: Partial<SchedulingContext> = {}): SchedulingCont
     therapistEmail: 'therapist@test.com',
     therapistName: 'Dr Test',
     therapistAvailability: null,
-    bookingMethod: 'agent-negotiated',
+    bookingMethod: 'agent_negotiated',
     userCountry: 'UK',
     therapistCountry: 'UK',
-    userTimezone: null,
-    therapistTimezone: null,
-    cancelledReason: null,
-    confirmedDateTime: null,
-    confirmedDateTimeParsed: null,
-    therapistHandle: 'dr-test',
-    therapistId: 'th-test',
-    confirmedAt: null,
-    additionalContext: null,
+    ...overrides,
   } as SchedulingContext;
 }
 
