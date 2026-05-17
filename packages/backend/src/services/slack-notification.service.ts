@@ -80,6 +80,19 @@ export interface SlackAlertOptions {
   additionalFields?: Record<string, string>;
   emoji?: string; // Override default severity emoji
   fallbackSuffix?: string; // Extra text appended to the plain-text fallback (push notifications)
+  /**
+   * Optional logical grouping for the 24h appointment-scoped dedup.
+   *
+   * Different alerts that describe the SAME root cause (e.g. "Human Review
+   * Requested" from the agent + "Auto-Escalation Triggered" from the
+   * stale-check service — both fire when an appointment flips to human
+   * control) have different titles and slip through title-based dedup.
+   * Setting the same `dedupGroup` on related alerts collapses them to one
+   * notification per appointment per 24h window.
+   *
+   * When omitted, dedup keys on the title (legacy behaviour).
+   */
+  dedupGroup?: string;
 }
 
 // Emoji mapping for severity
@@ -441,18 +454,28 @@ class SlackNotificationService {
         return true;
       }
 
-      // Layer 2: Appointment-scoped dedup (24h TTL, catches re-triggered events)
+      // Layer 2: Appointment-scoped dedup (24h TTL, catches re-triggered events).
       // Only applies when an appointmentId is present — global notifications
       // (e.g. weekly summaries, unmatched emails) are not appointment-scoped.
+      //
+      // Keys on `dedupGroup` when supplied, falling back to `title`. Using a
+      // shared dedupGroup across alerts that describe the same root cause
+      // (e.g. agent-flag + auto-escalation) collapses them to one alert per
+      // appointment per 24h, preventing the alert-storm pattern called out
+      // by the operability audit.
       if (options.appointmentId) {
-        const scopedRaw = `${options.title}|${options.appointmentId}`;
+        const scopedRaw = `${options.dedupGroup || options.title}|${options.appointmentId}`;
         const scopedHash = createHash('sha256').update(scopedRaw).digest('hex').slice(0, 16);
         const scopedKey = `slack:dedup:apt:${scopedHash}`;
 
         const scopedResult = await cacheManager.setNX(scopedKey, '1', APPOINTMENT_DEDUP_TTL_SECONDS);
         if (scopedResult === 'EXISTS') {
           logger.info(
-            { title: options.title, appointmentId: options.appointmentId },
+            {
+              title: options.title,
+              dedupGroup: options.dedupGroup,
+              appointmentId: options.appointmentId,
+            },
             'Suppressed duplicate Slack notification (appointment-scoped, 24h window)'
           );
           return true;
@@ -573,7 +596,12 @@ class SlackNotificationService {
   // ============================================
 
   /**
-   * Alert when auto-escalation triggers (72h stall → human control)
+   * Alert when auto-escalation triggers (72h stall → human control).
+   *
+   * Shares the `human-control` dedup group with notifyHumanReviewFlagged
+   * so an appointment that gets escalated by the system AND then flagged
+   * by the agent (or vice versa) only produces one alert per 24h window
+   * — both events describe the same root cause from the admin's POV.
    */
   async notifyAutoEscalation(params: {
     appointmentId: string;
@@ -586,6 +614,7 @@ class SlackNotificationService {
       appointmentId: params.appointmentId,
       therapistName: params.therapistName,
       details: `Conversation stalled for *${Math.round(params.stallDurationHours)}h*. Human control enabled.`,
+      dedupGroup: 'human-control',
     });
   }
 
@@ -701,7 +730,10 @@ class SlackNotificationService {
   }
 
   /**
-   * Alert when human review is flagged by the agent
+   * Alert when human review is flagged by the agent.
+   *
+   * Shares the `human-control` dedup group with notifyAutoEscalation —
+   * see that method's comment for the rationale.
    */
   async notifyHumanReviewFlagged(params: {
     appointmentId: string;
@@ -714,6 +746,7 @@ class SlackNotificationService {
       appointmentId: params.appointmentId,
       therapistName: params.therapistName,
       details: `AI flagged for review: ${params.reason}`,
+      dedupGroup: 'human-control',
     });
   }
 
