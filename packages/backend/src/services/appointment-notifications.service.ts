@@ -210,12 +210,11 @@ class AppointmentNotificationsService {
         appointmentId,
         'confirmed',
         'slack_notify_confirmed',
-        () => slackNotificationService.notifyAppointmentConfirmed(
+        () => slackNotificationService.notifyAppointmentConfirmed({
           appointmentId,
-          userName,
-          therapistName ?? 'unknown therapist',
-          confirmedDateTime
-        ),
+          therapistName: therapistName ?? 'unknown therapist',
+          confirmedDateTime,
+        }),
         {
           name: 'slack-notify-confirmed',
           context: logContext,
@@ -350,13 +349,12 @@ class AppointmentNotificationsService {
         appointmentId,
         'completed',
         'slack_notify_completed',
-        () => slackNotificationService.notifyAppointmentCompleted(
+        () => slackNotificationService.notifyAppointmentCompleted({
           appointmentId,
-          userName,
           therapistName,
           feedbackSubmissionId,
-          feedbackData
-        ),
+          feedbackData,
+        }),
         {
           name: 'slack-notify-completed',
           context: logContext,
@@ -402,13 +400,12 @@ class AppointmentNotificationsService {
         appointmentId,
         'cancelled',
         'slack_notify_cancelled',
-        () => slackNotificationService.notifyAppointmentCancelled(
+        () => slackNotificationService.notifyAppointmentCancelled({
           appointmentId,
-          userName,
           therapistName,
           reason,
-          cancelledBy
-        ),
+          cancelledBy,
+        }),
         {
           name: 'slack-notify-cancelled',
           context: logContext,
@@ -634,36 +631,33 @@ class AppointmentNotificationsService {
 
     if (newStatus === 'confirmed' && settings.slack.confirmed) {
       runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentConfirmed(
+        () => slackNotificationService.notifyAppointmentConfirmed({
           appointmentId,
-          userName || 'Unknown',
-          therapistName || 'Unknown',
-          confirmedDateTime || 'TBD'
-        ),
+          therapistName: therapistName || 'Unknown',
+          confirmedDateTime: confirmedDateTime || 'TBD',
+        }),
         { name: 'slack-notify-admin-confirmed', context: logContext, retry: true, maxRetries: 2 }
       );
     }
 
     if (newStatus === 'completed' && settings.slack.completed) {
       runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentCompleted(
+        () => slackNotificationService.notifyAppointmentCompleted({
           appointmentId,
-          userName || 'Unknown',
-          therapistName || 'Unknown',
-        ),
+          therapistName: therapistName || 'Unknown',
+        }),
         { name: 'slack-notify-admin-completed', context: logContext, retry: true, maxRetries: 2 }
       );
     }
 
     if (newStatus === 'cancelled' && settings.slack.cancelled) {
       runBackgroundTask(
-        () => slackNotificationService.notifyAppointmentCancelled(
+        () => slackNotificationService.notifyAppointmentCancelled({
           appointmentId,
-          userName || 'Unknown',
-          therapistName || 'Unknown',
-          'Admin override',
-          'admin'
-        ),
+          therapistName: therapistName || 'Unknown',
+          reason: 'Admin override',
+          cancelledBy: 'admin',
+        }),
         { name: 'slack-notify-admin-cancelled', context: logContext, retry: true, maxRetries: 2 }
       );
     }

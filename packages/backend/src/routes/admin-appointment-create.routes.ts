@@ -172,12 +172,10 @@ export async function adminAppointmentCreateRoutes(fastify: FastifyInstance) {
           .then((enabled) => {
             if (enabled !== false) {
               runBackgroundTask(
-                () => slackNotificationService.notifyAppointmentCreated(
-                  appointmentRequest.id,
-                  userName,
+                () => slackNotificationService.notifyAppointmentCreated({
+                  appointmentId: appointmentRequest.id,
                   therapistName,
-                  userEmail
-                ),
+                }),
                 {
                   name: 'slack-notify-admin-created',
                   context: { requestId, appointmentId: appointmentRequest.id },

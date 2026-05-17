@@ -576,13 +576,12 @@ class StaleCheckService extends LockedPeriodicService {
             ? Math.round((Date.now() - apt.lastToolExecutedAt.getTime()) / (60 * 60 * 1000))
             : Math.round((Date.now() - (apt.lastActivityAt?.getTime() || Date.now())) / (60 * 60 * 1000));
 
-          await slackNotificationService.notifyConversationStall(
-            apt.id,
-            apt.userName,
-            apt.therapistName,
-            stallHours,
-            apt.lastToolFailureReason || undefined
-          );
+          await slackNotificationService.notifyConversationStall({
+            appointmentId: apt.id,
+            therapistName: apt.therapistName,
+            stallDurationHours: stallHours,
+            lastToolFailure: apt.lastToolFailureReason || undefined,
+          });
 
           // Log stale_flagged audit event for stalled conversation
           auditEventService.log(apt.id, 'stale_flagged', 'system', {
@@ -765,12 +764,11 @@ class StaleCheckService extends LockedPeriodicService {
             'Auto-escalated stalled conversation to human control'
           );
 
-          await slackNotificationService.notifyAutoEscalation(
-            appointment.id,
-            appointment.userName,
-            appointment.therapistName,
-            aptStallHours
-          );
+          await slackNotificationService.notifyAutoEscalation({
+            appointmentId: appointment.id,
+            therapistName: appointment.therapistName,
+            stallDurationHours: aptStallHours,
+          });
         } catch (error) {
           logger.error(
             { checkId, appointmentId: appointment.id, error },

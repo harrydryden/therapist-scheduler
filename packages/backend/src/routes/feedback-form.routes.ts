@@ -388,13 +388,12 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
 
         if (appointment && !feedbackTransitioned) {
           runBackgroundTask(
-            () => slackNotificationService.notifyAppointmentCompleted(
-              appointment!.id,
-              appointment!.userName,
-              appointment!.therapistName,
-              submission.id,
+            () => slackNotificationService.notifyAppointmentCompleted({
+              appointmentId: appointment!.id,
+              therapistName: appointment!.therapistName,
+              feedbackSubmissionId: submission.id,
               feedbackData,
-            ),
+            }),
             {
               name: 'slack-notify-feedback-fallback-transition-failed',
               context: { appointmentId: appointment.id, submissionId: submission.id },
@@ -410,12 +409,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
         logger.error({ error: postError, submissionId: submission.id, appointmentId: appointment?.id }, 'Post-submission processing failed');
         if (appointment) {
           runBackgroundTask(
-            () => slackNotificationService.notifyAppointmentCompleted(
-              appointment!.id,
-              appointment!.userName,
-              appointment!.therapistName,
-              submission.id,
-            ),
+            () => slackNotificationService.notifyAppointmentCompleted({
+              appointmentId: appointment!.id,
+              therapistName: appointment!.therapistName,
+              feedbackSubmissionId: submission.id,
+            }),
             { name: 'slack-notify-feedback-fallback', context: { appointmentId: appointment.id, submissionId: submission.id }, retry: true, maxRetries: 2 }
           );
         }

@@ -395,29 +395,26 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       }
 
       case 'slack_notify_confirmed':
-        await slackNotificationService.notifyAppointmentConfirmed(
-          appointment.id,
-          appointment.userName,
-          appointment.therapistName,
-          appointment.confirmedDateTime || 'TBD'
-        );
+        await slackNotificationService.notifyAppointmentConfirmed({
+          appointmentId: appointment.id,
+          therapistName: appointment.therapistName,
+          confirmedDateTime: appointment.confirmedDateTime || 'TBD',
+        });
         break;
 
       case 'slack_notify_cancelled':
-        await slackNotificationService.notifyAppointmentCancelled(
-          appointment.id,
-          appointment.userName,
-          appointment.therapistName,
-          'System retry'
-        );
+        await slackNotificationService.notifyAppointmentCancelled({
+          appointmentId: appointment.id,
+          therapistName: appointment.therapistName,
+          reason: 'System retry',
+        });
         break;
 
       case 'slack_notify_completed':
-        await slackNotificationService.notifyAppointmentCompleted(
-          appointment.id,
-          appointment.userName,
-          appointment.therapistName
-        );
+        await slackNotificationService.notifyAppointmentCompleted({
+          appointmentId: appointment.id,
+          therapistName: appointment.therapistName,
+        });
         break;
 
       case 'therapist_freeze_sync': {

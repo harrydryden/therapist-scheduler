@@ -598,13 +598,12 @@ export async function recordDivergenceAlert(
 
     // Send Slack notification for thread divergence
     if (appointment) {
-      await slackNotificationService.notifyThreadDivergence(
+      await slackNotificationService.notifyThreadDivergence({
         appointmentId,
-        appointment.userName,
-        appointment.therapistName,
-        divergence.type,
-        divergence.description
-      );
+        therapistName: appointment.therapistName,
+        divergenceType: divergence.type,
+        description: divergence.description,
+      });
     }
   } catch (error) {
     // Don't fail the main operation if alert recording fails

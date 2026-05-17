@@ -357,12 +357,12 @@ export async function processMessage(messageId: string, traceId: string): Promis
 
           // Alert admins — an unmatched email likely means a reply was
           // silently dropped and needs manual review.
-          slackNotificationService.notifyUnmatchedEmailAbandoned(
+          slackNotificationService.notifyUnmatchedEmailAbandoned({
             messageId,
-            email.from,
-            email.subject,
+            from: email.from,
+            subject: email.subject,
             attempts,
-          ).catch((err) => {
+          }).catch((err) => {
             logger.warn({ traceId, err }, 'Failed to send Slack alert for unmatched email');
           });
 

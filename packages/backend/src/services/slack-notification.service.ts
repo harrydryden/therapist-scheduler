@@ -575,39 +575,73 @@ class SlackNotificationService {
   /**
    * Alert when auto-escalation triggers (72h stall → human control)
    */
-  async notifyAutoEscalation(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    stallDurationHours: number
-  ): Promise<boolean> {
+  async notifyAutoEscalation(params: {
+    appointmentId: string;
+    therapistName: string;
+    stallDurationHours: number;
+  }): Promise<boolean> {
     return this.sendAlert({
       title: 'Auto-Escalation Triggered',
       severity: 'high',
-      appointmentId,
-      therapistName,
-      details: `Conversation stalled for *${Math.round(stallDurationHours)}h*. Human control enabled.`,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: `Conversation stalled for *${Math.round(params.stallDurationHours)}h*. Human control enabled.`,
     });
   }
 
   /**
-   * Alert for thread divergence (crossed wires, CC issues)
+   * Alert for thread divergence on first detection (crossed wires, CC issues).
+   * Fires once per blocked message — see `notifyDivergenceAbandoned` for the
+   * terminal alert when retries exhaust.
    */
-  async notifyThreadDivergence(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    divergenceType: string,
-    description: string
-  ): Promise<boolean> {
+  async notifyThreadDivergence(params: {
+    appointmentId: string;
+    therapistName: string;
+    divergenceType: string;
+    description: string;
+  }): Promise<boolean> {
     return this.sendAlert({
       title: 'Thread Divergence',
       severity: 'high',
-      appointmentId,
-      therapistName,
-      details: description,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: params.description,
       additionalFields: {
-        'Type': divergenceType,
+        'Type': params.divergenceType,
+      },
+    });
+  }
+
+  /**
+   * Alert when a divergence-blocked message is permanently abandoned after
+   * exhausting MAX_PROCESSING_FAILURES retries. Surfaces the terminal state
+   * so admins see "this message is gone now" rather than only the first-
+   * attempt alert and silence after.
+   */
+  async notifyDivergenceAbandoned(params: {
+    appointmentId: string;
+    therapistName: string;
+    divergenceType: string;
+    attempts: number;
+    from: string;
+    subject: string;
+  }): Promise<boolean> {
+    // PII discipline mirrors notifyUnmatchedEmailAbandoned: the subject is
+    // kept so admins can locate the message in Gmail, the sender's email is
+    // dropped from Slack (admins pivot via the appointment link).
+    void params.from;
+    return this.sendAlert({
+      title: 'Divergence-Blocked Message Abandoned',
+      severity: 'critical',
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details:
+        `An inbound email was blocked by thread divergence and has been ` +
+        `abandoned after *${params.attempts}* retries. The reply will not be ` +
+        `processed automatically — manual review needed.`,
+      additionalFields: {
+        'Type': params.divergenceType,
+        'Subject': params.subject.slice(0, 100),
       },
     });
   }
@@ -615,29 +649,29 @@ class SlackNotificationService {
   /**
    * Alert for email bounce
    */
-  async notifyEmailBounce(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    bouncedRole: 'client' | 'therapist',
-    bounceReason: string
-  ): Promise<boolean> {
+  async notifyEmailBounce(params: {
+    appointmentId: string;
+    userName: string | null;
+    therapistName: string;
+    bouncedRole: 'client' | 'therapist';
+    bounceReason: string;
+  }): Promise<boolean> {
     // PII discipline: don't include the bounced email address in Slack.
     // Admins use the appointmentId link to view the full record. We
     // surface only the role so they know whether the client or
     // therapist email failed.
     const recipientLabel =
-      bouncedRole === 'therapist'
-        ? `Therapist (${therapistName})`
-        : `Client (${firstName(userName, 'unknown')})`;
+      params.bouncedRole === 'therapist'
+        ? `Therapist (${params.therapistName})`
+        : `Client (${firstName(params.userName, 'unknown')})`;
     return this.sendAlert({
       title: 'Email Bounce',
       severity: 'critical',
-      appointmentId,
-      therapistName,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
       details: `Email to *${recipientLabel}* bounced.`,
       additionalFields: {
-        'Reason': bounceReason,
+        'Reason': params.bounceReason,
       },
     });
   }
@@ -645,24 +679,23 @@ class SlackNotificationService {
   /**
    * Alert for conversation stall (activity but no progress)
    */
-  async notifyConversationStall(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    stallDurationHours: number,
-    lastToolFailure?: string
-  ): Promise<boolean> {
+  async notifyConversationStall(params: {
+    appointmentId: string;
+    therapistName: string;
+    stallDurationHours: number;
+    lastToolFailure?: string;
+  }): Promise<boolean> {
     const additionalFields: Record<string, string> = {};
-    if (lastToolFailure) {
-      additionalFields['Last Failure'] = lastToolFailure;
+    if (params.lastToolFailure) {
+      additionalFields['Last Failure'] = params.lastToolFailure;
     }
 
     return this.sendAlert({
       title: 'Conversation Stalled',
       severity: 'medium',
-      appointmentId,
-      therapistName,
-      details: `No progress for *${Math.round(stallDurationHours)}h*.`,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: `No progress for *${Math.round(params.stallDurationHours)}h*.`,
       additionalFields: Object.keys(additionalFields).length > 0 ? additionalFields : undefined,
     });
   }
@@ -670,60 +703,17 @@ class SlackNotificationService {
   /**
    * Alert when human review is flagged by the agent
    */
-  async notifyHumanReviewFlagged(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    reason: string
-  ): Promise<boolean> {
+  async notifyHumanReviewFlagged(params: {
+    appointmentId: string;
+    therapistName: string;
+    reason: string;
+  }): Promise<boolean> {
     return this.sendAlert({
       title: 'Human Review Requested',
       severity: 'high',
-      appointmentId,
-      therapistName,
-      details: `AI flagged for review: ${reason}`,
-    });
-  }
-
-  /**
-   * Alert when a chase follow-up email is sent to a non-responding party
-   */
-  async notifyChaseFollowUp(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    chasedParty: string,
-    inactiveHours: number
-  ): Promise<boolean> {
-    return this.sendAlert({
-      title: 'Chase Follow-up Sent',
-      severity: 'medium',
-      appointmentId,
-      therapistName,
-      details: `Chased *${chasedParty}* after *${inactiveHours}h* of inactivity. One follow-up sent — if no response, closure will be recommended.`,
-    });
-  }
-
-  /**
-   * Alert when the system recommends closing a thread (chase went unanswered)
-   */
-  async notifyClosureRecommendation(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    unresponsiveParty: string,
-    inactiveHours: number,
-    reason: string
-  ): Promise<boolean> {
-    return this.sendAlert({
-      title: 'Closure Recommended',
-      severity: 'high',
-      appointmentId,
-      therapistName,
-      details: `Chase to *${unresponsiveParty}* went unanswered (*${inactiveHours}h* inactive). Recommend cancelling this appointment.`,
-      additionalFields: {
-        'Action needed': 'Review and cancel or take control',
-      },
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: `AI flagged for review: ${params.reason}`,
     });
   }
 
@@ -734,17 +724,15 @@ class SlackNotificationService {
   /**
    * Notify when a new appointment is created
    */
-  async notifyAppointmentCreated(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    userEmail: string
-  ): Promise<boolean> {
+  async notifyAppointmentCreated(params: {
+    appointmentId: string;
+    therapistName: string;
+  }): Promise<boolean> {
     return this.sendAlert({
       title: 'Appointment Request',
       severity: 'low',
-      appointmentId,
-      therapistName,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
       details: `New scheduling request created.`,
     });
   }
@@ -752,18 +740,17 @@ class SlackNotificationService {
   /**
    * Notify when an appointment is confirmed
    */
-  async notifyAppointmentConfirmed(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    confirmedDateTime: string
-  ): Promise<boolean> {
+  async notifyAppointmentConfirmed(params: {
+    appointmentId: string;
+    therapistName: string;
+    confirmedDateTime: string;
+  }): Promise<boolean> {
     return this.sendAlert({
       title: 'Appointment Confirmed',
       severity: 'low',
-      appointmentId,
-      therapistName,
-      details: `Booked for ${confirmedDateTime}.`,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: `Booked for ${params.confirmedDateTime}.`,
       emoji: '🤝',
     });
   }
@@ -771,22 +758,21 @@ class SlackNotificationService {
   /**
    * Notify when an appointment is cancelled
    */
-  async notifyAppointmentCancelled(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    reason: string,
-    cancelledBy?: string
-  ): Promise<boolean> {
-    const details = cancelledBy
-      ? `Cancelled by ${cancelledBy}. Reason: ${reason}`
-      : `Reason: ${reason}`;
+  async notifyAppointmentCancelled(params: {
+    appointmentId: string;
+    therapistName: string;
+    reason: string;
+    cancelledBy?: string;
+  }): Promise<boolean> {
+    const details = params.cancelledBy
+      ? `Cancelled by ${params.cancelledBy}. Reason: ${params.reason}`
+      : `Reason: ${params.reason}`;
 
     return this.sendAlert({
       title: 'Appointment Cancelled',
       severity: 'medium',
-      appointmentId,
-      therapistName,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
       details,
       emoji: '❌',
     });
@@ -799,25 +785,24 @@ class SlackNotificationService {
    * "Feedback" header. The full responses are always accessible via the
    * admin forms dashboard link.
    */
-  async notifyAppointmentCompleted(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    feedbackSubmissionId?: string,
-    feedbackData?: Record<string, string>
-  ): Promise<boolean> {
+  async notifyAppointmentCompleted(params: {
+    appointmentId: string;
+    therapistName: string;
+    feedbackSubmissionId?: string;
+    feedbackData?: Record<string, string>;
+  }): Promise<boolean> {
     const formsUrl = `${this.adminDashboardBaseUrl}/forms`;
 
-    let details = feedbackSubmissionId
+    let details = params.feedbackSubmissionId
       ? `Session completed, feedback received. <${formsUrl}|View Feedback>`
       : 'Session completed.';
 
     // Place therapist in the details block so it renders above the
     // feedback header — sendAlert would otherwise append it *after*
     // the "📋 Feedback:" line, making it look like a feedback answer.
-    details += `\n*Therapist:* ${escapeSlackMrkdwn(therapistName)}`;
+    details += `\n*Therapist:* ${escapeSlackMrkdwn(params.therapistName)}`;
 
-    const hasFeedback = feedbackData && Object.keys(feedbackData).length > 0;
+    const hasFeedback = params.feedbackData && Object.keys(params.feedbackData).length > 0;
 
     // Add a visual separator before feedback answers so they don't
     // blend into the appointment details line.
@@ -829,7 +814,7 @@ class SlackNotificationService {
     // push notifications and email digests are still informative.
     let fallbackSuffix = '';
     if (hasFeedback) {
-      const summaryParts = Object.entries(feedbackData!)
+      const summaryParts = Object.entries(params.feedbackData!)
         .slice(0, 4)
         .map(([k, v]) => {
           const shortKey = k.length > 25 ? k.slice(0, 22) + '...' : k;
@@ -844,10 +829,10 @@ class SlackNotificationService {
     return this.sendAlert({
       title: 'Appointment Completed',
       severity: 'low',
-      appointmentId,
+      appointmentId: params.appointmentId,
       details,
       emoji: '✅',
-      additionalFields: hasFeedback ? feedbackData : undefined,
+      additionalFields: hasFeedback ? params.feedbackData : undefined,
       fallbackSuffix,
     });
   }
@@ -857,23 +842,23 @@ class SlackNotificationService {
    * has declined the therapist (e.g. due to availability).  This frees
    * the counsellor for other users.
    */
-  async notifyCancelMatchRecommended(
-    appointmentId: string,
-    userName: string | null,
-    therapistName: string,
-    reason: string
-  ): Promise<boolean> {
+  async notifyCancelMatchRecommended(params: {
+    appointmentId: string;
+    userName: string | null;
+    therapistName: string;
+    reason: string;
+  }): Promise<boolean> {
     // PII discipline: first name only for the user; appointmentId in the
     // alert metadata gives admins a click-through to the full record.
-    const userLabel = firstName(userName, 'The client');
+    const userLabel = firstName(params.userName, 'The client');
     return this.sendAlert({
       title: 'Cancel Match Recommended',
       severity: 'high',
-      appointmentId,
-      therapistName,
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
       details: `*${userLabel}* has declined this therapist. Recommend cancelling the match so the counsellor is available to others.`,
       additionalFields: {
-        'Reason': reason,
+        'Reason': params.reason,
         'Action needed': 'Review and cancel match via dashboard',
       },
       emoji: '🔄',
@@ -884,26 +869,26 @@ class SlackNotificationService {
    * Alert when an incoming email could not be matched to any appointment
    * after max retries. This means a therapist or client reply was silently dropped.
    */
-  async notifyUnmatchedEmailAbandoned(
-    messageId: string,
-    from: string,
-    subject: string,
-    attempts: number
-  ): Promise<boolean> {
+  async notifyUnmatchedEmailAbandoned(params: {
+    messageId: string;
+    from: string;
+    subject: string;
+    attempts: number;
+  }): Promise<boolean> {
     // PII discipline: don't echo the sender's email. Subject is kept
     // because it's needed for admins to find the message in Gmail; the
     // Message ID lets ops correlate with logs. The subject may itself
     // contain the user's name, but we trust admins to handle it once
     // they pivot from this alert into Gmail; the Slack channel itself
     // shouldn't be the leak point.
-    void from;
+    void params.from;
     return this.sendAlert({
       title: 'Unmatched Email Dropped',
       severity: 'high',
-      details: `Incoming email could not be matched to any appointment after *${attempts}* attempts and was abandoned. Manual review needed.`,
+      details: `Incoming email could not be matched to any appointment after *${params.attempts}* attempts and was abandoned. Manual review needed.`,
       additionalFields: {
-        'Subject': subject.slice(0, 100),
-        'Message ID': messageId,
+        'Subject': params.subject.slice(0, 100),
+        'Message ID': params.messageId,
       },
     });
   }
