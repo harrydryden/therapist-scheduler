@@ -82,10 +82,18 @@ class ChaseEmailService {
           therapistName: true,
           therapistEmail: true,
           checkpointStage: true,
+          // Denormalised in column form (PR #268). The pre-send reply
+          // check below only needs the timestamp; pulling the full
+          // conversationState JSON blob (up to 500KB per row) just for
+          // this one field was the largest chase-tick cost identified
+          // by the DB hot-path audit.
+          checkpointAt: true,
           gmailThreadId: true,
           therapistGmailThreadId: true,
           lastActivityAt: true,
-          conversationState: true,
+          // determineChaseTarget reads conversationState.checkpoint.context.lastEmailSentTo
+          // only for the `initial_contact`/`stalled`/no-checkpoint inference branch — a
+          // small fraction of candidates. Read on demand below to keep the hot path lean.
         },
         take: await getSettingValue<number>('chase.maxChaseBatchSize'),
       });
@@ -98,8 +106,27 @@ class ChaseEmailService {
 
       for (const appointment of candidates) {
         try {
+          // For most stages the chase target is determined purely from
+          // `checkpointStage` (denormalised column). Only the three legacy
+          // branches (`initial_contact`, `stalled`, no-checkpoint) need to
+          // peek at `conversationState.checkpoint.context.lastEmailSentTo`,
+          // and those are a minority of candidates. Fetch the blob on
+          // demand for just those rows so the hot path stays lean.
+          let lastEmailSentTo: 'user' | 'therapist' | null = null;
+          const stage = appointment.checkpointStage;
+          if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
+            const lazy = await prisma.appointmentRequest.findUnique({
+              where: { id: appointment.id },
+              select: { conversationState: true },
+            });
+            const state = lazy?.conversationState as
+              | { checkpoint?: { context?: { lastEmailSentTo?: 'user' | 'therapist' } } }
+              | null;
+            lastEmailSentTo = state?.checkpoint?.context?.lastEmailSentTo ?? null;
+          }
+
           // Determine who to chase based on checkpoint stage
-          const chaseTarget = this.determineChaseTarget(appointment);
+          const chaseTarget = this.determineChaseTarget(appointment, lastEmailSentTo);
           if (!chaseTarget) {
             logger.debug(
               { checkId, appointmentId: appointment.id },
@@ -141,12 +168,12 @@ class ChaseEmailService {
             if (appointment.therapistGmailThreadId) threadIdsToCheck.add(appointment.therapistGmailThreadId);
             if (appointment.gmailThreadId) threadIdsToCheck.add(appointment.gmailThreadId);
 
-            const checkpointAt = (appointment.conversationState as
-              | { checkpoint?: { checkpoint_at?: string } }
-              | null
-            )?.checkpoint?.checkpoint_at;
-            const checkpointMs = checkpointAt ? Date.parse(checkpointAt) : NaN;
-            const sinceMs = Number.isFinite(checkpointMs) ? checkpointMs : undefined;
+            // Read from the denormalised column populated by storeConversationState +
+            // applyCheckpointUpdate (PR #268). Replaces the previous JSON path
+            // extraction from `appointment.conversationState` — the row no longer
+            // includes the blob, so this hot path doesn't pull MB of payload per
+            // tick for one timestamp.
+            const sinceMs = appointment.checkpointAt?.getTime();
 
             if (threadIdsToCheck.size > 0) {
               try {
@@ -398,15 +425,23 @@ class ChaseEmailService {
    * Determine who to chase based on the conversation's checkpoint stage.
    * Returns the target ('user' or 'therapist'), their email, and the thread ID
    * to reply on.
+   *
+   * `lastEmailSentTo` is only consulted for the legacy `initial_contact`/
+   * `stalled`/no-checkpoint branches. Callers should pass `null` (or omit it)
+   * for any other stage — the caller is responsible for the lazy fetch when
+   * the legacy branch is reached, so the hot path (TherapistPending /
+   * UserPending) doesn't pay for a conversationState lookup.
    */
-  determineChaseTarget(appointment: {
-    checkpointStage: string | null;
-    userEmail: string;
-    therapistEmail: string;
-    gmailThreadId: string | null;
-    therapistGmailThreadId: string | null;
-    conversationState: unknown;
-  }): { target: 'user' | 'therapist'; email: string; threadId: string | null } | null {
+  determineChaseTarget(
+    appointment: {
+      checkpointStage: string | null;
+      userEmail: string;
+      therapistEmail: string;
+      gmailThreadId: string | null;
+      therapistGmailThreadId: string | null;
+    },
+    lastEmailSentTo: 'user' | 'therapist' | null = null,
+  ): { target: 'user' | 'therapist'; email: string; threadId: string | null } | null {
     const stage = appointment.checkpointStage;
 
     // Stages where we're waiting on the therapist
@@ -427,13 +462,10 @@ class ChaseEmailService {
       };
     }
 
-    // For initial_contact, stalled, or no checkpoint, infer from context
+    // For initial_contact, stalled, or no checkpoint, infer from the lazy
+    // lastEmailSentTo lookup the caller passed.
     if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
-      // Check the conversation state for who was last emailed
-      const state = appointment.conversationState as { checkpoint?: { context?: { lastEmailSentTo?: string } } } | null;
-      const lastEmailTo = state?.checkpoint?.context?.lastEmailSentTo;
-
-      if (lastEmailTo === 'therapist') {
+      if (lastEmailSentTo === 'therapist') {
         return {
           target: 'therapist',
           email: appointment.therapistEmail,
@@ -441,7 +473,7 @@ class ChaseEmailService {
         };
       }
 
-      if (lastEmailTo === 'user') {
+      if (lastEmailSentTo === 'user') {
         return {
           target: 'user',
           email: appointment.userEmail,

@@ -158,6 +158,13 @@ async function migrateConversationStates() {
       // appointment_conversations so a re-run of this script doesn't
       // diverge from the new sibling table.
       const stateJson = updatedState as object;
+      // Denormalise the checkpoint timestamp alongside stage — both
+      // columns are kept in lock-step by storeConversationState /
+      // applyCheckpointUpdate in normal operation; the one-shot
+      // migration writes the column directly so this script's output
+      // matches what the runtime writers would produce.
+      const checkpointAt = new Date(checkpoint.checkpoint_at);
+
       await prisma.$transaction([
         prisma.appointmentRequest.update({
           where: { id: appointment.id },
@@ -165,6 +172,7 @@ async function migrateConversationStates() {
             conversationState: stateJson,
             messageCount: messageCount,
             checkpointStage: stage,
+            checkpointAt,
           },
           select: { id: true },
         }),

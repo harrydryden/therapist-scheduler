@@ -200,6 +200,13 @@ model AppointmentRequest {
   // the JSONB blob's `checkpoint.stage` in sync with this column so
   // the next `storeConversationState` write doesn't null it.
   checkpointStage   String?    @default("initial_contact") @map("checkpoint_stage")
+  // Denormalised `conversationState.checkpoint.checkpoint_at`. Populated
+  // by the same two writers that maintain `checkpointStage`
+  // (storeConversationState + applyCheckpointUpdate). Lets the chase
+  // candidate query — which used to pull the full conversationState
+  // JSON just to read one timestamp — read this column directly,
+  // dropping the per-tick blob fetch entirely.
+  checkpointAt      DateTime?  @map("checkpoint_at")
   // Agent-curated thread memory (Layer B in the agent memory design).
   // Free-form observations the agent retains via the `remember` tool —
   // preferences, constraints, prior decisions, situational context the
