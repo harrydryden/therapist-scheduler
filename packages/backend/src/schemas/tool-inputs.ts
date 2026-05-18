@@ -7,10 +7,67 @@
 
 import { z } from 'zod';
 
+/**
+ * Declared intent for a `send_email` call. Promotes the agent's
+ * "why I'm sending this" from email prose into typed tool input so
+ * the system can:
+ *   - pick the right checkpoint action (recipient alone can't
+ *     distinguish a courtesy ack to the therapist from a "please send
+ *     more slots" follow-up — they look identical);
+ *   - tell intentional backward stage transitions from accidental
+ *     ones (the `wouldRegress` guard blocks the accidental class;
+ *     `request_more_availability` is the legitimate exception);
+ *   - skip stage progression entirely for `acknowledge` so courtesy
+ *     replies don't flip the FSM.
+ *
+ * Optional: omitted falls back to recipient-based action selection,
+ * so callsites that don't supply it keep their existing behaviour.
+ */
+export const sendEmailPurposeSchema = z.enum([
+  // Initial outreach to the therapist asking for their general
+  // availability. Stage → awaiting_therapist_availability.
+  'request_availability',
+  // Forwarding therapist availability slots to the user. Stage →
+  // awaiting_user_slot_selection.
+  'send_options',
+  // After the user picked a slot, asking the therapist to confirm.
+  // Stage → awaiting_therapist_confirmation.
+  'confirm_slot_with_therapist',
+  // The user rejected ALL offered slots — going back to the therapist
+  // for additional availability. Stage → awaiting_therapist_availability
+  // (legitimately a backward stage transition; the regression is the
+  // intent, not an accident).
+  'request_more_availability',
+  // Courtesy reply: a "thanks", "received", "I'll get back to you"
+  // message that doesn't change WHO we're waiting on. Stage unchanged.
+  'acknowledge',
+  // Catch-all for emails that don't fit the structured cases above.
+  // Falls back to recipient-based action selection — same as omitting
+  // the field entirely. Use sparingly.
+  'other',
+]);
+
+export type SendEmailPurpose = z.infer<typeof sendEmailPurposeSchema>;
+
+/**
+ * Runtime array of the purpose enum values. Source of truth for any
+ * consumer that needs the strings as data — currently the Anthropic
+ * tool definition (which wants a plain string[] in its JSON Schema
+ * `enum` field). Derived from the Zod schema so adding a new purpose
+ * to the schema automatically updates every consumer.
+ */
+export const SEND_EMAIL_PURPOSE_VALUES = sendEmailPurposeSchema.options;
+
 export const sendEmailInputSchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1).max(1000),
   body: z.string().min(1).max(50000),
+  /**
+   * Declared intent for this email. Omitted → recipient-based action
+   * fallback (see deriveCheckpointAction). New prompts should always
+   * pass a purpose; the fallback exists for callsites that don't.
+   */
+  purpose: sendEmailPurposeSchema.optional(),
 });
 
 export const updateAvailabilityInputSchema = z.object({

@@ -13,7 +13,10 @@
  */
 
 import { logger } from '../../../../utils/logger';
-import { sendEmailInputSchema } from '../../../../schemas/tool-inputs';
+import {
+  sendEmailInputSchema,
+  type SendEmailPurpose,
+} from '../../../../schemas/tool-inputs';
 import { sendAppointmentEmail } from '../send';
 import type { ConversationAction } from '../../../../services/conversation-checkpoint.service';
 import type {
@@ -25,6 +28,70 @@ export interface SendEmailHandlerOutcome {
   result: ToolExecutionResult;
   checkpointAction?: ConversationAction;
   emailSentTo?: 'user' | 'therapist';
+  /**
+   * Echoes back the declared purpose (if any) so the agent loop can
+   * use it for downstream decisions — specifically, exempting
+   * intentional regressions (e.g. `request_more_availability`) from
+   * the `wouldRegress` guard, and treating `acknowledge` as a no-op
+   * for stage tracking. Distinct from `checkpointAction` because some
+   * purposes (`acknowledge`) deliberately don't emit one.
+   */
+  purpose?: SendEmailPurpose;
+}
+
+/**
+ * Single source of truth for `send_email` action selection. The
+ * `purpose` parameter is the agent's declared intent (when supplied);
+ * `emailSentTo` is the recipient (always known). Resolution:
+ *
+ *   - explicit purpose (except 'other')    →  action from the switch
+ *   - 'other' / undefined / missing purpose →  recipient-based default
+ *                                              (legacy compat path —
+ *                                              same as pre-purpose
+ *                                              behaviour)
+ *   - 'acknowledge'                          →  undefined (no stage
+ *                                              change; courtesy reply)
+ *
+ * Defined as a switch rather than a Record so TS exhaustiveness-checks
+ * the SendEmailPurpose union — adding a new purpose without updating
+ * this mapping fails the build.
+ */
+function deriveCheckpointAction(
+  purpose: SendEmailPurpose | undefined,
+  emailSentTo: 'user' | 'therapist',
+): ConversationAction | undefined {
+  // Recipient-based default — used for the `other` and omitted cases.
+  // Computed once here so the legacy fallback and the `other`
+  // catch-all share one definition.
+  const recipientBased: ConversationAction =
+    emailSentTo === 'therapist'
+      ? 'sent_initial_email_to_therapist'
+      : 'sent_availability_to_user';
+
+  if (!purpose || purpose === 'other') return recipientBased;
+
+  switch (purpose) {
+    case 'request_availability':
+      return 'sent_initial_email_to_therapist';
+    case 'send_options':
+      return 'sent_availability_to_user';
+    case 'confirm_slot_with_therapist':
+      return 'sent_confirmation_request_to_therapist';
+    case 'request_more_availability':
+      // The user rejected all offered slots. The action signals a
+      // deliberate go-back to the therapist (mapped to stage
+      // `awaiting_therapist_availability`), which the agent loop
+      // exempts from the `wouldRegress` guard because the regression
+      // IS the intent here.
+      return 'received_user_slot_rejection';
+    case 'acknowledge':
+      // Courtesy reply — stage MUST NOT change. Returning undefined
+      // tells the loop to skip the checkpoint update entirely. This is
+      // the structurally-correct way to send "thanks, I'll get back to
+      // you" without flipping the stage (and triggering the chain of
+      // chase / dashboard / FSM consequences that follow a flip).
+      return undefined;
+  }
 }
 
 export async function handleSendEmail(
@@ -75,19 +142,10 @@ export async function handleSendEmail(
   const emailSentTo: 'user' | 'therapist' =
     normalizedTo === context.therapistEmail.toLowerCase() ? 'therapist' : 'user';
 
-  // Set checkpoint action based on recipient so the conversation
-  // stage is properly tracked. Without this, the checkpoint is never
-  // initialized after startScheduling (only send_email is called),
-  // leaving the stage as undefined and breaking stage-aware recovery
-  // and prompt guidance.
-  const checkpointAction: ConversationAction =
-    emailSentTo === 'therapist'
-      ? 'sent_initial_email_to_therapist'
-      : 'sent_availability_to_user';
-
   return {
     result: { success: true, toolName: 'send_email' },
-    checkpointAction,
+    checkpointAction: deriveCheckpointAction(emailData.purpose, emailSentTo),
     emailSentTo,
+    purpose: emailData.purpose,
   };
 }

@@ -64,6 +64,7 @@ import {
   AVAILABILITY_SIDE_EFFECT_TOOLS,
   AVAILABILITY_TERMINAL_TOOLS,
 } from '../domain/scheduling/availability/agent/tools';
+import { SEND_EMAIL_PURPOSE_VALUES } from '../schemas/tool-inputs';
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -167,7 +168,7 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
   {
     name: 'send_email',
-    description: 'Send an email to a recipient',
+    description: 'Send an email to a recipient. Always pass `purpose` so the system can track stage progression correctly — without it, the system falls back to inferring stage from recipient alone, which can\'t distinguish "asking the therapist for more slots after a user rejection" from "courtesy thanks to the therapist after forwarding slots".',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -182,6 +183,21 @@ export const schedulingTools: Anthropic.Tool[] = [
         body: {
           type: 'string',
           description: 'Email body content (plain text). IMPORTANT: Do NOT insert line breaks within paragraphs - only use blank lines between paragraphs. Let the email client handle text wrapping. Each paragraph should be a single continuous line of text.',
+        },
+        purpose: {
+          type: 'string',
+          // Sourced from the Zod schema so a new purpose value
+          // propagates automatically — no risk of the tool definition
+          // drifting from the handler's exhaustive switch.
+          enum: [...SEND_EMAIL_PURPOSE_VALUES],
+          description:
+            'Declared intent for this email — strongly recommended on every call. Pick the value that matches what the email is for:\n' +
+            '- `request_availability`: initial email to the therapist asking for their general availability.\n' +
+            '- `send_options`: email to the user with the therapist\'s available time slots.\n' +
+            '- `confirm_slot_with_therapist`: after the user picks a time, asking the therapist to confirm.\n' +
+            '- `request_more_availability`: the user rejected all offered times and you are asking the therapist for new slots. Use this — NOT `request_availability` — so the system knows this is a deliberate go-back, not an initial outreach.\n' +
+            '- `acknowledge`: a courtesy reply ("thanks", "I\'ll get back to you", "received"). The stage WILL NOT change — use this for replies that don\'t shift who we\'re waiting on.\n' +
+            '- `other`: anything that doesn\'t fit the above. Used sparingly.',
         },
       },
       required: ['to', 'subject', 'body'],
@@ -710,7 +726,14 @@ export async function runToolLoop(
             };
           }
 
-          // Update checkpoint after successful tool execution
+          // Update checkpoint after successful tool execution.
+          //   - checkpointAction set: standard stage/action update
+          //     (with the wouldRegress guard).
+          //   - checkpointAction undefined + email sent (the
+          //     `purpose: 'acknowledge'` path): stage stays put, but
+          //     `lastEmailSentTo` context is still recorded so the
+          //     chase-fallback inference path knows who we last
+          //     reached out to.
           if (result.checkpointAction) {
             // Explicit annotation: the runToolLoop entry-side bootstrap
             // mutates `conversationState.checkpoint`, which knocks TS's
@@ -719,18 +742,24 @@ export async function runToolLoop(
               conversationState.checkpoint;
             const newStage = stageFromAction(result.checkpointAction);
 
-            // Prevent send_email from regressing the checkpoint stage.
-            // The send_email tool always maps to one of two early-stage actions
-            // (sent_initial_email_to_therapist → awaiting_therapist_availability,
-            //  sent_availability_to_user → awaiting_user_slot_selection).
-            // This is correct for initial emails, but courtesy/follow-up emails
-            // (e.g., "Thanks, I've forwarded your dates to the client") should
-            // NOT reset the stage backward. Without this guard, a follow-up email
-            // to the therapist after forwarding availability to the user would
-            // regress the stage from awaiting_user_slot_selection back to
-            // awaiting_therapist_availability, causing the chaser to chase the
-            // wrong party.
-            const isRegression = currentCheckpoint &&
+            // Block send_email from accidentally regressing the stage
+            // (e.g. a courtesy "thanks, I've forwarded your dates"
+            // email to the therapist after the slot was offered to the
+            // user would otherwise flip the stage backward and mis-
+            // route the chaser to the therapist). The exemption below
+            // covers the legitimate counter-case: when the agent
+            // declares `purpose: 'request_more_availability'` the
+            // regression IS the intent (user rejected, going back to
+            // the therapist for more slots).
+            //
+            // `purpose: 'acknowledge'` doesn't reach this branch
+            // because the handler returns checkpointAction=undefined
+            // for it — the courtesy-reply path is handled by the
+            // sibling `else if` block below.
+            const isIntentionalRegression =
+              result.emailPurpose === 'request_more_availability';
+            const isRegression = !isIntentionalRegression &&
+              currentCheckpoint &&
               result.toolName === 'send_email' &&
               wouldRegress(currentCheckpoint.stage as ConversationStage, newStage);
 
@@ -777,6 +806,23 @@ export async function runToolLoop(
                 `${logContext} - Checkpoint updated after tool execution`
               );
             }
+          } else if (
+            // No checkpoint action but an email was sent — the
+            // `purpose: 'acknowledge'` path. Record the recipient on
+            // the existing checkpoint's context so the chase-fallback
+            // inference (determineChaseTarget's initial_contact /
+            // stalled branch) and the dashboard's "last emailed"
+            // labels stay accurate. Stage left untouched.
+            result.emailSentTo &&
+            conversationState.checkpoint
+          ) {
+            conversationState.checkpoint = {
+              ...conversationState.checkpoint,
+              context: {
+                ...conversationState.checkpoint.context,
+                lastEmailSentTo: result.emailSentTo,
+              },
+            };
           }
         }
 
