@@ -15,6 +15,7 @@ import { logger } from '../utils/logger';
 
 export type EmailIntent =
   | 'slot_selection'      // User selecting a time slot
+  | 'slot_rejection'      // User rejecting all offered slots, asks for more
   | 'availability_question' // Asking about availability
   | 'reschedule_request'  // Wants to change time
   | 'cancellation'        // Wants to cancel
@@ -75,6 +76,23 @@ const INTENT_PATTERNS: Record<EmailIntent, RegExp[]> = {
     /(?:please book|book me|schedule me)/i,
     /(\w+day)\s+(?:at\s+)?(\d{1,2}(?::\d{2})?(?:am|pm)?)/i,
     /(?:i(?:'ll| will) take|i choose|i(?:'d| would) prefer)/i,
+  ],
+  // User explicitly rejecting ALL offered slots and asking for more. This is
+  // distinct from slot_selection (positive choice) and reschedule_request
+  // (changing an already-confirmed slot). The chase service and the agent's
+  // workflow prompt both depend on this signal: without it, the agent
+  // tends to send a polite acknowledgement to the user and forget to
+  // email the therapist for new availability, leaving the conversation
+  // stuck at awaiting_user_slot_selection while we're actually waiting on
+  // the therapist.
+  slot_rejection: [
+    /(?:none|neither)\s+(?:of (?:those|these|them))?\s*(?:times?|slots?|options?)?\s*(?:work|suit|are good)/i,
+    /(?:those|these)\s+(?:times?|slots?|options?)?\s*don(?:'t|t)\s+work/i,
+    /(?:i(?:'m| am)|i(?:'ll| will be))\s+(?:not\s+)?(?:free|available)\s+(?:on|then|at)/i,
+    /(?:can(?:'t|not)|cannot)\s+(?:do|make|attend)\s+(?:any of|either of|those|these)/i,
+    /(?:do you have|are there)\s+(?:any\s+)?(?:other|more|different|alternative)\s+(?:times?|slots?|options?)/i,
+    /(?:let me know|tell me)\s+(?:if|when)\s+(?:you\s+)?(?:get|have|find)\s+(?:new|more|other|additional)\s+(?:ones?|times?|slots?)/i,
+    /(?:please\s+)?(?:send|share|suggest|propose)\s+(?:me\s+)?(?:some\s+)?(?:other|more|different|new|additional|alternative)\s+(?:times?|slots?|options?)/i,
   ],
   availability_question: [
     /(?:what|which)\s+(?:times?|slots?|days?)\s+(?:are|do you have)/i,
@@ -382,6 +400,7 @@ function isNegated(text: string, pattern: RegExp): boolean {
 function detectIntent(text: string): { intent: EmailIntent; confidence: number } {
   const scores: Record<EmailIntent, number> = {
     slot_selection: 0,
+    slot_rejection: 0,
     availability_question: 0,
     reschedule_request: 0,
     cancellation: 0,
