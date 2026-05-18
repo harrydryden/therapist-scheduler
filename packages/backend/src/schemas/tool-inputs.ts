@@ -9,22 +9,19 @@ import { z } from 'zod';
 
 /**
  * Declared intent for a `send_email` call. Promotes the agent's
- * implicit "why I'm sending this" from prose into structured tool
- * input data, so the system can:
- *   - choose the right checkpoint action (replacing the previous
- *     recipient-based mapping, which couldn't distinguish e.g. a
- *     courtesy ack to the therapist from a "please send more slots"
- *     follow-up — both look identical when you only see the recipient);
- *   - decide whether a backward stage transition is intentional (the
- *     `wouldRegress` guard was added to block courtesy emails from
- *     accidentally regressing the stage; with explicit purpose we can
- *     ALLOW the regression when it's the declared intent);
- *   - keep the field optional so legacy callsites that don't yet pass
- *     a purpose still get the previous recipient-based behaviour —
- *     no breaking change for in-flight conversations.
+ * "why I'm sending this" from email prose into typed tool input so
+ * the system can:
+ *   - pick the right checkpoint action (recipient alone can't
+ *     distinguish a courtesy ack to the therapist from a "please send
+ *     more slots" follow-up — they look identical);
+ *   - tell intentional backward stage transitions from accidental
+ *     ones (the `wouldRegress` guard blocks the accidental class;
+ *     `request_more_availability` is the legitimate exception);
+ *   - skip stage progression entirely for `acknowledge` so courtesy
+ *     replies don't flip the FSM.
  *
- * Mirrors the architecture-audit recommendation to disambiguate the
- * overloaded `send_email` tool.
+ * Optional: omitted falls back to recipient-based action selection,
+ * so callsites that don't supply it keep their existing behaviour.
  */
 export const sendEmailPurposeSchema = z.enum([
   // Initial outreach to the therapist asking for their general
@@ -66,10 +63,9 @@ export const sendEmailInputSchema = z.object({
   subject: z.string().min(1).max(1000),
   body: z.string().min(1).max(50000),
   /**
-   * Declared intent for this email. When omitted, the handler falls
-   * back to recipient-based action mapping (the pre-purpose default)
-   * — so legacy agent calls keep working without modification. New
-   * prompts should always pass a purpose.
+   * Declared intent for this email. Omitted → recipient-based action
+   * fallback (see deriveCheckpointAction). New prompts should always
+   * pass a purpose; the fallback exists for callsites that don't.
    */
   purpose: sendEmailPurposeSchema.optional(),
 });

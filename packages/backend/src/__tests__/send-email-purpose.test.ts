@@ -4,13 +4,13 @@
  * the therapist from a "please send more slots" follow-up, both of
  * which look identical from the recipient alone.
  *
- * Without this field, the system had to infer stage progression from
- * the email recipient. That worked for the happy path but broke the
- * minute the agent legitimately needed to go BACKWARDS in the FSM
- * (the user-rejection case fixed in PR #269). The `wouldRegress` guard
- * was added to block accidental regressions from courtesy emails but
- * also blocked intentional regressions — there was no way to tell the
- * difference. Explicit purpose closes that gap.
+ * Without this field, the system has to infer stage progression from
+ * the email recipient. That works for the happy path but breaks when
+ * the agent legitimately needs to go BACKWARDS in the FSM (e.g. user
+ * rejects all offered slots, agent goes back to the therapist for
+ * more). The `wouldRegress` guard blocks accidental regressions from
+ * courtesy emails but cannot distinguish them from intentional ones.
+ * Explicit purpose closes the gap.
  *
  * Layers pinned here:
  *   - Handler: purpose → checkpointAction mapping (one test per enum
@@ -89,13 +89,12 @@ describe('send_email — purpose-driven checkpointAction', () => {
     expect(outcome.purpose).toBe('confirm_slot_with_therapist');
   });
 
-  it('purpose=request_more_availability → received_user_slot_rejection (wires PR #269 action)', async () => {
-    // This is the case the architecture audit and the Maria/Ashleigh
-    // Slack example were both about. Without the explicit purpose field,
-    // a send_email to the therapist from `awaiting_user_slot_selection`
-    // produced action `sent_initial_email_to_therapist` (recipient-based)
-    // and got blocked by wouldRegress. Now the agent declares intent
-    // and the system records the correct action.
+  it('purpose=request_more_availability → received_user_slot_rejection', async () => {
+    // Without the explicit purpose field, a send_email to the
+    // therapist from `awaiting_user_slot_selection` produces action
+    // `sent_initial_email_to_therapist` (recipient-based) and is
+    // blocked by wouldRegress. With purpose set, the agent's intent
+    // is declared and the system records the correct action.
     const outcome = await call({
       to: 'ashleigh@example.com',
       purpose: 'request_more_availability',

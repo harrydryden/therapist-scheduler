@@ -78,8 +78,11 @@ function deriveCheckpointAction(
     case 'confirm_slot_with_therapist':
       return 'sent_confirmation_request_to_therapist';
     case 'request_more_availability':
-      // PR #269 introduced this action but no code path emitted it
-      // until now. The declared-purpose tool input is the path.
+      // The user rejected all offered slots. The action signals a
+      // deliberate go-back to the therapist (mapped to stage
+      // `awaiting_therapist_availability`), which the agent loop
+      // exempts from the `wouldRegress` guard because the regression
+      // IS the intent here.
       return 'received_user_slot_rejection';
     case 'acknowledge':
       // Courtesy reply — stage MUST NOT change. Returning undefined

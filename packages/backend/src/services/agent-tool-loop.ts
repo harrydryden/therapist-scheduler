@@ -726,15 +726,14 @@ export async function runToolLoop(
             };
           }
 
-          // Update checkpoint after successful tool execution. Two
-          // branches:
+          // Update checkpoint after successful tool execution.
           //   - checkpointAction set: standard stage/action update
           //     (with the wouldRegress guard).
-          //   - checkpointAction undefined, but the tool sent an email:
-          //     `purpose: 'acknowledge'` path — stage MUST NOT change,
-          //     but we still record `lastEmailSentTo` so the legacy
+          //   - checkpointAction undefined + email sent (the
+          //     `purpose: 'acknowledge'` path): stage stays put, but
+          //     `lastEmailSentTo` context is still recorded so the
           //     chase-fallback inference path knows who we last
-          //     reached out to (handled after the `if` block below).
+          //     reached out to.
           if (result.checkpointAction) {
             // Explicit annotation: the runToolLoop entry-side bootstrap
             // mutates `conversationState.checkpoint`, which knocks TS's
@@ -743,23 +742,20 @@ export async function runToolLoop(
               conversationState.checkpoint;
             const newStage = stageFromAction(result.checkpointAction);
 
-            // Prevent send_email from regressing the checkpoint stage —
-            // EXCEPT when the agent declared a purpose that makes the
-            // regression intentional. The guard was originally added
-            // for courtesy emails ("Thanks, I've forwarded your dates")
-            // that would otherwise flip the stage backward and mis-route
-            // the chaser. With the explicit `purpose` parameter on
-            // send_email, we can now distinguish:
+            // Block send_email from accidentally regressing the stage
+            // (e.g. a courtesy "thanks, I've forwarded your dates"
+            // email to the therapist after the slot was offered to the
+            // user would otherwise flip the stage backward and mis-
+            // route the chaser to the therapist). The exemption below
+            // covers the legitimate counter-case: when the agent
+            // declares `purpose: 'request_more_availability'` the
+            // regression IS the intent (user rejected, going back to
+            // the therapist for more slots).
             //
-            //   - 'request_more_availability': user rejected slots,
-            //     agent is genuinely going BACK to the therapist for
-            //     more. The regression IS the intent. Allow it.
-            //   - 'acknowledge': courtesy reply, stage MUST NOT change.
-            //     The handler already returns checkpointAction=undefined
-            //     for this case so this branch isn't reached.
-            //   - undefined / other purposes / no purpose: legacy
-            //     behaviour — guard against the original courtesy-email
-            //     regression bug.
+            // `purpose: 'acknowledge'` doesn't reach this branch
+            // because the handler returns checkpointAction=undefined
+            // for it — the courtesy-reply path is handled by the
+            // sibling `else if` block below.
             const isIntentionalRegression =
               result.emailPurpose === 'request_more_availability';
             const isRegression = !isIntentionalRegression &&
@@ -811,13 +807,12 @@ export async function runToolLoop(
               );
             }
           } else if (
-            // No checkpoint action but an email was sent — currently
-            // only fires for `purpose: 'acknowledge'`. Record the
-            // recipient on the existing checkpoint's context so the
-            // legacy chase-fallback inference (determineChaseTarget's
-            // initial_contact / stalled branch) has accurate signal,
-            // and the dashboard's "last emailed" labels stay in sync.
-            // Stage is intentionally left untouched.
+            // No checkpoint action but an email was sent — the
+            // `purpose: 'acknowledge'` path. Record the recipient on
+            // the existing checkpoint's context so the chase-fallback
+            // inference (determineChaseTarget's initial_contact /
+            // stalled branch) and the dashboard's "last emailed"
+            // labels stay accurate. Stage left untouched.
             result.emailSentTo &&
             conversationState.checkpoint
           ) {
