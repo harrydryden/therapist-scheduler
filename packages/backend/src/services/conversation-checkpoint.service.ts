@@ -22,6 +22,17 @@ export type ConversationAction =
   | 'received_therapist_availability'
   | 'sent_availability_to_user'
   | 'received_user_slot_selection'
+  // User received the slot options but rejected ALL of them
+  // ("none of those work", "I'm not free then", "can you suggest other
+  // times?"). Distinct from a counter-proposal — it explicitly signals
+  // we need to go BACK to the therapist for more availability rather
+  // than wait for the user to pick from the existing list. Maps to
+  // `awaiting_therapist_availability`. Without this action, the only
+  // legal transition from `awaiting_user_slot_selection` was to
+  // `awaiting_therapist_confirmation`, so a rejection had no
+  // structurally-correct way to record itself and the stage stayed
+  // stuck — the chase service then routed against the wrong party.
+  | 'received_user_slot_rejection'
   | 'sent_confirmation_request_to_therapist'
   | 'received_therapist_confirmation'
   | 'sent_final_confirmations'
@@ -60,7 +71,7 @@ export interface ConversationCheckpoint {
 const VALID_TRANSITIONS: Record<ConversationStage, ConversationStage[]> = {
   initial_contact: ['awaiting_therapist_availability', 'awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
   awaiting_therapist_availability: ['awaiting_user_slot_selection', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
-  awaiting_user_slot_selection: ['awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling', 'chased', 'closure_recommended'],
+  awaiting_user_slot_selection: ['awaiting_therapist_availability', 'awaiting_therapist_confirmation', 'cancelled', 'stalled', 'rescheduling', 'chased', 'closure_recommended'],
   awaiting_therapist_confirmation: ['awaiting_user_slot_selection', 'awaiting_meeting_link', 'confirmed', 'cancelled', 'stalled', 'chased', 'closure_recommended'],
   awaiting_meeting_link: ['confirmed', 'rescheduling', 'cancelled', 'stalled', 'chased'],
   confirmed: ['rescheduling', 'cancelled'],
@@ -145,6 +156,13 @@ export function stageFromAction(action: ConversationAction): ConversationStage {
     received_therapist_availability: 'awaiting_user_slot_selection',
     sent_availability_to_user: 'awaiting_user_slot_selection',
     received_user_slot_selection: 'awaiting_therapist_confirmation',
+    // User rejected ALL of the offered slots — we need new availability
+    // from the therapist, NOT a confirmation. Stage reverts to
+    // `awaiting_therapist_availability` so the chase service correctly
+    // routes the next chase to the therapist (per stage-groups
+    // THERAPIST_PENDING_STAGES) rather than the user who's already
+    // replied.
+    received_user_slot_rejection: 'awaiting_therapist_availability',
     sent_confirmation_request_to_therapist: 'awaiting_therapist_confirmation',
     received_therapist_confirmation: 'awaiting_meeting_link',
     sent_final_confirmations: 'confirmed',
@@ -256,6 +274,7 @@ const VALID_ACTIONS_PER_STAGE: Record<ConversationStage, string[]> = {
     'Wait for user to select a time',
     'Clarify options if user has questions',
     'After user selects, send confirmation request to therapist',
+    'If user REJECTS all offered slots ("none of those work", "I\'m not free then"), email the therapist for more availability in the SAME turn — record received_user_slot_rejection so stage reverts to awaiting_therapist_availability',
   ],
   awaiting_therapist_confirmation: [
     'Wait for therapist to confirm the selected slot',

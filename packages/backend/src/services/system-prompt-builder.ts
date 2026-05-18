@@ -556,7 +556,13 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
 3. ${confirmationGate}
 
 4. **Handle Conflicts**: If the therapist says the time is no longer available (booked by someone else), go back to the user with alternative times.
-   - If this happens more than once, consider asking the therapist for their most up-to-date availability.`;
+   - If this happens more than once, consider asking the therapist for their most up-to-date availability.
+
+5. **Handle User Rejection**: If the user rejects ALL the offered times (e.g., "none of those work", "I'm not free then", "can you suggest other times?"), you MUST do BOTH of the following IN THE SAME TURN:
+   1. Email the THERAPIST asking for additional availability — this is the primary action, do not skip it.
+   2. Email the USER with a brief acknowledgement ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
+
+   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm.`;
   }
 
   return `## Your Workflow (NO Availability Yet)
@@ -593,7 +599,13 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
 
    Replace {therapistFirstName} with the therapist's first name, {clientFirstName} with the client's first name, {selectedDateTime} with the user's selected time, and {userEmail} with the client's email address.
 
-5. ${confirmationGate}`;
+5. ${confirmationGate}
+
+6. **Handle User Rejection**: If the user rejects ALL the offered times (e.g., "none of those work", "I'm not free then", "can you suggest other times?"), you MUST do BOTH of the following IN THE SAME TURN:
+   1. Email the THERAPIST asking for additional availability — this is the primary action, do not skip it.
+   2. Email the USER with a brief acknowledgement ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
+
+   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm.`;
 }
 
 function buildKnowledgeSection(
