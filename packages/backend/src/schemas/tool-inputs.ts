@@ -52,6 +52,15 @@ export const sendEmailPurposeSchema = z.enum([
 
 export type SendEmailPurpose = z.infer<typeof sendEmailPurposeSchema>;
 
+/**
+ * Runtime array of the purpose enum values. Source of truth for any
+ * consumer that needs the strings as data — currently the Anthropic
+ * tool definition (which wants a plain string[] in its JSON Schema
+ * `enum` field). Derived from the Zod schema so adding a new purpose
+ * to the schema automatically updates every consumer.
+ */
+export const SEND_EMAIL_PURPOSE_VALUES = sendEmailPurposeSchema.options;
+
 export const sendEmailInputSchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1).max(1000),

@@ -250,12 +250,14 @@ describe('agent loop — purpose=request_more_availability bypasses wouldRegress
     expect(state.checkpoint?.context?.lastEmailSentTo).toBe('therapist');
   });
 
-  it('purpose=acknowledge produces no checkpoint update at all', async () => {
-    // Courtesy reply. Even though it goes to the user (and would
-    // normally map to sent_availability_to_user via the recipient
-    // fallback), the handler returns checkpointAction=undefined for
-    // acknowledge — so the loop's update block is skipped entirely.
-    // The stage stays put.
+  it('purpose=acknowledge: stage unchanged, but lastEmailSentTo context IS recorded', async () => {
+    // Courtesy reply. The handler returns checkpointAction=undefined
+    // so the loop's stage-advance block is skipped — but we still
+    // record `lastEmailSentTo` on the existing checkpoint's context.
+    // This keeps the legacy chase-fallback inference path (which
+    // looks at context.lastEmailSentTo for `initial_contact`/`stalled`
+    // / no-checkpoint stages) accurate, and keeps the dashboard's
+    // "last emailed" labels in sync after a courtesy email.
     scriptedResponses = [
       scriptToolUse('send_email', {
         to: 'maria@example.com',
@@ -289,10 +291,15 @@ describe('agent loop — purpose=request_more_availability bypasses wouldRegress
       makeContext(),
       { executeToolCall, flagForHumanReview: jest.fn() },
       'trace-ack',
-      'test-acknowledge-no-op',
+      'test-acknowledge-context-only',
     );
 
+    // Stage + last action unchanged — the structurally-correct
+    // courtesy-reply outcome.
     expect(state.checkpoint?.stage).toBe(beforeCheckpoint.stage);
     expect(state.checkpoint?.lastSuccessfulAction).toBe(beforeCheckpoint.lastSuccessfulAction);
+    // But context now records the recipient so chase-fallback / dashboard
+    // labels know who we last reached out to.
+    expect(state.checkpoint?.context?.lastEmailSentTo).toBe('user');
   });
 });

@@ -17,6 +17,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { firstName } from '../utils/first-name';
 import type { ConversationAction } from '../services/conversation-checkpoint.service';
+import type { SendEmailPurpose } from '../schemas/tool-inputs';
 
 /**
  * FIX T1: Tool execution result type for explicit success/failure reporting
@@ -50,15 +51,11 @@ export interface ToolExecutionResult {
    *     (the regression is the declared intent, not an accident);
    *   - skip the checkpoint update entirely for `acknowledge` (courtesy
    *     reply — no party-pending change, so no stage change).
-   * Stays undefined for non-send_email tools.
+   * Stays undefined for non-send_email tools. Sourced from
+   * schemas/tool-inputs so adding a purpose to the schema propagates
+   * here automatically.
    */
-  emailPurpose?:
-    | 'request_availability'
-    | 'send_options'
-    | 'confirm_slot_with_therapist'
-    | 'request_more_availability'
-    | 'acknowledge'
-    | 'other';
+  emailPurpose?: SendEmailPurpose;
   /** Custom result data to return to Claude (JSON-serialized). If set, used instead of generic success message. */
   resultMessage?: string;
   /** Response tracking data to merge into conversation state (avoids mid-loop state save conflicts) */

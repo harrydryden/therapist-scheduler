@@ -64,6 +64,7 @@ import {
   AVAILABILITY_SIDE_EFFECT_TOOLS,
   AVAILABILITY_TERMINAL_TOOLS,
 } from '../domain/scheduling/availability/agent/tools';
+import { SEND_EMAIL_PURPOSE_VALUES } from '../schemas/tool-inputs';
 
 const MAX_TOOL_ITERATIONS = 5;
 
@@ -185,14 +186,10 @@ export const schedulingTools: Anthropic.Tool[] = [
         },
         purpose: {
           type: 'string',
-          enum: [
-            'request_availability',
-            'send_options',
-            'confirm_slot_with_therapist',
-            'request_more_availability',
-            'acknowledge',
-            'other',
-          ],
+          // Sourced from the Zod schema so a new purpose value
+          // propagates automatically — no risk of the tool definition
+          // drifting from the handler's exhaustive switch.
+          enum: [...SEND_EMAIL_PURPOSE_VALUES],
           description:
             'Declared intent for this email — strongly recommended on every call. Pick the value that matches what the email is for:\n' +
             '- `request_availability`: initial email to the therapist asking for their general availability.\n' +
@@ -729,7 +726,15 @@ export async function runToolLoop(
             };
           }
 
-          // Update checkpoint after successful tool execution
+          // Update checkpoint after successful tool execution. Two
+          // branches:
+          //   - checkpointAction set: standard stage/action update
+          //     (with the wouldRegress guard).
+          //   - checkpointAction undefined, but the tool sent an email:
+          //     `purpose: 'acknowledge'` path — stage MUST NOT change,
+          //     but we still record `lastEmailSentTo` so the legacy
+          //     chase-fallback inference path knows who we last
+          //     reached out to (handled after the `if` block below).
           if (result.checkpointAction) {
             // Explicit annotation: the runToolLoop entry-side bootstrap
             // mutates `conversationState.checkpoint`, which knocks TS's
@@ -805,6 +810,24 @@ export async function runToolLoop(
                 `${logContext} - Checkpoint updated after tool execution`
               );
             }
+          } else if (
+            // No checkpoint action but an email was sent — currently
+            // only fires for `purpose: 'acknowledge'`. Record the
+            // recipient on the existing checkpoint's context so the
+            // legacy chase-fallback inference (determineChaseTarget's
+            // initial_contact / stalled branch) has accurate signal,
+            // and the dashboard's "last emailed" labels stay in sync.
+            // Stage is intentionally left untouched.
+            result.emailSentTo &&
+            conversationState.checkpoint
+          ) {
+            conversationState.checkpoint = {
+              ...conversationState.checkpoint,
+              context: {
+                ...conversationState.checkpoint.context,
+                lastEmailSentTo: result.emailSentTo,
+              },
+            };
           }
         }
 
