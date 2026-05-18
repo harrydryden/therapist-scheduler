@@ -7,10 +7,62 @@
 
 import { z } from 'zod';
 
+/**
+ * Declared intent for a `send_email` call. Promotes the agent's
+ * implicit "why I'm sending this" from prose into structured tool
+ * input data, so the system can:
+ *   - choose the right checkpoint action (replacing the previous
+ *     recipient-based mapping, which couldn't distinguish e.g. a
+ *     courtesy ack to the therapist from a "please send more slots"
+ *     follow-up — both look identical when you only see the recipient);
+ *   - decide whether a backward stage transition is intentional (the
+ *     `wouldRegress` guard was added to block courtesy emails from
+ *     accidentally regressing the stage; with explicit purpose we can
+ *     ALLOW the regression when it's the declared intent);
+ *   - keep the field optional so legacy callsites that don't yet pass
+ *     a purpose still get the previous recipient-based behaviour —
+ *     no breaking change for in-flight conversations.
+ *
+ * Mirrors the architecture-audit recommendation to disambiguate the
+ * overloaded `send_email` tool.
+ */
+export const sendEmailPurposeSchema = z.enum([
+  // Initial outreach to the therapist asking for their general
+  // availability. Stage → awaiting_therapist_availability.
+  'request_availability',
+  // Forwarding therapist availability slots to the user. Stage →
+  // awaiting_user_slot_selection.
+  'send_options',
+  // After the user picked a slot, asking the therapist to confirm.
+  // Stage → awaiting_therapist_confirmation.
+  'confirm_slot_with_therapist',
+  // The user rejected ALL offered slots — going back to the therapist
+  // for additional availability. Stage → awaiting_therapist_availability
+  // (legitimately a backward stage transition; the regression is the
+  // intent, not an accident).
+  'request_more_availability',
+  // Courtesy reply: a "thanks", "received", "I'll get back to you"
+  // message that doesn't change WHO we're waiting on. Stage unchanged.
+  'acknowledge',
+  // Catch-all for emails that don't fit the structured cases above.
+  // Falls back to recipient-based action selection — same as omitting
+  // the field entirely. Use sparingly.
+  'other',
+]);
+
+export type SendEmailPurpose = z.infer<typeof sendEmailPurposeSchema>;
+
 export const sendEmailInputSchema = z.object({
   to: z.string().email(),
   subject: z.string().min(1).max(1000),
   body: z.string().min(1).max(50000),
+  /**
+   * Declared intent for this email. When omitted, the handler falls
+   * back to recipient-based action mapping (the pre-purpose default)
+   * — so legacy agent calls keep working without modification. New
+   * prompts should always pass a purpose.
+   */
+  purpose: sendEmailPurposeSchema.optional(),
 });
 
 export const updateAvailabilityInputSchema = z.object({

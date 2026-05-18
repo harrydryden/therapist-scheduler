@@ -291,6 +291,7 @@ async function dispatchTool(
         ...outcome.result,
         checkpointAction: outcome.checkpointAction,
         emailSentTo: outcome.emailSentTo,
+        emailPurpose: outcome.purpose,
       };
     }
     case 'update_therapist_availability': {

@@ -13,7 +13,10 @@
  */
 
 import { logger } from '../../../../utils/logger';
-import { sendEmailInputSchema } from '../../../../schemas/tool-inputs';
+import {
+  sendEmailInputSchema,
+  type SendEmailPurpose,
+} from '../../../../schemas/tool-inputs';
 import { sendAppointmentEmail } from '../send';
 import type { ConversationAction } from '../../../../services/conversation-checkpoint.service';
 import type {
@@ -25,6 +28,51 @@ export interface SendEmailHandlerOutcome {
   result: ToolExecutionResult;
   checkpointAction?: ConversationAction;
   emailSentTo?: 'user' | 'therapist';
+  /**
+   * Echoes back the declared purpose (if any) so the agent loop can
+   * use it for downstream decisions — specifically, exempting
+   * intentional regressions (e.g. `request_more_availability`) from
+   * the `wouldRegress` guard, and treating `acknowledge` as a no-op
+   * for stage tracking. Distinct from `checkpointAction` because some
+   * purposes (`acknowledge`) deliberately don't emit one.
+   */
+  purpose?: SendEmailPurpose;
+}
+
+/**
+ * Map a declared purpose to a checkpoint action. Returns null for
+ * 'acknowledge' (no stage change) and 'other' (caller falls back to
+ * recipient-based mapping).
+ *
+ * Defined as a switch rather than a Record so TS exhaustiveness-checks
+ * the SendEmailPurpose union — adding a new purpose without updating
+ * this mapping fails the build.
+ */
+function actionForPurpose(
+  purpose: SendEmailPurpose,
+): ConversationAction | null {
+  switch (purpose) {
+    case 'request_availability':
+      return 'sent_initial_email_to_therapist';
+    case 'send_options':
+      return 'sent_availability_to_user';
+    case 'confirm_slot_with_therapist':
+      return 'sent_confirmation_request_to_therapist';
+    case 'request_more_availability':
+      // PR #269 introduced this action but no code path emitted it
+      // until now. The declared-purpose tool input is the path.
+      return 'received_user_slot_rejection';
+    case 'acknowledge':
+      // Courtesy reply — stage MUST NOT change. Returning null tells
+      // the loop to skip the checkpoint update entirely. This is the
+      // structurally-correct way to send "thanks, I'll get back to
+      // you" without flipping the stage (and triggering the chain of
+      // chase / dashboard / FSM consequences that follow a flip).
+      return null;
+    case 'other':
+      // Caller falls back to recipient-based mapping below.
+      return null;
+  }
 }
 
 export async function handleSendEmail(
@@ -75,19 +123,50 @@ export async function handleSendEmail(
   const emailSentTo: 'user' | 'therapist' =
     normalizedTo === context.therapistEmail.toLowerCase() ? 'therapist' : 'user';
 
-  // Set checkpoint action based on recipient so the conversation
-  // stage is properly tracked. Without this, the checkpoint is never
-  // initialized after startScheduling (only send_email is called),
-  // leaving the stage as undefined and breaking stage-aware recovery
-  // and prompt guidance.
-  const checkpointAction: ConversationAction =
-    emailSentTo === 'therapist'
-      ? 'sent_initial_email_to_therapist'
-      : 'sent_availability_to_user';
+  // Resolve checkpoint action. New behaviour (PR-purpose): when the
+  // agent declares a `purpose`, use it to derive the action — letting
+  // the system distinguish e.g. a courtesy ack to the therapist from
+  // a "please send more slots" follow-up, both of which look
+  // identical from the recipient alone.
+  //
+  // Legacy behaviour (purpose omitted, or purpose === 'other'): fall
+  // back to recipient-based mapping. In-flight conversations still
+  // work; new prompts pass purpose explicitly.
+  //
+  // Two callsites set `checkpointAction = undefined`:
+  //  - purpose === 'acknowledge': stage MUST NOT change (courtesy
+  //    reply; we're still waiting on the same party). Returning
+  //    undefined from this handler tells the agent loop to skip the
+  //    checkpoint update entirely.
+  //  - purpose === 'other' with no recipient fallback to apply: same.
+  let checkpointAction: ConversationAction | undefined;
+  if (emailData.purpose) {
+    const fromPurpose = actionForPurpose(emailData.purpose);
+    if (fromPurpose !== null) {
+      checkpointAction = fromPurpose;
+    } else if (emailData.purpose === 'other') {
+      // 'other' is the catch-all → fall through to recipient-based.
+      checkpointAction =
+        emailSentTo === 'therapist'
+          ? 'sent_initial_email_to_therapist'
+          : 'sent_availability_to_user';
+    }
+    // 'acknowledge' → checkpointAction stays undefined → no stage change.
+  } else {
+    // Legacy path: no purpose declared. Same as the previous behaviour
+    // (recipient-based mapping). Without this, the checkpoint is never
+    // initialized after startScheduling, leaving the stage undefined
+    // and breaking stage-aware recovery and prompt guidance.
+    checkpointAction =
+      emailSentTo === 'therapist'
+        ? 'sent_initial_email_to_therapist'
+        : 'sent_availability_to_user';
+  }
 
   return {
     result: { success: true, toolName: 'send_email' },
     checkpointAction,
     emailSentTo,
+    purpose: emailData.purpose,
   };
 }

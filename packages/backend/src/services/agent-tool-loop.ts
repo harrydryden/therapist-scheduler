@@ -167,7 +167,7 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
   {
     name: 'send_email',
-    description: 'Send an email to a recipient',
+    description: 'Send an email to a recipient. Always pass `purpose` so the system can track stage progression correctly — without it, the system falls back to inferring stage from recipient alone, which can\'t distinguish "asking the therapist for more slots after a user rejection" from "courtesy thanks to the therapist after forwarding slots".',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -182,6 +182,25 @@ export const schedulingTools: Anthropic.Tool[] = [
         body: {
           type: 'string',
           description: 'Email body content (plain text). IMPORTANT: Do NOT insert line breaks within paragraphs - only use blank lines between paragraphs. Let the email client handle text wrapping. Each paragraph should be a single continuous line of text.',
+        },
+        purpose: {
+          type: 'string',
+          enum: [
+            'request_availability',
+            'send_options',
+            'confirm_slot_with_therapist',
+            'request_more_availability',
+            'acknowledge',
+            'other',
+          ],
+          description:
+            'Declared intent for this email — strongly recommended on every call. Pick the value that matches what the email is for:\n' +
+            '- `request_availability`: initial email to the therapist asking for their general availability.\n' +
+            '- `send_options`: email to the user with the therapist\'s available time slots.\n' +
+            '- `confirm_slot_with_therapist`: after the user picks a time, asking the therapist to confirm.\n' +
+            '- `request_more_availability`: the user rejected all offered times and you are asking the therapist for new slots. Use this — NOT `request_availability` — so the system knows this is a deliberate go-back, not an initial outreach.\n' +
+            '- `acknowledge`: a courtesy reply ("thanks", "I\'ll get back to you", "received"). The stage WILL NOT change — use this for replies that don\'t shift who we\'re waiting on.\n' +
+            '- `other`: anything that doesn\'t fit the above. Used sparingly.',
         },
       },
       required: ['to', 'subject', 'body'],
@@ -719,18 +738,27 @@ export async function runToolLoop(
               conversationState.checkpoint;
             const newStage = stageFromAction(result.checkpointAction);
 
-            // Prevent send_email from regressing the checkpoint stage.
-            // The send_email tool always maps to one of two early-stage actions
-            // (sent_initial_email_to_therapist → awaiting_therapist_availability,
-            //  sent_availability_to_user → awaiting_user_slot_selection).
-            // This is correct for initial emails, but courtesy/follow-up emails
-            // (e.g., "Thanks, I've forwarded your dates to the client") should
-            // NOT reset the stage backward. Without this guard, a follow-up email
-            // to the therapist after forwarding availability to the user would
-            // regress the stage from awaiting_user_slot_selection back to
-            // awaiting_therapist_availability, causing the chaser to chase the
-            // wrong party.
-            const isRegression = currentCheckpoint &&
+            // Prevent send_email from regressing the checkpoint stage —
+            // EXCEPT when the agent declared a purpose that makes the
+            // regression intentional. The guard was originally added
+            // for courtesy emails ("Thanks, I've forwarded your dates")
+            // that would otherwise flip the stage backward and mis-route
+            // the chaser. With the explicit `purpose` parameter on
+            // send_email, we can now distinguish:
+            //
+            //   - 'request_more_availability': user rejected slots,
+            //     agent is genuinely going BACK to the therapist for
+            //     more. The regression IS the intent. Allow it.
+            //   - 'acknowledge': courtesy reply, stage MUST NOT change.
+            //     The handler already returns checkpointAction=undefined
+            //     for this case so this branch isn't reached.
+            //   - undefined / other purposes / no purpose: legacy
+            //     behaviour — guard against the original courtesy-email
+            //     regression bug.
+            const isIntentionalRegression =
+              result.emailPurpose === 'request_more_availability';
+            const isRegression = !isIntentionalRegression &&
+              currentCheckpoint &&
               result.toolName === 'send_email' &&
               wouldRegress(currentCheckpoint.stage as ConversationStage, newStage);
 

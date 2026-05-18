@@ -559,10 +559,10 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
    - If this happens more than once, consider asking the therapist for their most up-to-date availability.
 
 5. **Handle User Rejection**: If the user rejects ALL the offered times (e.g., "none of those work", "I'm not free then", "can you suggest other times?"), you MUST do BOTH of the following IN THE SAME TURN:
-   1. Email the THERAPIST asking for additional availability — this is the primary action, do not skip it.
-   2. Email the USER with a brief acknowledgement ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
+   1. Email the THERAPIST asking for additional availability — \`send_email\` with \`purpose: "request_more_availability"\`. This is the primary action, do not skip it.
+   2. Email the USER with a brief acknowledgement — \`send_email\` with \`purpose: "acknowledge"\` ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
 
-   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm.`;
+   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm. The \`purpose\` field is what tells the system which party we're now waiting on; without it the stage and chase routing will be wrong.`;
   }
 
   return `## Your Workflow (NO Availability Yet)
@@ -602,10 +602,10 @@ function buildWorkflowInstructions(params: WorkflowParams): string {
 5. ${confirmationGate}
 
 6. **Handle User Rejection**: If the user rejects ALL the offered times (e.g., "none of those work", "I'm not free then", "can you suggest other times?"), you MUST do BOTH of the following IN THE SAME TURN:
-   1. Email the THERAPIST asking for additional availability — this is the primary action, do not skip it.
-   2. Email the USER with a brief acknowledgement ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
+   1. Email the THERAPIST asking for additional availability — \`send_email\` with \`purpose: "request_more_availability"\`. This is the primary action, do not skip it.
+   2. Email the USER with a brief acknowledgement — \`send_email\` with \`purpose: "acknowledge"\` ("No problem — I'll check with ${context.therapistName} for more options and come back to you shortly.").
 
-   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm.`;
+   Do not promise the therapist follow-up in the user-facing email without actually making the tool call to the therapist. A text-only "I'll check in" reply leaves the conversation stuck — the user is waiting on us to act, not just to confirm. The \`purpose\` field is what tells the system which party we're now waiting on; without it the stage and chase routing will be wrong.`;
 }
 
 function buildKnowledgeSection(
