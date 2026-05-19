@@ -66,7 +66,17 @@ import {
 } from '../domain/scheduling/availability/agent/tools';
 import { SEND_EMAIL_PURPOSE_VALUES } from '../schemas/tool-inputs';
 
-const MAX_TOOL_ITERATIONS = 5;
+/** Maximum number of Claude round-trips per inbound trigger. The real
+ *  bound on side effects is TURN_TOOL_BUDGET (state-changing calls per
+ *  turn) — this cap only bounds Claude API spend within one inbound. Set
+ *  to 8 (was 5) after operators saw the iteration ceiling trip on
+ *  legitimate workflows where the therapist replied with many distinct
+ *  availability windows: each window consumes a slot, and the agent had
+ *  no spare iteration to emit the text-only "done" response that signals
+ *  natural completion. The 12-call budget, same-hash guard (3), and
+ *  error breaker (3) remain as the actual runaway safety nets — none
+ *  depend on this constant. */
+const MAX_TOOL_ITERATIONS = 8;
 
 /** Cumulative tool-call failures within a single runToolLoop invocation
  *  that trip the error circuit breaker. Three failures in one turn is the
@@ -76,9 +86,9 @@ const MAX_TOOL_ITERATIONS = 5;
 const TURN_ERROR_LIMIT = 3;
 
 /** Maximum tool-call attempts across a single runToolLoop invocation.
- *  Closes the "5 iterations × N tool_use blocks per iteration" amplification
- *  that lets one inbound trigger push 30+ calls into the per-appointment
- *  lifecycle counter. Generous enough for a realistic turn — e.g.
+ *  Closes the "MAX_TOOL_ITERATIONS × N tool_use blocks per iteration"
+ *  amplification that lets one inbound trigger push 30+ calls into the
+ *  per-appointment lifecycle counter. Generous enough for a realistic turn — e.g.
  *  remember + record_availability_window + send_email + record_booking_link
  *  + a follow-up email — but well below any plausible legitimate need.
  *

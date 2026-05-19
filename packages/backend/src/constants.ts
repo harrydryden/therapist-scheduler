@@ -396,11 +396,11 @@ export const TOOL_EXECUTION = {
    *  session → feedback) without piling up keys for archived ones. */
   COUNT_TTL_SECONDS: 30 * 24 * 60 * 60,
   /** Hard ceiling on tool calls per appointment. The per-turn cap
-   *  (MAX_TOOL_ITERATIONS = 5) bounds runaway loops within one inbound
-   *  email; this ceiling bounds total agent activity across an entire
-   *  appointment, so a prompt-injecting back-and-forth can't keep
-   *  driving the agent indefinitely. When exceeded we flip the
-   *  appointment into human control and Slack-alert. */
+   *  (TURN_TOOL_BUDGET = 12 state-changing calls) bounds runaway loops
+   *  within one inbound email; this ceiling bounds total agent activity
+   *  across an entire appointment, so a prompt-injecting back-and-forth
+   *  can't keep driving the agent indefinitely. When exceeded we flip
+   *  the appointment into human control and Slack-alert. */
   PER_APPOINTMENT_LIMIT: 50,
 } as const;
 
