@@ -17,7 +17,7 @@
  *   - Turn-tool budget exhausted (TURN_TOOL_BUDGET = 12)
  *   - Same-hash abort (SAME_HASH_TURN_ABORT = 3)
  *   - Error breaker (TURN_ERROR_LIMIT = 3)
- *   - Max iterations ceiling (MAX_TOOL_ITERATIONS = 5)
+ *   - Max iterations ceiling (MAX_TOOL_ITERATIONS = 8)
  *   - Natural finish on the last allowed iteration (must NOT flag)
  *   - `flag_for_human_review` tool emitted by the agent itself
  *
@@ -276,12 +276,12 @@ describe('runToolLoop — safety circuit wiring', () => {
   });
 
   it('MAX_TOOL_ITERATIONS hit flags for human review when the agent was still working (PR #262 wiring)', async () => {
-    // 5 iterations all with a tool_use block → while loop falls through
-    // after iteration 5 without natural finish. The post-loop check
+    // 8 iterations all with a tool_use block → while loop falls through
+    // after iteration 8 without natural finish. The post-loop check
     // should fire flagForHumanReview. This pins the wiring shipped in
     // PR #262 — before that fix this case exited silently with only a
     // logger.warn.
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       scriptedResponses.push(
         scriptToolResponse([{ name: 'remember', input: { fact: `iter-${i}` } }]),
       );
@@ -313,11 +313,11 @@ describe('runToolLoop — safety circuit wiring', () => {
   });
 
   it('natural finish on iteration MAX does NOT flag (loopFinishedNaturally exemption)', async () => {
-    // 4 iterations with tool calls, 5th iteration is a text-only response
-    // (natural "done"). iteration ends at 5 but loopFinishedNaturally
+    // 7 iterations with tool calls, 8th iteration is a text-only response
+    // (natural "done"). iteration ends at 8 but loopFinishedNaturally
     // exempts it from the iteration-ceiling escalation. Critical
     // regression case for the PR #262 fix.
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 7; i++) {
       scriptedResponses.push(
         scriptToolResponse([{ name: 'remember', input: { fact: `iter-${i}` } }]),
       );
@@ -390,12 +390,13 @@ describe('runToolLoop — safety circuit wiring', () => {
   });
 
   it('error breaker takes precedence over max-iterations when both would fire', async () => {
-    // 5 iterations, each returning one tool call that fails. After
-    // iteration 3, totalToolErrors === 3 trips the error breaker and
-    // the loop stops via stopLoop. The post-loop max-iter check should
-    // NOT also flag (already flagged). This pins the !flaggedForHumanReview
-    // guard on the iteration-ceiling branch.
-    for (let i = 0; i < 5; i++) {
+    // MAX_TOOL_ITERATIONS-worth of iterations scripted, each returning
+    // one tool call that fails. After iteration 3, totalToolErrors === 3
+    // trips the error breaker and the loop stops via stopLoop. The
+    // post-loop max-iter check should NOT also flag (already flagged).
+    // This pins the !flaggedForHumanReview guard on the iteration-ceiling
+    // branch.
+    for (let i = 0; i < 8; i++) {
       scriptedResponses.push(
         scriptToolResponse([{ name: 'remember', input: { fact: `iter-${i}` } }]),
       );
