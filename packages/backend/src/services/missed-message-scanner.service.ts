@@ -126,7 +126,7 @@ class MissedMessageScannerService {
         { scanId, trigger, error: result.error },
         'Missed message scan failed'
       );
-      this.trackSkip(scanId, trigger, 'error');
+      this.trackSkip(scanId, trigger, 'error', result.error.message);
       return EMPTY_RESULT;
     }
 
@@ -138,8 +138,14 @@ class MissedMessageScannerService {
   /**
    * Track consecutive skips and alert if threshold is exceeded.
    * Consecutive skips suggest the scanner is unhealthy (OAuth issues, stuck lock, etc.).
+   *
+   * `errorMessage` is the underlying `Error.message` when `reason === 'error'`
+   * (i.e. the task threw inside the locked runner). It is surfaced in the
+   * Slack alert so operators can triage the actual failure (e.g.
+   * "OAuth token invalid: invalid_grant") without grepping server logs —
+   * the previous alert just said "reason: error" and left them digging.
    */
-  private trackSkip(scanId: string, trigger: string, reason: string): void {
+  private trackSkip(scanId: string, trigger: string, reason: string, errorMessage?: string): void {
     this.consecutiveSkips++;
 
     if (this.consecutiveSkips >= CONSECUTIVE_SKIP_ALERT_THRESHOLD) {
@@ -148,15 +154,25 @@ class MissedMessageScannerService {
         'Missed message scanner has been skipped multiple times consecutively — messages may be going undetected'
       );
 
+      const additionalFields: Record<string, string> = {
+        'Scan ID': scanId,
+        'Trigger': trigger,
+      };
+      if (errorMessage) {
+        // Truncate defensively: known error sources here (OAuth-library
+        // strings, Prisma messages, the locked-runner timeout string) are
+        // short and PII-free, but a future throw site could leak a long
+        // payload. 200 chars is enough for a useful triage hint.
+        additionalFields['Error'] =
+          errorMessage.length > 200 ? `${errorMessage.slice(0, 200)}…` : errorMessage;
+      }
+
       slackNotificationService.sendAlert({
         title: 'Missed Message Scanner Unhealthy',
         severity: 'high',
         details: `Scanner has been skipped *${this.consecutiveSkips}* consecutive times (reason: ${reason}). ` +
           'Incoming messages may not be detected. Check OAuth token status and server health.',
-        additionalFields: {
-          'Scan ID': scanId,
-          'Trigger': trigger,
-        },
+        additionalFields,
       }).catch(() => {});
     }
   }
