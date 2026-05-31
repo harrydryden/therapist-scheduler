@@ -13,6 +13,7 @@
  *   - ai-conversation.service.ts (conversation state)
  */
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { firstName } from '../utils/first-name';
@@ -188,6 +189,25 @@ export function buildSchedulingContext(
 }
 
 /**
+ * The relation `include` shape that {@link buildSchedulingContext} depends
+ * on: each party's `country` (drives the timezone fallback chain) AND their
+ * explicit `timezone` (persisted by `record_user_timezone` /
+ * `record_therapist_timezone`).
+ *
+ * Exported and shared so EVERY caller that loads an appointment row to build
+ * a SchedulingContext fetches the same columns. `processEmailReply` used to
+ * hand-roll an `include` that selected `country` only, which silently dropped
+ * the recorded timezone from the email-reply prompt — the timezone section
+ * then rendered "unknown — you MUST ask" on every turn even after the agent
+ * had already recorded the zone, defeating those tools. Centralising the
+ * shape here makes that drift impossible.
+ */
+export const SCHEDULING_CONTEXT_RELATIONS_INCLUDE = {
+  user: { select: { country: true, timezone: true } },
+  therapist: { select: { country: true, timezone: true } },
+} satisfies Prisma.AppointmentRequestInclude;
+
+/**
  * Fetch an appointment request from the database and build a SchedulingContext.
  * Returns null if the appointment is not found.
  */
@@ -197,10 +217,7 @@ export async function fetchSchedulingContext(
 ): Promise<SchedulingContext | null> {
   const appointmentRequest = await prisma.appointmentRequest.findUnique({
     where: { id: appointmentRequestId },
-    include: {
-      user: { select: { country: true, timezone: true } },
-      therapist: { select: { country: true, timezone: true } },
-    },
+    include: SCHEDULING_CONTEXT_RELATIONS_INCLUDE,
   });
 
   if (!appointmentRequest) {
