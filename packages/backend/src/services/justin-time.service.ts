@@ -45,6 +45,10 @@ import type { ConversationState } from '../types';
 import { buildSystemPrompt } from './system-prompt-builder';
 import { runToolLoop } from './agent-tool-loop';
 import { reconcileStatusAfterReply } from './post-reply-status';
+import {
+  isTerminalAppointmentStatus,
+  alertTerminalAppointmentInbound,
+} from './terminal-appointment-guard';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from '../core/agent/tools';
 import { ConcurrentModificationError } from '../errors';
@@ -402,6 +406,30 @@ export class JustinTimeService {
           // conversation. See `AgentProcessorResult` for the
           // contract.
           loggedWhilePaused: true,
+        };
+      }
+
+      // Terminal-appointment guard. An inbound matched to a CANCELLED or
+      // COMPLETED appointment must not be auto-handled by the agent — the FSM
+      // is terminal and an automated reply on a closed booking is rarely
+      // right. Alert an admin and skip the loop. Placed AFTER the
+      // human-control check so an admin already in control keeps the existing
+      // log-and-replay behaviour; this only affects terminal appointments
+      // that are NOT under human control (the gap this guard closes). The
+      // message is marked processed (no loggedWhilePaused) — there's nothing
+      // for the agent to replay on a closed booking.
+      if (isTerminalAppointmentStatus(appointmentRequest.status)) {
+        const sender = emailEquals(fromEmail, appointmentRequest.userEmail) ? 'client' : 'therapist';
+        alertTerminalAppointmentInbound({
+          appointmentRequestId,
+          status: appointmentRequest.status,
+          therapistName: appointmentRequest.therapistName,
+          sender,
+          traceId: this.traceId,
+        });
+        return {
+          success: true,
+          message: `Email received for ${appointmentRequest.status} appointment — agent skipped, admin alerted`,
         };
       }
 

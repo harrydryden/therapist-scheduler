@@ -1,10 +1,15 @@
 /**
- * End-to-end tests for the four runaway-protection circuits inside
- * `runToolLoop` (the booking-agent tool loop). The helper builders that
- * produce the message strings are pinned by tool-loop-helpers.test.ts,
- * but until this file existed there was no test that drove `runToolLoop`
- * with a scripted Claude and asserted the wiring between a tripped
- * circuit and the `flagForHumanReview` callback.
+ * End-to-end tests for the four runaway-protection circuits inside the two
+ * agent tool loops — `runToolLoop` (booking) and `runAvailabilityToolLoop`
+ * (availability). The helper builders that produce the message strings are
+ * pinned by tool-loop-helpers.test.ts, but until this file existed there was
+ * no test that drove the loops with a scripted Claude and asserted the wiring
+ * between a tripped circuit and the `flagForHumanReview` callback.
+ *
+ * Both loops share the same per-turn guard arithmetic (budget + same-hash);
+ * the availability scenarios at the bottom lock that loop's behaviour before
+ * the shared `ToolTurnGuard` extraction so the refactor is provably
+ * behaviour-preserving for both callers.
  *
  * The wiring matters because a refactor in any of these four pathways
  * — the turn-budget gate, the same-hash guard, the error-breaker, the
@@ -92,7 +97,12 @@ jest.mock('../services/tools-for-stage', () => ({
   getToolsForStage: () => [],
 }));
 
-import { runToolLoop } from '../services/agent-tool-loop';
+import {
+  runToolLoop,
+  runAvailabilityToolLoop,
+  type AvailabilityAgentContext,
+  type AvailabilityConversationState,
+} from '../services/agent-tool-loop';
 import type {
   SchedulingContext,
   ToolExecutionResult,
@@ -125,6 +135,24 @@ function makeConversationState(): ConversationState {
     systemPrompt: 'test',
     messages: [],
   };
+}
+
+function makeAvailabilityContext(
+  overrides: Partial<AvailabilityAgentContext> = {},
+): AvailabilityAgentContext {
+  return {
+    conversationId: 'conv-test',
+    therapistId: 'th-test',
+    therapistName: 'Dr Test',
+    therapistEmail: 'therapist@test.com',
+    therapistCountry: 'UK',
+    kind: 'onboarding',
+    ...overrides,
+  };
+}
+
+function makeAvailabilityState(): AvailabilityConversationState {
+  return { messages: [] };
 }
 
 /** Build a Claude response with one or more tool_use blocks (and optional text). */
@@ -423,5 +451,197 @@ describe('runToolLoop — safety circuit wiring', () => {
     expect(flagForHumanReview.mock.calls[0][0]).toMatch(/error circuit breaker/i);
     expect(flagForHumanReview.mock.calls[0][0]).not.toMatch(/iteration ceiling/i);
     expect(result.flaggedForHumanReview).toBe(true);
+  });
+});
+
+describe('runAvailabilityToolLoop — safety circuit wiring', () => {
+  // The availability loop has no appointment-scoped audit table, so it
+  // surfaces skip buckets via structured logging rather than
+  // auditEventService — but the budget / same-hash / error / iteration
+  // circuits and their flagForHumanReview wiring are identical to the
+  // booking loop. These scenarios lock that behaviour. `remember` is a
+  // non-terminal, non-pure tool here; `mark_complete` is terminal.
+
+  it('TURN_TOOL_BUDGET trip flags for human review and stops the loop', async () => {
+    const tools = Array.from({ length: 13 }, (_, i) => ({
+      name: 'remember',
+      input: { note: `note-${i}`, category: 'context' },
+    }));
+    scriptedResponses = [scriptToolResponse(tools)];
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: true,
+      toolName: toolCall.name,
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-1',
+      'test-av-budget',
+    );
+
+    expect(flagForHumanReview).toHaveBeenCalledTimes(1);
+    expect(flagForHumanReview.mock.calls[0][0]).toMatch(/budget exhausted/i);
+    expect(result.flaggedForHumanReview).toBe(true);
+    expect(state.messages.some((m) => m.role === 'admin' && m.content.includes('budget'))).toBe(
+      true,
+    );
+  });
+
+  it('SAME_HASH_TURN_ABORT trip flags for human review and stops the loop', async () => {
+    const tool = { name: 'remember', input: { note: 'dup', category: 'context' } };
+    scriptedResponses = [scriptToolResponse([tool, tool, tool])];
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: true,
+      toolName: toolCall.name,
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-2',
+      'test-av-same-hash',
+    );
+
+    expect(flagForHumanReview).toHaveBeenCalledTimes(1);
+    expect(flagForHumanReview.mock.calls[0][0]).toMatch(/same tool called/i);
+    expect(result.flaggedForHumanReview).toBe(true);
+    expect(state.messages.some((m) => m.role === 'admin')).toBe(true);
+  });
+
+  it('TURN_ERROR_LIMIT trip flags for human review when tools keep failing', async () => {
+    const tools = [
+      { name: 'remember', input: { note: 'a', category: 'context' } },
+      { name: 'remember', input: { note: 'b', category: 'context' } },
+      { name: 'remember', input: { note: 'c', category: 'context' } },
+    ];
+    scriptedResponses = [scriptToolResponse(tools)];
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: false,
+      toolName: toolCall.name,
+      error: 'boom',
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-3',
+      'test-av-error-breaker',
+    );
+
+    expect(flagForHumanReview).toHaveBeenCalledTimes(1);
+    expect(flagForHumanReview.mock.calls[0][0]).toMatch(/error circuit breaker/i);
+    expect(result.flaggedForHumanReview).toBe(true);
+    expect(result.totalToolErrors).toBeGreaterThanOrEqual(3);
+  });
+
+  it('MAX_TOOL_ITERATIONS hit flags for human review when the agent was still working', async () => {
+    for (let i = 0; i < 8; i++) {
+      scriptedResponses.push(
+        scriptToolResponse([{ name: 'remember', input: { note: `iter-${i}`, category: 'context' } }]),
+      );
+    }
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: true,
+      toolName: toolCall.name,
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-4',
+      'test-av-max-iter',
+    );
+
+    expect(flagForHumanReview).toHaveBeenCalledTimes(1);
+    expect(flagForHumanReview.mock.calls[0][0]).toMatch(/iteration ceiling/i);
+    expect(result.flaggedForHumanReview).toBe(true);
+    expect(result.hitMaxIterations).toBe(true);
+    expect(state.messages.some((m) => m.role === 'admin' && /ceiling/i.test(m.content))).toBe(
+      true,
+    );
+  });
+
+  it('mark_complete terminal tool stops the loop and does NOT flag', async () => {
+    scriptedResponses = [
+      scriptToolResponse([{ name: 'mark_complete', input: { summary: 'Captured 3 windows' } }]),
+    ];
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: true,
+      toolName: toolCall.name,
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-5',
+      'test-av-mark-complete',
+    );
+
+    expect(flagForHumanReview).not.toHaveBeenCalled();
+    expect(result.markedComplete).toBe(true);
+    expect(result.flaggedForHumanReview).toBe(false);
+    expect(result.iterations).toBe(1);
+  });
+
+  it('natural finish on iteration MAX does NOT flag', async () => {
+    for (let i = 0; i < 7; i++) {
+      scriptedResponses.push(
+        scriptToolResponse([{ name: 'remember', input: { note: `iter-${i}`, category: 'context' } }]),
+      );
+    }
+    scriptedResponses.push(scriptTextOnly('All your availability is on file — thanks!'));
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => ({
+      success: true,
+      toolName: toolCall.name,
+    }));
+    const flagForHumanReview = jest.fn();
+    const state = makeAvailabilityState();
+
+    const { result } = await runAvailabilityToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeAvailabilityContext(),
+      { executeToolCall, flagForHumanReview },
+      'av-trace-6',
+      'test-av-natural-finish',
+    );
+
+    expect(flagForHumanReview).not.toHaveBeenCalled();
+    expect(result.flaggedForHumanReview).toBe(false);
+    expect(result.markedComplete).toBe(false);
+    expect(result.hitMaxIterations).toBe(true);
   });
 });

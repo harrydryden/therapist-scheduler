@@ -37,24 +37,20 @@ import {
 import { truncateMessageContent } from './ai-conversation.service';
 import { auditEventService } from './audit-event.service';
 import { getSettingValue } from './settings.service';
-// `PURE_TOOLS` lives in `core/agent/tools/pure-tools.ts` so the
-// dispatcher (which bypasses the human-control gate + idempotency
-// mark for pure tools) and this loop (which bypasses the turn
-// budget) agree about the set. See that module for the full rationale.
-import { PURE_TOOLS } from '../core/agent/tools/pure-tools';
 import { getToolsForStage } from './tools-for-stage';
+// The per-turn budget + same-hash decision logic is shared with the
+// availability loop via ToolTurnGuard. It owns the PURE_TOOLS budget
+// exemption + the message builders, so neither is referenced directly here
+// any more.
+import { ToolTurnGuard } from './agent-turn-guard';
 import {
   appendToolRoundTrip,
-  buildBudgetExhaustedMessage,
   buildErrorBreakerAdminMessage,
   buildErrorBreakerFlagReason,
   buildMaxIterationsAdminMessage,
   buildMaxIterationsFlagReason,
-  buildSameHashAbortMessage,
-  buildSameHashBlockedMessage,
   buildSkipMessage,
   buildTurnBreakerReason,
-  computeTurnHash,
   parseClaudeResponse,
 } from './tool-loop-helpers';
 import type { ToolExecutionResult, SchedulingContext } from './scheduling-context.service';
@@ -96,8 +92,8 @@ const TURN_ERROR_LIMIT = 3;
  *  one-off availability windows in a single message — each window is one
  *  `record_availability_window` call, and operators reported the prior
  *  budget tripping on ~5-date replies once `resolve_local_time` calls
- *  were also counted. With pure tools now exempt (see `PURE_TOOLS`
- *  below) the new budget gates ~12 state-changing calls per turn.
+ *  were also counted. With pure tools now exempt (ToolTurnGuard consults
+ *  `PURE_TOOLS`) the budget gates ~12 state-changing calls per turn.
  *  Loop-style runaway is still caught by the SAME_HASH_TURN_ABORT
  *  guard, not by this budget. */
 const TURN_TOOL_BUDGET = 12;
@@ -112,10 +108,11 @@ const SAME_HASH_TURN_ABORT = 3;
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
-// Pure helpers (computeTurnHash, buildSkipMessage, parseClaudeResponse,
-// the turn-guard message builders, and appendToolRoundTrip) live in
-// tool-loop-helpers.ts so they can be unit-tested without dragging in
-// the loop's anthropic + prisma + settings module graph.
+// Pure helpers (buildSkipMessage, parseClaudeResponse, the breaker-message
+// builders, and appendToolRoundTrip) live in tool-loop-helpers.ts; the
+// per-turn budget + same-hash decision lives in agent-turn-guard.ts. Both
+// are unit-tested without dragging in the loop's anthropic + prisma +
+// settings module graph.
 
 /**
  * Shared Anthropic call shape used by both tool loops. Centralises model
@@ -539,13 +536,13 @@ export async function runToolLoop(
   const executedTools: ExecutedTool[] = [];
   let flaggedForHumanReview = false;
 
-  // Turn-scope counters for the budget + same-hash guards. Both live in
-  // this closure so they cumulate across iterations within one runToolLoop
-  // invocation but reset cleanly per invocation.
-  let toolsThisTurn = 0;
-  const turnHashCounts = new Map<string, number>();
-  let budgetExhausted = false;
-  let sameHashAborted = false;
+  // Per-turn budget + same-hash gate. Scoped to this runToolLoop invocation
+  // (counters cumulate across iterations, reset per invocation). The decision
+  // arithmetic is shared with the availability loop via ToolTurnGuard.
+  const turnGuard = new ToolTurnGuard({
+    budget: TURN_TOOL_BUDGET,
+    sameHashAbortLimit: SAME_HASH_TURN_ABORT,
+  });
 
   // Set to true when the loop exits because Claude returned no tool calls
   // (the canonical "I'm done" signal). Used to distinguish a natural finish
@@ -628,90 +625,29 @@ export async function runToolLoop(
       let toolResult: string;
       let isError = false;
 
-      // Pure tools (compute-only, no side effects) bypass the turn
-      // budget. See PURE_TOOLS for the contract — `resolve_local_time`
-      // is prompted before EVERY `record_availability_window`, so
-      // counting it doubled the budget pressure on multi-date
-      // therapist replies. Excluding it gates the budget on
-      // state-changing calls only.
-      const isPureTool = PURE_TOOLS.has(toolCall.name);
-
-      // Turn budget guard. Once exhausted, push a synthetic result for
-      // every remaining tool_use block in this iteration (Anthropic
-      // requires one result per use) but do not execute. The trip is
-      // flagged after the for-loop completes.
-      if (!isPureTool && toolsThisTurn >= TURN_TOOL_BUDGET) {
-        budgetExhausted = true;
+      // Per-turn budget + same-hash gate (shared with the availability loop
+      // via ToolTurnGuard). On a skip we still push one tool_result per
+      // tool_use block (Anthropic requires one result per use) and audit the
+      // short-circuit by bucket — the executor never sees the block, so the
+      // audit row is the only post-incident signal that a call was
+      // suppressed. The budget/abort trips are escalated after the for-loop.
+      const decision = turnGuard.evaluate(toolCall.name, toolCall.input);
+      if (decision.kind === 'skip') {
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: buildBudgetExhaustedMessage(toolCall.name, TURN_TOOL_BUDGET),
-          is_error: false,
-        });
-        // Audit the short-circuit. The executor never sees this tool_use
-        // block, so without this the only signal that something was
-        // suppressed lives in the assistant message; the audit log lets a
-        // post-incident triage break "51/50" down by bucket.
-        auditEventService.logToolExecuted(context.appointmentRequestId, {
-          traceId,
-          toolName: toolCall.name,
-          result: 'skipped',
-          bucket: 'turn_budget_exhausted',
-        });
-        continue;
-      }
-
-      // Same-hash-in-turn guard. 1st occurrence executes; 2nd is
-      // short-circuited with a directive (model gets one chance to
-      // pivot); SAME_HASH_TURN_ABORT-th aborts the loop entirely.
-      const turnHash = computeTurnHash(toolCall.name, toolCall.input);
-      const seenCount = (turnHashCounts.get(turnHash) ?? 0) + 1;
-      turnHashCounts.set(turnHash, seenCount);
-
-      if (seenCount >= SAME_HASH_TURN_ABORT) {
-        sameHashAborted = true;
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolCall.id,
-          content: buildSameHashAbortMessage(toolCall.name, seenCount),
+          content: decision.content,
           is_error: false,
         });
         auditEventService.logToolExecuted(context.appointmentRequestId, {
           traceId,
           toolName: toolCall.name,
           result: 'skipped',
-          bucket: 'same_hash_aborted',
+          bucket: decision.bucket,
         });
         continue;
       }
 
-      if (seenCount > 1) {
-        // 2nd occurrence: skip with directive, still costs a budget slot
-        // for state-changing tools (a tool_use block was emitted and
-        // answered). Pure tools don't tick the budget — their result
-        // is deterministic, so a repeat call is just wasted compute.
-        if (!isPureTool) toolsThisTurn++;
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolCall.id,
-          content: buildSameHashBlockedMessage(toolCall.name),
-          is_error: false,
-        });
-        auditEventService.logToolExecuted(context.appointmentRequestId, {
-          traceId,
-          toolName: toolCall.name,
-          result: 'skipped',
-          bucket: 'same_hash_blocked',
-        });
-        continue;
-      }
-
-      // First occurrence — execute. Increment before the call so a thrown
-      // exception still counts against the budget. Pure tools (see
-      // PURE_TOOLS) don't count — they're side-effect-free and the
-      // prompt mandates calling `resolve_local_time` once per window
-      // recorded, which doubles the budget hit on multi-date replies.
-      if (!isPureTool) toolsThisTurn++;
       const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
@@ -878,20 +814,20 @@ export async function runToolLoop(
     // Both trip after the inner for-loop so all tool_results for this
     // iteration are collected (Anthropic requires one result per use)
     // before the while loop exits without feeding them back to Claude.
-    if (!stopLoop && !flaggedForHumanReview && (budgetExhausted || sameHashAborted)) {
+    if (!stopLoop && !flaggedForHumanReview && (turnGuard.budgetExhausted || turnGuard.sameHashAborted)) {
       const reason = buildTurnBreakerReason(
-        budgetExhausted ? 'budget' : 'same_hash',
+        turnGuard.budgetExhausted ? 'budget' : 'same_hash',
         { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
       );
       logger.warn(
         {
           traceId,
           appointmentRequestId: context.appointmentRequestId,
-          toolsThisTurn,
+          toolsThisTurn: turnGuard.toolsThisTurn,
           iteration,
-          budgetExhausted,
-          sameHashAborted,
-          bucket: budgetExhausted ? 'turn_budget_exhausted' : 'same_hash_aborted',
+          budgetExhausted: turnGuard.budgetExhausted,
+          sameHashAborted: turnGuard.sameHashAborted,
+          bucket: turnGuard.budgetExhausted ? 'turn_budget_exhausted' : 'same_hash_aborted',
         },
         `${logContext} - Turn-level circuit breaker tripped — ${reason}`,
       );
@@ -1106,13 +1042,12 @@ export async function runAvailabilityToolLoop(
   let flaggedForHumanReview = false;
   let markedComplete = false;
 
-  // Turn-scope counters for the budget + same-hash guards (mirrors the
-  // booking loop). Closure-scoped so they cumulate across iterations
-  // within one runAvailabilityToolLoop invocation and reset per invocation.
-  let toolsThisTurn = 0;
-  const turnHashCounts = new Map<string, number>();
-  let budgetExhausted = false;
-  let sameHashAborted = false;
+  // Per-turn budget + same-hash gate, shared with the booking loop via
+  // ToolTurnGuard. Scoped to this runAvailabilityToolLoop invocation.
+  const turnGuard = new ToolTurnGuard({
+    budget: TURN_TOOL_BUDGET,
+    sameHashAbortLimit: SAME_HASH_TURN_ABORT,
+  });
 
   // Mirrors the booking loop: true when Claude returns no tool calls (the
   // canonical "I'm done" signal), distinguishing a natural finish from
@@ -1176,92 +1111,40 @@ export async function runAvailabilityToolLoop(
       let toolResult: string;
       let isError = false;
 
-      // Pure tools (currently just `resolve_local_time`) bypass the
-      // budget — see PURE_TOOLS at the top of this file. The prompt
-      // mandates calling resolve_local_time before every recorded
-      // window, so counting it doubled the budget hit on multi-date
-      // therapist replies.
-      const isPureTool = PURE_TOOLS.has(toolCall.name);
-
-      // Turn budget guard (mirrors booking loop). The booking loop writes
-      // an audit event via auditEventService.logToolExecuted; the
-      // availability loop has no equivalent table (audit events are
-      // appointment-scoped, this loop runs on TherapistConversation), so
-      // we surface the bucket through structured logging instead. Same
-      // searchable signal in logs without a schema lift.
-      if (!isPureTool && toolsThisTurn >= TURN_TOOL_BUDGET) {
-        budgetExhausted = true;
+      // Per-turn budget + same-hash gate (shared with the booking loop via
+      // ToolTurnGuard). The booking loop records skips via auditEventService;
+      // this loop has no appointment-scoped audit table (it runs on
+      // TherapistConversation), so it surfaces the bucket through structured
+      // logging instead — same searchable signal, no schema lift. Levels are
+      // preserved per bucket: warn for budget/abort, info for the soft 2nd-
+      // occurrence block.
+      const decision = turnGuard.evaluate(toolCall.name, toolCall.input);
+      if (decision.kind === 'skip') {
         toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
-          content: buildBudgetExhaustedMessage(toolCall.name, TURN_TOOL_BUDGET),
+          content: decision.content,
           is_error: false,
         });
-        logger.warn(
-          {
-            traceId,
-            conversationId: context.conversationId,
-            toolName: toolCall.name,
-            bucket: 'turn_budget_exhausted',
-          },
-          `${logContext} - availability turn budget exhausted on tool ${toolCall.name}`,
-        );
+        if (decision.bucket === 'turn_budget_exhausted') {
+          logger.warn(
+            { traceId, conversationId: context.conversationId, toolName: toolCall.name, bucket: decision.bucket },
+            `${logContext} - availability turn budget exhausted on tool ${toolCall.name}`,
+          );
+        } else if (decision.bucket === 'same_hash_aborted') {
+          logger.warn(
+            { traceId, conversationId: context.conversationId, toolName: toolCall.name, seenCount: decision.seenCount, bucket: decision.bucket },
+            `${logContext} - availability same-hash abort on tool ${toolCall.name}`,
+          );
+        } else {
+          logger.info(
+            { traceId, conversationId: context.conversationId, toolName: toolCall.name, seenCount: decision.seenCount, bucket: decision.bucket },
+            `${logContext} - availability same-hash 2nd-occurrence skip on tool ${toolCall.name}`,
+          );
+        }
         continue;
       }
 
-      // Same-hash-in-turn guard (mirrors booking loop).
-      const turnHash = computeTurnHash(toolCall.name, toolCall.input);
-      const seenCount = (turnHashCounts.get(turnHash) ?? 0) + 1;
-      turnHashCounts.set(turnHash, seenCount);
-
-      if (seenCount >= SAME_HASH_TURN_ABORT) {
-        sameHashAborted = true;
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolCall.id,
-          content: buildSameHashAbortMessage(toolCall.name, seenCount),
-          is_error: false,
-        });
-        logger.warn(
-          {
-            traceId,
-            conversationId: context.conversationId,
-            toolName: toolCall.name,
-            seenCount,
-            bucket: 'same_hash_aborted',
-          },
-          `${logContext} - availability same-hash abort on tool ${toolCall.name}`,
-        );
-        continue;
-      }
-
-      if (seenCount > 1) {
-        // Pure tools don't tick the budget on the 2nd occurrence
-        // either — their result is deterministic, so a repeat call
-        // is wasted compute, not a budget concern.
-        if (!isPureTool) toolsThisTurn++;
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolCall.id,
-          content: buildSameHashBlockedMessage(toolCall.name),
-          is_error: false,
-        });
-        logger.info(
-          {
-            traceId,
-            conversationId: context.conversationId,
-            toolName: toolCall.name,
-            seenCount,
-            bucket: 'same_hash_blocked',
-          },
-          `${logContext} - availability same-hash 2nd-occurrence skip on tool ${toolCall.name}`,
-        );
-        continue;
-      }
-
-      // Pure tools (PURE_TOOLS) don't count against the budget. See
-      // the top of the file for the rationale.
-      if (!isPureTool) toolsThisTurn++;
       const result = await callbacks.executeToolCall(toolCall, context);
 
       if (result.success) {
@@ -1318,19 +1201,19 @@ export async function runAvailabilityToolLoop(
 
     // Turn-level circuit breakers (budget / same-hash). Mirror the booking
     // loop and fire before the error breaker so the right cause is logged.
-    if (!stopLoop && !flaggedForHumanReview && !markedComplete && (budgetExhausted || sameHashAborted)) {
+    if (!stopLoop && !flaggedForHumanReview && !markedComplete && (turnGuard.budgetExhausted || turnGuard.sameHashAborted)) {
       const reason = buildTurnBreakerReason(
-        budgetExhausted ? 'budget' : 'same_hash',
+        turnGuard.budgetExhausted ? 'budget' : 'same_hash',
         { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
       );
       logger.warn(
         {
           traceId,
           conversationId: context.conversationId,
-          toolsThisTurn,
+          toolsThisTurn: turnGuard.toolsThisTurn,
           iteration,
-          budgetExhausted,
-          sameHashAborted,
+          budgetExhausted: turnGuard.budgetExhausted,
+          sameHashAborted: turnGuard.sameHashAborted,
         },
         `${logContext} - availability turn-level circuit breaker tripped — ${reason}`,
       );
