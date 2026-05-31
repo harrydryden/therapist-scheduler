@@ -358,9 +358,10 @@ export async function adminRoutes(fastify: FastifyInstance) {
           ...result,
         });
       } catch (err) {
-        // Surface user-actionable errors (disabled, already-sent) as 400s
-        // so the UI can show the message; everything else is a 500.
-        if (err instanceof Error && /disabled|already sent/i.test(err.message)) {
+        // Surface user-actionable errors (disabled, already-sent, no
+        // available therapists) as 400s so the UI can show the message;
+        // everything else is a 500.
+        if (err instanceof Error && /disabled|already sent|no available therapists/i.test(err.message)) {
           return Errors.badRequest(reply, err.message);
         }
         logger.error({ err, requestId }, 'Failed to trigger weekly mailing');

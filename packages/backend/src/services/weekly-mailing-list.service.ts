@@ -152,6 +152,17 @@ class WeeklyMailingListService extends LockedPeriodicService {
       throw new Error('Email already sent this week. Wait for the 7-day window to pass or use skipAlreadySentCheck.');
     }
 
+    // Availability gate. The weekly email exists to drive bookings, so it must
+    // not go out when the directory has no bookable therapist. The periodic
+    // tick enforces this via evaluateSendDecision (`no-therapists`); forceSend
+    // must too, otherwise the admin "Send now" button silently bypasses the
+    // invariant and emails users to a directory they can't book from.
+    const availableTherapists = await this.getAvailableTherapists();
+    if (availableTherapists.length === 0) {
+      logger.warn({ checkId }, 'No available therapists — refusing to force-send weekly mailing');
+      throw new Error('No available therapists right now — the weekly email is not sent when there are no bookable therapists on the site.');
+    }
+
     const users = await this.getEligibleUsers();
     if (users.length === 0) {
       logger.info({ checkId }, 'No eligible users for weekly mailing');

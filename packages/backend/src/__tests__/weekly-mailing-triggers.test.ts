@@ -352,3 +352,52 @@ describe('Weekly Mailing — previewSend()', () => {
     expect(preview.bodyPreview).not.toMatch(/booking link expires|new personal booking link/);
   });
 });
+
+// ============================================
+// forceSend() availability gate
+// ============================================
+
+describe('Weekly Mailing — forceSend() availability gate', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    testRedis.__store.clear();
+    setupSettings();
+
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([testUser]);
+    (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.therapist.findMany as jest.Mock).mockResolvedValue(testTherapistRows);
+    (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
+    (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
+  });
+
+  it('refuses to send (throws) when the directory has no active therapists', async () => {
+    (prisma.therapist.findMany as jest.Mock).mockResolvedValue([]);
+
+    await expect(weeklyMailingListService.forceSend()).rejects.toThrow(/no available therapists/i);
+    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('refuses to send when every active therapist is frozen/unavailable', async () => {
+    (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue(
+      testTherapistRows.map((t) => t.notionId),
+    );
+
+    await expect(weeklyMailingListService.forceSend()).rejects.toThrow(/no available therapists/i);
+    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('sends when at least one therapist is available', async () => {
+    const result = await weeklyMailingListService.forceSend();
+
+    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(result.sent).toBe(1);
+  });
+
+  it('enforces the gate even with skipAlreadySentCheck=true (internal tooling)', async () => {
+    (prisma.therapist.findMany as jest.Mock).mockResolvedValue([]);
+
+    await expect(weeklyMailingListService.forceSend(true)).rejects.toThrow(/no available therapists/i);
+    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+  });
+});
