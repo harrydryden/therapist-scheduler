@@ -14,6 +14,10 @@
  *
  * The fix wraps the transition in the same InvalidTransitionError-as-no-op
  * idiom startScheduling already uses for its pending → contacted call.
+ *
+ * Also covers the confirmed-reschedule branch: its write is status-guarded
+ * (updateMany WHERE status='confirmed') so a concurrent cancel/complete can't
+ * resurrect reschedule fields onto a terminal row.
  */
 
 jest.mock('../utils/logger', () => ({
@@ -27,11 +31,11 @@ jest.mock('../domain/scheduling/lifecycle', () => ({
   },
 }));
 
-const appointmentUpdateMock = jest.fn();
+const appointmentUpdateManyMock = jest.fn();
 jest.mock('../utils/database', () => ({
   prisma: {
     appointmentRequest: {
-      update: (...args: unknown[]) => appointmentUpdateMock(...args),
+      updateMany: (...args: unknown[]) => appointmentUpdateManyMock(...args),
     },
   },
 }));
@@ -50,6 +54,7 @@ function tool(toolName: string) {
 beforeEach(() => {
   jest.clearAllMocks();
   transitionToNegotiatingMock.mockResolvedValue({ success: true });
+  appointmentUpdateManyMock.mockResolvedValue({ count: 1 });
 });
 
 describe('reconcileStatusAfterReply — pending/contacted → negotiating', () => {
@@ -69,7 +74,7 @@ describe('reconcileStatusAfterReply — pending/contacted → negotiating', () =
         appointmentId: APT,
         source: 'agent',
       });
-      expect(appointmentUpdateMock).not.toHaveBeenCalled();
+      expect(appointmentUpdateManyMock).not.toHaveBeenCalled();
     },
   );
 
@@ -127,8 +132,6 @@ describe('reconcileStatusAfterReply — pending/contacted → negotiating', () =
 
 describe('reconcileStatusAfterReply — confirmed appointment', () => {
   it('clears the confirmed datetime and flags reschedule when initiate_reschedule ran', async () => {
-    appointmentUpdateMock.mockResolvedValue({ id: APT });
-
     await reconcileStatusAfterReply({
       appointmentRequest: { id: APT, status: 'confirmed', confirmedDateTime: 'Mon 3 Feb 10am' },
       appointmentRequestId: APT,
@@ -138,9 +141,10 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
     });
 
     expect(transitionToNegotiatingMock).not.toHaveBeenCalled();
-    expect(appointmentUpdateMock).toHaveBeenCalledTimes(1);
-    const arg = appointmentUpdateMock.mock.calls[0][0];
-    expect(arg.where).toEqual({ id: APT });
+    expect(appointmentUpdateManyMock).toHaveBeenCalledTimes(1);
+    const arg = appointmentUpdateManyMock.mock.calls[0][0];
+    // Status-guarded so a concurrent cancel/complete can't be overwritten.
+    expect(arg.where).toEqual({ id: APT, status: 'confirmed' });
     expect(arg.data).toMatchObject({
       reschedulingInProgress: true,
       reschedulingInitiatedBy: FROM,
@@ -148,6 +152,24 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
       confirmedDateTime: null,
       confirmedDateTimeParsed: null,
     });
+  });
+
+  it('does not throw when the row drifted off confirmed before the reschedule write (count 0)', async () => {
+    // A concurrent cancel/complete landed between the tool loop and here;
+    // the status-guarded updateMany matches no rows. Must be a benign no-op.
+    appointmentUpdateManyMock.mockResolvedValue({ count: 0 });
+
+    await expect(
+      reconcileStatusAfterReply({
+        appointmentRequest: { id: APT, status: 'confirmed', confirmedDateTime: 'Mon 3 Feb 10am' },
+        appointmentRequestId: APT,
+        fromEmail: FROM,
+        executedTools: [tool('initiate_reschedule')],
+        traceId: TRACE,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(appointmentUpdateManyMock).toHaveBeenCalledTimes(1);
   });
 
   it('is a no-op when mark_scheduling_complete finalised the reschedule', async () => {
@@ -159,7 +181,7 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
       traceId: TRACE,
     });
 
-    expect(appointmentUpdateMock).not.toHaveBeenCalled();
+    expect(appointmentUpdateManyMock).not.toHaveBeenCalled();
     expect(transitionToNegotiatingMock).not.toHaveBeenCalled();
   });
 
@@ -172,7 +194,7 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
       traceId: TRACE,
     });
 
-    expect(appointmentUpdateMock).not.toHaveBeenCalled();
+    expect(appointmentUpdateManyMock).not.toHaveBeenCalled();
     expect(transitionToNegotiatingMock).not.toHaveBeenCalled();
   });
 });
@@ -187,7 +209,7 @@ describe('reconcileStatusAfterReply — cancelled appointment', () => {
       traceId: TRACE,
     });
 
-    expect(appointmentUpdateMock).not.toHaveBeenCalled();
+    expect(appointmentUpdateManyMock).not.toHaveBeenCalled();
     expect(transitionToNegotiatingMock).not.toHaveBeenCalled();
   });
 });

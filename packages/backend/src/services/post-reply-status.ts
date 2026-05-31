@@ -112,8 +112,14 @@ export async function reconcileStatusAfterReply(
       // already advanced the JSON checkpoint via the `initiated_reschedule`
       // action, and the subsequent storeConversationState call will sync
       // the denormalized column from the JSON.
-      await prisma.appointmentRequest.update({
-        where: { id: appointmentRequestId },
+      //
+      // Status-guarded (updateMany WHERE status='confirmed') so a concurrent
+      // cancel/complete landing between the tool loop and here can't resurrect
+      // reschedule fields (confirmedDateTime=null, reschedulingInProgress=true)
+      // onto a terminal row. The normal path is unaffected — initiate_reschedule
+      // leaves the row 'confirmed'.
+      const rescheduleUpdate = await prisma.appointmentRequest.updateMany({
+        where: { id: appointmentRequestId, status: 'confirmed' },
         data: {
           reschedulingInProgress: true,
           reschedulingInitiatedBy: fromEmail,
@@ -121,12 +127,18 @@ export async function reconcileStatusAfterReply(
           confirmedDateTime: null,
           confirmedDateTimeParsed: null,
         },
-        select: { id: true },
       });
-      logger.info(
-        { traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
-        'Agent initiated reschedule for confirmed appointment - cleared stale date/time',
-      );
+      if (rescheduleUpdate.count === 0) {
+        logger.warn(
+          { traceId, appointmentRequestId },
+          'Reschedule flag-update skipped — appointment no longer confirmed (concurrent cancel/complete)',
+        );
+      } else {
+        logger.info(
+          { traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
+          'Agent initiated reschedule for confirmed appointment - cleared stale date/time',
+        );
+      }
     } else {
       // Informational reply — leave appointment state untouched.
       logger.info(
