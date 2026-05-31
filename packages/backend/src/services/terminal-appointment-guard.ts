@@ -24,15 +24,26 @@
 import { logger } from '../utils/logger';
 import { runBackgroundTask } from '../utils/background-task';
 import { slackNotificationService } from './slack-notification.service';
+import { TERMINAL_STATUSES } from '../constants';
 
 /**
- * Appointment statuses on which the booking agent must not auto-respond.
- * Both are terminal in the lifecycle FSM.
+ * Whether the booking agent must skip auto-responding to an inbound matched
+ * to this appointment status — true for the terminal lifecycle states
+ * (completed, cancelled).
+ *
+ * Deliberately keyed off the SAME canonical `TERMINAL_STATUSES` the
+ * thread-matcher uses (utils/thread-matcher.ts). That matcher forwards
+ * deterministic replies (thread-id / In-Reply-To / tracking-code) to
+ * terminal appointments WITHOUT status-filtering — only the legacy
+ * subject/sender fallback excludes them — and THIS guard is what catches
+ * those forwarded inbounds downstream in processEmailReply. Sharing the one
+ * constant (rather than re-listing the statuses here) guarantees the guard
+ * recognises exactly the set the matcher lets through: add a status to
+ * TERMINAL_STATUSES and both move together, with no silent gap where the
+ * matcher routes an inbound the guard then fails to recognise as terminal.
  */
-export const TERMINAL_AGENT_STATUSES: readonly string[] = ['cancelled', 'completed'];
-
 export function isTerminalAppointmentStatus(status: string): boolean {
-  return TERMINAL_AGENT_STATUSES.includes(status);
+  return (TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
 /**

@@ -25,10 +25,10 @@ jest.mock('../services/slack-notification.service', () => ({
 }));
 
 import {
-  TERMINAL_AGENT_STATUSES,
   isTerminalAppointmentStatus,
   alertTerminalAppointmentInbound,
 } from '../services/terminal-appointment-guard';
+import { TERMINAL_STATUSES } from '../constants';
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -36,7 +36,17 @@ describe('isTerminalAppointmentStatus', () => {
   it('is true for cancelled and completed', () => {
     expect(isTerminalAppointmentStatus('cancelled')).toBe(true);
     expect(isTerminalAppointmentStatus('completed')).toBe(true);
-    expect([...TERMINAL_AGENT_STATUSES].sort()).toEqual(['cancelled', 'completed']);
+  });
+
+  it('agrees with the canonical TERMINAL_STATUSES (no drift from the matcher)', () => {
+    // The guard must recognise EXACTLY the terminal set the thread-matcher
+    // forwards deterministic replies to — otherwise the matcher could route
+    // an inbound to a terminal appointment the guard fails to short-circuit.
+    // Pinning against the shared constant catches that drift at build time.
+    for (const status of TERMINAL_STATUSES) {
+      expect(isTerminalAppointmentStatus(status)).toBe(true);
+    }
+    expect([...TERMINAL_STATUSES].sort()).toEqual(['cancelled', 'completed']);
   });
 
   it('is false for every active/in-flight status', () => {
