@@ -50,6 +50,7 @@ import { ConcurrentModificationError } from '../errors';
 import { emailEquals } from '../utils/email-equals';
 import {
   buildSchedulingContext,
+  SCHEDULING_CONTEXT_RELATIONS_INCLUDE,
   type SchedulingContext,
   type ToolExecutionResult,
   type ConversationMessage,
@@ -230,12 +231,14 @@ export class JustinTimeService {
     try {
       // Get the appointment request along with the related user/therapist
       // so we can determine each party's country (and timezone) for the agent.
+      // Uses the shared SCHEDULING_CONTEXT_RELATIONS_INCLUDE so the nested
+      // select matches what buildSchedulingContext reads — notably the
+      // explicit `timezone` column, which a hand-rolled country-only include
+      // previously dropped, re-asking the user/therapist for their location
+      // every turn.
       const appointmentRequest = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
-        include: {
-          user: { select: { country: true } },
-          therapist: { select: { country: true } },
-        },
+        include: SCHEDULING_CONTEXT_RELATIONS_INCLUDE,
       });
 
       if (!appointmentRequest) {
