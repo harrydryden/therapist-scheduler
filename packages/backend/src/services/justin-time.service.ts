@@ -44,6 +44,7 @@ import type { ConversationState } from '../types';
 // Extracted modules
 import { buildSystemPrompt } from './system-prompt-builder';
 import { runToolLoop } from './agent-tool-loop';
+import { reconcileStatusAfterReply } from './post-reply-status';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from '../core/agent/tools';
 import { ConcurrentModificationError } from '../errors';
@@ -613,7 +614,13 @@ ${formatClassificationForPrompt(emailClassification)}`;
       }
 
       // Update status based on current state and incoming email context
-      await this.updateAppointmentStatus(appointmentRequest, appointmentRequestId, fromEmail, executedTools);
+      await reconcileStatusAfterReply({
+        appointmentRequest,
+        appointmentRequestId,
+        fromEmail,
+        executedTools,
+        traceId: this.traceId,
+      });
 
       return {
         success: true,
@@ -697,89 +704,6 @@ ${formatClassificationForPrompt(emailClassification)}`;
       logger.warn(
         { traceId: this.traceId, error: trackingError },
         'Failed to calculate response time'
-      );
-    }
-  }
-
-  /**
-   * Update appointment status based on the executed tools and current state.
-   * Encapsulates the post-tool-loop status transition logic.
-   */
-  private async updateAppointmentStatus(
-    appointmentRequest: {
-      id: string;
-      status: string;
-      confirmedDateTime?: string | null;
-      reschedulingInProgress?: boolean | null;
-      therapistName: string;
-    },
-    appointmentRequestId: string,
-    fromEmail: string,
-    executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>,
-  ): Promise<void> {
-    // Valid transitions:
-    // - pending -> negotiating (first email received)
-    // - contacted -> negotiating (ongoing negotiation)
-    // - confirmed + rescheduling possible -> set reschedulingInProgress flag
-    // - cancelled -> no status change (terminal)
-    // FIX #21: Use lifecycle service instead of direct Prisma update for audit trail & consistency
-    const validTransitionStates = ['pending', 'contacted'];
-    if (validTransitionStates.includes(appointmentRequest.status)) {
-      await appointmentLifecycleService.transitionToNegotiating({
-        appointmentId: appointmentRequestId,
-        source: 'agent',
-      });
-      logger.info(
-        { traceId: this.traceId, appointmentRequestId, oldStatus: appointmentRequest.status },
-        'Status transitioned to negotiating via lifecycle service'
-      );
-    } else if (appointmentRequest.status === 'confirmed') {
-      // Confirmed appointment received an email - could be a rescheduling request
-      // or just an informational reply (e.g. acknowledging a meeting link check).
-      const completedReschedule = executedTools.some(
-        (t) => t.toolName === 'mark_scheduling_complete'
-      );
-      const initiatedReschedule = executedTools.some(
-        (t) => t.toolName === 'initiate_reschedule'
-      );
-
-      if (completedReschedule) {
-        logger.info(
-          { traceId: this.traceId, appointmentRequestId },
-          'Skipping rescheduling flag update - mark_scheduling_complete already finalized the reschedule'
-        );
-      } else if (initiatedReschedule) {
-        // Agent confirmed this is a reschedule. Clear the confirmed date/time.
-        // checkpointStage is intentionally NOT set here — the agent tool loop
-        // already advanced the JSON checkpoint via the `initiated_reschedule`
-        // action, and the subsequent storeConversationState call will sync
-        // the denormalized column from the JSON.
-        await prisma.appointmentRequest.update({
-          where: { id: appointmentRequestId },
-          data: {
-            reschedulingInProgress: true,
-            reschedulingInitiatedBy: fromEmail,
-            previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
-            confirmedDateTime: null,
-            confirmedDateTimeParsed: null,
-          },
-          select: { id: true },
-        });
-        logger.info(
-          { traceId: this.traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
-          'Agent initiated reschedule for confirmed appointment - cleared stale date/time'
-        );
-      } else {
-        // Informational reply — leave appointment state untouched.
-        logger.info(
-          { traceId: this.traceId, appointmentRequestId, executedToolNames: executedTools.map(t => t.toolName) },
-          'Email received for confirmed appointment - no reschedule initiated, treating as informational'
-        );
-      }
-    } else if (appointmentRequest.status === 'cancelled') {
-      logger.warn(
-        { traceId: this.traceId, appointmentRequestId, status: appointmentRequest.status },
-        'Received email for cancelled appointment - not updating status'
       );
     }
   }
