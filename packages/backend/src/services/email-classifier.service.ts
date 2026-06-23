@@ -56,6 +56,11 @@ export interface EmailClassification {
   therapistConfirmation: TherapistConfirmation | null;
   isFromTherapist: boolean;
   urgencyLevel: 'low' | 'medium' | 'high';
+  // When set, the email raised a topic outside the scheduling agent's
+  // remit (pay/recruitment/clinical/complaint). Drives a human-review
+  // escalation in needsSpecialHandling and a strong warning in the prompt
+  // so the agent flags rather than improvises. See OUT_OF_SCOPE_PATTERNS.
+  outOfScopeReason?: 'compensation' | 'recruitment' | 'clinical' | 'complaint_legal';
   suggestedAction?: string; // Hint for the agent
   flags: {
     mentionsMultipleSlots: boolean;
@@ -238,6 +243,63 @@ const CONFIRMATION_PATTERNS = {
     /(?:https?:\/\/)?calendly\.com\/[\w-]+/i,
   ],
 };
+
+// Out-of-scope topic detection. The scheduling agent's remit is booking
+// times — these topics belong to a human (recruitment, accounts, clinical
+// team, complaints/legal). This is a deterministic backstop to the system
+// prompt's "Out-of-Scope Topics" rule: even if the agent fails to flag,
+// needsSpecialHandling escalates and an admin is alerted. Patterns are kept
+// high-precision because genuine scheduling emails rarely contain these
+// terms — better to miss a borderline case than to over-escalate routine
+// booking chatter. Order matters: the first matching group wins, and
+// clinical/safeguarding is checked first so a crisis is never mislabelled
+// as a pay question.
+type OutOfScopeReason = NonNullable<EmailClassification['outOfScopeReason']>;
+const OUT_OF_SCOPE_PATTERNS: { reason: OutOfScopeReason; patterns: RegExp[] }[] = [
+  {
+    reason: 'clinical',
+    patterns: [
+      /(?:suicid|self.?harm|kill myself|harm myself|end my life|in crisis)/i,
+      /(?:medical|clinical|therapeutic)\s+advice/i,
+      /(?:diagnos(?:e|is|ed)|prescri(?:be|ption)|medication)/i,
+    ],
+  },
+  {
+    reason: 'complaint_legal',
+    patterns: [
+      /(?:formal\s+complaint|wish to complain|making a complaint)/i,
+      /(?:legal\s+action|solicitor|lawyer|gdpr|data\s+protection|right to erasure|safeguarding)/i,
+    ],
+  },
+  {
+    reason: 'compensation',
+    patterns: [
+      /(?:pay\s+band|hourly\s+rate|day\s+rate|fee\s+structure|salary|my\s+wage)/i,
+      /(?:how much (?:do|will) (?:i|we) (?:get|be)\s+paid|when (?:do|will) i get paid|getting paid|rate of pay|remunerat|compensation\s+(?:package|for))/i,
+    ],
+  },
+  {
+    reason: 'recruitment',
+    patterns: [
+      /(?:hiring\s+process|interview\s+(?:stage|process)|recruitment\s+(?:process|team))/i,
+      /(?:employment\s+(?:terms|contract)|job\s+description|the\s+role\s+(?:involve|entail|itself))/i,
+      /(?:still\s+(?:a\s+)?good\s+fit|good\s+fit\s+for\s+(?:the|this)\s+role|am i (?:hired|accepted|being considered))/i,
+    ],
+  },
+];
+
+/**
+ * Detect whether the email raises a topic outside scheduling. Returns the
+ * first matching reason (clinical/safeguarding checked first), or null.
+ */
+function detectOutOfScopeTopic(text: string): OutOfScopeReason | null {
+  for (const group of OUT_OF_SCOPE_PATTERNS) {
+    for (const pattern of group.patterns) {
+      if (pattern.test(text)) return group.reason;
+    }
+  }
+  return null;
+}
 
 // Auto-reply detection — the sender's mailbox auto-responded.
 // They are currently unreachable and won't see our emails until they return.
@@ -616,6 +678,7 @@ export function classifyEmail(
 
   const autoReply = isAutoReply(emailBody, autoSubmitted);
   const futureAbsence = hasFutureAbsenceMention(emailBody);
+  const outOfScopeReason = detectOutOfScopeTopic(emailBody) ?? undefined;
 
   const flags = {
     mentionsMultipleSlots: extractedSlots.length > 1,
@@ -635,6 +698,7 @@ export function classifyEmail(
     therapistConfirmation,
     isFromTherapist,
     urgencyLevel,
+    outOfScopeReason,
     flags,
   };
 
@@ -669,6 +733,13 @@ export function needsSpecialHandling(classification: EmailClassification): {
   needsAttention: boolean;
   reason?: string;
 } {
+  // Out-of-scope topics (pay, recruitment, clinical, complaint/legal) must
+  // always reach a human — checked first because a clinical/safeguarding
+  // message outranks every other signal and must never be auto-handled.
+  if (classification.outOfScopeReason) {
+    return { needsAttention: true, reason: 'out_of_scope' };
+  }
+
   // Check urgent/frustrated first — these are higher priority than OOO
   if (classification.urgencyLevel === 'high') {
     return { needsAttention: true, reason: 'urgent' };
@@ -708,6 +779,19 @@ export function formatClassificationForPrompt(classification: EmailClassificatio
   // Warning for low confidence
   if (classification.confidence < CONFIDENCE_THRESHOLD) {
     lines.push(`- ⚠️ LOW CONFIDENCE: Verify this interpretation before acting. The email may be ambiguous.`);
+  }
+
+  // Out-of-scope topic — strongest steer toward flag_for_human_review.
+  if (classification.outOfScopeReason) {
+    const scopeLabels: Record<NonNullable<EmailClassification['outOfScopeReason']>, string> = {
+      compensation: 'pay/fees/compensation',
+      recruitment: 'recruitment/hiring/contract',
+      clinical: 'clinical or safeguarding',
+      complaint_legal: 'complaint/legal/data-protection',
+    };
+    lines.push(
+      `- 🚩 OUT OF SCOPE (${scopeLabels[classification.outOfScopeReason]}): This is outside scheduling. Do NOT answer or negotiate the substance — call flag_for_human_review and, if appropriate, send only a brief holding reply.`
+    );
   }
 
   // Sentiment

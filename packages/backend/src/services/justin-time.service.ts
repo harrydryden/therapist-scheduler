@@ -304,6 +304,7 @@ export class JustinTimeService {
           frustrated_user: 'Frustrated user detected',
           out_of_office: 'Out-of-office reply received',
           cancellation_request: 'Cancellation requested',
+          out_of_scope: 'Out-of-scope request (needs human)',
         };
         const alertTitle = reasonLabels[specialHandling.reason || ''] || 'Email needs attention';
         const sender = emailClassification.isFromTherapist ? 'therapist' : 'client';

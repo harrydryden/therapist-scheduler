@@ -685,4 +685,68 @@ describe('formatClassificationForPrompt', () => {
       expect(formatted).toContain('Therapist appears to be confirming');
     }
   });
+
+  it('surfaces an OUT OF SCOPE warning when the topic is off-remit', () => {
+    const classification = classifyEmail(
+      'Could you share the current pay band and hourly rate for this role?',
+      THERAPIST_EMAIL,
+      THERAPIST_EMAIL,
+      USER_EMAIL
+    );
+    const formatted = formatClassificationForPrompt(classification);
+    expect(formatted).toContain('OUT OF SCOPE');
+    expect(formatted).toContain('flag_for_human_review');
+  });
+});
+
+describe('out-of-scope topic detection', () => {
+  // The Elizabeth/Sophie incident: a recruitment candidate replied to a
+  // scheduling email asking about pay bands and the role. The agent must
+  // recognise these as off-remit and escalate rather than improvise.
+  const cases: { label: string; text: string; reason: EmailClassification['outOfScopeReason'] }[] = [
+    { label: 'pay band', text: 'What is the pay band for this position?', reason: 'compensation' },
+    { label: 'hourly rate', text: 'I am seeking a higher hourly rate given my experience.', reason: 'compensation' },
+    { label: 'when paid', text: 'When will I get paid for these sessions?', reason: 'compensation' },
+    { label: 'the role', text: 'Could you tell me more about how the role itself works?', reason: 'recruitment' },
+    { label: 'hiring process', text: 'Where am I in the hiring process?', reason: 'recruitment' },
+    { label: 'good fit', text: 'I want to check it is still a good fit for the role.', reason: 'recruitment' },
+    { label: 'clinical crisis', text: 'I am in crisis and want to harm myself.', reason: 'clinical' },
+    { label: 'medical advice', text: 'Can you give me medical advice about my medication?', reason: 'clinical' },
+    { label: 'complaint', text: 'I would like to make a formal complaint about this.', reason: 'complaint_legal' },
+    { label: 'GDPR', text: 'This is a GDPR data protection request for erasure.', reason: 'complaint_legal' },
+  ];
+
+  for (const c of cases) {
+    it(`flags "${c.label}" as out of scope (${c.reason})`, () => {
+      const result = classifyEmail(c.text, THERAPIST_EMAIL, THERAPIST_EMAIL, USER_EMAIL);
+      expect(result.outOfScopeReason).toBe(c.reason);
+      expect(needsSpecialHandling(result)).toEqual({ needsAttention: true, reason: 'out_of_scope' });
+    });
+  }
+
+  it('clinical/safeguarding outranks other signals', () => {
+    // Mixed message: a crisis mention alongside scheduling words must still
+    // classify as clinical, never as a routine slot question.
+    const result = classifyEmail(
+      "I can do Monday at 10am but honestly I am in crisis right now.",
+      USER_EMAIL,
+      THERAPIST_EMAIL,
+      USER_EMAIL
+    );
+    expect(result.outOfScopeReason).toBe('clinical');
+    expect(needsSpecialHandling(result).reason).toBe('out_of_scope');
+  });
+
+  it('does NOT flag ordinary scheduling emails as out of scope', () => {
+    const ordinary = [
+      'Monday at 10am works great for me, thanks!',
+      "Could we do Wednesday afternoon instead? That time doesn't work.",
+      "I haven't received the meeting link yet — could you resend it?",
+    ];
+    for (const text of ordinary) {
+      const result = classifyEmail(text, USER_EMAIL, THERAPIST_EMAIL, USER_EMAIL);
+      expect(result.outOfScopeReason).toBeUndefined();
+      expect(needsSpecialHandling(result).reason).not.toBe('out_of_scope');
+    }
+  });
 });
