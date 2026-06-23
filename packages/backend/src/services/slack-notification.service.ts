@@ -926,6 +926,30 @@ class SlackNotificationService {
     });
   }
 
+  /**
+   * Alert when an unmatched therapist has reached the nudge ceiling
+   * (THERAPIST_NUDGE.MAX_NUDGES) without ever being matched to a client.
+   *
+   * Fires once — the nudge service stops emailing this therapist after
+   * the cap, so the admin needs to decide what happens next (source a
+   * client manually, pause them, or reach out personally) rather than the
+   * system silently re-nudging forever.
+   */
+  async notifyTherapistNudgeExhausted(params: {
+    therapistName: string;
+    nudgeCount: number;
+  }): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Therapist Nudge Limit Reached',
+      severity: 'medium',
+      therapistName: params.therapistName,
+      details:
+        `This therapist has now received *${params.nudgeCount}* "still looking for a client" ` +
+        `nudges without being matched. Automatic nudging has stopped — please decide whether to ` +
+        `source a client for them, pause them, or follow up personally.`,
+    });
+  }
+
   // ============================================
   // Summary Reports
   // ============================================
