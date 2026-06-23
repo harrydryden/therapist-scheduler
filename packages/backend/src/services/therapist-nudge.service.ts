@@ -5,9 +5,10 @@ import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
-import { ACTIVE_STATUSES } from '../constants';
+import { ACTIVE_STATUSES, THERAPIST_NUDGE } from '../constants';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
+import { slackNotificationService } from './slack-notification.service';
 
 // Check every 6 hours whether any therapists are due a nudge
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -147,11 +148,14 @@ class TherapistNudgeService {
 
     // Find eligible therapists:
     //  - Have an ingestedAt date
+    //  - Below the nudge ceiling (capped therapists are escalated once and
+    //    then excluded — see THERAPIST_NUDGE.MAX_NUDGES)
     //  - Either never nudged (lastNudgeAt is null, ingestedAt before cutoff)
     //    or last nudged before the cutoff
     const candidates = await prisma.therapist.findMany({
       where: {
         ingestedAt: { not: null },
+        nudgeCount: { lt: THERAPIST_NUDGE.MAX_NUDGES },
         OR: [
           {
             lastNudgeAt: null,
@@ -167,6 +171,7 @@ class TherapistNudgeService {
         notionId: true,
         name: true,
         email: true,
+        nudgeCount: true,
       },
     });
 
@@ -220,6 +225,9 @@ class TherapistNudgeService {
         const claimResult = await prisma.therapist.updateMany({
           where: {
             id: therapist.id,
+            // Defensive: re-check the ceiling atomically with the claim so a
+            // concurrent worker can't push a therapist past MAX_NUDGES.
+            nudgeCount: { lt: THERAPIST_NUDGE.MAX_NUDGES },
             OR: [
               { lastNudgeAt: null },
               { lastNudgeAt: { lte: cutoff } },
@@ -308,6 +316,11 @@ class TherapistNudgeService {
                   data: {
                     lastNudgeAt: new Date(),
                     lastNudgeThreadId: threadId || null,
+                    // Advance the ceiling counter. Bundled into the same
+                    // atomic txn as lastNudgeAt so it shares the existing
+                    // at-most-once-per-cycle semantics (the retry path only
+                    // re-sends the email; it does not replay this txn).
+                    nudgeCount: { increment: 1 },
                   },
                 });
 
@@ -352,6 +365,27 @@ class TherapistNudgeService {
 
         // Counted at queue time — the harness owns durability + retry.
         sent++;
+
+        // If this was the final permitted nudge, escalate to an admin once.
+        // After this cycle nudgeCount reaches MAX_NUDGES, so the candidate
+        // query excludes this therapist on every future tick — meaning this
+        // alert fires exactly once. Fire-and-forget: a Slack failure must not
+        // abort the nudge run (the cap itself has already been applied via
+        // the incremented counter).
+        const nudgeCountAfterSend = therapist.nudgeCount + 1;
+        if (nudgeCountAfterSend >= THERAPIST_NUDGE.MAX_NUDGES) {
+          void slackNotificationService
+            .notifyTherapistNudgeExhausted({
+              therapistName: therapist.name,
+              nudgeCount: nudgeCountAfterSend,
+            })
+            .catch((alertErr) => {
+              logger.warn(
+                { alertErr, therapistId: therapist.id },
+                'Failed to send therapist nudge-exhausted escalation',
+              );
+            });
+        }
       } catch (err) {
         failed++;
         logger.error(

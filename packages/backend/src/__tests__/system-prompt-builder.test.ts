@@ -163,6 +163,26 @@ describe('buildSystemPrompt — section presence', () => {
     expect(prompt).toContain('TEST_TIMEZONE_SECTION_MARKER');
   });
 
+  it('instructs the agent to pair weekdays with an explicit calendar date', async () => {
+    // Guards the #3 hardening: bare "Tuesday at 11am" copy caused the two
+    // parties to risk booking different weeks. The prompt must require an
+    // explicit date and tie the email copy to the stored datetime.
+    const prompt = await buildSystemPrompt(baseContext);
+    expect(prompt).toContain('DATE & TIME CLARITY');
+    expect(prompt).toMatch(/explicit calendar date/i);
+  });
+
+  it('lists the out-of-scope topics the agent must escalate rather than improvise', async () => {
+    // Guards the #1 hardening (the recruitment-candidate incident): pay,
+    // recruitment, clinical, and complaint/legal topics must route to a
+    // human, never be answered by the scheduling agent.
+    const prompt = await buildSystemPrompt(baseContext);
+    expect(prompt).toContain('Out-of-Scope Topics');
+    expect(prompt).toMatch(/pay.*rates.*fees|compensation/i);
+    expect(prompt).toMatch(/recruitment|hiring/i);
+    expect(prompt).toMatch(/clinical|therapeutic/i);
+  });
+
   it('includes the privacy guardrails verbatim phrases that the prompt-injection defenses depend on', async () => {
     // These phrases are referenced in test-injection scenarios elsewhere;
     // dropping them would silently weaken the agent's resistance to

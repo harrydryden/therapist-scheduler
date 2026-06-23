@@ -131,6 +131,13 @@ model Therapist {
   ingestedAt        DateTime? @map("ingested_at") // When the therapist was added to the platform
   lastNudgeAt       DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
   lastNudgeThreadId String?   @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)
+  // How many "still looking for a client" nudges this therapist has been
+  // sent. Bounds the otherwise-unbounded nudge loop: the nudge service
+  // skips therapists who have reached THERAPIST_NUDGE.MAX_NUDGES and
+  // escalates to an admin once instead of emailing them again. Previously
+  // only lastNudgeAt was tracked, so a never-matched therapist was
+  // re-nudged on the configured cadence forever.
+  nudgeCount        Int       @default(0) @map("nudge_count")
 
   // Agent profile (Layer C in the agent memory design). Cross-appointment
   // observations about this therapist's scheduling style. Strictly
@@ -258,6 +265,14 @@ model AppointmentRequest {
   feedbackFormSentAt      DateTime? @map("feedback_form_sent_at")
   feedbackReminderSentAt  DateTime? @map("feedback_reminder_sent_at")
   confirmedDateTimeParsed DateTime? @map("confirmed_date_time_parsed")
+  // Positive evidence that a real meeting link exists for this booking —
+  // stamped when an inbound therapist email actually contains a meeting
+  // URL (not merely a promise to send one). The lifecycle tick uses it to
+  // tell a verified session_held transition from one it is asserting purely
+  // because the clock passed: a confirmed booking where the therapist only
+  // ever said "I'll send the invite" leaves this null, and that case is
+  // logged + audited rather than silently treated as a held session.
+  meetingLinkConfirmedAt  DateTime? @map("meeting_link_confirmed_at")
 
   // Rescheduling support
   reschedulingInProgress    Boolean @default(false) @map("rescheduling_in_progress")

@@ -33,6 +33,7 @@ type TherapistRow = {
   email: string;
   lastNudgeAt: Date | null;
   lastNudgeThreadId: string | null;
+  nudgeCount: number;
 };
 type ConversationRow = {
   id: string;
@@ -50,9 +51,20 @@ const conversations: Record<string, ConversationRow> = {};
 let nextConvoId = 1;
 
 const therapistFindMany = jest.fn();
-const therapistUpdate = jest.fn(async ({ where, data }: { where: { id: string }; data: Partial<TherapistRow> }) => {
+// Mirrors Prisma's atomic `{ increment: n }` update operator so the
+// in-memory store stays a faithful stand-in (the nudge service advances
+// nudgeCount that way).
+const therapistUpdate = jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
   if (!therapists[where.id]) throw new Error('P2025');
-  therapists[where.id] = { ...therapists[where.id], ...data };
+  const next: Record<string, unknown> = { ...therapists[where.id] };
+  for (const [key, value] of Object.entries(data)) {
+    if (value && typeof value === 'object' && 'increment' in (value as Record<string, unknown>)) {
+      next[key] = ((next[key] as number) ?? 0) + (value as { increment: number }).increment;
+    } else {
+      next[key] = value;
+    }
+  }
+  therapists[where.id] = next as unknown as TherapistRow;
   return therapists[where.id];
 });
 const appointmentFindMany = jest.fn().mockResolvedValue([]);
@@ -180,6 +192,14 @@ jest.mock('../services/therapist-booking-status.service', () => ({
   },
 }));
 
+// Slack escalation fired when a therapist reaches the nudge ceiling.
+const mockNotifyNudgeExhausted = jest.fn().mockResolvedValue(true);
+jest.mock('../services/slack-notification.service', () => ({
+  slackNotificationService: {
+    notifyTherapistNudgeExhausted: (...a: unknown[]) => mockNotifyNudgeExhausted(...a),
+  },
+}));
+
 // LockedTaskRunner's constructor wires into redis-locks → redis-client,
 // which opens a real Redis connection on module load. Stub the runner
 // entirely — the test calls sendNudges() directly rather than going
@@ -234,10 +254,22 @@ function seedTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
     email: 'alex@example.com',
     lastNudgeAt: null,
     lastNudgeThreadId: null,
+    nudgeCount: 0,
     ...overrides,
   };
   therapists[row.id] = row;
   return row;
+}
+
+// Re-script the two therapistFindMany calls (active-set, then candidates)
+// so a test can control the candidate's pre-send nudgeCount.
+function scriptCandidate(nudgeCount: number): void {
+  therapistFindMany.mockReset();
+  therapistFindMany
+    .mockResolvedValueOnce([{ id: 'tx-1', notionId: null }])
+    .mockResolvedValueOnce([
+      { id: 'tx-1', notionId: null, name: 'Alex Therapist', email: 'alex@example.com', nudgeCount },
+    ]);
 }
 
 beforeEach(() => {
@@ -259,6 +291,7 @@ beforeEach(() => {
         notionId: null,
         name: 'Alex Therapist',
         email: 'alex@example.com',
+        nudgeCount: 0,
       },
     ]); // candidates
   mockSendEmail.mockResolvedValue({ threadId: 'thread-nudge-1', messageId: 'msg-nudge-1' });
@@ -375,5 +408,71 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
     );
     expect(active).toHaveLength(1);
     expect(active[0].gmailThreadId).toBe('thread-nudge-1');
+  });
+});
+
+describe('therapistNudgeService — nudge ceiling (THERAPIST_NUDGE.MAX_NUDGES)', () => {
+  it('only considers therapists below the nudge ceiling', async () => {
+    seedTherapist();
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+
+    // The candidate query (second findMany call) must filter out therapists
+    // that have already hit the cap — otherwise a never-matched therapist is
+    // nudged forever, which is the runaway loop this guards against.
+    const candidateQuery = therapistFindMany.mock.calls[1][0];
+    expect(candidateQuery.where.nudgeCount).toEqual({ lt: 3 });
+  });
+
+  it('increments nudgeCount atomically when sending a nudge', async () => {
+    seedTherapist();
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+    await Promise.all(backgroundTaskPromises);
+
+    // The send transaction advances the ceiling counter via the atomic
+    // increment operator (not a plain write that could clobber a concurrent
+    // claim).
+    const incrementCall = therapistUpdate.mock.calls.find(
+      ([arg]) => (arg.data as Record<string, unknown>).nudgeCount !== undefined,
+    );
+    expect(incrementCall).toBeDefined();
+    expect((incrementCall![0].data as Record<string, unknown>).nudgeCount).toEqual({ increment: 1 });
+    expect(therapists['tx-1'].nudgeCount).toBe(1);
+  });
+
+  it('escalates to an admin exactly when the final permitted nudge is sent', async () => {
+    // Pre-send count of 2 → this send is the 3rd (== MAX_NUDGES), the last
+    // one the therapist will ever get automatically.
+    seedTherapist({ nudgeCount: 2 });
+    scriptCandidate(2);
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+    await Promise.all(backgroundTaskPromises);
+
+    expect(mockNotifyNudgeExhausted).toHaveBeenCalledTimes(1);
+    expect(mockNotifyNudgeExhausted).toHaveBeenCalledWith({
+      therapistName: 'Alex Therapist',
+      nudgeCount: 3,
+    });
+  });
+
+  it('does NOT escalate on a non-final nudge', async () => {
+    // Pre-send count of 0 → this is the 1st nudge, well below the ceiling.
+    seedTherapist({ nudgeCount: 0 });
+    scriptCandidate(0);
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+    await Promise.all(backgroundTaskPromises);
+
+    expect(mockNotifyNudgeExhausted).not.toHaveBeenCalled();
   });
 });

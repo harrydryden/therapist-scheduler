@@ -31,6 +31,7 @@ export type AuditEventType =
   | 'error'                    // Error occurred during processing
   | 'stale_flagged'            // Appointment flagged as stale
   | 'follow_up_sent'           // Post-booking follow-up sent
+  | 'session_held_unverified'  // Auto-transitioned to session_held with no verified meeting link
   // Lifecycle events (non-status-change). These are emitted by
   // recordAppointmentEvent and queried directly by event type.
   | 'chase_sent'
@@ -190,6 +191,18 @@ export interface StaleFlaggedPayload extends BasePayload {
 }
 
 /**
+ * Payload for a session_held transition the system made without positive
+ * evidence a meeting link exists (meetingLinkConfirmedAt was null at tick
+ * time). Records HOW the session time was known so triage can tell a
+ * never-set-up booking from a normal one whose link simply arrived
+ * out-of-band.
+ */
+export interface SessionHeldUnverifiedPayload extends BasePayload {
+  confirmedDateTime?: string | null;
+  note: string;
+}
+
+/**
  * Union type for all payloads
  */
 export type AuditEventPayload =
@@ -204,6 +217,7 @@ export type AuditEventPayload =
   | ClaudeResponsePayload
   | FollowUpPayload
   | StaleFlaggedPayload
+  | SessionHeldUnverifiedPayload
   | BasePayload;
 
 /**

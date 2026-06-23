@@ -8,6 +8,40 @@ interface HumanControlSectionProps {
   controls: AppointmentControls;
 }
 
+/**
+ * Convert a stored confirmed-date string into the `YYYY-MM-DDTHH:mm` value an
+ * `<input type="datetime-local">` expects. Returns '' when the value can't be
+ * parsed to a real instant (e.g. a legacy free-text "Tuesday at 11am"), in
+ * which case the admin simply picks afresh.
+ */
+function toDatetimeLocalValue(value: string | null | undefined): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * Turn the picker's value into an explicit, unambiguous date string for
+ * submission — "Tuesday 23 June 2026 at 14:00" rather than a bare weekday.
+ * This removes the ambiguity of the old free-text field (which Tuesday?) and
+ * parses cleanly into confirmedDateTimeParsed on the backend (chrono-node).
+ */
+function formatPickedDateTime(localValue: string): string {
+  if (!localValue) return '';
+  const d = new Date(localValue);
+  if (Number.isNaN(d.getTime())) return '';
+  const date = d.toLocaleDateString('en-GB', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${date} at ${time}`;
+}
+
 export default function HumanControlSection({
   appointment,
   controls,
@@ -23,6 +57,11 @@ export default function HumanControlSection({
   // initiated; apology + reassurance to therapist when user initiated;
   // neutral both-ways for admin). Default 'admin' = pre-change behaviour.
   const [cancelledBy, setCancelledBy] = useState<'admin' | 'client' | 'therapist'>('admin');
+  // Datetime-local value backing the confirmed-time picker. Seeded from the
+  // stored value when it's a real instant; '' for legacy free-text values
+  // (the admin then picks an unambiguous date). The canonical submitted
+  // string lives in controls.editConfirmedDateTime, set on change.
+  const [pickerValue, setPickerValue] = useState(() => toDatetimeLocalValue(appointment.confirmedDateTime));
 
   // Reset the cancellation-initiator picker when the operator
   // navigates to a different appointment. Without this, picking
@@ -33,6 +72,12 @@ export default function HumanControlSection({
   useEffect(() => {
     setCancelledBy('admin');
   }, [appointment.id]);
+
+  // Keep the picker in sync with the stored confirmed time when navigating
+  // between appointments (same re-render-not-remount reason as above).
+  useEffect(() => {
+    setPickerValue(toDatetimeLocalValue(appointment.confirmedDateTime));
+  }, [appointment.id, appointment.confirmedDateTime]);
 
   const handleSendMessage = () => {
     if (!messageSubject.trim() || !messageBody.trim()) return;
@@ -158,20 +203,39 @@ export default function HumanControlSection({
 
               {controls.editStatus === 'confirmed' && (
                 <div className="mb-2">
-                  <label className="text-sm text-slate-600 block mb-1">
+                  <label htmlFor="confirmed-datetime" className="text-sm text-slate-600 block mb-1">
                     Confirmed Date/Time:
                     <span className="text-red-500 ml-1">*</span>
                   </label>
                   <input
-                    type="text"
-                    value={controls.editConfirmedDateTime}
-                    onChange={(e) => controls.setEditConfirmedDateTime(e.target.value)}
-                    placeholder="e.g., Tuesday 15th January at 2pm"
+                    id="confirmed-datetime"
+                    type="datetime-local"
+                    value={pickerValue}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPickerValue(v);
+                      // Store an explicit, unambiguous date string — never a
+                      // bare weekday. Empty picker clears the canonical value
+                      // so the required-field guard below still fires.
+                      controls.setEditConfirmedDateTime(formatPickedDateTime(v));
+                    }}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
                   />
-                  <p className="text-xs text-slate-500 mt-1">
-                    Enter the agreed appointment date and time
-                  </p>
+                  {pickerValue ? (
+                    <p className="text-xs text-slate-500 mt-1">
+                      Will be saved as: <span className="font-medium">{formatPickedDateTime(pickerValue)}</span>
+                    </p>
+                  ) : controls.editConfirmedDateTime ? (
+                    // Legacy free-text value we couldn't parse into the picker.
+                    // Show it so the admin knows what's on file before replacing.
+                    <p className="text-xs text-amber-600 mt-1">
+                      Current value: “{controls.editConfirmedDateTime}”. Pick a date to replace it with an explicit one.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-slate-500 mt-1">
+                      Pick the agreed appointment date and time
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -245,6 +309,7 @@ export default function HumanControlSection({
                     controls.setShowEditPanel(false);
                     controls.setEditStatus(appointment.status);
                     controls.setEditConfirmedDateTime(appointment.confirmedDateTime || '');
+                    setPickerValue(toDatetimeLocalValue(appointment.confirmedDateTime));
                     controls.setEditReason('');
                   }}
                   aria-label="Cancel edit"

@@ -68,6 +68,14 @@ export const THERAPIST_BOOKING = {
   MAX_UNIQUE_REQUESTS: 2,
 } as const;
 
+// Therapist nudge ceiling. The "still looking for a client" nudge runs on
+// a cadence (therapistNudge.intervalWeeks); this caps how many times an
+// unmatched therapist is emailed before we stop and escalate to an admin
+// instead — the loop equivalent of the per-appointment tool ceiling.
+export const THERAPIST_NUDGE = {
+  MAX_NUDGES: 3,
+} as const;
+
 // API timeouts — single source of truth for all operation timeouts.
 // Previously split between constants.ts and utils/timeout.ts DEFAULT_TIMEOUTS.
 export const TIMEOUTS = {
