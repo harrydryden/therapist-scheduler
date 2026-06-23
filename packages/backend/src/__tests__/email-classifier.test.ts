@@ -750,3 +750,40 @@ describe('out-of-scope topic detection', () => {
     }
   });
 });
+
+describe('meeting-link presence (lifecycle-truth signal)', () => {
+  // meetingLinkPresent must be true ONLY when an actual link URL is in the
+  // email — not when the therapist merely promises to send one. This is the
+  // signal that stamps AppointmentRequest.meetingLinkConfirmedAt.
+  it('is true when the therapist email contains a real meeting URL', () => {
+    const result = classifyEmail(
+      'Confirmed — here is the link: https://us02web.zoom.us/j/85512345678',
+      THERAPIST_EMAIL,
+      THERAPIST_EMAIL,
+      USER_EMAIL
+    );
+    expect(result.therapistConfirmation?.meetingLinkPresent).toBe(true);
+  });
+
+  it('is NOT set when the therapist only promises to send a link later', () => {
+    const result = classifyEmail(
+      "That time works — I'll send the meeting link closer to the day.",
+      THERAPIST_EMAIL,
+      THERAPIST_EMAIL,
+      USER_EMAIL
+    );
+    // Confirmed, yes — but no actual link present, so no verification signal.
+    expect(result.therapistConfirmation?.isConfirmed).toBe(true);
+    expect(result.therapistConfirmation?.meetingLinkPresent).toBeFalsy();
+  });
+
+  it('is not set for a plain slot confirmation with no link', () => {
+    const result = classifyEmail(
+      'Yes, that works for me.',
+      THERAPIST_EMAIL,
+      THERAPIST_EMAIL,
+      USER_EMAIL
+    );
+    expect(result.therapistConfirmation?.meetingLinkPresent).toBeFalsy();
+  });
+});

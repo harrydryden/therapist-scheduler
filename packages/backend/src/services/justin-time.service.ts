@@ -336,6 +336,33 @@ export class JustinTimeService {
         await this.trackTherapistResponseTime(appointmentRequestId, appointmentRequest.therapistEmail);
       }
 
+      // Lifecycle-truth signal: when an inbound therapist email actually
+      // contains a meeting-link URL (not merely a promise to send one),
+      // record that a real link exists. The lifecycle tick reads
+      // meetingLinkConfirmedAt so it can distinguish a verified session from
+      // one it would otherwise assert purely because the clock passed.
+      // Idempotent (only stamps while still null) and best-effort — a failure
+      // here must never break message processing.
+      if (isFromTherapist && emailClassification.therapistConfirmation?.meetingLinkPresent) {
+        try {
+          const stamp = await prisma.appointmentRequest.updateMany({
+            where: { id: appointmentRequestId, meetingLinkConfirmedAt: null },
+            data: { meetingLinkConfirmedAt: new Date() },
+          });
+          if (stamp.count > 0) {
+            logger.info(
+              { traceId: this.traceId, appointmentRequestId },
+              'Recorded meeting link present in therapist email (meetingLinkConfirmedAt)'
+            );
+          }
+        } catch (stampErr) {
+          logger.warn(
+            { traceId: this.traceId, appointmentRequestId, stampErr },
+            'Failed to stamp meetingLinkConfirmedAt — non-fatal'
+          );
+        }
+      }
+
       // Check if human control is enabled - skip agent processing if so
       if (appointmentRequest.humanControlEnabled) {
         logger.info(

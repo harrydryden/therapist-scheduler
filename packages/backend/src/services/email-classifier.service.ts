@@ -46,6 +46,12 @@ export interface TherapistConfirmation {
   confirmationType?: 'slot' | 'meeting_link' | 'booking';
   confirmedSlot?: string; // If they confirmed a specific slot
   willSendLink?: boolean; // If they said they'll send meeting link
+  // True only when the email contains an ACTUAL meeting-link URL (Zoom,
+  // Meet, Teams, etc.), as opposed to merely promising to send one. This is
+  // positive evidence a real link exists and is used to stamp
+  // AppointmentRequest.meetingLinkConfirmedAt, which the lifecycle tick reads
+  // to avoid asserting an unverified session was held.
+  meetingLinkPresent?: boolean;
 }
 
 export interface EmailClassification {
@@ -399,6 +405,7 @@ function detectTherapistConfirmation(
       result.isConfirmed = true;
       result.confirmationType = 'meeting_link';
       result.willSendLink = true; // Link is already present
+      result.meetingLinkPresent = true; // Actual URL — positive verification evidence
       return result; // No need to check further
     }
   }
