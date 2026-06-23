@@ -688,14 +688,13 @@ Please answer their question helpfully and direct them to the booking URL to sch
         },
         {
           name: 'unsubscribe_user',
-          description: 'Unsubscribe a user from weekly promotional emails. Use this when a user explicitly requests to be removed from the mailing list or asks to stop receiving emails.',
+          description: 'Unsubscribe the user you are currently replying to from weekly promotional emails. Use this when they explicitly ask to be removed from the mailing list or to stop receiving emails. You do NOT supply an email address — the system unsubscribes the verified sender of this conversation.',
           input_schema: {
             type: 'object',
             properties: {
-              email: { type: 'string', description: 'Email address to unsubscribe' },
               reason: { type: 'string', description: 'Brief note about why they unsubscribed (optional)' },
             },
-            required: ['email'],
+            required: [],
           },
         },
       ];
@@ -781,10 +780,16 @@ Please answer their question helpfully and direct them to the booking URL to sch
             content: `[Tool executed: send_email to ${input.to}]`,
           });
         } else if (toolCall.name === 'unsubscribe_user') {
-          const input = toolCall.input as { email: string; reason?: string };
+          const input = toolCall.input as { reason?: string };
+          // Unsubscribe the VERIFIED sender of this inquiry, never an address
+          // supplied by the model. The inbound was matched to
+          // `inquiry.userEmail` (by thread id / sender), so that's the only
+          // address we can safely act on — a model-supplied email could
+          // mis-target a third party named in the body, or be hallucinated.
+          const targetEmail = inquiry.userEmail.toLowerCase();
 
           logger.info(
-            { traceId: this.traceId, inquiryId, email: input.email, reason: input.reason },
+            { traceId: this.traceId, inquiryId, email: targetEmail, reason: input.reason },
             'Unsubscribing user from weekly mailing list'
           );
 
@@ -793,7 +798,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
             // treat as already-unsubscribed.
             const result = await prisma.user.updateMany({
               where: {
-                email: input.email.toLowerCase(),
+                email: targetEmail,
                 subscribed: true,
               },
               data: { subscribed: false },
@@ -801,12 +806,12 @@ Please answer their question helpfully and direct them to the booking URL to sch
 
             if (result.count > 0) {
               logger.info(
-                { traceId: this.traceId, email: input.email },
+                { traceId: this.traceId, email: targetEmail },
                 'User unsubscribed from weekly mailing list'
               );
             } else {
               logger.warn(
-                { traceId: this.traceId, email: input.email },
+                { traceId: this.traceId, email: targetEmail },
                 'User not found or already unsubscribed'
               );
             }
@@ -820,16 +825,16 @@ Please answer their question helpfully and direct them to the booking URL to sch
             // Log tool execution
             conversationState.messages.push({
               role: 'user',
-              content: `[Tool executed: unsubscribe_user for ${input.email}${input.reason ? ` - Reason: ${input.reason}` : ''}]`,
+              content: `[Tool executed: unsubscribe_user for ${targetEmail}${input.reason ? ` - Reason: ${input.reason}` : ''}]`,
             });
           } catch (unsubError) {
             logger.error(
-              { traceId: this.traceId, error: unsubError, email: input.email },
+              { traceId: this.traceId, error: unsubError, email: targetEmail },
               'Failed to unsubscribe user'
             );
             conversationState.messages.push({
               role: 'user',
-              content: `[Tool failed: unsubscribe_user for ${input.email} - Error occurred]`,
+              content: `[Tool failed: unsubscribe_user for ${targetEmail} - Error occurred]`,
             });
           }
         }
@@ -915,7 +920,7 @@ Example responses for booking requests:
 
 ## Handling Unsubscribe Requests
 If a user asks to unsubscribe, stop receiving emails, or be removed from the mailing list:
-1. Use the unsubscribe_user tool with their email address
+1. Use the unsubscribe_user tool — you do NOT pass an email address; it unsubscribes the person you're replying to
 2. Then send a friendly confirmation email acknowledging their request
 3. Be understanding and professional - don't try to convince them to stay
 
@@ -924,7 +929,7 @@ Example unsubscribe response:
 
 ## Available Tools
 - send_email: Use this to reply to the user's message
-- unsubscribe_user: Use this to remove a user from the weekly mailing list when they request it`;
+- unsubscribe_user: Use this to remove the current user from the weekly mailing list when they request it`;
   }
 }
 

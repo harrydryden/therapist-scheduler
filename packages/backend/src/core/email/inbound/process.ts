@@ -295,7 +295,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
       }
 
       // STEP 9: weekly promotional mailing replies.
-      if (isWeeklyMailingReply(email)) {
+      if (await isWeeklyMailingReply(email)) {
         const handled = await processWeeklyMailingReply(email, messageId, traceId);
         if (handled) {
           await markMessageProcessed(messageId, 'weekly-mailing-reply');
