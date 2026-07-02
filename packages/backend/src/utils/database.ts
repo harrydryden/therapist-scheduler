@@ -29,6 +29,19 @@ function createPrismaClient(): PrismaClient {
   const isProduction = process.env.NODE_ENV === 'production';
 
   return new PrismaClient({
+    // Interactive transaction defaults. Prisma's built-in defaults
+    // (maxWait 2s, timeout 5s) are too tight for the conversation-state
+    // dual-write path: each save writes a JSON blob of up to 500KB twice
+    // (legacy column + appointment_conversations mirror) while contending
+    // on the appointment row lock with agent-memory's FOR UPDATE and the
+    // serializable terminal transitions. A routine DB latency spike is
+    // enough to blow 5s ("Transaction already closed", seen in prod on
+    // Gmail message processing). terminal-tx.ts keeps its own explicit
+    // per-call options, which override these.
+    transactionOptions: {
+      maxWait: 10_000,
+      timeout: 15_000,
+    },
     log: isProduction
       ? [
           { emit: 'event', level: 'error' },

@@ -38,12 +38,40 @@ export function isSerializationError(error: unknown): boolean {
 }
 
 /**
- * Run `fn` and retry on serialization failure with exponential backoff.
- * The caller passes a fn that itself opens the transaction — keeping
- * the retry policy out of the transaction body so a serialization
- * error rolls back cleanly before we re-enter.
+ * Recognise a transient database error that is safe to retry by
+ * re-running the transaction from the top: dropped connections
+ * (Prisma P1001/P1002/P1008/P1017, or the raw driver messages) and
+ * interactive transactions that expired before committing (P2028,
+ * "Transaction already closed"). In every one of these cases nothing
+ * was committed, so a clean re-run is correct.
  *
- * Non-serialization errors propagate immediately.
+ * Seen in prod during a DB latency blip: Gmail message processing
+ * failed with "Server has closed the connection" on a read and
+ * "Transaction already closed" on a conversation-state save. Both
+ * self-heal on retry.
+ */
+const TRANSIENT_DB_ERROR_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017', 'P2028']);
+const TRANSIENT_DB_ERROR_PATTERNS = [
+  'Server has closed the connection',
+  'Transaction already closed',
+  'Connection reset by peer',
+  'Connection terminated unexpectedly',
+];
+
+export function isTransientDbError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: string }).code;
+  if (code && TRANSIENT_DB_ERROR_CODES.has(code)) return true;
+  return TRANSIENT_DB_ERROR_PATTERNS.some((pattern) => error.message.includes(pattern));
+}
+
+/**
+ * Run `fn` and retry on serialization failure or transient DB error
+ * with exponential backoff. The caller passes a fn that itself opens
+ * the transaction — keeping the retry policy out of the transaction
+ * body so a failed attempt rolls back cleanly before we re-enter.
+ *
+ * All other errors propagate immediately.
  */
 export async function withSerializationRetry<T>(
   fn: () => Promise<T>,
@@ -56,9 +84,13 @@ export async function withSerializationRetry<T>(
       return await fn();
     } catch (error) {
       lastError = error;
-      if (isSerializationError(error) && attempt < SERIALIZATION_RETRY.MAX_RETRIES) {
+      const retriable = isSerializationError(error) || isTransientDbError(error);
+      if (retriable && attempt < SERIALIZATION_RETRY.MAX_RETRIES) {
         const delay = getBackoffDelay(attempt);
-        log?.('serialization conflict — retrying with backoff', {
+        const reason = isSerializationError(error)
+          ? 'serialization conflict'
+          : 'transient DB error';
+        log?.(`${reason} — retrying with backoff`, {
           ...context,
           attempt: attempt + 1,
           delayMs: delay,
