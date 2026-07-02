@@ -112,6 +112,18 @@ function seedTherapist(id: string) {
   therapistStore[id] = { upcomingAvailability: null, bookingLink: null };
 }
 
+// Windows must sit in the future relative to the real clock — the store
+// compacts fully-past windows (endsAt < now), so hardcoded dates turn
+// into time-bombs that start failing the day they lapse (this bit us
+// with 2026-06 fixtures).
+const futureIso = (daysAhead: number, hourOffset = 0): string =>
+  new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1000 + hourOffset * 60 * 60 * 1000).toISOString();
+
+const tuesdayStart = futureIso(7);
+const tuesdayEnd = futureIso(7, 2);
+const thursdayStart = futureIso(9);
+const thursdayEnd = futureIso(9, 2);
+
 describe('addUpcomingAvailability — concurrency contract', () => {
   it('serializes concurrent appends so neither write clobbers the other', async () => {
     seedTherapist('therapist-1');
@@ -123,15 +135,15 @@ describe('addUpcomingAvailability — concurrency contract', () => {
     // write before computing.
     const [r1, r2] = await Promise.all([
       addUpcomingAvailability('therapist-1', {
-        startsAt: '2026-06-02T09:00:00+01:00',
-        endsAt: '2026-06-02T11:00:00+01:00',
+        startsAt: tuesdayStart,
+        endsAt: tuesdayEnd,
         status: 'available',
         source: 'therapist',
         quote: 'A: free Tuesday morning',
       }),
       addUpcomingAvailability('therapist-1', {
-        startsAt: '2026-06-04T14:00:00+01:00',
-        endsAt: '2026-06-04T16:00:00+01:00',
+        startsAt: thursdayStart,
+        endsAt: thursdayEnd,
         status: 'available',
         source: 'therapist',
         quote: 'B: free Thursday afternoon',
@@ -142,18 +154,17 @@ describe('addUpcomingAvailability — concurrency contract', () => {
     expect(r2.added).toBe(true);
 
     const windows = await getUpcomingAvailability('therapist-1');
-    expect(windows.map((w) => w.startsAt).sort()).toEqual([
-      '2026-06-02T09:00:00+01:00',
-      '2026-06-04T14:00:00+01:00',
-    ]);
+    expect(windows.map((w) => w.startsAt).sort()).toEqual(
+      [tuesdayStart, thursdayStart].sort(),
+    );
   });
 
   it('runs the read-modify-write inside $transaction with a row-lock SELECT', async () => {
     seedTherapist('therapist-2');
 
     await addUpcomingAvailability('therapist-2', {
-      startsAt: '2026-06-02T09:00:00+01:00',
-      endsAt: '2026-06-02T11:00:00+01:00',
+      startsAt: tuesdayStart,
+      endsAt: tuesdayEnd,
       status: 'available',
       source: 'therapist',
       quote: 'fresh',
@@ -170,15 +181,15 @@ describe('addUpcomingAvailability — concurrency contract', () => {
     seedTherapist('therapist-3');
 
     const first = await addUpcomingAvailability('therapist-3', {
-      startsAt: '2026-06-02T09:00:00+01:00',
-      endsAt: '2026-06-02T11:00:00+01:00',
+      startsAt: tuesdayStart,
+      endsAt: tuesdayEnd,
       status: 'available',
       source: 'therapist',
       quote: 'first phrasing',
     });
     const second = await addUpcomingAvailability('therapist-3', {
-      startsAt: '2026-06-02T09:00:00+01:00',
-      endsAt: '2026-06-02T11:00:00+01:00',
+      startsAt: tuesdayStart,
+      endsAt: tuesdayEnd,
       status: 'available',
       source: 'therapist',
       quote: 'rephrased — should dedupe',
@@ -199,7 +210,7 @@ describe('addUpcomingAvailability — concurrency contract', () => {
     // Fill to capacity with windows that all sit in the future, then
     // add one more — the oldest (by recordedAt, which is in insertion
     // order) should be evicted.
-    const baseTime = new Date('2026-06-01T00:00:00+01:00').getTime();
+    const baseTime = Date.now() + 24 * 60 * 60 * 1000;
     const hour = 60 * 60 * 1000;
     for (let i = 0; i < MAX_UPCOMING_WINDOWS_PER_THERAPIST; i++) {
       await addUpcomingAvailability('therapist-4', {
@@ -231,8 +242,8 @@ describe('getUpcomingAvailability — primary-key scoping', () => {
   it('returns [] for a therapist that does not exist; never falls back', async () => {
     seedTherapist('therapist-real');
     await addUpcomingAvailability('therapist-real', {
-      startsAt: '2026-06-02T09:00:00+01:00',
-      endsAt: '2026-06-02T11:00:00+01:00',
+      startsAt: tuesdayStart,
+      endsAt: tuesdayEnd,
       status: 'available',
       source: 'therapist',
       quote: 'real',

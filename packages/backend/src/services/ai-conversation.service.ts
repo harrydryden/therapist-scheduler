@@ -24,6 +24,7 @@ import { wrapUntrustedContent } from '../utils/content-sanitizer';
 import { getSettingValue } from './settings.service';
 import { CONVERSATION_LIMITS } from '../constants';
 import { resilientCall } from '../utils/resilient-call';
+import { withSerializationRetry } from '../utils/serialization-retry';
 import { circuitBreakerRegistry, CIRCUIT_BREAKER_CONFIGS } from '../utils/circuit-breaker';
 import { ConcurrentModificationError } from '../errors';
 import type { ConversationState } from '../types';
@@ -115,69 +116,83 @@ export class AIConversationService {
       // row. The cutover (reads switching to the new table) is a
       // follow-up PR; until then the legacy column is the source of
       // truth and the mirror is for safety.
-      await prisma.$transaction(async (tx) => {
-        const result = await tx.appointmentRequest.updateMany({
-          where: {
-            id: appointmentRequestId,
-            updatedAt: expectedUpdatedAt,
-          },
-          data: {
-            conversationState: stateJson,
-            updatedAt: now,
-            // FIX ST2: Atomic activity recording - no separate call needed
-            lastActivityAt: now,
-            isStale: false,
-            messageCount,
-            checkpointStage,
-            checkpointAt,
-            // Chase-reset on stage advance — see the read at the top
-            // of this method for the rationale.
-            ...chaseResetFields,
-          },
-        });
+      //
+      // withSerializationRetry re-runs the whole transaction on a
+      // transient DB error (dropped connection, expired transaction) —
+      // nothing was committed, so a clean re-run is correct. A
+      // ConcurrentModificationError is NOT transient and propagates
+      // immediately to the caller's optimistic-lock handling.
+      await withSerializationRetry(
+        () => prisma.$transaction(async (tx) => {
+          const result = await tx.appointmentRequest.updateMany({
+            where: {
+              id: appointmentRequestId,
+              updatedAt: expectedUpdatedAt,
+            },
+            data: {
+              conversationState: stateJson,
+              updatedAt: now,
+              // FIX ST2: Atomic activity recording - no separate call needed
+              lastActivityAt: now,
+              isStale: false,
+              messageCount,
+              checkpointStage,
+              checkpointAt,
+              // Chase-reset on stage advance — see the read at the top
+              // of this method for the rationale.
+              ...chaseResetFields,
+            },
+          });
 
-        if (result.count === 0) {
-          // Version mismatch - another process modified the state.
-          // Use the typed error so callers can `instanceof`-check rather
-          // than string-matching the message (fragile across rephrasings).
-          throw new ConcurrentModificationError(appointmentRequestId);
-        }
+          if (result.count === 0) {
+            // Version mismatch - another process modified the state.
+            // Use the typed error so callers can `instanceof`-check rather
+            // than string-matching the message (fragile across rephrasings).
+            throw new ConcurrentModificationError(appointmentRequestId);
+          }
 
-        await tx.appointmentConversation.upsert({
-          where: { appointmentId: appointmentRequestId },
-          create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-          update: { conversationState: stateJson },
-        });
-      });
+          await tx.appointmentConversation.upsert({
+            where: { appointmentId: appointmentRequestId },
+            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+            update: { conversationState: stateJson },
+          });
+        }),
+        { appointmentRequestId, op: 'storeConversationState' },
+        (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
+      );
     } else {
       // Legacy call without version check (for initial state creation).
       // FIX ST2: Include activity recording in same atomic operation.
       // Phase 3a dual-write applied as in the optimistic-locked branch.
-      await prisma.$transaction(async (tx) => {
-        await tx.appointmentRequest.update({
-          where: { id: appointmentRequestId },
-          data: {
-            conversationState: stateJson,
-            updatedAt: now,
-            // FIX ST2: Atomic activity recording
-            lastActivityAt: now,
-            isStale: false,
-            messageCount,
-            checkpointStage,
-            checkpointAt,
-            // Chase-reset on stage advance — see the read at the top
-            // of this method for the rationale.
-            ...chaseResetFields,
-          },
-          select: { id: true },
-        });
+      await withSerializationRetry(
+        () => prisma.$transaction(async (tx) => {
+          await tx.appointmentRequest.update({
+            where: { id: appointmentRequestId },
+            data: {
+              conversationState: stateJson,
+              updatedAt: now,
+              // FIX ST2: Atomic activity recording
+              lastActivityAt: now,
+              isStale: false,
+              messageCount,
+              checkpointStage,
+              checkpointAt,
+              // Chase-reset on stage advance — see the read at the top
+              // of this method for the rationale.
+              ...chaseResetFields,
+            },
+            select: { id: true },
+          });
 
-        await tx.appointmentConversation.upsert({
-          where: { appointmentId: appointmentRequestId },
-          create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-          update: { conversationState: stateJson },
-        });
-      });
+          await tx.appointmentConversation.upsert({
+            where: { appointmentId: appointmentRequestId },
+            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+            update: { conversationState: stateJson },
+          });
+        }),
+        { appointmentRequestId, op: 'storeConversationState:init' },
+        (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
+      );
     }
   }
 
@@ -267,34 +282,43 @@ export class AIConversationService {
       // can distinguish optimistic-lock losses from successes. If the
       // legacy update misses (count=0) we DON'T touch the mirror
       // table — the rest of the row state didn't change either.
-      const transactionResult = await prisma.$transaction(async (tx) => {
-        const result = await tx.appointmentRequest.updateMany({
-          where: {
-            id: appointmentRequestId,
-            updatedAt: record.updatedAt,
-            ...options?.extraWhere,
-          },
-          data: {
-            conversationState: stateJson,
-            messageCount,
-            checkpointStage,
-            checkpointAt,
-            updatedAt: now,
-            ...chaseResetFields,
-            ...options?.extraUpdates,
-          },
-        });
-
-        if (result.count === 1) {
-          await tx.appointmentConversation.upsert({
-            where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-            update: { conversationState: stateJson },
+      //
+      // withSerializationRetry re-runs the transaction on a transient
+      // DB error (dropped connection, expired transaction). If the row
+      // changed between attempts, the re-run just yields count=0 and
+      // the outer optimistic-lock loop takes over.
+      const transactionResult = await withSerializationRetry(
+        () => prisma.$transaction(async (tx) => {
+          const result = await tx.appointmentRequest.updateMany({
+            where: {
+              id: appointmentRequestId,
+              updatedAt: record.updatedAt,
+              ...options?.extraWhere,
+            },
+            data: {
+              conversationState: stateJson,
+              messageCount,
+              checkpointStage,
+              checkpointAt,
+              updatedAt: now,
+              ...chaseResetFields,
+              ...options?.extraUpdates,
+            },
           });
-        }
 
-        return result;
-      });
+          if (result.count === 1) {
+            await tx.appointmentConversation.upsert({
+              where: { appointmentId: appointmentRequestId },
+              create: { appointmentId: appointmentRequestId, conversationState: stateJson },
+              update: { conversationState: stateJson },
+            });
+          }
+
+          return result;
+        }),
+        { appointmentRequestId, op: 'applyCheckpointUpdate' },
+        (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
+      );
 
       if (transactionResult.count === 1) {
         return { applied: true, stage: checkpointStage };
