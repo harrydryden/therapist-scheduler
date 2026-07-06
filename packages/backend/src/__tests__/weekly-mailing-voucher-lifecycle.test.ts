@@ -101,6 +101,7 @@ jest.mock('../utils/locked-task-runner', () => ({
 
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
+import { SETTING_DEFINITIONS } from '../config/setting-definitions';
 import { getSettingValue, getSettingValues } from '../services/settings.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { emailProcessingService } from '../services/email-processing.service';
@@ -136,6 +137,10 @@ function setupSettings(overrides: Record<string, unknown> = {}) {
     'voucher.enabled': true,
     'voucher.expiryDays': 14,
     'voucher.maxStrikes': 3,
+    // Enabled here so the legacy unsubscribe-path tests exercise it; the
+    // PLATFORM default is false (asserted below) so deploys don't free up
+    // anyone's spot unless an admin opts in.
+    'voucher.autoUnsubscribeEnabled': true,
     ...overrides,
   };
 
@@ -313,7 +318,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     expect(upsertCall.update.strikeCount).toBe(2);
   });
 
-  // ---- Max strikes: auto-unsubscribe ----
+  // ---- Max strikes: auto-unsubscribe (only when the toggle is on) ----
 
   it('auto-unsubscribes when max strikes reached', async () => {
     const sentAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
@@ -350,6 +355,64 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
       where: { id: testUser.id },
       data: { subscribed: false },
     });
+  });
+
+  it('keeps the user subscribed at max strikes when auto-unsubscribe is disabled', async () => {
+    setupSettings({ 'voucher.autoUnsubscribeEnabled': false });
+    const sentAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
+      makeTracking({
+        lastVoucherSentAt: sentAt,
+        lastVoucherToken: 'v1:old:tok:sig',
+        strikeCount: 2, // incrementing to 3 hits maxStrikes
+      })
+    );
+
+    await weeklyMailingListService.forceSend(true);
+
+    // The user gets a normal weekly email with a fresh code, NOT the
+    // final "freeing up your spot" notice.
+    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    expect(emailCall.subject).toBe('Your weekly therapy update');
+    expect(emailCall.subject).not.toMatch(/Goodbye/i);
+
+    // They retain access: no unsubscribe write anywhere.
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    const unsubWrites = (prisma.voucherTracking.update as jest.Mock).mock.calls.filter(
+      (c: unknown[]) => (c[0] as { data: { unsubscribedAt?: Date } }).data.unsubscribedAt instanceof Date
+    );
+    expect(unsubWrites).toHaveLength(0);
+
+    // Strikes keep counting for visibility, atomically with the new voucher.
+    expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
+    const upsertCall = (prisma.voucherTracking.upsert as jest.Mock).mock.calls[0][0];
+    expect(upsertCall.update.strikeCount).toBe(3);
+    expect(upsertCall.update.lastVoucherToken).toBeTruthy();
+  });
+
+  it('never unsubscribes when the toggle lookup returns undefined (fail-safe)', async () => {
+    // A missing/failed setting read must not free up anyone's spot.
+    setupSettings({ 'voucher.autoUnsubscribeEnabled': undefined });
+    const sentAt = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(
+      makeTracking({
+        lastVoucherSentAt: sentAt,
+        lastVoucherToken: 'v1:old:tok:sig',
+        strikeCount: 2,
+      })
+    );
+
+    await weeklyMailingListService.forceSend(true);
+
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('ships with auto-unsubscribe disabled by default', () => {
+    // The platform default is the effective value until an admin opts in —
+    // this guard is what "turn off freeing up spots" rests on.
+    expect(SETTING_DEFINITIONS['voucher.autoUnsubscribeEnabled'].defaultValue).toBe(false);
   });
 
   // ---- Non-voucher mode ----
