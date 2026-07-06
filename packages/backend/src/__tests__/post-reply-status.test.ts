@@ -151,6 +151,10 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
       previousConfirmedDateTime: 'Mon 3 Feb 10am',
       confirmedDateTime: null,
       confirmedDateTimeParsed: null,
+      // Via the shared startReschedulingState fragment — the old slot's
+      // follow-up sentinels are void once a reschedule begins.
+      meetingLinkCheckSentAt: null,
+      reminderSentAt: null,
     });
   });
 

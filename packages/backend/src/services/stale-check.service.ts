@@ -5,7 +5,8 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
 import { emailQueueService } from './email-queue.service';
-import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES } from '../constants';
+import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES, RESCHEDULE_OVERDUE_GRACE_MS } from '../constants';
+import { parseConfirmedDateTime } from '../utils/date';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
 import { auditEventService } from './audit-event.service';
@@ -630,6 +631,18 @@ class StaleCheckService extends LockedPeriodicService {
         logger.warn({ checkId, error: walErr }, 'Periodic WAL recovery failed (non-critical)');
       }
 
+      // Reschedule-overdue watchdog: surface appointments stranded mid-
+      // reschedule whose abandoned slot has passed. Inactivity staleness
+      // can't catch these — any new email resets the clock while the row
+      // stays invisible to the lifecycle tick (no confirmed datetime).
+      const rescheduleOverdueCount = await this.checkOverdueReschedules(checkId);
+      if (rescheduleOverdueCount > 0) {
+        logger.warn(
+          { checkId, rescheduleOverdueCount },
+          'Flagged overdue reschedules whose previous session date has passed'
+        );
+      }
+
       // Edge Case #7: Auto-escalation to human control
       // Automatically escalate conversations that have been stalled for too long
       const autoEscalatedCount = await this.autoEscalateStalled(checkId);
@@ -678,6 +691,106 @@ class StaleCheckService extends LockedPeriodicService {
     } catch (error) {
       logger.error({ checkId, error }, 'Failed to run stale check');
     }
+  }
+
+  /**
+   * Reschedule-overdue watchdog.
+   *
+   * Entering a reschedule clears `confirmedDateTime(Parsed)`, which removes
+   * the appointment from the lifecycle tick's confirmed → session_held
+   * query. If the reschedule never finalises, the row sits in
+   * `confirmed` + reschedulingInProgress forever: no session_held, no
+   * feedback form, no completion — and generic inactivity staleness misses
+   * it whenever the conversation keeps receiving email. This sweep alerts
+   * admins once per stuck reschedule, when the ABANDONED slot
+   * (`previousConfirmedDateTime`) is comfortably in the past: at that point
+   * either the session happened off the books (status needs a manual fix)
+   * or the client silently lost their booking. `rescheduleOverdueAlertAt`
+   * is the once-only sentinel; it's cleared with the rest of the
+   * rescheduling state when a reschedule resolves.
+   */
+  private async checkOverdueReschedules(checkId: string): Promise<number> {
+    const now = Date.now();
+
+    const candidates = await prisma.appointmentRequest.findMany({
+      where: {
+        status: 'confirmed',
+        reschedulingInProgress: true,
+        rescheduleOverdueAlertAt: null,
+      },
+      select: {
+        id: true,
+        therapistName: true,
+        previousConfirmedDateTime: true,
+        reschedulingInitiatedBy: true,
+      },
+      take: 50,
+    });
+
+    if (candidates.length === 0) return 0;
+
+    let alerted = 0;
+
+    for (const apt of candidates) {
+      // The abandoned slot is stored as the raw display string; parse it
+      // with forwardDate: false — it describes a slot booked in the past,
+      // and the parser's default forward bias would resolve year-less
+      // strings to the future, so the alert would never fire.
+      if (!apt.previousConfirmedDateTime) continue;
+      const previousSlot = parseConfirmedDateTime(
+        apt.previousConfirmedDateTime,
+        new Date(),
+        { forwardDate: false },
+      );
+      if (!previousSlot) {
+        logger.debug(
+          { checkId, appointmentId: apt.id, previousConfirmedDateTime: apt.previousConfirmedDateTime },
+          'Reschedule-overdue check: previous slot not parseable - skipping'
+        );
+        continue;
+      }
+      if (now - previousSlot.getTime() <= RESCHEDULE_OVERDUE_GRACE_MS) continue;
+
+      try {
+        // Preconditions re-checked in the write so a reschedule that
+        // resolved (or a concurrent sweep) between the candidate query and
+        // here doesn't get a spurious alert — count 0 means we lost the
+        // race and stay silent.
+        const stamped = await prisma.appointmentRequest.updateMany({
+          where: {
+            id: apt.id,
+            status: 'confirmed',
+            reschedulingInProgress: true,
+            rescheduleOverdueAlertAt: null,
+          },
+          data: { rescheduleOverdueAlertAt: new Date() },
+        });
+        if (stamped.count === 0) continue;
+
+        alerted++;
+
+        auditEventService.log(apt.id, 'reschedule_overdue', 'system', {
+          previousConfirmedDateTime: apt.previousConfirmedDateTime,
+          reschedulingInitiatedBy: apt.reschedulingInitiatedBy,
+          note:
+            'Reschedule was initiated but never finalised, and the previously booked session time has passed. ' +
+            'Confirm whether the session took place; the appointment cannot reach session_held/feedback until a new date is set.',
+        });
+
+        await slackNotificationService.notifyRescheduleOverdue({
+          appointmentId: apt.id,
+          therapistName: apt.therapistName,
+          previousConfirmedDateTime: apt.previousConfirmedDateTime,
+        });
+      } catch (error) {
+        logger.error(
+          { checkId, appointmentId: apt.id, error },
+          'Failed to flag overdue reschedule'
+        );
+      }
+    }
+
+    return alerted;
   }
 
   /**

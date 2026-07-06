@@ -278,6 +278,13 @@ model AppointmentRequest {
   reschedulingInProgress    Boolean @default(false) @map("rescheduling_in_progress")
   reschedulingInitiatedBy   String? @map("rescheduling_initiated_by")
   previousConfirmedDateTime String? @map("previous_confirmed_date_time")
+  // Watchdog sentinel: stamped once when the stale-check sweep alerts that
+  // this reschedule is overdue — the abandoned previous slot has passed and
+  // no new datetime was ever agreed, so the appointment is invisible to the
+  // lifecycle tick and can never auto-complete. Cleared alongside the other
+  // rescheduling fields (CLEAR_RESCHEDULING_STATE) when the reschedule
+  // resolves, so a later reschedule can alert again.
+  rescheduleOverdueAlertAt  DateTime? @map("reschedule_overdue_alert_at")
 
   // Conversation stall detection (FIX NEW: detect spinning conversations)
   conversationStallAlertAt      DateTime? @map("conversation_stall_alert_at")

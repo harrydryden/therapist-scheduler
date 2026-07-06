@@ -730,6 +730,32 @@ class SlackNotificationService {
   }
 
   /**
+   * Alert when a reschedule is overdue: the appointment entered rescheduling
+   * (confirmed datetime cleared) but no new time was ever finalised, and the
+   * abandoned previous slot has passed. The row is invisible to the
+   * lifecycle tick in this state, so without admin action it can never
+   * reach session_held / feedback / completed.
+   *
+   * PII discipline: the reschedule initiator can be a raw email address, so
+   * it goes to the audit event, not to Slack.
+   */
+  async notifyRescheduleOverdue(params: {
+    appointmentId: string;
+    therapistName: string;
+    previousConfirmedDateTime: string;
+  }): Promise<boolean> {
+    return this.sendAlert({
+      title: 'Reschedule Overdue — Session Date Passed',
+      severity: 'high',
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details:
+        `Rescheduling started but no new time was agreed, and the previously booked slot (*${params.previousConfirmedDateTime}*) has passed. ` +
+        'Confirm whether the session took place. The appointment cannot progress to session held / feedback until a new date is set (or the status is updated manually).',
+    });
+  }
+
+  /**
    * Alert when human review is flagged by the agent.
    *
    * Shares the `human-control` dedup group with notifyAutoEscalation —
