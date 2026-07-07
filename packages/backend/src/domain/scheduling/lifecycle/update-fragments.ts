@@ -15,7 +15,43 @@
 export const CLEAR_RESCHEDULING_STATE = {
   reschedulingInProgress: false,
   reschedulingInitiatedBy: null,
+  // The watchdog alert for an overdue reschedule is about the in-progress
+  // reschedule; once that resolves (new datetime, completed, cancelled,
+  // admin force) the alert is moot and must not suppress a future one.
+  rescheduleOverdueAlertAt: null,
 } as const;
+
+/**
+ * Field set written when an appointment ENTERS rescheduling. Two writers
+ * apply it and MUST stay in lock-step (defining the shape here is the
+ * lock-step mechanism, same rationale as CLEAR_CHASE_STATE):
+ *   - the agent's `initiate_reschedule` tool handler (initiatedBy 'agent')
+ *   - `reconcileStatusAfterReply`'s post-loop safety net (initiatedBy =
+ *     the inbound sender)
+ *
+ * `confirmedDateTime` and its parsed mirror `confirmedDateTimeParsed` are
+ * cleared TOGETHER. Clearing only the display string (a historical drift
+ * between the two writers) left a stale parsed value behind, which let the
+ * lifecycle tick promote a mid-reschedule appointment to session_held off
+ * the abandoned slot.
+ */
+export function startReschedulingState(params: {
+  initiatedBy: string;
+  previousConfirmedDateTime: string | null;
+}) {
+  return {
+    reschedulingInProgress: true,
+    reschedulingInitiatedBy: params.initiatedBy,
+    previousConfirmedDateTime: params.previousConfirmedDateTime,
+    confirmedDateTime: null,
+    confirmedDateTimeParsed: null,
+    // The old slot's follow-up sentinels are void — the post-booking
+    // services must re-send a meeting-link check and reminder once a new
+    // datetime is agreed.
+    meetingLinkCheckSentAt: null,
+    reminderSentAt: null,
+  } as const;
+}
 
 /**
  * Reset all four post-booking follow-up sentinels. Used by transitionToConfirmed

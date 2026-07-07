@@ -32,6 +32,7 @@ export type AuditEventType =
   | 'stale_flagged'            // Appointment flagged as stale
   | 'follow_up_sent'           // Post-booking follow-up sent
   | 'session_held_unverified'  // Auto-transitioned to session_held with no verified meeting link
+  | 'reschedule_overdue'       // Reschedule never finalised and the abandoned slot has passed
   // Lifecycle events (non-status-change). These are emitted by
   // recordAppointmentEvent and queried directly by event type.
   | 'chase_sent'

@@ -21,6 +21,7 @@
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
+import { startReschedulingState } from '../domain/scheduling/lifecycle/update-fragments';
 import { InvalidTransitionError } from '../errors';
 
 export interface PostReplyAppointmentSnapshot {
@@ -120,13 +121,10 @@ export async function reconcileStatusAfterReply(
       // leaves the row 'confirmed'.
       const rescheduleUpdate = await prisma.appointmentRequest.updateMany({
         where: { id: appointmentRequestId, status: 'confirmed' },
-        data: {
-          reschedulingInProgress: true,
-          reschedulingInitiatedBy: fromEmail,
-          previousConfirmedDateTime: appointmentRequest.confirmedDateTime,
-          confirmedDateTime: null,
-          confirmedDateTimeParsed: null,
-        },
+        data: startReschedulingState({
+          initiatedBy: fromEmail,
+          previousConfirmedDateTime: appointmentRequest.confirmedDateTime ?? null,
+        }),
       });
       if (rescheduleUpdate.count === 0) {
         logger.warn(

@@ -401,6 +401,8 @@ If either party (client or therapist) indicates they need to change the appointm
 
 **Important**: Always verify with BOTH parties before finalizing any time change.
 
+**Rescheduling is only for sessions that have NOT happened yet.** If the confirmed session time has already passed, initiate_reschedule will be rejected: the session is presumed to have taken place, and clearing its date would break post-session follow-up. When someone asks for "another time" after the session has passed, treat it as a request for a NEW session — call flag_for_human_review so an admin can set up a new booking (also do this if they say the session never actually happened).
+
 ## Post-Booking Issues
 
 After a booking is confirmed, the client may report issues. Handle these as follows:
@@ -425,7 +427,7 @@ After a booking is confirmed, the client may report issues. Handle these as foll
 - record_availability_window: Capture a one-off availability window someone mentioned — e.g. "I can do Mondays for the next two weeks", "I'm free this Friday afternoon", "I'm out the week of the 15th". Resolve the relative phrasing to absolute ISO 8601 timestamps yourself, using today's date. status="available" for offered slots, status="unavailable" for explicit blocks. Past windows are dropped automatically. ROUTING: source="therapist" goes to the therapist's permanent upcoming-availability record (visible to future bookings too); source="user" stays scoped to THIS booking only.
 - record_booking_link: Persist the therapist's direct scheduling-tool URL (Calendly, Acuity, YouCanBook.me, SavvyCal, anything similar) when they share one in the conversation. Writes to the therapist's permanent record so future bookings see it. Always call this BEFORE forwarding the link to the client — that way the URL is captured even if this conversation goes sideways. See the "Detecting Booking Links in Emails" section above.
 - mark_scheduling_complete: Mark done AFTER therapist confirms they'll send the meeting link. This also sends final confirmation emails to both parties.
-- initiate_reschedule: Signal that a reschedule is needed. Call this FIRST when either party requests a time change on a confirmed appointment, BEFORE sending any coordination emails.
+- initiate_reschedule: Signal that a reschedule is needed. Call this FIRST when either party requests a time change on a confirmed appointment, BEFORE sending any coordination emails. Only valid while the confirmed session time is still upcoming — rejected once the session time has passed (see Appointment Rescheduling).
 - cancel_appointment: Cancel the appointment if either party **explicitly** asks to cancel. This frees the therapist for other bookings.
 - recommend_cancel_match: Recommend the admin cancel this match when the user has declined the therapist (e.g. due to availability not working, preference, or any reason they don't want to proceed) but hasn't explicitly said "cancel". This alerts the admin and pauses agent processing.
 - issue_voucher_code: Issue a session voucher code for a user who needs one to book. Use this when a user contacts you saying they don't have a session code or their code has expired. The tool generates a personal code and booking link for their email address. Share both the display code and the booking URL in your reply.

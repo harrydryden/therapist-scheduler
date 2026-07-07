@@ -519,6 +519,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       'voucher.enabled',
       'voucher.expiryDays',
       'voucher.maxStrikes',
+      'voucher.autoUnsubscribeEnabled',
     ]);
     return {
       subjectTemplate: settingsMap.get('email.weeklyMailingSubject') as string,
@@ -529,6 +530,9 @@ class WeeklyMailingListService extends LockedPeriodicService {
       voucherEnabled: settingsMap.get('voucher.enabled') as boolean,
       voucherExpiryDays: settingsMap.get('voucher.expiryDays') as number,
       voucherMaxStrikes: settingsMap.get('voucher.maxStrikes') as number,
+      // Explicit === true: this gate removes people from the list, so an
+      // undefined/failed lookup must fail SAFE (keep the user subscribed).
+      voucherAutoUnsubscribeEnabled: settingsMap.get('voucher.autoUnsubscribeEnabled') === true,
     };
   }
 
@@ -544,6 +548,8 @@ class WeeklyMailingListService extends LockedPeriodicService {
    * - Active unused voucher: send reminder for the existing code
    * - Voucher was used: reward with a fresh code (resets strike counter)
    * - After N consecutive expired codes: auto-unsubscribe with final notice
+   *   — ONLY when `voucher.autoUnsubscribeEnabled` is on (off by default);
+   *   otherwise the user keeps their spot and receives a fresh code
    */
   private async sendWeeklyEmail(
     user: MailingListUser,
@@ -598,8 +604,19 @@ class WeeklyMailingListService extends LockedPeriodicService {
     } else if (tracking?.lastVoucherSentAt && !voucherUsed && !hasActiveVoucher) {
       const newStrikeCount = (tracking.strikeCount || 0) + 1;
       if (newStrikeCount >= maxStrikes) {
-        await this.sendFinalNoticeAndUnsubscribe(user, emailSettings, unsubscribeUrl, tracking, newStrikeCount);
-        return;
+        // Freeing up the user's spot is opt-in. When the toggle is off the
+        // user keeps their subscription and gets a fresh code like any
+        // other strike week — no final notice. Strikes keep counting for
+        // visibility, so if the toggle is later enabled, the next expired
+        // voucher (not this historical tally alone) triggers the notice.
+        if (emailSettings.voucherAutoUnsubscribeEnabled) {
+          await this.sendFinalNoticeAndUnsubscribe(user, emailSettings, unsubscribeUrl, tracking, newStrikeCount);
+          return;
+        }
+        logger.info(
+          { email: emailLower, strikeCount: newStrikeCount, maxStrikes },
+          'Max voucher strikes reached but auto-unsubscribe is disabled - keeping user subscribed'
+        );
       }
       tracking = { ...tracking, strikeCount: newStrikeCount };
       logger.info({ email: emailLower, strikeCount: newStrikeCount, maxStrikes }, 'Voucher expired unused, strike incremented');
@@ -743,6 +760,7 @@ interface EmailSettings {
   voucherEnabled: boolean;
   voucherExpiryDays: number;
   voucherMaxStrikes: number;
+  voucherAutoUnsubscribeEnabled: boolean;
 }
 
 /**

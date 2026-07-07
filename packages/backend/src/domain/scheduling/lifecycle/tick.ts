@@ -10,7 +10,7 @@
 import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
 import { LockedPeriodicService } from '../../../utils/locked-periodic-service';
-import { APPOINTMENT_STATUS } from '../../../constants';
+import { APPOINTMENT_STATUS, SESSION_END_BUFFER_MS } from '../../../constants';
 import { transitionToSessionHeld } from './transitions/light';
 import { auditEventService } from '../../../services/audit-event.service';
 
@@ -19,7 +19,6 @@ const STARTUP_DELAY_MS = 2 * 60 * 1000;  // 2 minutes
 const LOCK_TTL_SECONDS = 300;            // 5 minutes
 const RENEWAL_INTERVAL_MS = 30 * 1000;   // 30 seconds
 const LOCK_KEY = 'lock:appointment-lifecycle-tick';
-const SESSION_END_BUFFER_MS = 60 * 60 * 1000; // 1 hour
 const BATCH_SIZE = 50;
 
 interface TickResult {
@@ -52,6 +51,13 @@ class AppointmentLifecycleTickService extends LockedPeriodicService<TickResult> 
     const appointments = await prisma.appointmentRequest.findMany({
       where: {
         status: APPOINTMENT_STATUS.CONFIRMED,
+        // A row mid-reschedule has abandoned its booked slot; asserting
+        // session_held off that slot would be wrong even when a stale
+        // confirmedDateTimeParsed survived (rows written before the
+        // reschedule-entry fields were unified cleared only the display
+        // string). The reschedule either finalises with a new datetime
+        // (clearing this flag) or the stale-check watchdog surfaces it.
+        reschedulingInProgress: false,
         confirmedDateTimeParsed: {
           not: null,
           lt: sessionEndBuffer,

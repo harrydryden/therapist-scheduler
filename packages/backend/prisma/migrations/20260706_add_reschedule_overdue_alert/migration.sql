@@ -1,0 +1,12 @@
+-- Watchdog sentinel for appointments stranded in rescheduling limbo:
+-- reschedulingInProgress=true clears confirmed_date_time(_parsed), which
+-- removes the row from the lifecycle tick's query. If the reschedule never
+-- finalises, the appointment can never reach session_held / feedback /
+-- completed. The stale-check sweep stamps this column when it alerts admins
+-- that the abandoned previous slot has passed with no new date agreed, so
+-- each stuck reschedule alerts exactly once. Cleared whenever the
+-- reschedule resolves (new datetime confirmed, completed, cancelled, or
+-- admin force-update).
+--
+-- Idempotent (ADD COLUMN IF NOT EXISTS) per docs/SCHEMA_MIGRATIONS.md.
+ALTER TABLE "appointment_requests" ADD COLUMN IF NOT EXISTS "reschedule_overdue_alert_at" TIMESTAMP(3);

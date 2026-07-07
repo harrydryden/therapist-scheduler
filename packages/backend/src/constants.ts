@@ -136,6 +136,26 @@ export const POST_BOOKING = {
   SESSION_REMINDER_HOURS_BEFORE: 4,
 } as const;
 
+// Shared boundary for "this session is over": a confirmed session is
+// treated as having taken place once it is this long past its scheduled
+// start (50min session + 10min slack). Two consumers MUST stay in
+// lock-step on this value:
+//   - the lifecycle tick, which promotes confirmed → session_held past it
+//   - the initiate_reschedule guard, which refuses to wipe the confirmed
+//     datetime past it (a "reschedule" of a session that already happened
+//     is really a new-booking request, and clearing the date would strand
+//     the appointment outside the tick's query forever)
+// A single constant means there is no window where a row is both
+// promotable and reschedulable.
+export const SESSION_END_BUFFER_MS = 60 * 60 * 1000; // 1 hour
+
+// How long after the abandoned previous slot a still-unresolved reschedule
+// is flagged to admins by the stale-check watchdog. Generous enough to
+// ignore reschedules that are actively converging (and to absorb timezone
+// ambiguity when parsing the stored slot string), small enough that a
+// stranded appointment surfaces the next day rather than never.
+export const RESCHEDULE_OVERDUE_GRACE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 // Chase follow-up — DEFAULTS ONLY, runtime values come from chase.* settings
 export const CHASE_FOLLOWUP = {
   CHASE_AFTER_STALE_HOURS: 72,

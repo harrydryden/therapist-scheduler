@@ -74,6 +74,17 @@ describe('appointment-lifecycle tick — meeting-link truth gate', () => {
     expect(query.select).toMatchObject({ meetingLinkConfirmedAt: true });
   });
 
+  it('excludes mid-reschedule rows — an abandoned slot must not become session_held', async () => {
+    // A row that entered rescheduling has walked away from its booked slot;
+    // even if a stale confirmedDateTimeParsed survived (pre-unification
+    // writers cleared only the display string), promoting it would assert a
+    // session off a datetime both parties abandoned.
+    appointmentFindMany.mockResolvedValueOnce([]);
+    await runTick();
+    const query = appointmentFindMany.mock.calls[0][0];
+    expect(query.where).toMatchObject({ reschedulingInProgress: false });
+  });
+
   it('counts a verified hold as transitioned without an unverified audit', async () => {
     appointmentFindMany.mockResolvedValueOnce([
       { id: 'apt-verified', meetingLinkConfirmedAt: new Date('2026-06-20T10:00:00Z'), confirmedDateTime: 'Tue 16 June 11am' },
