@@ -7,78 +7,26 @@
  * This service handles non-transactional operations that run AFTER a status
  * transition has been committed:
  * - Therapist booking status updates (freeze/unfreeze)
- * - Therapist deactivation when no active appointments remain
  * - SSE broadcast of status changes
  *
  * Notifications (Slack/email) are handled by appointment-notifications.service.ts.
  *
  * All operations here are non-fatal: failures are logged but never cause
  * the transition to be rolled back.
+ *
+ * Note: a therapist's `active` flag (their visibility on the public booking
+ * page) is deliberately NOT touched here. It is an admin-only toggle,
+ * decoupled from the appointment lifecycle — terminating a therapist's last
+ * appointment (cancel/complete) must not hide them from the finder.
  */
 
-import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { APPOINTMENT_STATUS, AppointmentStatus, ACTIVE_STATUSES } from '../constants';
+import { APPOINTMENT_STATUS, AppointmentStatus } from '../constants';
 import { sseService } from './sse.service';
 import { appointmentNotificationsService } from './appointment-notifications.service';
 import { runTrackedSideEffect } from './side-effect-harness';
 import type { TransitionSource, TransitionResult } from '../domain/scheduling/lifecycle';
-
-/**
- * Count this therapist's OTHER active appointments and, if there are none,
- * mark the therapist inactive in Postgres.
- *
- * Used by completion / cancellation / admin-force paths so the same "last
- * appointment closed → take therapist off the booking page" semantics apply
- * regardless of how the appointment terminated.
- *
- * Failures are logged but never thrown — matches the existing "non-fatal
- * side effect" contract.
- */
-async function deactivateTherapistIfLastAppointment(args: {
-  appointmentId: string;
-  therapistHandle: string;
-  taskName: string;
-  logContext: Record<string, unknown>;
-  successLogMessage: string;
-}): Promise<void> {
-  const { appointmentId, therapistHandle, taskName, logContext, successLogMessage } = args;
-
-  try {
-    const otherActiveAppointments = await prisma.appointmentRequest.count({
-      where: {
-        therapistHandle,
-        id: { not: appointmentId },
-        status: { in: [...ACTIVE_STATUSES] },
-      },
-    });
-
-    if (otherActiveAppointments === 0) {
-      // therapistHandle is the public handle: legacy notionId or
-      // post-Notion Postgres uuid. Match by either — updateMany returns
-      // count=0 if no row matches, which is fine for missing therapists.
-      const result = await prisma.therapist.updateMany({
-        where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
-        data: { active: false },
-      });
-      logger.info(
-        { ...logContext, therapistHandle, taskName, updated: result.count },
-        successLogMessage,
-      );
-    } else {
-      logger.info(
-        { ...logContext, therapistHandle, otherActiveAppointments },
-        'Therapist still has active appointments - keeping active',
-      );
-    }
-  } catch (err) {
-    logger.error(
-      { ...logContext, therapistHandle, err },
-      `Failed to deactivate therapist (${taskName}) — non-fatal`,
-    );
-  }
-}
 
 // ============================================
 // Parameter Types
@@ -190,11 +138,12 @@ class TransitionSideEffectsService {
 
   /**
    * Side effects after a successful completion:
-   * - Clear therapist confirmed status
+   * - Clear therapist confirmed status (unfreeze for other bookings)
    * - Recalculate therapist request count
-   * - Conditionally deactivate therapist in Notion
-   * - Sync therapist freeze status to Notion
-   * - Sync user to Notion
+   *
+   * Note: does NOT change the therapist's `active` flag. Completing a
+   * therapist's last appointment must not remove them from the public
+   * booking page — visibility is an admin-only toggle.
    */
   async onCompleted(params: OnCompletedParams): Promise<void> {
     const { appointmentId, therapistHandle, userEmail } = params;
@@ -213,13 +162,6 @@ class TransitionSideEffectsService {
         async () => {
           await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
           await therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle);
-          await deactivateTherapistIfLastAppointment({
-            appointmentId,
-            therapistHandle,
-            taskName: 'therapist-deactivate-completion',
-            logContext: { appointmentId },
-            successLogMessage: 'Marked therapist as inactive after last appointment completed',
-          });
         },
         {
           name: 'therapist-unfreeze-completion',
@@ -237,7 +179,10 @@ class TransitionSideEffectsService {
    * Side effects after a successful cancellation:
    * - Unmark therapist as confirmed (if was confirmed)
    * - Recalculate therapist booking status
-   * - Conditionally deactivate therapist if no other active appointments
+   *
+   * Note: does NOT change the therapist's `active` flag. Cancelling a
+   * therapist's last appointment must not remove them from the public
+   * booking page — visibility is an admin-only toggle.
    *
    * Same retry semantics as onCompleted — failed writes are re-driven
    * by the side-effect retry runner.
@@ -255,13 +200,6 @@ class TransitionSideEffectsService {
             await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
           }
           await therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle);
-          await deactivateTherapistIfLastAppointment({
-            appointmentId,
-            therapistHandle,
-            taskName: 'therapist-deactivate-cancellation',
-            logContext: { appointmentId },
-            successLogMessage: 'Marked therapist as inactive after last appointment cancelled',
-          });
         },
         {
           name: 'therapist-unfreeze-cancellation',
@@ -298,9 +236,10 @@ class TransitionSideEffectsService {
     const nowCancelled = newStatus === APPOINTMENT_STATUS.CANCELLED;
 
     // --- Therapist booking status ---
-    // Each operation has its own try/catch so a failure in one does not block the others.
+    // Updates freeze/unfreeze flags only. The therapist's `active` flag
+    // (public booking-page visibility) is deliberately left untouched —
+    // it is an admin-only toggle, decoupled from the appointment lifecycle.
     if (appointment.therapistHandle) {
-      // Step 1: Update booking status flags
       try {
         if (nowConfirmed && !wasConfirmed) {
           await therapistBookingStatusService.markConfirmed(
@@ -319,19 +258,8 @@ class TransitionSideEffectsService {
       } catch (err) {
         logger.error(
           { ...logContext, therapistHandle: appointment.therapistHandle, err },
-          'Failed to update therapist booking status after admin force update (non-fatal, continuing to deactivation)'
+          'Failed to update therapist booking status after admin force update (non-fatal)'
         );
-      }
-
-      // Step 2: Conditionally deactivate therapist (independent of Step 1).
-      if (nowCompleted || nowCancelled) {
-        await deactivateTherapistIfLastAppointment({
-          appointmentId,
-          therapistHandle: appointment.therapistHandle,
-          taskName: 'therapist-deactivate-admin-force',
-          logContext,
-          successLogMessage: `Marked therapist as inactive after admin force-${nowCompleted ? 'completed' : 'cancelled'} last appointment`,
-        });
       }
     }
 

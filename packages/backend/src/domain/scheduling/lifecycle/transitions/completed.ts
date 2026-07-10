@@ -128,7 +128,7 @@ export async function transitionToCompleted(
     userEmail: appointment.userEmail,
   });
 
-  // Post-transition side effects (therapist booking status, deactivation)
+  // Post-transition side effects (therapist booking status)
   fireAndForget(
     transitionSideEffectsService.onCompleted({
       appointmentId,

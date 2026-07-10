@@ -215,7 +215,7 @@ export async function transitionToCancelled(
     'Appointment cancelled',
   );
 
-  // Post-transition side effects (therapist booking status, deactivation)
+  // Post-transition side effects (therapist booking status)
   fireAndForget(
     transitionSideEffectsService.onCancelled({
       appointmentId,
