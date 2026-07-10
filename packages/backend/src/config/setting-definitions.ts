@@ -78,13 +78,10 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     maxValue: 48,
     defaultValue: POST_BOOKING.SESSION_REMINDER_HOURS_BEFORE,
   },
-  'postBooking.feedbackFormUrl': {
-    category: 'postBooking',
-    label: 'Feedback Form URL (fallback)',
-    description: 'Fallback URL for the feedback form when no tracking code is available. Used only for legacy appointments without tracking codes.',
-    valueType: 'string',
-    defaultValue: '',
-  },
+  // Note: 'postBooking.feedbackFormUrl' (tokenless fallback URL) was removed —
+  // every feedback link is now built from the tracking code with an HMAC token
+  // via feedback-email.helper.ts; a tokenless fallback link could never
+  // complete an appointment.
 
   // Agent conversation settings
   'agent.maxMessages': {

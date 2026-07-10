@@ -52,6 +52,7 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
             trackingCode: true,
             gmailThreadId: true,
             status: true,
+            confirmedDateTimeParsed: true,
             feedbackFormSentAt: true,
           },
         });
@@ -68,6 +69,9 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
           );
         }
 
+        // Validate BEFORE sending — a rejection after the email is out would
+        // leave the user with a form the system doesn't expect.
+        //
         // A valid feedback link requires a tracking code (the token is bound
         // to it). Without one the shared helper can't build a tokened URL, so
         // reject rather than send a link that can't complete the appointment.
@@ -75,6 +79,39 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
           return Errors.badRequest(
             reply,
             'Appointment has no tracking code — cannot build a valid feedback link.',
+          );
+        }
+
+        // Status gate: session_held / confirmed transition cleanly;
+        // feedback_requested is a re-send (handled below). Completed
+        // appointments must go through re-request-feedback (which discards
+        // the existing submission and walks the status back); earlier
+        // statuses have no session to gather feedback on.
+        const status = appointment.status;
+        const sendable =
+          status === 'session_held' || status === 'confirmed' || status === 'feedback_requested';
+        if (!sendable) {
+          const hint =
+            status === 'completed'
+              ? ' Use the re-request-feedback endpoint to discard the existing submission and re-send.'
+              : '';
+          return Errors.badRequest(
+            reply,
+            `Cannot send a feedback form for an appointment in status "${status}".${hint}`,
+          );
+        }
+
+        // Back-fill guard: a confirmed appointment whose session is still in
+        // the future must not receive a feedback form (and transitioning it
+        // would pull it out of the session-reminder/meeting-link automations).
+        if (
+          status === 'confirmed' &&
+          appointment.confirmedDateTimeParsed &&
+          appointment.confirmedDateTimeParsed > new Date()
+        ) {
+          return Errors.badRequest(
+            reply,
+            'The session has not happened yet — feedback cannot be requested before the confirmed session time.',
           );
         }
 
@@ -86,15 +123,28 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
 
         // Use lifecycle service for the status transition (audit
         // trail, side effects, feedbackFormSentAt stamp).
-        await appointmentLifecycleService.transitionToFeedbackRequested({
+        const transition = await appointmentLifecycleService.transitionToFeedbackRequested({
           appointmentId: id,
           source: 'admin',
           adminId: `admin:${request.ip || 'unknown'}`,
         });
 
+        // Already feedback_requested → the transition idempotently skips and
+        // does NOT re-stamp feedbackFormSentAt. Stamp it here so the resend is
+        // recorded and downstream timers (reminder delay) key off the new send.
+        if (transition.skipped) {
+          await prisma.appointmentRequest.update({
+            where: { id },
+            data: { feedbackFormSentAt: new Date() },
+            select: { id: true },
+          });
+        }
+
         logger.info(
-          { requestId, appointmentId: id, userEmail: appointment.userEmail },
-          'Manually sent feedback form email and transitioned to feedback_requested',
+          { requestId, appointmentId: id, userEmail: appointment.userEmail, transitionSkipped: !!transition.skipped },
+          transition.skipped
+            ? 'Manually re-sent feedback form email (already feedback_requested; re-stamped feedbackFormSentAt)'
+            : 'Manually sent feedback form email and transitioned to feedback_requested',
         );
 
         return sendSuccess(reply, {

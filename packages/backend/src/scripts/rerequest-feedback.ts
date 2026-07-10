@@ -53,6 +53,7 @@ async function main(): Promise<void> {
       status: true,
       userEmail: true,
       trackingCode: true,
+      confirmedDateTimeParsed: true,
       feedbackFormSentAt: true,
     },
   });
@@ -64,8 +65,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Same discard scope as reRequestFeedback: rows linked to the appointment
+  // plus anonymous rows carrying its tracking code (historical tokenless links).
   const submissionCount = await prisma.feedbackSubmission.count({
-    where: { appointmentRequestId: appointment.id },
+    where: {
+      OR: [
+        { appointmentRequestId: appointment.id },
+        ...(appointment.trackingCode
+          ? [{ trackingCode: appointment.trackingCode.toUpperCase(), appointmentRequestId: null }]
+          : []),
+      ],
+    },
   });
 
   console.log('Appointment:', {
@@ -78,6 +88,27 @@ async function main(): Promise<void> {
   });
 
   if (!args.apply) {
+    // Mirror the validations --apply would enforce so the dry run doesn't
+    // promise actions that the real run would refuse.
+    const blockers: string[] = [];
+    if (!appointment.trackingCode) {
+      blockers.push('no tracking code — a valid tokened feedback link cannot be built');
+    }
+    if (!['confirmed', 'session_held', 'feedback_requested', 'completed'].includes(appointment.status)) {
+      blockers.push(`status "${appointment.status}" is not eligible (session never reached confirmed)`);
+    } else if (
+      appointment.status === 'confirmed' &&
+      appointment.confirmedDateTimeParsed &&
+      appointment.confirmedDateTimeParsed > new Date()
+    ) {
+      blockers.push(`session has not happened yet (confirmed for ${appointment.confirmedDateTimeParsed.toISOString()})`);
+    }
+
+    if (blockers.length > 0) {
+      console.log(`\n[DRY RUN] --apply would REFUSE this appointment:\n - ${blockers.join('\n - ')}`);
+      return;
+    }
+
     console.log(
       `\n[DRY RUN] Would discard ${submissionCount} submission(s), reset feedback state, ` +
         `and send a fresh tokened feedback email to ${appointment.userEmail}.\n` +

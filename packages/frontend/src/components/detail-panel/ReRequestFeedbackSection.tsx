@@ -1,19 +1,16 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { POST_BOOKING_STATUSES } from '@therapist-scheduler/shared';
 import { reRequestFeedback } from '../../api/appointments';
 import { getErrorMessage } from '../../api/core';
 import type { AppointmentDetail } from '../../types';
 
 /**
- * Statuses from which re-requesting feedback makes sense (mirrors the backend
- * eligibility check). Anything earlier means the session hasn't happened.
+ * Statuses from which re-requesting feedback makes sense — the shared
+ * post-booking set (confirmed and beyond, excluding cancelled), the same
+ * constant the backend eligibility check uses, so the gates can't drift.
  */
-export const FEEDBACK_ELIGIBLE_STATUSES = [
-  'confirmed',
-  'session_held',
-  'feedback_requested',
-  'completed',
-];
+export const FEEDBACK_ELIGIBLE_STATUSES: readonly string[] = POST_BOOKING_STATUSES;
 
 interface ReRequestFeedbackSectionProps {
   appointment: AppointmentDetail;

@@ -508,6 +508,10 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
 
         const submission = await prisma.feedbackSubmission.findFirst({
           where: { trackingCode: code.toUpperCase() },
+          // Multiple rows per tracking code are an expected state (e.g. a
+          // stale anonymous submission plus a fresh linked one) — return the
+          // newest deterministically.
+          orderBy: { createdAt: 'desc' },
           include: {
             appointment: {
               select: {

@@ -130,7 +130,12 @@ export default function AppointmentDetailPanel({
             }}
           />
 
+          {/* Keyed by appointment id: the panel and its children (delete
+              confirm, re-request feedback success/confirm) hold local state
+              that must not leak across appointment switches while the
+              drawer stays mounted. */}
           <CompactControlPanel
+            key={appointmentDetail.id}
             appointment={appointmentDetail}
             controls={controls}
           />

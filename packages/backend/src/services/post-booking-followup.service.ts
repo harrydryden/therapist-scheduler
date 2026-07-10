@@ -35,8 +35,7 @@ import { auditEventService } from './audit-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { processSentinelBatch } from './sentinel-batch-runner';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
-import { generateFeedbackToken } from '../utils/feedback-token';
-import { buildFeedbackEmailPayload } from './feedback-email.helper';
+import { buildFeedbackEmailPayload, buildFeedbackFormUrl } from './feedback-email.helper';
 
 // Processing constants — imported from centralized constants
 const {
@@ -321,6 +320,7 @@ class PostBookingFollowupService extends PeriodicService {
             therapistGmailThreadId: true,
             status: true,
             notes: true,
+            transitionGeneration: true,
           },
           take: BATCH_SIZE,
           orderBy: { confirmedDateTimeParsed: 'asc' },
@@ -447,6 +447,9 @@ class PostBookingFollowupService extends PeriodicService {
             name: 'session-reminder-pair',
             context: { appointmentId: appointment.id },
           },
+          // Per-lifecycle-pass idempotency scope — see feedback-dispatch.
+          // reminderSentAt is re-armed by admin walk-backs to confirmed.
+          appointment.transitionGeneration,
         );
       },
     });
@@ -498,6 +501,7 @@ class PostBookingFollowupService extends PeriodicService {
             gmailThreadId: true,
             status: true,
             notes: true,
+            transitionGeneration: true,
           },
           take: BATCH_SIZE,
           orderBy: { confirmedDateTimeParsed: 'asc' },
@@ -591,6 +595,9 @@ class PostBookingFollowupService extends PeriodicService {
             name: 'meeting-link-check-email',
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
+          // Per-lifecycle-pass idempotency scope — see feedback-dispatch.
+          // meetingLinkCheckSentAt is re-armed by admin walk-backs to confirmed.
+          appointment.transitionGeneration,
         );
       },
     });
@@ -637,6 +644,7 @@ class PostBookingFollowupService extends PeriodicService {
             trackingCode: true,
             status: true,
             notes: true,
+            transitionGeneration: true,
           },
           take: BATCH_SIZE,
           orderBy: { confirmedDateTimeParsed: 'asc' },
@@ -753,6 +761,12 @@ class PostBookingFollowupService extends PeriodicService {
             name: 'feedback-dispatch',
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
+          // Scope the idempotency key to this lifecycle pass. Without this the
+          // key is "once per appointment, ever": after an admin walk-back
+          // (which re-arms the sentinel), the harness would dedupe against the
+          // first pass's completed row, skip the send, and strand the claimed
+          // sentinel at EPOCH — silently parking the appointment forever.
+          appointment.transitionGeneration,
         );
       },
     });
@@ -928,6 +942,7 @@ class PostBookingFollowupService extends PeriodicService {
             gmailThreadId: true,
             trackingCode: true,
             feedbackFormSentAt: true,
+            transitionGeneration: true,
           },
           take: BATCH_SIZE,
           orderBy: { feedbackFormSentAt: 'asc' },
@@ -967,6 +982,11 @@ class PostBookingFollowupService extends PeriodicService {
             name: 'feedback-reminder-email',
             context: { appointmentId: appointment.id, userEmail: appointment.userEmail },
           },
+          // Per-lifecycle-pass idempotency scope — see feedback-dispatch above.
+          // A walk-back re-arms feedbackReminderSentAt; without the generation
+          // the harness dedupes against the first pass's completed row and the
+          // re-armed sentinel strands at EPOCH with no reminder sent.
+          appointment.transitionGeneration,
         );
       },
     });
@@ -994,7 +1014,6 @@ class PostBookingFollowupService extends PeriodicService {
     const userName = firstName(appointment.userName);
     const therapistFirstName = firstName(appointment.therapistName);
 
-    // Build feedback form URL using native form with tracking code
     if (!appointment.trackingCode) {
       logger.warn(
         { appointmentId: appointment.id, userEmail: appointment.userEmail },
@@ -1003,10 +1022,9 @@ class PostBookingFollowupService extends PeriodicService {
       throw new Error('Appointment missing tracking code');
     }
 
-    const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
-    const baseUrl = webAppUrl.replace(/\/$/, '');
-    const feedbackToken = generateFeedbackToken(appointment.id);
-    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}?fk=${encodeURIComponent(feedbackToken)}`;
+    // Tokened URL via the shared helper — same link contract as the initial
+    // feedback dispatch and the admin send/re-request paths.
+    const feedbackFormUrl = await buildFeedbackFormUrl(appointment);
 
     const subject = await getEmailSubject('feedbackReminder', {
       therapistName: therapistFirstName,
