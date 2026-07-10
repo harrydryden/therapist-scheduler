@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 
 interface ConfirmDialogProps {
   title: string;
@@ -27,6 +27,21 @@ export default function ConfirmDialog({
     ? 'bg-red-600 text-white hover:bg-red-700'
     : 'bg-slate-900 text-white hover:bg-slate-800';
 
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Move focus into the dialog once on mount so Escape-to-close works from
+  // the keyboard. Must run only on mount (not on every render): an inline
+  // `ref={(el) => el.focus()}` re-fires each render and steals focus back
+  // from any input the user is typing in — dropping every keystroke after
+  // the first. Skip if focus is already inside the dialog (e.g. a child
+  // with `autoFocus`) so we don't override an intentionally-focused field.
+  useEffect(() => {
+    const el = dialogRef.current;
+    if (el && !el.contains(document.activeElement)) {
+      el.focus();
+    }
+  }, []);
+
   return (
     <div
       className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
@@ -39,7 +54,7 @@ export default function ConfirmDialog({
         aria-labelledby="confirm-dialog-title"
         className="bg-white rounded-xl shadow-lg max-w-md w-full mx-4 p-6"
         onClick={(e) => e.stopPropagation()}
-        ref={(el) => el?.focus()}
+        ref={dialogRef}
         tabIndex={-1}
       >
         <h3 id="confirm-dialog-title" className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
