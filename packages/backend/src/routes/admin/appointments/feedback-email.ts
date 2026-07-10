@@ -17,9 +17,7 @@ import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
 import { emailProcessingService } from '../../../services/email-processing.service';
 import { appointmentLifecycleService } from '../../../domain/scheduling/lifecycle';
-import { getEmailSubject, getEmailBody } from '../../../utils/email-templates';
-import { firstName } from '../../../utils/first-name';
-import { getSettingValue } from '../../../services/settings.service';
+import { buildFeedbackEmailPayload } from '../../../services/feedback-email.helper';
 import { sendSuccess, Errors } from '../../../utils/response';
 
 export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void> {
@@ -70,34 +68,21 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
           );
         }
 
-        // Build feedback form URL. Prefer the trackingCode-scoped URL
-        // (per-appointment) over the generic configured URL.
-        let feedbackFormUrl: string;
-        if (appointment.trackingCode) {
-          const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
-          const baseUrl = webAppUrl.replace(/\/$/, '');
-          feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}`;
-        } else {
-          feedbackFormUrl = await getSettingValue<string>('postBooking.feedbackFormUrl');
+        // A valid feedback link requires a tracking code (the token is bound
+        // to it). Without one the shared helper can't build a tokened URL, so
+        // reject rather than send a link that can't complete the appointment.
+        if (!appointment.trackingCode) {
+          return Errors.badRequest(
+            reply,
+            'Appointment has no tracking code — cannot build a valid feedback link.',
+          );
         }
 
-        const userName = firstName(appointment.userName);
-        const therapistFirstName = firstName(appointment.therapistName);
-        const subject = await getEmailSubject('feedbackForm', {
-          therapistName: therapistFirstName,
-        });
-        const emailBody = await getEmailBody('feedbackForm', {
-          userName,
-          therapistName: therapistFirstName,
-          feedbackFormUrl,
-        });
-
-        await emailProcessingService.sendEmail({
-          to: appointment.userEmail,
-          subject,
-          body: emailBody,
-          threadId: appointment.gmailThreadId || undefined,
-        });
+        // Build the tokened email via the shared helper so the link carries a
+        // valid `?fk=` token (previously this endpoint sent a tokenless URL,
+        // producing anonymous submissions that never completed the appointment).
+        const emailPayload = await buildFeedbackEmailPayload(appointment);
+        await emailProcessingService.sendEmail(emailPayload);
 
         // Use lifecycle service for the status transition (audit
         // trail, side effects, feedbackFormSentAt stamp).
@@ -115,7 +100,6 @@ export async function feedbackEmailRoute(fastify: FastifyInstance): Promise<void
         return sendSuccess(reply, {
           appointmentId: id,
           emailSentTo: appointment.userEmail,
-          feedbackFormUrl,
           message: 'Feedback email sent successfully',
         });
       } catch (err) {

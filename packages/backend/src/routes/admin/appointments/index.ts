@@ -27,6 +27,7 @@ import { patchDashboardRoute } from './patch-dashboard';
 import { patchAdminRoute } from './patch-admin';
 import { sendMessageRoute } from './send-message';
 import { feedbackEmailRoute } from './feedback-email';
+import { reRequestFeedbackRoute } from './re-request-feedback';
 import { reprocessThreadRoute } from './reprocess-thread';
 import { dropdownsRoutes } from './dropdowns';
 import { actionClosureRoute } from './action-closure';
@@ -48,6 +49,7 @@ export async function adminAppointmentRoutes(fastify: FastifyInstance): Promise<
   // Side-channel actions.
   await fastify.register(sendMessageRoute);
   await fastify.register(feedbackEmailRoute);
+  await fastify.register(reRequestFeedbackRoute);
   await fastify.register(reprocessThreadRoute);
   await fastify.register(actionClosureRoute);
 

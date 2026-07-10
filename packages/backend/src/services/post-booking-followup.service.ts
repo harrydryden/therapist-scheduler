@@ -36,6 +36,7 @@ import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { processSentinelBatch } from './sentinel-batch-runner';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { generateFeedbackToken } from '../utils/feedback-token';
+import { buildFeedbackEmailPayload } from './feedback-email.helper';
 
 // Processing constants — imported from centralized constants
 const {
@@ -818,10 +819,9 @@ class PostBookingFollowupService extends PeriodicService {
     trackingCode: string | null;
     gmailThreadId: string | null;
   }): Promise<{ to: string; subject: string; body: string; threadId?: string }> {
-    const userName = firstName(appointment.userName);
-    const therapistFirstName = firstName(appointment.therapistName);
-
-    // Build feedback form URL using native form with tracking code
+    // Missing tracking code is handled specially by the caller (admin note +
+    // sentinel confirm to prevent re-runs), so warn here before the shared
+    // helper throws so this cron-specific context lands in the logs.
     if (!appointment.trackingCode) {
       logger.warn(
         { appointmentId: appointment.id, userEmail: appointment.userEmail },
@@ -830,29 +830,9 @@ class PostBookingFollowupService extends PeriodicService {
       throw new Error('Appointment missing tracking code');
     }
 
-    const webAppUrl = await getSettingValue<string>('weeklyMailing.webAppUrl');
-    const baseUrl = webAppUrl.replace(/\/$/, '');
-    // Embed an HMAC-signed token bound to this appointment ID. The submit
-    // endpoint requires it before transitioning to `completed`, blocking
-    // tracking-code enumeration attacks.
-    const feedbackToken = generateFeedbackToken(appointment.id);
-    const feedbackFormUrl = `${baseUrl}/feedback/${appointment.trackingCode}?fk=${encodeURIComponent(feedbackToken)}`;
-
-    const subject = await getEmailSubject('feedbackForm', {
-      therapistName: therapistFirstName,
-    });
-    const body = await getEmailBody('feedbackForm', {
-      userName,
-      therapistName: therapistFirstName,
-      feedbackFormUrl,
-    });
-
-    return {
-      to: appointment.userEmail,
-      subject,
-      body,
-      threadId: appointment.gmailThreadId || undefined,
-    };
+    // Delegate to the shared helper so the tokened `?fk=` link is built the
+    // same way for the cron, the manual send endpoint, and the re-request flow.
+    return buildFeedbackEmailPayload(appointment);
   }
 
   /**

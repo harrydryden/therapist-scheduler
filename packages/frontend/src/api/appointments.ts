@@ -325,6 +325,34 @@ export async function createAdminAppointment(
   );
 }
 
+export interface ReRequestFeedbackResult {
+  appointmentId: string;
+  emailSentTo: string;
+  deletedSubmissions: number;
+  previousStatus: string;
+  newStatus: string;
+}
+
+/**
+ * Discard an appointment's existing feedback submission (if any) and send a
+ * fresh, tokened feedback-form email. For recovering from a feedback form
+ * that went out too early or was submitted in error.
+ */
+export async function reRequestFeedback(
+  appointmentId: string
+): Promise<ReRequestFeedbackResult> {
+  return unwrap(
+    await fetchAdminApi<ReRequestFeedbackResult>(
+      `/admin/dashboard/appointments/${appointmentId}/re-request-feedback`,
+      {
+        method: 'POST',
+        body: JSON.stringify({}),
+      }
+    ),
+    're-request feedback'
+  );
+}
+
 export async function actionClosure(
   appointmentId: string,
   action: 'cancel' | 'dismiss'

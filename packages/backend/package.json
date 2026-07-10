@@ -13,6 +13,7 @@
     "db:studio": "prisma studio",
     "migrate:conversation-state": "tsx src/scripts/migrate-conversation-state.ts",
     "cleanup:misrouted-conversation": "tsx src/scripts/cleanup-misrouted-conversation.ts",
+    "rerequest:feedback": "tsx src/scripts/rerequest-feedback.ts",
     "backfill:appointment-conversation": "tsx src/scripts/backfill-appointment-conversation.ts",
     "verify:appointment-conversation": "tsx src/scripts/backfill-appointment-conversation.ts --verify",
     "typecheck": "prisma generate && tsc --noEmit",
