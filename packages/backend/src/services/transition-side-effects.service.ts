@@ -177,12 +177,21 @@ class TransitionSideEffectsService {
 
   /**
    * Side effects after a successful cancellation:
-   * - Unmark therapist as confirmed (if was confirmed)
+   * - Unmark therapist as confirmed (unconditionally — see below)
    * - Recalculate therapist booking status
    *
    * Note: does NOT change the therapist's `active` flag. Cancelling a
    * therapist's last appointment must not remove them from the public
    * booking page — visibility is an admin-only toggle.
+   *
+   * unmarkConfirmed runs regardless of the previous status. Cancellation is
+   * reachable from any active status, and `hasConfirmedBooking` is set when
+   * the appointment first confirms — gating the unmark on "previous status
+   * was exactly `confirmed`" stranded the flag whenever the cancel happened
+   * from session_held/feedback_requested, silently hiding the therapist from
+   * the public finder with no admin remedy (the unfreeze button is disabled
+   * while the flag is set). unmarkConfirmed is self-guarding: it no-ops when
+   * the flag isn't set or when another confirmed-active appointment exists.
    *
    * Same retry semantics as onCompleted — failed writes are re-driven
    * by the side-effect retry runner.
@@ -196,9 +205,7 @@ class TransitionSideEffectsService {
         'cancelled',
         'therapist_unfreeze_sync',
         async () => {
-          if (wasConfirmed) {
-            await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
-          }
+          await therapistBookingStatusService.unmarkConfirmed(therapistHandle);
           await therapistBookingStatusService.recalculateUniqueRequestCount(therapistHandle);
         },
         {
@@ -246,7 +253,11 @@ class TransitionSideEffectsService {
             appointment.therapistHandle,
             appointment.therapistName ?? 'unknown therapist'
           );
-        } else if ((nowCompleted || nowCancelled) && wasConfirmed) {
+        } else if (nowCompleted || nowCancelled) {
+          // Unconditional on terminal moves (not gated on previousStatus ===
+          // confirmed): force-terminating from session_held/feedback_requested
+          // otherwise strands hasConfirmedBooking=true, hiding the therapist
+          // from the public finder. unmarkConfirmed is self-guarding.
           await therapistBookingStatusService.unmarkConfirmed(appointment.therapistHandle);
         }
 
