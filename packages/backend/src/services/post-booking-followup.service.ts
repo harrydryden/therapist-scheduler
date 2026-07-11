@@ -33,6 +33,13 @@ import { getSettingValue } from './settings.service';
 import { resolveRecipientTimezone } from '../core/timezone';
 import { auditEventService } from './audit-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
+import {
+  finalizeMeetingLinkCheck,
+  finalizeFeedbackDispatch,
+  finalizeFeedbackReminder,
+  finalizeSessionReminderPair,
+  type SessionReminderPairPayload,
+} from './periodic-effect-finalizers';
 import { processSentinelBatch } from './sentinel-batch-runner';
 import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { buildFeedbackEmailPayload, buildFeedbackFormUrl } from './feedback-email.helper';
@@ -346,101 +353,58 @@ class PostBookingFollowupService extends PeriodicService {
           { kind: 'appointment', appointmentId: appointment.id },
           'email_session_reminder_pair',
           {
-            renderPayload: async () => ({
+            renderPayload: async (): Promise<SessionReminderPairPayload> => ({
               user: userPayload,
               therapist: therapistPayload,
             }),
-            execute: async (envelope) => {
+            execute: async (envelope, { updateStoredPayload }) => {
               // Track which sides landed so we can branch on full vs.
-              // partial vs. neither outcomes.
-              let userSent = false;
-              let therapistSent = false;
+              // partial vs. neither outcomes. Seed from any progress a
+              // prior (crashed) attempt already persisted, so a retry
+              // doesn't re-send a side that already went out.
+              let userSent = envelope.sentTo?.user ?? false;
+              let therapistSent = envelope.sentTo?.therapist ?? false;
 
-              try {
-                await emailProcessingService.sendEmail(envelope.user);
-                userSent = true;
-              } catch (userError) {
-                logger.error(
-                  { checkId, appointmentId: appointment.id, error: userError },
-                  'Failed to send session reminder to user'
-                );
-              }
-
-              try {
-                await emailProcessingService.sendEmail(envelope.therapist);
-                therapistSent = true;
-              } catch (therapistError) {
-                logger.error(
-                  { checkId, appointmentId: appointment.id, error: therapistError },
-                  'Failed to send session reminder to therapist'
-                );
-              }
-
-              // Neither side landed — throw so the harness retries the
-              // pair (bounded by MAX_RETRY_ATTEMPTS).
-              if (!userSent && !therapistSent) {
-                throw new Error('Session reminder failed for both user and therapist');
-              }
-
-              // FIX #16: Handle partial vs full success differently.
-              if (userSent && therapistSent) {
-                const confirmed = await confirmSentinelClaim(appointment.id, 'reminderSentAt', now);
-
-                if (!confirmed) {
-                  logger.error(
-                    { checkId, appointmentId: appointment.id },
-                    'ALERT: Session reminder emails sent but sentinel update failed - possible duplicate'
-                  );
-                  try {
-                    await prisma.appointmentRequest.update({
-                      where: { id: appointment.id },
-                      data: {
-                        notes: `${notesSoFar || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: sessionReminder emails sent but tracking update failed - review for duplicates`,
-                      },
-                      select: { id: true },
-                    });
-                  } catch {
-                    // Ignore - already logged main issue
-                  }
-                  return;
-                }
-
-                logger.info(
-                  { checkId, appointmentId: appointment.id, userEmail: envelope.user.to, therapistEmail: envelope.therapist.to },
-                  'Sent session reminder emails to user and therapist'
-                );
-                return;
-              }
-
-              // Partial success — set sentinel + raise isStale + leave
-              // an admin note, then return without throwing so the
-              // already-delivered side isn't replayed by the harness
-              // retry runner.
-              const failedRecipient = !userSent ? 'user' : 'therapist';
-              const succeededRecipient = userSent ? 'user' : 'therapist';
-
-              const confirmed = await confirmSentinelClaim(appointment.id, 'reminderSentAt', now, {
-                extraData: { isStale: true },
-              });
-
-              if (confirmed) {
+              if (!userSent) {
                 try {
-                  await prisma.appointmentRequest.update({
-                    where: { id: appointment.id },
-                    data: {
-                      notes: `${notesSoFar || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: Session reminder sent to ${succeededRecipient} but FAILED for ${failedRecipient} - manual follow-up required`,
-                    },
-                    select: { id: true },
-                  });
-                } catch {
-                  // Ignore - already logged main issue
+                  await emailProcessingService.sendEmail(envelope.user);
+                  userSent = true;
+                  await updateStoredPayload({ sentTo: { user: true, therapist: therapistSent } });
+                } catch (userError) {
+                  logger.error(
+                    { checkId, appointmentId: appointment.id, error: userError },
+                    'Failed to send session reminder to user'
+                  );
                 }
               }
 
-              logger.warn(
-                { checkId, appointmentId: appointment.id, userSent, therapistSent, failedRecipient },
-                'Partial session reminder send - flagged as stale for admin follow-up'
-              );
+              if (!therapistSent) {
+                try {
+                  await emailProcessingService.sendEmail(envelope.therapist);
+                  therapistSent = true;
+                  await updateStoredPayload({ sentTo: { user: userSent, therapist: true } });
+                } catch (therapistError) {
+                  logger.error(
+                    { checkId, appointmentId: appointment.id, error: therapistError },
+                    'Failed to send session reminder to therapist'
+                  );
+                }
+              }
+
+              // Same finalization (sentinel confirm / partial-success
+              // notes) runs whether this is the first attempt or a
+              // retry — see finalizeSessionReminderPair's doc comment.
+              // Throws (both sides failed) so the harness retries.
+              await finalizeSessionReminderPair({
+                appointmentId: appointment.id,
+                userSent,
+                therapistSent,
+                now,
+                checkId,
+                notesSoFar,
+                userEmailForLog: envelope.user.to,
+                therapistEmailForLog: envelope.therapist.to,
+              });
             },
           },
           {
@@ -558,37 +522,13 @@ class PostBookingFollowupService extends PeriodicService {
             renderPayload: async () => payload,
             execute: async (envelope) => {
               await emailProcessingService.sendEmail(envelope);
-
-              auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
-                followUpType: 'meeting_link_check',
+              await finalizeMeetingLinkCheck({
+                appointmentId: appointment.id,
+                now,
+                checkId,
+                notesSoFar,
+                userEmail: appointment.userEmail,
               });
-
-              const confirmed = await confirmSentinelClaim(appointment.id, 'meetingLinkCheckSentAt', now);
-
-              if (!confirmed) {
-                // Sentinel taken by another process — email was already sent though.
-                logger.error(
-                  { checkId, appointmentId: appointment.id },
-                  'ALERT: Meeting link check email sent but sentinel update failed - possible duplicate'
-                );
-                try {
-                  await prisma.appointmentRequest.update({
-                    where: { id: appointment.id },
-                    data: {
-                      notes: `${notesSoFar || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: meetingLinkCheck email sent but tracking update failed - review for duplicates`,
-                    },
-                    select: { id: true },
-                  });
-                } catch {
-                  // Ignore - already logged main issue
-                }
-                return;
-              }
-
-              logger.info(
-                { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
-                'Sent meeting link check email'
-              );
             },
           },
           {
@@ -719,42 +659,17 @@ class PostBookingFollowupService extends PeriodicService {
                 );
               }
 
-              auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
-                followUpType: 'feedback_form',
-              });
-
-              const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackFormSentAt', now);
-
-              if (!confirmed) {
-                logger.error(
-                  { checkId, appointmentId: appointment.id },
-                  'ALERT: Feedback form email sent but sentinel update failed - possible duplicate'
-                );
-                try {
-                  await prisma.appointmentRequest.update({
-                    where: { id: appointment.id },
-                    data: {
-                      notes: `${notesSoFar || ''}\n[SYSTEM ALERT ${new Date().toISOString()}]: feedbackForm email sent but tracking update failed - review for duplicates`,
-                    },
-                    select: { id: true },
-                  });
-                } catch {
-                  // Ignore - already logged main issue
-                }
-                return;
-              }
-
-              // Status transition. If it throws, we re-throw so the
-              // harness retries the whole unit (replaying both sends).
-              await appointmentLifecycleService.transitionToFeedbackRequested({
+              // Same finalization (audit log + sentinel confirm + lifecycle
+              // transition) runs whether this is the first attempt or a
+              // retry replaying the stored payload — see
+              // finalizeFeedbackDispatch's own doc comment.
+              await finalizeFeedbackDispatch({
                 appointmentId: appointment.id,
-                source: 'system',
+                now,
+                checkId,
+                notesSoFar,
+                userEmail: envelope.user.to,
               });
-
-              logger.info(
-                { checkId, appointmentId: appointment.id, userEmail: envelope.user.to },
-                'Sent feedback form dispatch and transitioned to feedback_requested'
-              );
             },
           },
           {
@@ -957,25 +872,12 @@ class PostBookingFollowupService extends PeriodicService {
             renderPayload: async () => payload,
             execute: async (envelope) => {
               await emailProcessingService.sendEmail(envelope);
-
-              auditEventService.log(appointment.id, 'follow_up_sent', 'system', {
-                followUpType: 'feedback_reminder',
+              await finalizeFeedbackReminder({
+                appointmentId: appointment.id,
+                now,
+                checkId,
+                userEmail: appointment.userEmail,
               });
-
-              const confirmed = await confirmSentinelClaim(appointment.id, 'feedbackReminderSentAt', now);
-
-              if (!confirmed) {
-                logger.error(
-                  { checkId, appointmentId: appointment.id },
-                  'ALERT: Feedback reminder email sent but sentinel update failed - possible duplicate'
-                );
-                return;
-              }
-
-              logger.info(
-                { checkId, appointmentId: appointment.id, userEmail: appointment.userEmail },
-                'Sent feedback reminder email'
-              );
             },
           },
           {

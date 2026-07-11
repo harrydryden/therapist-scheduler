@@ -47,6 +47,13 @@ const sideEffectUpdateMock = jest.fn();
 // `count: 1` so retry tests drive the execute branch; tests for the
 // "another worker holds the lease" path override to `{ count: 0 }`.
 const sideEffectUpdateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+// Sentinel confirm — confirmSentinelClaim (utils/atomic-sentinel-claim.ts)
+// runs for real against this mock, so tests can assert on its where/data
+// args exactly as they would against the finalizer's real behaviour.
+// Default `count: 1` (sentinel confirms cleanly); override to `{count: 0}`
+// to exercise the "sentinel update failed" alert branch.
+const appointmentUpdateManyMock = jest.fn().mockResolvedValue({ count: 1 });
+const appointmentUpdateMock = jest.fn().mockResolvedValue({ id: 'apt-1' });
 
 jest.mock('../utils/database', () => ({
   prisma: {
@@ -58,6 +65,8 @@ jest.mock('../utils/database', () => ({
     },
     appointmentRequest: {
       findUnique: (...args: unknown[]) => appointmentFindUniqueMock(...args),
+      updateMany: (...args: unknown[]) => appointmentUpdateManyMock(...args),
+      update: (...args: unknown[]) => appointmentUpdateMock(...args),
       count: jest.fn().mockResolvedValue(0),
     },
     therapist: {
@@ -65,6 +74,29 @@ jest.mock('../utils/database', () => ({
       updateMany: (...args: unknown[]) => therapistUpdateManyMock(...args),
     },
   },
+}));
+
+const applyCheckpointActionMock = jest.fn().mockResolvedValue({ applied: true, stage: 'chased' });
+jest.mock('../services/ai-conversation.service', () => ({
+  aiConversationService: {
+    applyCheckpointAction: (...args: unknown[]) => applyCheckpointActionMock(...args),
+  },
+}));
+
+const transitionToFeedbackRequestedMock = jest.fn().mockResolvedValue(undefined);
+jest.mock('../domain/scheduling/lifecycle', () => ({
+  appointmentLifecycleService: {
+    transitionToFeedbackRequested: (...args: unknown[]) => transitionToFeedbackRequestedMock(...args),
+  },
+}));
+
+const recordAppointmentEventMock = jest.fn().mockResolvedValue(undefined);
+jest.mock('../services/appointment-event.service', () => ({
+  recordAppointmentEvent: (...args: unknown[]) => recordAppointmentEventMock(...args),
+}));
+
+jest.mock('../services/audit-event.service', () => ({
+  auditEventService: { log: jest.fn() },
 }));
 
 const emailEnqueueMock = jest.fn().mockResolvedValue(undefined);
@@ -147,18 +179,17 @@ const APPOINTMENT_ROW = {
   status: 'pending',
   confirmedDateTime: null,
   trackingCode: 'SPL1',
+  notes: 'existing notes',
+  lastActivityAt: new Date('2026-05-16T04:00:00.000Z'),
 };
 
-describe('executeEffect — paired periodic emails (email_feedback_dispatch, email_session_reminder_pair)', () => {
-  // These two effect types share a single retry branch that reads BOTH
-  // envelopes from the stored payload and enqueues both. The pair is
-  // the unit of work — partial replay isn't supported.
+describe('executeEffect — email_feedback_dispatch (regression: finalization must run on retry)', () => {
   const PAIRED_PAYLOAD = {
     user: { to: 'alice@example.com', subject: 'user subj', body: 'user body', threadId: 'thr-u' },
     therapist: { to: 't@example.com', subject: 'thx subj', body: 'thx body' },
   };
 
-  it('enqueues BOTH envelopes for email_feedback_dispatch using the stored payload', async () => {
+  it('enqueues BOTH envelopes AND runs finalization (sentinel confirm + feedback_requested transition)', async () => {
     appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
 
     await executeEffect({
@@ -172,7 +203,6 @@ describe('executeEffect — paired periodic emails (email_feedback_dispatch, ema
     });
 
     expect(emailEnqueueMock).toHaveBeenCalledTimes(2);
-    // First call: user envelope, threadId threaded through.
     expect(emailEnqueueMock).toHaveBeenNthCalledWith(1, {
       to: 'alice@example.com',
       subject: 'user subj',
@@ -189,9 +219,91 @@ describe('executeEffect — paired periodic emails (email_feedback_dispatch, ema
       body: 'thx body',
       appointmentId: 'apt-1',
     });
+
+    // THE FIX: previously the retry branch stopped after the enqueues.
+    // The sentinel must now be confirmed and the lifecycle transition
+    // must fire — exactly like the first-run closure — or a retried
+    // dispatch permanently strands the appointment in session_held.
+    expect(appointmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'apt-1', feedbackFormSentAt: expect.any(Date) },
+        data: expect.objectContaining({ feedbackFormSentAt: expect.any(Date) }),
+      }),
+    );
+    expect(transitionToFeedbackRequestedMock).toHaveBeenCalledWith({
+      appointmentId: 'apt-1',
+      source: 'system',
+    });
   });
 
-  it('enqueues BOTH envelopes for email_session_reminder_pair using the stored payload', async () => {
+  it('sends only the user email when the stored payload has no therapist envelope (setting was disabled at render time), still finalizes', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
+
+    await executeEffect({
+      id: 'log-fd',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_feedback_dispatch',
+      idempotencyKey: 'key-fd',
+      attempts: 1,
+      payload: { user: PAIRED_PAYLOAD.user, therapist: null },
+    });
+
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(transitionToFeedbackRequestedMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not transition when the sentinel confirm fails (possible-duplicate alert path)', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
+    appointmentUpdateManyMock.mockResolvedValueOnce({ count: 0 });
+
+    await executeEffect({
+      id: 'log-fd',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_feedback_dispatch',
+      idempotencyKey: 'key-fd',
+      attempts: 1,
+      payload: PAIRED_PAYLOAD,
+    });
+
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(2);
+    expect(transitionToFeedbackRequestedMock).not.toHaveBeenCalled();
+    // Alert note appended to the existing notes.
+    expect(appointmentUpdateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'apt-1' },
+        data: expect.objectContaining({ notes: expect.stringContaining('existing notes') }),
+      }),
+    );
+  });
+
+  it('throws when the payload is missing the user envelope', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
+
+    await expect(
+      executeEffect({
+        id: 'log-fd',
+        appointmentId: 'apt-1',
+        therapistId: null,
+        effectType: 'email_feedback_dispatch',
+        idempotencyKey: 'key-fd',
+        attempts: 1,
+        payload: { therapist: PAIRED_PAYLOAD.therapist },
+      }),
+    ).rejects.toThrow(/missing or invalid payload/i);
+
+    expect(emailEnqueueMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeEffect — email_session_reminder_pair (regression: finalization + per-recipient skip on retry)', () => {
+  const PAIRED_PAYLOAD = {
+    user: { to: 'alice@example.com', subject: 'user subj', body: 'user body', threadId: 'thr-u' },
+    therapist: { to: 't@example.com', subject: 'thx subj', body: 'thx body' },
+  };
+
+  it('enqueues BOTH envelopes AND confirms the sentinel when neither side was previously sent', async () => {
     appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
 
     await executeEffect({
@@ -205,24 +317,37 @@ describe('executeEffect — paired periodic emails (email_feedback_dispatch, ema
     });
 
     expect(emailEnqueueMock).toHaveBeenCalledTimes(2);
+    expect(appointmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'apt-1', reminderSentAt: expect.any(Date) },
+      }),
+    );
   });
 
-  it('throws when the paired payload is missing the user envelope', async () => {
+  it('skips re-sending the side already recorded as sent in the stored payload', async () => {
     appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
 
-    await expect(
-      executeEffect({
-        id: 'log-fd',
-        appointmentId: 'apt-1',
-        therapistId: null,
-        effectType: 'email_feedback_dispatch',
-        idempotencyKey: 'key-fd',
-        attempts: 1,
-        payload: { therapist: PAIRED_PAYLOAD.therapist },
-      }),
-    ).rejects.toThrow(/paired payload/i);
+    await executeEffect({
+      id: 'log-srp',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_session_reminder_pair',
+      idempotencyKey: 'key-srp',
+      attempts: 1,
+      // A prior crashed attempt already sent to the user (updateStoredPayload
+      // persisted sentTo.user=true) before dying — retry must only re-send
+      // to the therapist, not duplicate the user's already-delivered email.
+      payload: { ...PAIRED_PAYLOAD, sentTo: { user: true, therapist: false } },
+    });
 
-    expect(emailEnqueueMock).not.toHaveBeenCalled();
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(emailEnqueueMock).toHaveBeenCalledWith(
+      expect.objectContaining({ to: 't@example.com' }),
+    );
+    // Still finalizes as a full success (both sides are now sent).
+    expect(appointmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'apt-1', reminderSentAt: expect.any(Date) } }),
+    );
   });
 
   it('throws when the paired payload is entirely missing (legacy row predating payload support)', async () => {
@@ -242,13 +367,7 @@ describe('executeEffect — paired periodic emails (email_feedback_dispatch, ema
   });
 });
 
-describe('executeEffect — single periodic emails (shared replay branch)', () => {
-  // email_chase_user, email_chase_therapist, email_meeting_link_check,
-  // email_feedback_reminder all fall through the SAME case arm in
-  // executeEffect (alongside the status-transition email types). The
-  // replay reads a single envelope from payload and enqueues it. We
-  // test with email_chase_user as the representative; the others share
-  // the branch by case-fallthrough.
+describe('executeEffect — email_chase_user / email_chase_therapist (regression: checkpoint advance on retry)', () => {
   const SINGLE_PAYLOAD = {
     to: 'alice@example.com',
     subject: 'chase subj',
@@ -256,7 +375,7 @@ describe('executeEffect — single periodic emails (shared replay branch)', () =
     threadId: 'thr-1',
   };
 
-  it('replays the stored envelope for email_chase_user (representative of the case-fallthrough arm)', async () => {
+  it('replays the stored envelope AND advances the checkpoint (chaseSentAt / chaseSentTo)', async () => {
     appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
 
     await executeEffect({
@@ -277,9 +396,48 @@ describe('executeEffect — single periodic emails (shared replay branch)', () =
       appointmentId: 'apt-1',
       threadId: 'thr-1',
     });
+
+    // THE FIX: previously the retry branch stopped after the enqueue.
+    // The checkpoint must now advance (chaseSentAt/chaseSentTo/audit
+    // event) exactly like the first-run closure, or a re-armed chase
+    // never records that it fired.
+    expect(applyCheckpointActionMock).toHaveBeenCalledWith(
+      'apt-1',
+      'sent_chase_followup',
+      expect.objectContaining({
+        extraUpdates: expect.objectContaining({ chaseSentTo: 'user' }),
+      }),
+    );
+    expect(recordAppointmentEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({ appointmentId: 'apt-1', type: 'chase_sent' }),
+    );
   });
 
-  it('omits threadId from enqueue when payload has no threadId', async () => {
+  it('derives the therapist target from the effectType for email_chase_therapist', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
+
+    await executeEffect({
+      id: 'log-c',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_chase_therapist',
+      idempotencyKey: 'key-c',
+      attempts: 1,
+      payload: { to: 't@example.com', subject: 's', body: 'b' },
+    });
+
+    expect(applyCheckpointActionMock).toHaveBeenCalledWith(
+      'apt-1',
+      'sent_chase_followup',
+      expect.objectContaining({
+        extraUpdates: expect.objectContaining({ chaseSentTo: 'therapist' }),
+      }),
+    );
+  });
+});
+
+describe('executeEffect — email_meeting_link_check / email_feedback_reminder (single-envelope periodic emails)', () => {
+  it('replays the envelope and confirms the meeting-link-check sentinel', async () => {
     appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
 
     await executeEffect({
@@ -295,6 +453,28 @@ describe('executeEffect — single periodic emails (shared replay branch)', () =
     expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
     const call = emailEnqueueMock.mock.calls[0][0];
     expect(call).not.toHaveProperty('threadId');
+    expect(appointmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'apt-1', meetingLinkCheckSentAt: expect.any(Date) } }),
+    );
+  });
+
+  it('replays the envelope and confirms the feedback-reminder sentinel', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(APPOINTMENT_ROW);
+
+    await executeEffect({
+      id: 'log-c',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_feedback_reminder',
+      idempotencyKey: 'key-c',
+      attempts: 1,
+      payload: { to: 'alice@example.com', subject: 's', body: 'b' },
+    });
+
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(appointmentUpdateManyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'apt-1', feedbackReminderSentAt: expect.any(Date) } }),
+    );
   });
 
   it('throws when the stored payload is missing fields — legacy row predating payload support', async () => {

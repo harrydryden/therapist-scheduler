@@ -37,6 +37,7 @@ jest.mock('../config', () => ({
 
 const findUniqueMock = jest.fn();
 const createMock = jest.fn();
+const updateMock = jest.fn().mockResolvedValue({});
 
 // updateMany is the CAS-claim issued by tryClaimEffect before execute
 // (added to close the retry-while-in-flight concurrency hole). Default
@@ -51,7 +52,7 @@ jest.mock('../utils/database', () => ({
       findUnique: (...args: unknown[]) => findUniqueMock(...args),
       create: (...args: unknown[]) => createMock(...args),
       findMany: jest.fn(),
-      update: jest.fn(),
+      update: (...args: unknown[]) => updateMock(...args),
       updateMany: (...args: unknown[]) => updateManyMock(...args),
     },
   },
@@ -356,5 +357,71 @@ describe('runPeriodicTrackedSideEffect', () => {
     expect(createMock).toHaveBeenCalledTimes(1);
     expect(createMock.mock.calls[0][0].data.payload).toEqual(pairedPayload);
     expect(createMock.mock.calls[0][0].data.effectType).toBe('email_feedback_dispatch');
+  });
+
+  it('execute\'s updateStoredPayload helper persists incremental progress to the registered row', async () => {
+    // A paired effect (e.g. session-reminder-pair) calls updateStoredPayload
+    // after each side lands, so a crash between the two sends leaves a
+    // durable record of what already succeeded — see periodic-effect-
+    // finalizers.ts / side-effect-retry.service.ts's sentTo handling.
+    const pairedPayload: {
+      user: { to: string; subject: string; body: string };
+      therapist: { to: string; subject: string; body: string };
+      sentTo?: { user?: boolean; therapist?: boolean };
+    } = {
+      user: { to: 'u@x', subject: 'user subj', body: 'user body' },
+      therapist: { to: 't@x', subject: 'thx subj', body: 'thx body' },
+    };
+
+    runPeriodicTrackedSideEffect(
+      { kind: 'appointment', appointmentId: 'apt-6' },
+      'email_session_reminder_pair',
+      {
+        renderPayload: async () => pairedPayload,
+        execute: async (_payload, { updateStoredPayload }) => {
+          await updateStoredPayload({ sentTo: { user: true, therapist: false } });
+        },
+      },
+      { name: 'test' },
+    );
+
+    await capturedTask!();
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const idempotencyKey = createMock.mock.calls[0][0].data.idempotencyKey;
+
+    // Two updates land on the row: the incremental payload progress from
+    // updateStoredPayload, then markCompleted's status flip once execute
+    // resolves. Assert on the payload-update call specifically.
+    expect(updateMock).toHaveBeenCalledWith({
+      where: { idempotencyKey },
+      data: { payload: { ...pairedPayload, sentTo: { user: true, therapist: false } } },
+    });
+  });
+
+  it('updateStoredPayload is a safe no-op when registration itself failed (untracked execute)', async () => {
+    findUniqueMock.mockRejectedValueOnce(new Error('DB unavailable'));
+
+    let helperThrew = false;
+    runPeriodicTrackedSideEffect(
+      { kind: 'appointment', appointmentId: 'apt-7' },
+      'email_chase_user',
+      {
+        renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }),
+        execute: async (_payload, { updateStoredPayload }) => {
+          try {
+            await updateStoredPayload({});
+          } catch {
+            helperThrew = true;
+          }
+        },
+      },
+      { name: 'test' },
+    );
+
+    await capturedTask!();
+
+    expect(helperThrew).toBe(false);
+    expect(updateMock).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,14 @@ import { JustinTimeService } from './justin-time.service';
 import { fetchSchedulingContext } from './scheduling-context.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { APPOINTMENT_STATUS } from '../constants';
+import {
+  finalizeChase,
+  finalizeMeetingLinkCheck,
+  finalizeFeedbackDispatch,
+  finalizeFeedbackReminder,
+  finalizeSessionReminderPair,
+  type SessionReminderPairPayload,
+} from './periodic-effect-finalizers';
 
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
@@ -256,6 +264,8 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         status: true,
         confirmedDateTime: true,
         trackingCode: true,
+        notes: true,
+        lastActivityAt: true,
       },
     });
 
@@ -349,25 +359,16 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       case 'email_client_confirmation':
       case 'email_therapist_confirmation':
       case 'email_client_cancellation':
-      case 'email_therapist_cancellation':
-      // Periodic (non-transition) emails registered via
-      // runPeriodicTrackedSideEffect. Same payload shape, same replay
-      // path — the renderer captures a fully-rendered {to, subject,
-      // body, threadId?} envelope at original-send time, and we
-      // enqueue it verbatim on retry. We deliberately do NOT re-render
-      // on retry: settings drift (e.g. tracking URL, salutation
-      // template) between original send and retry would produce a
-      // surprising second email.
-      case 'email_chase_user':
-      case 'email_chase_therapist':
-      case 'email_meeting_link_check':
-      case 'email_feedback_reminder': {
-        // Replay the email using the rendered payload captured at registration
-        // time. We never re-render the template on retry — settings could
-        // have changed between the original send and the retry, and a stale
-        // English-fallback was the original reason this retry path was unused
-        // for emails. If the payload is missing (effect was registered before
-        // payload support), abandon rather than send something wrong.
+      case 'email_therapist_cancellation': {
+        // One-shot transition emails registered via
+        // runReplayableTrackedSideEffect — not sentinel-gated, no
+        // finalization step beyond the send itself. The renderer
+        // captures a fully-rendered {to, subject, body, threadId?}
+        // envelope at original-send time, and we enqueue it verbatim on
+        // retry. We deliberately do NOT re-render on retry: settings
+        // drift (e.g. tracking URL, salutation template) between
+        // original send and retry would produce a surprising second
+        // email.
         const payload = effect.payload as
           | { to: string; subject: string; body: string; threadId?: string | null }
           | null
@@ -387,28 +388,149 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         break;
       }
 
-      case 'email_feedback_dispatch':
-      case 'email_session_reminder_pair': {
+      case 'email_chase_user':
+      case 'email_chase_therapist': {
+        // Sentinel-gated periodic effect. Replay the stored envelope (same
+        // never-re-render contract as above), then run the SAME
+        // finalization the first-run closure runs (checkpoint advance +
+        // chase-sent metadata + audit event) — see finalizeChase's doc
+        // comment for why this must be identical on first-run and retry.
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string; threadId?: string | null }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload — registration predates payload support`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
+          appointmentId: appointment.id,
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
+        });
+        const target: 'user' | 'therapist' = effect.effectType === 'email_chase_user' ? 'user' : 'therapist';
+        const inactiveHours = appointment.lastActivityAt
+          ? Math.round((Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000))
+          : 0;
+        await finalizeChase({
+          appointmentId: appointment.id,
+          target,
+          targetEmail: payload.to,
+          now: new Date(),
+          userName: appointment.userName,
+          therapistName: appointment.therapistName,
+          inactiveHours,
+        });
+        break;
+      }
+
+      case 'email_meeting_link_check': {
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string; threadId?: string | null }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload — registration predates payload support`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
+          appointmentId: appointment.id,
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
+        });
+        await finalizeMeetingLinkCheck({
+          appointmentId: appointment.id,
+          now: new Date(),
+          notesSoFar: appointment.notes,
+          userEmail: payload.to,
+        });
+        break;
+      }
+
+      case 'email_feedback_reminder': {
+        const payload = effect.payload as
+          | { to: string; subject: string; body: string; threadId?: string | null }
+          | null
+          | undefined;
+        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid stored payload — registration predates payload support`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.to,
+          subject: payload.subject,
+          body: payload.body,
+          appointmentId: appointment.id,
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
+        });
+        await finalizeFeedbackReminder({
+          appointmentId: appointment.id,
+          now: new Date(),
+          userEmail: payload.to,
+        });
+        break;
+      }
+
+      case 'email_feedback_dispatch': {
         // Paired periodic effect: two emails registered as one tracked
         // row. Payload carries both envelopes so retry replays both,
         // matching the original execute's atomicity (the pair is the
         // unit of work). Same "never re-render" contract as the single
-        // case above.
-        //
-        // Duplicate-on-retry risk: if the first attempt sent one of
-        // the two and then crashed, retry sends BOTH again — the
-        // already-delivered recipient gets a duplicate. We accept this
-        // bounded-by-MAX_RETRY_ATTEMPTS cost in exchange for
-        // sequencing the lifecycle transition (feedback_dispatch only)
-        // and partial-success annotation (session_reminder_pair only)
-        // correctly relative to the sends.
+        // case above. Finalization (sentinel confirm + lifecycle
+        // transition) runs after the sends — see
+        // finalizeFeedbackDispatch's doc comment.
         const payload = effect.payload as
           | {
               user: { to: string; subject: string; body: string; threadId?: string | null };
-              therapist: { to: string; subject: string; body: string; threadId?: string | null };
+              therapist: { to: string; subject: string; body: string; threadId?: string | null } | null;
             }
           | null
           | undefined;
+        if (!payload || !payload.user || typeof payload.user.to !== 'string') {
+          throw new Error(
+            `Cannot retry ${effect.effectType}: missing or invalid payload — expected { user, therapist? } envelopes`,
+          );
+        }
+        await emailQueueService.enqueue({
+          to: payload.user.to,
+          subject: payload.user.subject,
+          body: payload.user.body,
+          appointmentId: appointment.id,
+          ...(payload.user.threadId ? { threadId: payload.user.threadId } : {}),
+        });
+        if (payload.therapist) {
+          await emailQueueService.enqueue({
+            to: payload.therapist.to,
+            subject: payload.therapist.subject,
+            body: payload.therapist.body,
+            appointmentId: appointment.id,
+            ...(payload.therapist.threadId ? { threadId: payload.therapist.threadId } : {}),
+          });
+        }
+        await finalizeFeedbackDispatch({
+          appointmentId: appointment.id,
+          now: new Date(),
+          notesSoFar: appointment.notes,
+          userEmail: payload.user.to,
+        });
+        break;
+      }
+
+      case 'email_session_reminder_pair': {
+        // Duplicate-on-retry protection: the stored payload's `sentTo`
+        // tracks which side(s) already landed (updated incrementally by
+        // the first-run closure via updateStoredPayload as each send
+        // succeeds), so retry only re-sends the side that didn't. Rows
+        // registered before this field existed have no `sentTo` — both
+        // sides are treated as not-yet-sent, matching today's behaviour.
+        const payload = effect.payload as SessionReminderPairPayload | null | undefined;
         if (
           !payload ||
           !payload.user ||
@@ -420,19 +542,37 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             `Cannot retry ${effect.effectType}: missing or invalid paired payload — expected { user, therapist } envelopes`,
           );
         }
-        await emailQueueService.enqueue({
-          to: payload.user.to,
-          subject: payload.user.subject,
-          body: payload.user.body,
+        let userSent = payload.sentTo?.user ?? false;
+        let therapistSent = payload.sentTo?.therapist ?? false;
+
+        if (!userSent) {
+          await emailQueueService.enqueue({
+            to: payload.user.to,
+            subject: payload.user.subject,
+            body: payload.user.body,
+            appointmentId: appointment.id,
+            ...(payload.user.threadId ? { threadId: payload.user.threadId } : {}),
+          });
+          userSent = true;
+        }
+        if (!therapistSent) {
+          await emailQueueService.enqueue({
+            to: payload.therapist.to,
+            subject: payload.therapist.subject,
+            body: payload.therapist.body,
+            appointmentId: appointment.id,
+            ...(payload.therapist.threadId ? { threadId: payload.therapist.threadId } : {}),
+          });
+          therapistSent = true;
+        }
+        await finalizeSessionReminderPair({
           appointmentId: appointment.id,
-          ...(payload.user.threadId ? { threadId: payload.user.threadId } : {}),
-        });
-        await emailQueueService.enqueue({
-          to: payload.therapist.to,
-          subject: payload.therapist.subject,
-          body: payload.therapist.body,
-          appointmentId: appointment.id,
-          ...(payload.therapist.threadId ? { threadId: payload.therapist.threadId } : {}),
+          userSent,
+          therapistSent,
+          now: new Date(),
+          notesSoFar: appointment.notes,
+          userEmailForLog: payload.user.to,
+          therapistEmailForLog: payload.therapist.to,
         });
         break;
       }

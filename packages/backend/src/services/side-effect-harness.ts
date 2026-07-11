@@ -61,7 +61,7 @@ export type SideEffectScope =
  */
 async function runWithTrackedRegistration(
   register: () => Promise<RegisteredSideEffect>,
-  execute: () => Promise<unknown>,
+  execute: (registered?: RegisteredSideEffect) => Promise<unknown>,
   logContext: Record<string, unknown>,
 ): Promise<void> {
   let registered;
@@ -116,7 +116,7 @@ async function runWithTrackedRegistration(
   }
 
   try {
-    await execute();
+    await execute(registered);
     await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
   } catch (err) {
     // Persist the failure so the periodic retry service picks it up.
@@ -259,13 +259,21 @@ export function runReplayableTrackedSideEffect<P>(
  * handles it (typically releases the sentinel so the next tick
  * re-evaluates). On execute failure: row marked failed, retry runner
  * replays via the per-effectType branch in side-effect-retry.
+ *
+ * `execute` also receives an `updateStoredPayload` helper — best-effort,
+ * for effects whose unit of work has more than one independent part
+ * (e.g. a user+therapist email pair). Calling it persists incremental
+ * progress to the row's stored payload, so a crash between the two parts
+ * leaves a durable record of what already landed; retry (side-effect-
+ * retry.service.ts) can then skip re-doing the part that succeeded
+ * instead of blindly redoing the whole unit. Most callers ignore it.
  */
 export function runPeriodicTrackedSideEffect<P>(
   scope: SideEffectScope,
   effectType: SideEffectType,
   spec: {
     renderPayload: () => Promise<P>;
-    execute: (payload: P) => Promise<unknown>;
+    execute: (payload: P, helpers: { updateStoredPayload: (patch: Partial<P>) => Promise<void> }) => Promise<unknown>;
   },
   options: BackgroundTaskOptions,
   scopeGeneration?: number,
@@ -274,7 +282,13 @@ export function runPeriodicTrackedSideEffect<P>(
     const payload = await spec.renderPayload();
     await runWithTrackedRegistration(
       () => registerForScope(scope, effectType, payload, scopeGeneration),
-      () => spec.execute(payload),
+      (registered) => spec.execute(payload, {
+        updateStoredPayload: registered
+          ? (patch) => sideEffectTrackerService.updatePayload(registered.idempotencyKey, { ...payload, ...patch })
+          : async () => {
+              // Registration failed (running untracked) — nothing to persist to.
+            },
+      }),
       scopeLogContext(scope, effectType),
     );
   }, options);
