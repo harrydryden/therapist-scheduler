@@ -599,10 +599,16 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
         return str;
       };
 
+      // YYYY-MM-DD in Europe/London (en-CA renders ISO order). Taking the
+      // UTC date via toISOString() would stamp late-evening BST submissions
+      // with the previous day.
+      const londonDateStamp = (date: Date): string =>
+        new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London' }).format(date);
+
       const csvRows = submissions.map((s) => {
         const resp = s.responses as Record<string, string | number>;
         const row: (string | number | null)[] = [
-          new Date(s.createdAt).toISOString().split('T')[0],
+          londonDateStamp(new Date(s.createdAt)),
           s.trackingCode,
           s.therapistName,
         ];
@@ -618,7 +624,7 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
       const csv = [csvHeaders.map(escapeCsv).join(','), ...csvRows].join('\n');
 
       reply.header('Content-Type', 'text/csv');
-      reply.header('Content-Disposition', `attachment; filename="feedback-submissions-${new Date().toISOString().split('T')[0]}.csv"`);
+      reply.header('Content-Disposition', `attachment; filename="feedback-submissions-${londonDateStamp(new Date())}.csv"`);
       return reply.send(csv);
     } catch (error) {
       logger.error({ error }, 'Failed to export feedback submissions');

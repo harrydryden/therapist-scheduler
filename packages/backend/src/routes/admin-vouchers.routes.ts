@@ -12,6 +12,7 @@ import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getSettingValue } from '../services/settings.service';
 import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
+import { formatVoucherExpiry } from '../utils/voucher-section';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderTemplate } from '../utils/email-templates';
 import { emailProcessingService } from '../services/email-processing.service';
@@ -100,9 +101,7 @@ async function sendVoucherEmail(
     const bodyTemplate = await getSettingValue<string>('email.weeklyMailingBody');
     const unsubscribeUrl = generateUnsubscribeUrl(email, config.backendUrl);
 
-    const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'long', year: 'numeric',
-    });
+    const voucherExpiry = formatVoucherExpiry(voucherResult.expiresAt);
 
     const subject = renderTemplate(subjectTemplate, {
       userName: email.split('@')[0],

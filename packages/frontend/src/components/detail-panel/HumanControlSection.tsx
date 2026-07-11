@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AppointmentDetail } from '../../types';
 import type { AppointmentControls } from '../../hooks/useAppointmentControls';
 import ScanResultsPanel from './ScanResultsPanel';
+import { toDatetimeLocalValue, datetimeLocalToLondonProse, formatDateTime } from '../../utils/date-format';
 
 interface HumanControlSectionProps {
   appointment: AppointmentDetail;
@@ -9,37 +10,22 @@ interface HumanControlSectionProps {
 }
 
 /**
- * Convert a stored confirmed-date string into the `YYYY-MM-DDTHH:mm` value an
- * `<input type="datetime-local">` expects. Returns '' when the value can't be
- * parsed to a real instant (e.g. a legacy free-text "Tuesday at 11am"), in
- * which case the admin simply picks afresh.
+ * The confirmed-time picker works in UK (Europe/London) wall-clock — the
+ * timezone appointment times are stored in. `toDatetimeLocalValue` renders
+ * the stored instant's LONDON components into the picker, and
+ * `datetimeLocalToLondonProse` turns the picked value back into the explicit
+ * UK prose string ("Tuesday 23 June 2026 at 14:00") that both admin editors
+ * submit. Both helpers are shared with AdminAppointmentsPage so the two
+ * editors can never drift into different wire formats or timezones again.
+ *
+ * Seeding uses `confirmedDateTimeParsed` (the ISO instant) — the raw
+ * `confirmedDateTime` is prose that `new Date()` can't parse, which
+ * previously left the picker empty even when a valid time was on file.
  */
-function toDatetimeLocalValue(value: string | null | undefined): string {
-  if (!value) return '';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/**
- * Turn the picker's value into an explicit, unambiguous date string for
- * submission — "Tuesday 23 June 2026 at 14:00" rather than a bare weekday.
- * This removes the ambiguity of the old free-text field (which Tuesday?) and
- * parses cleanly into confirmedDateTimeParsed on the backend (chrono-node).
- */
-function formatPickedDateTime(localValue: string): string {
-  if (!localValue) return '';
-  const d = new Date(localValue);
-  if (Number.isNaN(d.getTime())) return '';
-  const date = d.toLocaleDateString('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-  });
-  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
-  return `${date} at ${time}`;
+function seedPickerValue(appointment: AppointmentDetail): string {
+  return toDatetimeLocalValue(
+    appointment.confirmedDateTimeParsed || appointment.confirmedDateTime,
+  );
 }
 
 export default function HumanControlSection({
@@ -61,7 +47,7 @@ export default function HumanControlSection({
   // stored value when it's a real instant; '' for legacy free-text values
   // (the admin then picks an unambiguous date). The canonical submitted
   // string lives in controls.editConfirmedDateTime, set on change.
-  const [pickerValue, setPickerValue] = useState(() => toDatetimeLocalValue(appointment.confirmedDateTime));
+  const [pickerValue, setPickerValue] = useState(() => seedPickerValue(appointment));
 
   // Reset the cancellation-initiator picker when the operator
   // navigates to a different appointment. Without this, picking
@@ -76,8 +62,9 @@ export default function HumanControlSection({
   // Keep the picker in sync with the stored confirmed time when navigating
   // between appointments (same re-render-not-remount reason as above).
   useEffect(() => {
-    setPickerValue(toDatetimeLocalValue(appointment.confirmedDateTime));
-  }, [appointment.id, appointment.confirmedDateTime]);
+    setPickerValue(seedPickerValue(appointment));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appointment.id, appointment.confirmedDateTime, appointment.confirmedDateTimeParsed]);
 
   const handleSendMessage = () => {
     if (!messageSubject.trim() || !messageBody.trim()) return;
@@ -150,7 +137,7 @@ export default function HumanControlSection({
             <p className="text-sm text-orange-700">
               Taken by: {appointment.humanControlTakenBy || 'Unknown'}
               {appointment.humanControlTakenAt &&
-                ` at ${new Date(appointment.humanControlTakenAt).toLocaleString()}`}
+                ` at ${formatDateTime(appointment.humanControlTakenAt)} (UK)`}
             </p>
             {appointment.humanControlReason && (
               <p className="text-sm text-orange-600 mt-1">
@@ -204,7 +191,7 @@ export default function HumanControlSection({
               {controls.editStatus === 'confirmed' && (
                 <div className="mb-2">
                   <label htmlFor="confirmed-datetime" className="text-sm text-slate-600 block mb-1">
-                    Confirmed Date/Time:
+                    Confirmed Date/Time <span className="text-slate-400">(UK time)</span>:
                     <span className="text-red-500 ml-1">*</span>
                   </label>
                   <input
@@ -217,13 +204,13 @@ export default function HumanControlSection({
                       // Store an explicit, unambiguous date string — never a
                       // bare weekday. Empty picker clears the canonical value
                       // so the required-field guard below still fires.
-                      controls.setEditConfirmedDateTime(formatPickedDateTime(v));
+                      controls.setEditConfirmedDateTime(datetimeLocalToLondonProse(v));
                     }}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
                   />
                   {pickerValue ? (
                     <p className="text-xs text-slate-500 mt-1">
-                      Will be saved as: <span className="font-medium">{formatPickedDateTime(pickerValue)}</span>
+                      Will be saved as: <span className="font-medium">{datetimeLocalToLondonProse(pickerValue)} (UK)</span>
                     </p>
                   ) : controls.editConfirmedDateTime ? (
                     // Legacy free-text value we couldn't parse into the picker.
@@ -309,7 +296,7 @@ export default function HumanControlSection({
                     controls.setShowEditPanel(false);
                     controls.setEditStatus(appointment.status);
                     controls.setEditConfirmedDateTime(appointment.confirmedDateTime || '');
-                    setPickerValue(toDatetimeLocalValue(appointment.confirmedDateTime));
+                    setPickerValue(seedPickerValue(appointment));
                     controls.setEditReason('');
                   }}
                   aria-label="Cancel edit"

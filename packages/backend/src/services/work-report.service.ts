@@ -18,6 +18,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { WORK_REPORT } from '../constants';
 import { anthropicClient } from '../utils/anthropic-client';
 import { CLAUDE_MODELS } from '../config/models';
+import { wallClockToUtc } from '../utils/date';
 
 class WorkReportService extends PeriodicService {
   private instanceId: string;
@@ -124,19 +125,13 @@ class WorkReportService extends PeriodicService {
     const get = (type: string) => ukParts.find(p => p.type === type)?.value || '';
     const daysBack = dayOfWeek === 1 ? 3 : 1; // Monday → back to Friday, else → yesterday
 
-    // Build "target day 09:00 UK time" as an ISO string, then compute UTC offset
     const year = parseInt(get('year'));
     const month = parseInt(get('month')) - 1;
-    const day = parseInt(get('day')) - daysBack;
+    const day = parseInt(get('day')) - daysBack; // may go ≤0; Date.UTC rolls over correctly
 
-    // Create a date at 09:00 UK time by using the UK-to-UTC offset
-    // First, get the UTC time that corresponds to this UK local time
-    const candidateUtc = new Date(Date.UTC(year, month, day, WORK_REPORT.REPORT_HOUR, 0, 0));
-    // What UK time does this UTC correspond to?
-    const ukCheck = new Date(candidateUtc.toLocaleString('en-US', { timeZone: 'Europe/London' }));
-    const offsetMs = ukCheck.getTime() - candidateUtc.getTime();
-    // Subtract the offset to get the UTC equivalent of 9am UK
-    return new Date(candidateUtc.getTime() - offsetMs);
+    // "Target day 09:00 UK wall-clock" → UTC instant, DST-safe and
+    // independent of the server's own timezone.
+    return wallClockToUtc(year, month, day, WORK_REPORT.REPORT_HOUR, 0, 'Europe/London');
   }
 
   /**

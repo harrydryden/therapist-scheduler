@@ -1,5 +1,6 @@
 import type { AppointmentDetail } from '../../types';
 import StatusBadge from '../StatusBadge';
+import { formatDateTime } from '../../utils/date-format';
 
 interface DetailHeaderProps {
   appointment: AppointmentDetail;
@@ -28,10 +29,17 @@ export default function DetailHeader({ appointment }: DetailHeaderProps) {
       {appointment.confirmedAt && (
         <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-200">
           <p className="text-sm font-medium text-green-700">
-            Confirmed: {appointment.confirmedDateTime || new Date(appointment.confirmedAt).toLocaleString()}
+            {/* Appointment time: prefer the human-readable string, then the
+                parsed instant rendered in UK time. Never fall back to
+                confirmedAt — that's WHEN the booking was confirmed, not when
+                the session is, and labelling it "Confirmed:" misled admins. */}
+            Confirmed: {appointment.confirmedDateTime
+              || (appointment.confirmedDateTimeParsed
+                ? `${formatDateTime(appointment.confirmedDateTimeParsed)} (UK)`
+                : 'time not recorded')}
           </p>
           <p className="text-xs text-green-600 mt-1">
-            on {new Date(appointment.confirmedAt).toLocaleString()}
+            on {formatDateTime(appointment.confirmedAt)} (UK)
           </p>
         </div>
       )}

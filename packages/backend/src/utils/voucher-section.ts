@@ -15,14 +15,21 @@
 
 /**
  * Format a voucher expiry date as a human-readable string,
- * e.g. "21 May 2026". UK locale matches the existing convention in
- * weekly-mailing-list.service.ts.
+ * e.g. "21 May 2026". Rendered as the LONDON calendar date — a
+ * late-evening expiry instant during BST would otherwise display one
+ * day early on a UTC server.
+ *
+ * Mirrors `formatLondonDate` in `utils/date.ts`; inlined here (not
+ * imported) because this module is deliberately dependency-light —
+ * date.ts transitively pulls in config/settings, which the
+ * voucher-section unit tests run without.
  */
 export function formatVoucherExpiry(date: Date): string {
   return date.toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'long',
     year: 'numeric',
+    timeZone: 'Europe/London',
   });
 }
 

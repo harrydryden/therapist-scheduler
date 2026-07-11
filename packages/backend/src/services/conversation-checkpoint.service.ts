@@ -420,7 +420,12 @@ export function getAdminSummary(checkpoint: ConversationCheckpoint): string {
 
   if (checkpoint.stalled_since) {
     const stalledDate = new Date(checkpoint.stalled_since);
-    parts.push(`**Stalled Since:** ${stalledDate.toLocaleDateString()}`);
+    // en-GB + Europe/London: the platform's display convention. A bare
+    // toLocaleDateString() renders the SERVER-local (UTC) calendar day
+    // in en-US format, which can be a day off the London date.
+    parts.push(`**Stalled Since:** ${stalledDate.toLocaleDateString('en-GB', {
+      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/London',
+    })}`);
   }
 
   if (checkpoint.recovery_attempts && checkpoint.recovery_attempts > 0) {

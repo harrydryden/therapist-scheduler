@@ -137,6 +137,25 @@ function readCalendarComponents(
   return { day: date.getDate(), monthIndex: date.getMonth(), dayOfWeek: date.getDay() };
 }
 
+/**
+ * Format an instant as a long en-GB calendar date in Europe/London,
+ * e.g. "21 May 2026".
+ *
+ * The single helper for date-ONLY renderings of stored instants
+ * (voucher expiries, invitation expiries, "stalled since" stamps).
+ * Anchoring the calendar day to the platform timezone matters: an
+ * expiry instant of 23:30 UTC during BST is already the NEXT day in
+ * London, so a server-local rendering shows a date one day early.
+ */
+export function formatLondonDate(date: Date): string {
+  return date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'Europe/London',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 3. Timezone helpers
 // ---------------------------------------------------------------------------

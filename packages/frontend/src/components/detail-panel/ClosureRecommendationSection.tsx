@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AppointmentDetail } from '../../types';
+import { formatDateTime } from '../../utils/date-format';
 
 interface ClosureRecommendationSectionProps {
   appointment: AppointmentDetail;
@@ -22,7 +23,7 @@ export default function ClosureRecommendationSection({
           <p className="text-sm font-medium text-amber-800">Chase follow-up sent</p>
           <p className="text-xs text-amber-600 mt-1">
             Sent to {appointment.chaseSentTo} on{' '}
-            {new Date(appointment.chaseSentAt).toLocaleString()}.
+            {formatDateTime(appointment.chaseSentAt)} (UK).
             Awaiting response.
           </p>
         </div>
@@ -53,7 +54,7 @@ export default function ClosureRecommendationSection({
           </p>
           <p className="text-xs text-red-500 mt-1">
             Recommended on{' '}
-            {new Date(appointment.closureRecommendedAt).toLocaleString()}
+            {formatDateTime(appointment.closureRecommendedAt)} (UK)
           </p>
         </div>
       </div>
