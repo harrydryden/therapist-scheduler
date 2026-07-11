@@ -6,6 +6,7 @@ import {
   getAllAppointments,
   createAdminAppointment,
   updateAdminAppointment,
+  reRequestFeedback,
 } from '../api/client';
 import type {
   AdminUser,
@@ -16,6 +17,7 @@ import {
   STATUS_LABELS,
   ALL_STATUSES,
 } from '../types';
+import { POST_BOOKING_STATUSES } from '@therapist-scheduler/shared';
 import { formatDateTime, toDatetimeLocalValue, datetimeLocalToLondonProse } from '../utils/date-format';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -623,6 +625,13 @@ function AppointmentsTable() {
     | null
   >(null);
   const [reasonText, setReasonText] = useState('');
+  // Staged feedback-form resend awaiting confirmation. Resending discards
+  // any prior submission and walks a completed/feedback_requested row back
+  // to session_held under the hood (see feedback-rerequest.service), so it's
+  // gated behind an explicit confirm.
+  const [pendingFeedbackResend, setPendingFeedbackResend] = useState<
+    { id: string; email: string; status: string } | null
+  >(null);
   const limit = 20;
   const queryClient = useQueryClient();
   const { showToast } = useToastContext();
@@ -677,6 +686,28 @@ function AppointmentsTable() {
     onError: (error) => {
       setSavingId(null);
       showToast(getErrorMessage(error, 'Failed to update appointment'), 'error');
+    },
+  });
+
+  // Re-request feedback: reuses the shared reRequestFeedback flow (discard
+  // prior submission → walk back if already completed/feedback_requested →
+  // re-send tokened form). Same endpoint the dashboard detail drawer uses,
+  // surfaced here so it's reachable from the appointments table too.
+  const reRequestFeedbackMutation = useMutation({
+    mutationFn: (appointmentId: string) => reRequestFeedback(appointmentId),
+    onSuccess: (data) => {
+      setPendingFeedbackResend(null);
+      queryClient.invalidateQueries({ queryKey: ['admin-all-appointments'] });
+      showToast(
+        `Feedback form re-sent to ${data.emailSentTo}` +
+          (data.deletedSubmissions > 0
+            ? ` (discarded ${data.deletedSubmissions} prior submission${data.deletedSubmissions === 1 ? '' : 's'}).`
+            : '.'),
+        'success',
+      );
+    },
+    onError: (error) => {
+      showToast(getErrorMessage(error, 'Failed to re-request feedback'), 'error');
     },
   });
 
@@ -838,6 +869,7 @@ function AppointmentsTable() {
                     Updated <SortIcon column="updatedAt" />
                   </button>
                 </th>
+                <th className="px-4 py-3 text-right font-medium text-slate-500">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -888,6 +920,23 @@ function AppointmentsTable() {
                   <td className="px-4 py-3 text-slate-500 text-xs">
                     {formatDateTime(apt.updatedAt)}
                   </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    {POST_BOOKING_STATUSES.includes(apt.status) && apt.trackingCode ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPendingFeedbackResend({ id: apt.id, email: apt.userEmail, status: apt.status })
+                        }
+                        disabled={reRequestFeedbackMutation.isPending}
+                        className="px-2.5 py-1 text-xs font-medium border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+                        title="Discard any prior submission and re-send the feedback form to the client"
+                      >
+                        Re-request feedback
+                      </button>
+                    ) : (
+                      <span className="text-slate-300 text-xs">-</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -936,6 +985,37 @@ function AppointmentsTable() {
             autoFocus
             className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
           />
+        </ConfirmDialog>
+      )}
+
+      {/* Re-request feedback confirmation. Resending discards any prior
+          submission and, for a completed / feedback_requested appointment,
+          walks it back to session_held so the form can go out again — hence
+          the explicit confirm. No audit reason is required (the backend
+          records the admin action itself). */}
+      {pendingFeedbackResend && (
+        <ConfirmDialog
+          title="Re-request feedback?"
+          confirmLabel="Discard & re-send"
+          isPending={reRequestFeedbackMutation.isPending}
+          onConfirm={() => reRequestFeedbackMutation.mutate(pendingFeedbackResend.id)}
+          onCancel={() => {
+            if (!reRequestFeedbackMutation.isPending) setPendingFeedbackResend(null);
+          }}
+        >
+          <p className="text-slate-600">
+            This emails a fresh feedback form to{' '}
+            <span className="font-medium text-slate-800">{pendingFeedbackResend.email}</span> and
+            discards any existing submission for this appointment.
+            {pendingFeedbackResend.status === 'completed' && (
+              <>
+                {' '}
+                The appointment is currently <span className="font-medium">completed</span>; it will
+                be moved back to <span className="font-medium">feedback&nbsp;requested</span> so the
+                new form can be submitted.
+              </>
+            )}
+          </p>
         </ConfirmDialog>
       )}
     </div>

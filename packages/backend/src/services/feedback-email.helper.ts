@@ -11,8 +11,8 @@
  * anonymously and never transitions the appointment to `completed`), so a
  * tokenless link is effectively a broken feedback request. Consumers:
  *   - the post-booking-followup cron (`processFeedbackForms`)
- *   - the manual admin send endpoint (`send-feedback-email`)
- *   - the admin re-request-feedback flow
+ *   - the admin re-request-feedback flow (manual resend, incl. resending
+ *     for an already-completed appointment)
  */
 
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
