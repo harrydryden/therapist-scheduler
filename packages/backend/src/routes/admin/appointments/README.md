@@ -24,7 +24,9 @@ routes/admin/appointments/
 ├── patch-admin.ts           PATCH /api/admin/appointments/:id
 │                            (no human-control requirement; uses adminForceUpdate)
 ├── send-message.ts          POST /:id/send-message
-├── feedback-email.ts        POST /:id/send-feedback-email
+├── re-request-feedback.ts   POST /:id/re-request-feedback (discard prior
+│                            submission + re-send tokened form; handles
+│                            already-completed appointments via walk-back)
 ├── reprocess-thread.ts      POST /:id/reprocess-thread (preview / safe / force)
 ├── action-closure.ts        POST /:id/action-closure (cancel / dismiss)
 ├── dropdowns.ts             GET users + GET therapists (for the appointments page)
@@ -74,8 +76,15 @@ preHandler and the same lifecycle service for state changes.
    sending to arbitrary addresses via this path — only the user or
    therapist of the appointment is allowed.
 
-6. **`send-feedback-email` duplicate guard** rejects when
-   `feedbackFormSentAt` is set unless `?force=true`.
+6. **`re-request-feedback` is the single manual-resend path.** It
+   delegates to `feedback-rerequest.service.ts`, which discards any
+   prior submission, walks a `feedback_requested`/`completed`
+   appointment back to `session_held` (so the forward transition can
+   re-fire), CAS-claims `feedbackFormSentAt` to exclude the cron, then
+   re-sends the tokened form. Eligibility is `POST_BOOKING_STATUSES`
+   (confirmed and beyond). The older, never-wired
+   `send-feedback-email` endpoint — which 500'd when resending for an
+   already-completed appointment — was removed in favour of this path.
 
 7. **`delete` confirmed-guard** requires `forceDeleteConfirmed: true`
    for confirmed rows.
