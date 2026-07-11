@@ -92,5 +92,18 @@ export function computeBackwardSentinelResets(
     reset = true;
   }
 
+  // Moving back INTO feedback_requested (completed → feedback_requested,
+  // the "restore a wrongly-completed appointment" path) → reset the
+  // reminder sentinel only. The form genuinely was sent (keep that
+  // timestamp), but a stale reminder timestamp would make the
+  // feedback-dead-end auto-completer re-complete the row on its very next
+  // tick (it completes feedback_requested rows whose reminder is older
+  // than the closure window). Clearing it restarts the reminder → grace
+  // period → auto-complete cycle from now instead.
+  if (toIdx === FEEDBACK_IDX && fromIdx > FEEDBACK_IDX) {
+    updates.feedbackReminderSentAt = null;
+    reset = true;
+  }
+
   return { updates, reset };
 }
