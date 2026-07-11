@@ -13,10 +13,11 @@
  * require a manual update here.
  *
  * Current aliases:
- * - claude-sonnet-4-6: Latest Sonnet 4.6.x (fast + intelligent)
- * - claude-haiku-4-5: Latest Haiku 4.5.x (fastest, no 4.6 available yet)
+ * - claude-sonnet-5: Latest Sonnet generation (fast + intelligent)
+ * - claude-opus-4-8: Latest Opus generation (highest capability)
+ * - claude-haiku-4-5: Latest Haiku 4.5.x (fastest, most cost-effective)
  *
- * Last updated: 2026-03-24
+ * Last updated: 2026-07-11
  */
 
 export const CLAUDE_MODELS = {
@@ -25,15 +26,15 @@ export const CLAUDE_MODELS = {
    * Used by: Justin Time scheduling agent
    * Characteristics: Best reasoning, tool use, and multi-step tasks
    */
-  AGENT: 'claude-sonnet-4-6',
+  AGENT: 'claude-sonnet-5',
 
   /**
    * Model for data extraction and structured output tasks
    * Used by: PDF ingestion, profile extraction
-   * Characteristics: Fastest model, optimized for structured data extraction
-   * Haiku is ~5x faster than Sonnet with comparable accuracy for extraction tasks
+   * Characteristics: Highest-capability model for accurate extraction from
+   * complex or messy documents, where correctness matters more than speed.
    */
-  EXTRACTION: 'claude-haiku-4-5',
+  EXTRACTION: 'claude-opus-4-8',
 
   /**
    * Model for simple, fast tasks (classification, quick responses)
