@@ -399,10 +399,10 @@ class EmailQueueService {
       const note = `\n\n[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${to}\nSubject: ${subject.slice(0, 100)}${subject.length > 100 ? '...' : ''}\nFailed after ${job.attemptsMade} retries: ${errorMessage.slice(0, 200)}`;
 
       await prisma.$executeRaw`
-        UPDATE "AppointmentRequest"
+        UPDATE "appointment_requests"
         SET "notes" = COALESCE("notes", '') || ${note},
-            "conversationStallAlertAt" = ${now},
-            "conversationStallAcknowledged" = false
+            "conversation_stall_alert_at" = ${now},
+            "conversation_stall_acknowledged" = false
         WHERE "id" = ${appointmentId}
       `;
     }

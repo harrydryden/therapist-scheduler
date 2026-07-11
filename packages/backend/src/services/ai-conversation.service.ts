@@ -435,7 +435,7 @@ export class AIConversationService {
   async storeConversationStateWithRetry(
     appointmentRequestId: string,
     state: { systemPrompt: string; messages: ConversationMessage[] },
-    expectedUpdatedAt: Date,
+    expectedUpdatedAt: Date | undefined,
     executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>
   ): Promise<{ success: boolean; retriesUsed: number }> {
     const MAX_RETRIES = 3;
@@ -468,9 +468,7 @@ export class AIConversationService {
     }
 
     // All retries exhausted - record compensation data
-    const emailTools = executedTools.filter(t =>
-      t.toolName === 'send_user_email' || t.toolName === 'send_therapist_email'
-    );
+    const emailTools = executedTools.filter(t => t.toolName === 'send_email');
 
     if (emailTools.length > 0) {
       // Log critical compensation data for manual recovery

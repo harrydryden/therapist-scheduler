@@ -239,10 +239,10 @@ export async function processPendingEmails(
 
             // Atomic append to prevent note loss under concurrent updates.
             await prisma.$executeRaw`
-              UPDATE "AppointmentRequest"
+              UPDATE "appointment_requests"
               SET "notes" = COALESCE("notes", '') || ${abandonmentNote},
-                  "conversationStallAlertAt" = ${now},
-                  "conversationStallAcknowledged" = false
+                  "conversation_stall_alert_at" = ${now},
+                  "conversation_stall_acknowledged" = false
               WHERE "id" = ${email.appointmentId}
             `;
 

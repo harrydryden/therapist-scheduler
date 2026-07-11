@@ -99,7 +99,7 @@ export async function checkAndHandleDivergence(args: {
 
     const divergenceNote = `[DIVERGENCE ALERT - ${new Date().toISOString()}]\n${getDivergenceSummary(divergence)}\n\nEmail from: ${email.from}\nSubject: ${email.subject}\n---\n`;
     await prisma.$executeRaw`
-      UPDATE "AppointmentRequest"
+      UPDATE "appointment_requests"
       SET "notes" = ${divergenceNote} || COALESCE("notes", '')
       WHERE "id" = ${appointmentId}
     `;
