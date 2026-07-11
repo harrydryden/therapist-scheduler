@@ -696,6 +696,31 @@ class ChaseEmailService {
 
       for (const appointment of candidates) {
         try {
+          // Re-verify right before completing: an admin re-request/restore can
+          // run between the candidate fetch and this point, walking the row
+          // back and re-arming a FRESH feedback cycle (reminder nulled or
+          // re-stamped). Acting on the stale candidate would instantly
+          // re-complete an appointment the admin just revived. The residual
+          // TOCTOU window is milliseconds and requires the reminder to still
+          // be stale, which the sentinel resets now prevent.
+          const fresh = await prisma.appointmentRequest.findUnique({
+            where: { id: appointment.id },
+            select: { status: true, feedbackReminderSentAt: true },
+          });
+          if (
+            !fresh ||
+            fresh.status !== 'feedback_requested' ||
+            !fresh.feedbackReminderSentAt ||
+            fresh.feedbackReminderSentAt.getTime() === 0 ||
+            fresh.feedbackReminderSentAt >= threshold
+          ) {
+            logger.debug(
+              { checkId, appointmentId: appointment.id },
+              'Skipping feedback auto-complete — row changed since candidate fetch'
+            );
+            continue;
+          }
+
           const result = await appointmentLifecycleService.transitionToCompleted({
             appointmentId: appointment.id,
             source: 'system',
