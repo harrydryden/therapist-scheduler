@@ -134,45 +134,28 @@ export class JustinTimeService {
       // FIX RSA-4 + FIX #27 note: Save conversation state with retry and compensation.
       // No optimistic lock for initial save — this is intentional since there's no prior version.
       // Concurrent startScheduling calls are prevented by the email processing lock in the webhook layer.
-      let stateSaved = false;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await this.aiConversation.storeConversationState(context.appointmentRequestId, conversationState);
-          stateSaved = true;
-          if (attempt > 0) {
-            logger.info(
-              { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, attempt },
-              'startScheduling - State save succeeded after retry'
-            );
-          }
-          break;
-        } catch (error) {
-          if (attempt < 2) {
-            const delay = 100 * Math.pow(2, attempt);
-            logger.warn(
-              { traceId: this.traceId, appointmentRequestId: context.appointmentRequestId, attempt, delay },
-              'startScheduling - State save failed, retrying'
-            );
-            await new Promise(resolve => setTimeout(resolve, delay));
-          }
-        }
-      }
+      // Shares the same retry + DB-persisted compensation-note logic as the
+      // final save in processEmailReply, instead of a second hand-rolled loop.
+      const saveResult = await this.aiConversation.storeConversationStateWithRetry(
+        context.appointmentRequestId,
+        conversationState,
+        undefined,
+        executedTools,
+      );
 
-      if (!stateSaved) {
-        const emailTools = executedTools.filter(t =>
-          t.toolName === 'send_user_email' || t.toolName === 'send_therapist_email'
+      if (!saveResult.success) {
+        // Do NOT continue to transitionToContacted or return success: the
+        // conversationState is null, so every subsequent inbound reply would
+        // throw "Conversation state not found" with no runner able to
+        // recover it. Throwing here makes the caller's promise reject, so
+        // appointments.routes.ts's .catch marks the justintime_start outbox
+        // row 'failed' (status stays 'pending') instead of .then marking it
+        // 'completed'. The retry runner's outreach-evidence guard (see
+        // side-effect-retry.service.ts) prevents this from re-sending
+        // duplicate intro emails if any were already sent.
+        throw new Error(
+          `startScheduling: conversation state save failed after retries for appointment ${context.appointmentRequestId}`,
         );
-        if (emailTools.length > 0) {
-          logger.error(
-            {
-              traceId: this.traceId,
-              appointmentRequestId: context.appointmentRequestId,
-              compensationRequired: true,
-              emailsSent: emailTools,
-            },
-            'COMPENSATION REQUIRED: startScheduling - Emails sent but state save failed'
-          );
-        }
       }
 
       // Advance to 'contacted' via the lifecycle service so the transition gets

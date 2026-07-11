@@ -78,6 +78,7 @@ jest.mock('../services/slack-notification.service', () => ({
 }));
 
 import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
+import { slackNotificationService as slackNotificationServiceMock } from '../services/slack-notification.service';
 
 describe('appointment-creation outbox: registerInTransaction', () => {
   beforeEach(() => {
@@ -306,5 +307,31 @@ describe('appointment-creation outbox: justintime_start retry executor', () => {
     appointmentFindUniqueMock.mockResolvedValue(null);
 
     await expect(executeEffect(baseEffect)).rejects.toThrow(/not found/i);
+  });
+
+  it('skips re-drive and alerts when a Gmail thread was stamped but state was never saved', async () => {
+    appointmentFindUniqueMock.mockResolvedValue({
+      id: 'apt-1',
+      userName: 'Alice',
+      userEmail: 'alice@example.com',
+      therapistName: 'Dr T',
+      therapistEmail: 't@example.com',
+      therapistHandle: 'th-1',
+      status: 'pending',
+      messageCount: 0,
+      conversationState: null,
+      confirmedDateTime: null,
+      trackingCode: 'SPL1',
+      gmailThreadId: 'thread-abc',
+      therapistGmailThreadId: null,
+    });
+
+    await executeEffect(baseEffect);
+
+    expect(startSchedulingMock).not.toHaveBeenCalled();
+    expect(fetchSchedulingContextMock).not.toHaveBeenCalled();
+    expect(slackNotificationServiceMock.sendAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ appointmentId: 'apt-1', severity: 'high' }),
+    );
   });
 });

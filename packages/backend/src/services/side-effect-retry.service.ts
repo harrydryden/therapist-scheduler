@@ -274,8 +274,14 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         // beyond `pending`, or if any conversation activity has been
         // recorded (messageCount > 0 / conversationState saved). The narrow
         // "emails sent but state save failed" window is intentionally not
-        // re-driven here — that case logs COMPENSATION REQUIRED and waits
-        // for manual intervention rather than risking duplicate outreach.
+        // re-driven here — that case waits for manual intervention rather
+        // than risking duplicate outreach. Since startScheduling now throws
+        // (instead of silently transitioning to 'contacted') when the save
+        // fails, status alone no longer distinguishes "nothing happened yet"
+        // from "emails went out but the state never persisted" — both leave
+        // the row 'pending' with messageCount=0 and conversationState=null.
+        // The Gmail thread IDs stamped by the send tool are the remaining
+        // evidence of a real send, so they gate the retry.
         const richAppointment = await prisma.appointmentRequest.findUnique({
           where: { id: effect.appointmentId },
           select: {
@@ -283,6 +289,8 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             status: true,
             messageCount: true,
             conversationState: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
           },
         });
 
@@ -305,6 +313,24 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             { effectId: effect.id, appointmentId: effect.appointmentId },
             'justintime_start retry skipped: conversation activity already recorded; manual intervention may be required',
           );
+          return;
+        }
+
+        if (richAppointment.gmailThreadId || richAppointment.therapistGmailThreadId) {
+          logger.error(
+            { effectId: effect.id, appointmentId: effect.appointmentId },
+            'justintime_start retry skipped: outreach evidence found (Gmail thread stamped) but state was never saved; manual intervention required',
+          );
+          try {
+            await slackNotificationService.sendAlert({
+              title: 'Scheduling Start Needs Manual Recovery',
+              severity: 'high',
+              appointmentId: effect.appointmentId,
+              details: 'The initial scheduling email(s) were sent but the conversation state was never saved. Retrying would resend duplicate outreach, so this has been left for manual review.',
+            });
+          } catch {
+            // Don't let Slack failure mask the underlying condition.
+          }
           return;
         }
 
