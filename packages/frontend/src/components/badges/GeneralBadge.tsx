@@ -9,7 +9,7 @@ export function GeneralBadge({ categoryType }: GeneralBadgeProps) {
 
   return (
     <span
-      className={`inline-block px-2.5 py-0.5 text-xs font-medium rounded-full border ${colorClass}`}
+      className={`inline-block px-2.5 py-[3px] text-xs font-medium rounded-full border ${colorClass}`}
     >
       General
     </span>

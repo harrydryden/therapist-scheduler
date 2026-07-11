@@ -12,11 +12,11 @@ export {
   getExplainer,
 } from '@therapist-scheduler/shared/config/therapist-categories';
 
-// Frontend-specific: display labels for category sections
+// Frontend-specific: display labels for category sections (sentence case)
 export const CATEGORY_LABELS = {
   approach: 'Approach',
   style: 'Style',
-  areasOfFocus: 'Areas of Focus',
+  areasOfFocus: 'Areas of focus',
 } as const;
 
 // Frontend-specific: Tailwind color classes for category badges (Spill palette)

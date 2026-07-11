@@ -40,10 +40,10 @@ export default function HoldingPage() {
           />
         </svg>
       </div>
-      <h2 className="text-2xl font-semibold text-slate-900 mb-3">
+      <h2 className="font-display font-bold text-3xl leading-[39px] tracking-[-0.6px] text-black mb-3">
         Therapists coming soon
       </h2>
-      <p className="text-slate-600 leading-relaxed">
+      <p className="text-base tracking-[-0.31px] text-spill-grey-600 leading-relaxed">
         We don't have any therapists on the platform at the moment. More will be added soon.
         We'll notify you when they are.
       </p>

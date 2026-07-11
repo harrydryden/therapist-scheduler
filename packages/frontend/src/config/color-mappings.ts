@@ -15,9 +15,9 @@ export const STATUS_BADGE_COLORS: Record<string, string> = {
   confirmed: 'bg-spill-teal-100 text-spill-teal-600',
 
   // Post-session stages
-  session_held: 'bg-spill-teal-200 text-spill-teal-700',
-  feedback_requested: 'bg-purple-100 text-purple-700',
-  completed: 'bg-green-100 text-green-700',
+  session_held: 'bg-spill-teal-200 text-spill-teal-600',
+  feedback_requested: 'bg-spill-blue-100 text-spill-blue-800',
+  completed: 'bg-spill-teal-100 text-spill-teal-600',
 
   // Terminal
   cancelled: 'bg-spill-red-100 text-spill-red-600',
@@ -54,12 +54,12 @@ export const STAGE_LABELS: Record<string, string> = {
 
 // Utility function to get status color with fallback
 export function getStatusColor(status: string): string {
-  return STATUS_BADGE_COLORS[status] || 'bg-slate-100 text-slate-800';
+  return STATUS_BADGE_COLORS[status] || 'bg-spill-grey-100 text-spill-grey-600';
 }
 
 // Utility function to get audience color with fallback
 export function getAudienceColor(audience: string): string {
-  return AUDIENCE_BADGE_COLORS[audience] || 'bg-slate-100 text-slate-800';
+  return AUDIENCE_BADGE_COLORS[audience] || 'bg-spill-grey-100 text-spill-grey-600';
 }
 
 // Utility function to get health status color with fallback

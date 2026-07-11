@@ -2,8 +2,38 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+/* Spill display family — self-hosted Mark Pro (regular/medium + bold).
+   Body family is Inter, loaded via Google Fonts in index.html. */
+@font-face {
+  font-family: 'Mark Pro';
+  src: url('./assets/fonts/MarkPro.woff2') format('woff2');
+  font-weight: 400 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Mark Pro';
+  src: url('./assets/fonts/MarkPro-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-white text-spill-grey-600 antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply text-black;
+  }
 }
 
 /* Ensure smooth scrolling on mobile */

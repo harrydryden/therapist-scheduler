@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import SpillLogo from '../components/SpillLogo';
 import { API_BASE } from '../config/env';
 import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
@@ -109,8 +110,8 @@ function ScaleQuestion({
   const range = Array.from({ length: max - min + 1 }, (_, i) => min + i);
 
   return (
-    <div className="space-y-3">
-      <div className="flex justify-between text-sm text-gray-500">
+    <div className="space-y-2.5">
+      <div className="flex justify-between text-[13px] text-spill-grey-400">
         <span>{question.scaleMinLabel || min}</span>
         <span>{question.scaleMaxLabel || max}</span>
       </div>
@@ -123,10 +124,10 @@ function ScaleQuestion({
             aria-label={`${num} out of ${max}${num === min && question.scaleMinLabel ? ` - ${question.scaleMinLabel}` : ''}${num === max && question.scaleMaxLabel ? ` - ${question.scaleMaxLabel}` : ''}`}
             aria-pressed={value === num}
             className={`
-              flex-1 py-3 rounded-lg font-medium transition-all
+              flex-1 py-3 rounded-lg text-[15px] border transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400
               ${value === num
-                ? 'bg-primary-600 text-white shadow-md scale-105'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'bg-spill-blue-100 border-spill-blue-800 text-spill-blue-900 font-semibold'
+                : 'bg-white border-spill-grey-200 text-spill-grey-600 font-medium hover:bg-spill-grey-100'
               }
             `}
           >
@@ -157,10 +158,10 @@ function ChoiceQuestion({
           type="button"
           onClick={() => onChange(option)}
           className={`
-            w-full py-3 px-4 rounded-lg font-medium text-left transition-all
+            w-full py-3 px-4 rounded-lg text-sm border text-left transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400
             ${value === option
-              ? 'bg-primary-600 text-white shadow-md'
-              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              ? 'bg-spill-blue-100 border-spill-blue-800 text-spill-blue-900 font-semibold'
+              : 'bg-white border-spill-grey-200 text-spill-grey-600 font-medium hover:bg-spill-grey-100'
             }
           `}
         >
@@ -198,10 +199,10 @@ function ChoiceWithTextQuestion({
             type="button"
             onClick={() => onChoiceChange(option)}
             className={`
-              w-full py-3 px-4 rounded-lg font-medium text-left transition-all
+              w-full py-3 px-4 rounded-lg text-sm border text-left transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400
               ${choiceValue === option
-                ? 'bg-primary-600 text-white shadow-md'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                ? 'bg-spill-blue-100 border-spill-blue-800 text-spill-blue-900 font-semibold'
+                : 'bg-white border-spill-grey-200 text-spill-grey-600 font-medium hover:bg-spill-grey-100'
               }
             `}
           >
@@ -212,7 +213,7 @@ function ChoiceWithTextQuestion({
       {choiceValue && (
         <div className="space-y-1">
           {textRequired && (
-            <p className="text-sm text-red-600 font-medium">Please explain your answer <span className="text-red-500">*</span></p>
+            <p className="text-[13px] text-spill-red-600 font-medium">Please explain your answer <span className="text-spill-red-600">*</span></p>
           )}
           <textarea
             value={textValue}
@@ -221,10 +222,10 @@ function ChoiceWithTextQuestion({
               ? (question.followUpPlaceholder || 'Please tell us more...')
               : (question.followUpPlaceholder || 'Tell us more (optional)...')}
             rows={3}
-            className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none ${
+            className={`w-full px-3.5 py-3 text-sm bg-white border rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-shadow duration-150 resize-none ${
               textRequired && !textValue.trim()
-                ? 'border-red-300'
-                : 'border-gray-300'
+                ? 'border-spill-red-400'
+                : 'border-spill-grey-200'
             }`}
           />
         </div>
@@ -454,8 +455,8 @@ export default function FeedbackFormPage() {
   // Loading state
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+      <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-2 border-spill-grey-200 border-t-spill-blue-800"></div>
       </div>
     );
   }
@@ -463,22 +464,22 @@ export default function FeedbackFormPage() {
   // Already submitted state
   if (alreadySubmitted) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full text-center">
+          <div className="w-14 h-14 bg-spill-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-7 h-7 text-spill-blue-800" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Already Submitted</h2>
-          <p className="text-gray-600 mb-6">
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">Already submitted</h3>
+          <p className="text-sm text-spill-grey-600 mb-6">
             You have already submitted feedback for this session. Thank you for your time!
           </p>
           <Link
             to="/"
-            className="inline-block px-6 py-3 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
+            className="inline-block px-6 py-3 bg-black text-white rounded-lg text-sm font-semibold hover:bg-spill-grey-600 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
           >
-            Return Home
+            Return home
           </Link>
         </div>
       </div>
@@ -488,26 +489,26 @@ export default function FeedbackFormPage() {
   // Error state
   if (error || !formConfig) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
-          <div className={`w-16 h-16 ${isSubmitError ? 'bg-yellow-100' : 'bg-red-100'} rounded-full flex items-center justify-center mx-auto mb-4`}>
-            <svg className={`w-8 h-8 ${isSubmitError ? 'text-yellow-600' : 'text-red-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full text-center">
+          <div className={`w-14 h-14 ${isSubmitError ? 'bg-spill-yellow-100' : 'bg-spill-red-100'} rounded-full flex items-center justify-center mx-auto mb-4`}>
+            <svg className={`w-7 h-7 ${isSubmitError ? 'text-spill-yellow-600' : 'text-spill-red-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">
-            {isSubmitError ? 'Submission Error' : 'Unable to Load Form'}
-          </h2>
-          <p className="text-gray-600 mb-6">
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">
+            {isSubmitError ? 'Submission error' : 'Unable to load form'}
+          </h3>
+          <p className="text-sm text-spill-grey-600 mb-6">
             {isSubmitError
               ? 'There was a problem submitting your feedback. Your responses may have been saved — please do not resubmit. If the issue persists, contact support.'
               : (error || 'The feedback form is not available at this time.')}
           </p>
           <Link
             to="/"
-            className="inline-block px-6 py-3 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
+            className="inline-block px-6 py-3 bg-black text-white rounded-lg text-sm font-semibold hover:bg-spill-grey-600 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
           >
-            Return Home
+            Return home
           </Link>
         </div>
       </div>
@@ -517,20 +518,20 @@ export default function FeedbackFormPage() {
   // Complete state
   if (isComplete) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full text-center">
+          <div className="w-14 h-14 bg-spill-teal-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-7 h-7 text-spill-teal-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
             </svg>
           </div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">{formConfig.thankYouTitle}</h2>
-          <p className="text-gray-600 mb-6">{formConfig.thankYouMessage}</p>
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">{formConfig.thankYouTitle}</h3>
+          <p className="text-sm text-spill-grey-600 mb-6">{formConfig.thankYouMessage}</p>
           <Link
             to="/"
-            className="inline-block px-6 py-3 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
+            className="inline-block px-6 py-3 bg-black text-white rounded-lg text-sm font-semibold hover:bg-spill-grey-600 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
           >
-            Return Home
+            Return home
           </Link>
         </div>
       </div>
@@ -540,14 +541,15 @@ export default function FeedbackFormPage() {
   // Welcome screen
   if (currentQuestionIndex === -1) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full">
-          <h1 className="text-2xl font-bold text-gray-900 mb-1">Therapy Session Feedback</h1>
+      <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
+        <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full">
+          <SpillLogo className="w-5 h-7 text-black mb-5" />
+          <h2 className="font-display font-bold text-3xl leading-[39px] tracking-[-0.6px] text-black mb-1.5">Therapy session feedback</h2>
           {prefilled && (
-            <p className="text-lg text-gray-600 mb-6">Session with {prefilled.therapistName}</p>
+            <p className="text-base tracking-[-0.31px] text-spill-grey-400 mb-5">Session with {prefilled.therapistName}</p>
           )}
 
-          <div className="text-gray-600 mb-6">
+          <div className="text-sm text-spill-grey-600 mb-7">
             {prefilled?.userName && (
               <p className="mb-2">Hi {prefilled.userName}</p>
             )}
@@ -555,8 +557,8 @@ export default function FeedbackFormPage() {
           </div>
 
           {warning && (
-            <div className="mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <p className="text-sm text-yellow-800">{warning}</p>
+            <div className="mb-6 p-4 bg-spill-yellow-100 border border-spill-yellow-200 rounded-lg">
+              <p className="text-sm text-spill-grey-600">{warning}</p>
             </div>
           )}
 
@@ -570,9 +572,9 @@ export default function FeedbackFormPage() {
                 : 0;
               setCurrentQuestionIndex(firstRealIdx);
             }}
-            className="w-full py-3 px-6 bg-primary-600 text-white rounded-lg font-medium hover:bg-primary-700 transition-colors"
+            className="w-full py-3 px-6 bg-black text-white rounded-lg text-sm font-semibold hover:bg-spill-grey-600 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
           >
-            Start Feedback
+            Start feedback
           </button>
         </div>
       </div>
@@ -587,11 +589,11 @@ export default function FeedbackFormPage() {
   const canProceed = isCurrentQuestionAnswered();
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-lg p-8 max-w-md w-full">
+    <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
+      <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full">
         {/* Progress bar */}
-        <div className="mb-6">
-          <div className="flex justify-between text-sm text-gray-500 mb-2">
+        <div className="mb-7">
+          <div className="flex justify-between text-[13px] text-spill-grey-400 mb-2">
             <span>Question {currentVisibleIndex + 1} of {visibleQuestions.length}</span>
           </div>
           <div
@@ -600,10 +602,10 @@ export default function FeedbackFormPage() {
             aria-valuemin={0}
             aria-valuemax={100}
             aria-label="Form completion progress"
-            className="h-2 bg-gray-200 rounded-full overflow-hidden"
+            className="h-1.5 bg-spill-grey-100 rounded-full overflow-hidden"
           >
             <div
-              className="h-full bg-primary-600 transition-all duration-300"
+              className="h-full bg-spill-teal-400 rounded-full transition-all duration-300"
               style={{ width: `${progress}%` }}
             />
           </div>
@@ -611,15 +613,15 @@ export default function FeedbackFormPage() {
 
         {/* Question */}
         <div className="mb-6">
-          <h2 className="text-xl font-semibold text-gray-900 mb-1">
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black">
             {currentQuestion.question}
-            {currentQuestion.required && <span className="text-red-500 ml-1">*</span>}
-          </h2>
+            {currentQuestion.required && <span className="text-spill-red-600 ml-1">*</span>}
+          </h3>
           {currentQuestion.helperText && (
-            <p className="text-sm text-gray-500 italic mt-1">{currentQuestion.helperText}</p>
+            <p className="text-[13px] text-spill-grey-400 mt-1.5">{currentQuestion.helperText}</p>
           )}
           {currentQuestion.prefilled && prefilled?.therapistName && (
-            <p className="text-sm text-gray-500 mt-1">Pre-filled from your appointment</p>
+            <p className="text-[13px] text-spill-grey-400 mt-1.5">Pre-filled from your appointment</p>
           )}
         </div>
 
@@ -640,13 +642,13 @@ export default function FeedbackFormPage() {
                   onChange={(e) => handleResponseChange(currentQuestion.id, e.target.value)}
                   rows={4}
                   aria-describedby={wordCountId}
-                  className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none ${
-                    overLimit ? 'border-red-300' : 'border-gray-300'
+                  className={`w-full px-3.5 py-3 text-sm bg-white border rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-shadow duration-150 resize-none ${
+                    overLimit ? 'border-spill-red-400' : 'border-spill-grey-200'
                   }`}
                   placeholder="Type your answer..."
                 />
                 {showCounter && (
-                  <p id={wordCountId} className={`text-sm text-right ${overLimit ? 'text-red-600 font-medium' : 'text-gray-400'}`}>
+                  <p id={wordCountId} className={`text-[13px] text-right ${overLimit ? 'text-spill-red-600 font-medium' : 'text-spill-grey-400'}`}>
                     {words}/{limit} words
                   </p>
                 )}
@@ -687,7 +689,7 @@ export default function FeedbackFormPage() {
           {currentQuestionIndex > 0 && (
             <button
               onClick={handleBack}
-              className="flex-1 py-3 px-6 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
+              className="flex-1 py-3 px-6 bg-white text-spill-grey-600 border border-spill-grey-200 rounded-lg text-sm font-medium hover:bg-spill-grey-100 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
             >
               Back
             </button>
@@ -697,10 +699,10 @@ export default function FeedbackFormPage() {
             onClick={handleNext}
             disabled={!canProceed || isSubmitting}
             className={`
-              flex-1 py-3 px-6 rounded-lg font-medium transition-colors
+              flex-1 py-3 px-6 rounded-lg text-sm font-semibold bg-black text-white transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400
               ${!canProceed
-                ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                : 'bg-primary-600 text-white hover:bg-primary-700'
+                ? 'opacity-45 cursor-not-allowed'
+                : 'hover:bg-spill-grey-600'
               }
             `}
           >
