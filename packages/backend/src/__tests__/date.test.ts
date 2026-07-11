@@ -28,18 +28,21 @@ describe('parseConfirmedDateTime', () => {
   const refDate = new Date('2025-02-05T12:00:00Z');
 
   describe('chrono-node parsing', () => {
+    // Assertions use toISOString (the absolute instant) rather than
+    // getMonth()/getDate() (server-local calendar reads) so they hold under
+    // any TZ the test host runs in. refDate + default platform timezone
+    // (Europe/London) mean a bare "10:00am" resolves at the GMT/BST offset.
     it('parses "Monday 3rd February at 10:00am"', () => {
+      // 3 Feb is 2 days BEFORE the 5 Feb 2025 reference, so forwardDate
+      // (the default) rolls it to 2026 — the year chrono infers is
+      // TZ-independent, unlike the old getDate() read this replaced.
       const result = parseConfirmedDateTime('Monday 3rd February at 10:00am', refDate);
-      expect(result).not.toBeNull();
-      expect(result!.getMonth()).toBe(1); // February
-      expect(result!.getDate()).toBe(3);
+      expect(result?.toISOString()).toBe('2026-02-03T10:00:00.000Z'); // 10:00 GMT
     });
 
     it('parses "Tuesday 11th March at 2:30pm"', () => {
       const result = parseConfirmedDateTime('Tuesday 11th March at 2:30pm', refDate);
-      expect(result).not.toBeNull();
-      expect(result!.getMonth()).toBe(2); // March
-      expect(result!.getDate()).toBe(11);
+      expect(result?.toISOString()).toBe('2025-03-11T14:30:00.000Z'); // 14:30 GMT
     });
 
     it('parses "Friday at 3pm"', () => {
@@ -47,12 +50,11 @@ describe('parseConfirmedDateTime', () => {
       expect(result).not.toBeNull();
     });
 
-    it('parses ISO format "2025-02-10T14:00:00"', () => {
+    it('parses ISO format "2025-02-10T14:00:00" as platform-timezone wall-clock', () => {
+      // No offset in the string → interpreted in the platform timezone
+      // (GMT on this date), not the server zone.
       const result = parseConfirmedDateTime('2025-02-10T14:00:00', refDate);
-      expect(result).not.toBeNull();
-      expect(result!.getFullYear()).toBe(2025);
-      expect(result!.getMonth()).toBe(1);
-      expect(result!.getDate()).toBe(10);
+      expect(result?.toISOString()).toBe('2025-02-10T14:00:00.000Z');
     });
   });
 
@@ -66,10 +68,9 @@ describe('parseConfirmedDateTime', () => {
 
     it('respects forwardDate=false option', () => {
       const result = parseConfirmedDateTime('January 1st at 10am', refDate, { forwardDate: false });
-      expect(result).not.toBeNull();
-      // With forwardDate false, may return current year (past date)
-      expect(result!.getMonth()).toBe(0); // January
-      expect(result!.getDate()).toBe(1);
+      // With forwardDate false, keeps the reference year (a past date).
+      // 10am on 1 Jan 2025 in the platform timezone (GMT).
+      expect(result?.toISOString()).toBe('2025-01-01T10:00:00.000Z');
     });
   });
 
