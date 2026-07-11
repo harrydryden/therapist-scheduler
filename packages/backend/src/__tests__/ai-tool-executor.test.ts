@@ -245,10 +245,12 @@ describe('per-appointment tool ceiling', () => {
     expect(mockSendEmail).not.toHaveBeenCalled();
 
     // The ceiling path should also flip the appointment into human
-    // control by calling appointmentRequest.update with a payload
-    // that includes humanControlEnabled: true.
-    const updateCalls = getPrismaMock().appointmentRequest.update.mock.calls;
-    const flipCall = updateCalls.find(
+    // control by calling appointmentRequest.updateMany (atomic —
+    // scoped to humanControlEnabled: false so it can't clobber an
+    // existing takeover record) with a payload that includes
+    // humanControlEnabled: true.
+    const updateManyCalls = getPrismaMock().appointmentRequest.updateMany.mock.calls;
+    const flipCall = updateManyCalls.find(
       (c: unknown[]) =>
         (c[0] as { data?: { humanControlEnabled?: boolean } })?.data?.humanControlEnabled === true,
     );

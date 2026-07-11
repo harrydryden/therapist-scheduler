@@ -29,7 +29,7 @@ import { emailQueueService } from '../../../services/email-queue.service';
 import { auditEventService } from '../../../services/audit-event.service';
 import { getSettingValue } from '../../../services/settings.service';
 import { prependTrackingCodeToSubject } from '../../../services/tracking-code.service';
-import { EMAIL } from '../../../constants';
+import { EMAIL, TERMINAL_STATUSES } from '../../../constants';
 import { normalizeEmailBody } from './email-normalization';
 
 /**
@@ -109,15 +109,18 @@ export async function sendAppointmentEmail(
       }
     }
 
-    // ATOMIC TOCTOU defence: re-check human-control via updateMany
-    // with `humanControlEnabled: false` as a where predicate. If
-    // human control flipped between the executor-level check and
-    // this point, `count: 0` and we silently abort the send.
+    // ATOMIC TOCTOU defence: re-check human-control AND terminal-status via
+    // updateMany with both as where predicates. If human control flipped, or
+    // an admin cancelled the appointment, between the executor-level check
+    // and this point, `count: 0` and we silently abort the send — closes the
+    // window where an in-flight turn could still email a cancelled/completed
+    // appointment.
     if (appointmentRequestId) {
       const canSend = await prisma.appointmentRequest.updateMany({
         where: {
           id: appointmentRequestId,
           humanControlEnabled: false,
+          status: { notIn: [...TERMINAL_STATUSES] },
         },
         data: {
           lastActivityAt: new Date(),
@@ -127,13 +130,20 @@ export async function sendAppointmentEmail(
       if (canSend.count === 0) {
         const current = await prisma.appointmentRequest.findUnique({
           where: { id: appointmentRequestId },
-          select: { humanControlEnabled: true },
+          select: { humanControlEnabled: true, status: true },
         });
 
         if (current?.humanControlEnabled) {
           logger.warn(
             { traceId, appointmentRequestId, to: params.to },
             'Human control enabled - aborting email send (atomic check)',
+          );
+          return;
+        }
+        if (current && (TERMINAL_STATUSES as readonly string[]).includes(current.status)) {
+          logger.warn(
+            { traceId, appointmentRequestId, to: params.to, status: current.status },
+            'Appointment reached a terminal status mid-turn - aborting email send (atomic check)',
           );
           return;
         }

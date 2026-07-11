@@ -792,6 +792,23 @@ export async function runToolLoop(
           stopLoop = true;
           break;
         }
+
+        // An ADMIN (not the agent) enabled human control mid-turn: dispatch's
+        // atomic gate (dispatch.ts) skips the tool with skipReason:
+        // 'human_control'. Without this break the loop keeps calling Claude
+        // for the rest of the turn's iteration budget and appends its
+        // would-be replies into the thread the admin just took over.
+        // Deliberately does NOT set flaggedForHumanReview or call
+        // callbacks.flagForHumanReview — human control is already enabled
+        // by the admin; re-flagging would overwrite their takeover record.
+        if (result.skipped && result.skipReason === 'human_control') {
+          logger.info(
+            { traceId, appointmentRequestId: context.appointmentRequestId },
+            `${logContext} - Human control enabled mid-turn — stopping tool loop`
+          );
+          stopLoop = true;
+          break;
+        }
       } else {
         toolResult = `Error: ${result.error}`;
         isError = true;

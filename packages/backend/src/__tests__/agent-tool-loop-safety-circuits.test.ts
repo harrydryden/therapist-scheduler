@@ -417,6 +417,43 @@ describe('runToolLoop — safety circuit wiring', () => {
     expect(result.hitMaxIterations).toBe(false);
   });
 
+  it('an admin enabling human control mid-turn (dispatch human_control skip) stops the loop without re-flagging', async () => {
+    // Only ONE response is scripted. dispatch.ts's atomic human-control
+    // gate returns {success:true, skipped:true, skipReason:'human_control'}
+    // when an admin took control between the model's decision and tool
+    // execution. Without the loop-break fix, the loop would push a skip
+    // message and call messagesCreate again for a 2nd iteration — which
+    // would throw here ("called more times than test scripted"), failing
+    // the test. Reaching the assertions below proves the loop stopped
+    // after the skip instead of consuming a 2nd scripted response.
+    scriptedResponses = [
+      scriptToolResponse([{ name: 'send_email', input: { to: 'user@test.com', body: 'hi' } }]),
+    ];
+
+    const executeToolCall = jest.fn(async (toolCall): Promise<ToolExecutionResult> => {
+      return { success: true, toolName: toolCall.name, skipped: true, skipReason: 'human_control' };
+    });
+    const flagForHumanReview = jest.fn();
+    const state = makeConversationState();
+
+    const { result } = await runToolLoop(
+      'system',
+      [{ role: 'user', content: 'hi' }],
+      state,
+      makeContext(),
+      { executeToolCall, flagForHumanReview },
+      'trace-human-control-skip',
+      'test-human-control-skip',
+    );
+
+    // Human control was enabled by an admin, not by the agent's own
+    // flag_for_human_review — the loop must not re-flag (that would
+    // overwrite the admin's takeover record) or call the callback.
+    expect(flagForHumanReview).not.toHaveBeenCalled();
+    expect(result.flaggedForHumanReview).toBe(false);
+    expect(result.iterations).toBe(1);
+  });
+
   it('error breaker takes precedence over max-iterations when both would fire', async () => {
     // MAX_TOOL_ITERATIONS-worth of iterations scripted, each returning
     // one tool call that fails. After iteration 3, totalToolErrors === 3
