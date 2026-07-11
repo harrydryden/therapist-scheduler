@@ -224,8 +224,11 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         />
       </div>
 
-      {/* Availability panel */}
-      <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3">
+      {/* Availability panel — min-height keeps the grey box a consistent
+          height across cards whose slot counts differ (the "+N more days"
+          toggle only appears above 2 days, which would otherwise make some
+          panels a line taller than others). */}
+      <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3 min-h-[140px]">
         <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-2">
           Availability
         </span>
