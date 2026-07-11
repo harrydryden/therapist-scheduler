@@ -19,9 +19,11 @@ export const CATEGORY_LABELS = {
   areasOfFocus: 'Areas of focus',
 } as const;
 
-// Frontend-specific: Tailwind color classes for category badges (Spill palette)
+// Frontend-specific: Tailwind color classes for category badges (Spill palette).
+// Text is the same dark grey across all three tints for readability; the
+// background/border colour alone distinguishes the category families.
 export const CATEGORY_COLORS = {
   approach: 'bg-spill-grey-100 text-spill-grey-600 border-spill-grey-200',
-  style: 'bg-spill-teal-100 text-spill-teal-600 border-spill-teal-200',
-  areasOfFocus: 'bg-spill-blue-100 text-spill-blue-800 border-spill-blue-200',
+  style: 'bg-spill-teal-100 text-spill-grey-600 border-spill-teal-200',
+  areasOfFocus: 'bg-spill-blue-100 text-spill-grey-600 border-spill-blue-200',
 } as const;
