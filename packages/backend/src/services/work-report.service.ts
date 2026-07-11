@@ -5,45 +5,34 @@
  * Reports are created every working day (Mon–Fri) at 9am UK time.
  * Monday reports cover Fri 9am → Mon 9am (including the weekend).
  *
- * Uses LockedTaskRunner for distributed locking to ensure only one instance generates.
- * Extends PeriodicService for standard start/stop/interval lifecycle.
+ * Extends LockedPeriodicService for the standard start/stop/interval +
+ * distributed-lock lifecycle (previously hand-rolled a LockedTaskRunner
+ * on top of PeriodicService — see utils/locked-periodic-service.ts).
+ *
+ * Always started (not gated on Slack being configured) — reports are
+ * saved to the database for admin panel viewing even if Slack delivery
+ * (best-effort) isn't set up.
  */
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { LockedTaskRunner } from '../utils/locked-task-runner';
-import { PeriodicService } from '../utils/periodic-service';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { slackNotificationService } from './slack-notification.service';
 import { WORK_REPORT } from '../constants';
 import { anthropicClient } from '../utils/anthropic-client';
 import { CLAUDE_MODELS } from '../config/models';
 import { wallClockToUtc } from '../utils/date';
 
-class WorkReportService extends PeriodicService {
-  private instanceId: string;
-  private lockedRunner: LockedTaskRunner;
-
+class WorkReportService extends LockedPeriodicService<void> {
   constructor() {
     super({
       name: 'work-report',
       intervalMs: WORK_REPORT.CHECK_INTERVAL_MS,
-    });
-
-    this.instanceId = `work-report-${process.pid}-${Date.now().toString(36)}`;
-    this.lockedRunner = new LockedTaskRunner({
       lockKey: WORK_REPORT.LOCK_KEY,
       lockTtlSeconds: WORK_REPORT.LOCK_TTL_SECONDS,
       renewalIntervalMs: 30_000,
-      instanceId: this.instanceId,
-      context: 'work-report',
     });
-  }
-
-  start(): void {
-    // Always start — reports are saved to the database for admin panel viewing
-    // even if Slack is not configured. Slack delivery is best-effort.
-    super.start();
   }
 
   /**
@@ -70,37 +59,28 @@ class WorkReportService extends PeriodicService {
     return { hour, dayOfWeek, dateStr };
   }
 
-  protected async runCheck(): Promise<void> {
+  protected async tick(): Promise<void> {
     const now = new Date();
     const { hour, dayOfWeek, dateStr } = this.getUkTimeParts(now);
 
-    // Only run on weekdays (Mon=1 to Fri=5) at 9am UK time
+    // Only run on weekdays (Mon=1 to Fri=5) at 9am UK time. Runs inside
+    // the acquired lock (a cheap no-op Redis round-trip most ticks,
+    // every 30 minutes) rather than short-circuiting before it, so the
+    // lock/tick lifecycle stays uniform with every other
+    // LockedPeriodicService subclass.
     if (dayOfWeek < 1 || dayOfWeek > 5 || hour !== WORK_REPORT.REPORT_HOUR) {
       return;
     }
 
-    // Acquire distributed lock BEFORE checking cache to prevent race conditions
-    // where two instances both pass the cache check simultaneously
-    const taskResult = await this.lockedRunner.run(async () => {
-      // Re-check inside lock to prevent duplicate generation
-      const lastReportDate = await redis.get(WORK_REPORT.LAST_REPORT_KEY);
-      if (lastReportDate === dateStr) {
-        logger.debug('Work report already generated today');
-        return;
-      }
-
-      await this.generateAndSendReport();
-      await redis.set(WORK_REPORT.LAST_REPORT_KEY, dateStr, 'EX', 7 * 24 * 60 * 60);
-    });
-
-    if (!taskResult.acquired) {
-      logger.debug('Another instance is handling work report generation');
+    // Re-check the cache inside the lock to prevent duplicate generation.
+    const lastReportDate = await redis.get(WORK_REPORT.LAST_REPORT_KEY);
+    if (lastReportDate === dateStr) {
+      logger.debug('Work report already generated today');
       return;
     }
 
-    if (taskResult.error) {
-      logger.error({ error: taskResult.error }, 'Error generating work report');
-    }
+    await this.generateAndSendReport();
+    await redis.set(WORK_REPORT.LAST_REPORT_KEY, dateStr, 'EX', 7 * 24 * 60 * 60);
   }
 
   /**

@@ -31,6 +31,7 @@ import {
   tryClaimSentinel,
   confirmSentinelClaim,
   releaseSentinelClaim,
+  cleanupStuckSentinels,
 } from '../utils/atomic-sentinel-claim';
 
 beforeEach(() => {
@@ -149,5 +150,40 @@ describe('releaseSentinelClaim', () => {
     updateManyMock.mockResolvedValue({ count: 0 });
     const ok = await releaseSentinelClaim('apt-1', 'chaseSentAt');
     expect(ok).toBe(false);
+  });
+});
+
+describe('cleanupStuckSentinels', () => {
+  it('resets every requested field independently, gated on EPOCH_SENTINEL + staleness cutoff', async () => {
+    updateManyMock
+      .mockResolvedValueOnce({ count: 2 })
+      .mockResolvedValueOnce({ count: 0 });
+
+    const counts = await cleanupStuckSentinels(['chaseSentAt', 'reminderSentAt'], 2 * 60 * 1000);
+
+    expect(counts).toEqual({ chaseSentAt: 2, reminderSentAt: 0 });
+    expect(updateManyMock).toHaveBeenCalledTimes(2);
+
+    const firstArgs = updateManyMock.mock.calls[0][0];
+    expect(firstArgs.where.chaseSentAt).toBe(EPOCH_SENTINEL);
+    expect(firstArgs.where.updatedAt.lt).toBeInstanceOf(Date);
+    expect(firstArgs.data).toEqual({ chaseSentAt: null });
+
+    const secondArgs = updateManyMock.mock.calls[1][0];
+    expect(secondArgs.where.reminderSentAt).toBe(EPOCH_SENTINEL);
+    expect(secondArgs.data).toEqual({ reminderSentAt: null });
+  });
+
+  it('uses a cutoff older-than-olderThanMs so freshly-claimed sentinels are not reset', async () => {
+    updateManyMock.mockResolvedValue({ count: 0 });
+    const before = Date.now();
+
+    await cleanupStuckSentinels(['chaseSentAt'], 5 * 60 * 1000);
+
+    const cutoff = updateManyMock.mock.calls[0][0].where.updatedAt.lt as Date;
+    const expectedCutoff = before - 5 * 60 * 1000;
+    // Allow a small margin for test execution time.
+    expect(cutoff.getTime()).toBeGreaterThanOrEqual(expectedCutoff - 1000);
+    expect(cutoff.getTime()).toBeLessThanOrEqual(expectedCutoff + 1000);
   });
 });

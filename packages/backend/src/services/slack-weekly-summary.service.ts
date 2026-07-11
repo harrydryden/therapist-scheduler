@@ -2,38 +2,29 @@
  * Slack Weekly Summary Service
  *
  * Sends a weekly summary of scheduling activity to Slack every Monday at 9am UK time.
- * Uses LockedTaskRunner for distributed locking to ensure only one instance sends.
- * Extends PeriodicService for standard start/stop/interval lifecycle.
+ * Extends LockedPeriodicService for the standard start/stop/interval +
+ * distributed-lock lifecycle (previously hand-rolled a LockedTaskRunner
+ * on top of PeriodicService — see utils/locked-periodic-service.ts).
  */
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { LockedTaskRunner } from '../utils/locked-task-runner';
-import { PeriodicService } from '../utils/periodic-service';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { slackNotificationService } from './slack-notification.service';
 import { SLACK_NOTIFICATIONS, PRE_BOOKING_STATUSES } from '../constants';
 import { getDateInTimezone } from '../utils/date';
 
 const LAST_SUMMARY_KEY = SLACK_NOTIFICATIONS.LAST_SUMMARY_KEY;
 
-class SlackWeeklySummaryService extends PeriodicService {
-  private instanceId: string;
-  private lockedRunner: LockedTaskRunner;
-
+class SlackWeeklySummaryService extends LockedPeriodicService<void> {
   constructor() {
     super({
       name: 'slack-weekly-summary',
       intervalMs: SLACK_NOTIFICATIONS.CHECK_INTERVAL_MS,
-    });
-
-    this.instanceId = `summary-${process.pid}-${Date.now().toString(36)}`;
-    this.lockedRunner = new LockedTaskRunner({
       lockKey: SLACK_NOTIFICATIONS.LOCK_KEY,
       lockTtlSeconds: SLACK_NOTIFICATIONS.LOCK_TTL_SECONDS,
       renewalIntervalMs: 30_000,
-      instanceId: this.instanceId,
-      context: 'slack-weekly-summary',
     });
   }
 
@@ -45,7 +36,7 @@ class SlackWeeklySummaryService extends PeriodicService {
     super.start();
   }
 
-  protected async runCheck(): Promise<void> {
+  protected async tick(): Promise<void> {
     // Get current time in UK timezone. Intl-based — never round-trip a
     // toLocaleString rendering through new Date(), which re-parses it in
     // the SERVER's zone and only works while the server happens to run UTC.
@@ -69,20 +60,9 @@ class SlackWeeklySummaryService extends PeriodicService {
       return;
     }
 
-    const taskResult = await this.lockedRunner.run(async () => {
-      await this.sendWeeklySummary();
-      // Mark as sent
-      await redis.set(LAST_SUMMARY_KEY, today, 'EX', 7 * 24 * 60 * 60);
-    });
-
-    if (!taskResult.acquired) {
-      logger.debug('Another instance is handling weekly summary');
-      return;
-    }
-
-    if (taskResult.error) {
-      logger.error({ error: taskResult.error }, 'Error sending weekly summary');
-    }
+    await this.sendWeeklySummary();
+    // Mark as sent
+    await redis.set(LAST_SUMMARY_KEY, today, 'EX', 7 * 24 * 60 * 60);
   }
 
   /**
@@ -143,7 +123,7 @@ class SlackWeeklySummaryService extends PeriodicService {
     // Count needing attention (stalled + diverged + human flagged)
     const needingAttention = await prisma.appointmentRequest.count({
       where: {
-        status: { in: ['pending', 'contacted', 'negotiating', 'confirmed'] },
+        status: { in: [...PRE_BOOKING_STATUSES, 'confirmed'] },
         OR: [
           { conversationStallAlertAt: { not: null }, conversationStallAcknowledged: false },
           { threadDivergedAt: { not: null }, threadDivergenceAcknowledged: false },

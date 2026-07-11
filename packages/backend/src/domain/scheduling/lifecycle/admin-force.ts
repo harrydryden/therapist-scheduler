@@ -38,6 +38,7 @@ import { APPOINTMENT_STATUS, type AppointmentStatus } from '../../../constants';
 import { AppointmentNotFoundError } from '../../../errors';
 import { transitionSideEffectsService } from '../../../services/transition-side-effects.service';
 import { recordAppointmentEvent } from '../../../services/appointment-event.service';
+import { isTerminalAppointmentStatus } from '../../../services/terminal-appointment-guard';
 import { addAuditMessage, recordStatusChangeEvent } from './audit';
 import { CLEAR_RESCHEDULING_STATE } from './update-fragments';
 import {
@@ -184,7 +185,7 @@ export async function adminForceUpdate(
 
       // Terminal statuses (completed/cancelled) supersede any in-progress reschedule.
       // Clear rescheduling state so the record is clean.
-      if (newStatus === APPOINTMENT_STATUS.COMPLETED || newStatus === APPOINTMENT_STATUS.CANCELLED) {
+      if (isTerminalAppointmentStatus(newStatus)) {
         Object.assign(updateData, CLEAR_RESCHEDULING_STATE);
       }
 
@@ -198,7 +199,7 @@ export async function adminForceUpdate(
 
       // When clearing the date on an active appointment, mark as rescheduling
       const effectiveStatus = newStatus || previousStatus;
-      const isActiveStatus = effectiveStatus !== APPOINTMENT_STATUS.COMPLETED && effectiveStatus !== APPOINTMENT_STATUS.CANCELLED;
+      const isActiveStatus = !isTerminalAppointmentStatus(effectiveStatus);
       if (!confirmedDateTime && isActiveStatus && appointment.confirmedDateTime) {
         updateData.reschedulingInProgress = true;
         updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
