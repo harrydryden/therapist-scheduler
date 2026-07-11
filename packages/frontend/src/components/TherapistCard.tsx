@@ -49,9 +49,24 @@ interface AvailabilityDisplayProps {
 function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, onBookNowClick }: AvailabilityDisplayProps) {
   // Only count display-quality slots (valid weekday + HH:MM-HH:MM). When the
   // agent or an upstream ingestion writes freeform garbage like "flexible"
-  // or "Not specified", we want the card to fall through to "Available on
-  // request" rather than render "Mon: flexible-flexible".
-  const hasAvailability = availability && getDisplayableSlots(availability).length > 0;
+  // or "Not specified", we fall through to "Available on request" rather than
+  // render "Mon: flexible-flexible".
+  const hasAvailability = !!availability && getDisplayableSlots(availability).length > 0;
+
+  const formattedSlots = hasAvailability ? formatAvailability(availability!) : [];
+  const displaySlots = isExpanded ? formattedSlots : formattedSlots.slice(0, UI.MAX_AVAILABILITY_SLOTS);
+  const hasMore = formattedSlots.length > UI.MAX_AVAILABILITY_SLOTS;
+
+  // Every panel is composed of the same three parts: a slot area, a toggle
+  // row, and a footer row. The slot area always reserves up to
+  // MAX_AVAILABILITY_SLOTS rows (real day/time lines, or a single "Available
+  // on request" line when there are none, padded with blank rows); the toggle
+  // and footer rows are always present. This keeps every availability panel
+  // the same height by construction — no hard-coded pixel floor — so the
+  // panels line up across sibling cards regardless of slot count, direct-
+  // booking links, or the on-request empty state.
+  const rows = hasAvailability ? displaySlots : ['Available on request'];
+  const fillerRows = isExpanded ? 0 : Math.max(0, UI.MAX_AVAILABILITY_SLOTS - rows.length);
 
   const bookNowButton = bookingLink && (
     <button
@@ -66,44 +81,49 @@ function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, 
     </button>
   );
 
-  if (!hasAvailability) {
-    return (
-      <div className="text-spill-grey-400">
-        <div className="flex items-center gap-2.5">
-          <CalendarIcon />
-          <span className="text-sm">Available on request</span>
-        </div>
-        {bookNowButton && <div className="ml-[26px] mt-2">{bookNowButton}</div>}
-      </div>
-    );
-  }
-
-  const formattedSlots = formatAvailability(availability);
-  const displaySlots = isExpanded ? formattedSlots : formattedSlots.slice(0, UI.MAX_AVAILABILITY_SLOTS);
-  const hasMore = formattedSlots.length > UI.MAX_AVAILABILITY_SLOTS;
-
   return (
-    <div className="text-spill-grey-600">
+    <div className={hasAvailability ? 'text-spill-grey-600' : 'text-spill-grey-400'}>
       <div className="space-y-1">
-        {displaySlots.map((slot, idx) => (
+        {rows.map((row, idx) => (
           <div key={idx} className="flex items-center gap-2.5">
-            {idx === 0 && <CalendarIcon />}
-            {idx > 0 && <div className="w-4 flex-shrink-0" />}
-            <span className="text-sm">{slot}</span>
+            {idx === 0 ? <CalendarIcon /> : <div className="w-4 flex-shrink-0" />}
+            <span className="text-sm">{row}</span>
           </div>
         ))}
-        {hasMore && (
-          <button
-            onClick={onToggle}
-            aria-expanded={isExpanded}
-            aria-label={isExpanded ? 'Show fewer availability times' : 'Show more availability times'}
-            className="ml-[26px] text-xs text-spill-blue-800 hover:underline font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
-          >
-            {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more days`}
-          </button>
-        )}
-        <p className="text-xs text-spill-grey-400 mt-1.5 ml-[26px]">More times available upon request</p>
-        {bookNowButton && <div className="ml-[26px] mt-1.5">{bookNowButton}</div>}
+        {Array.from({ length: fillerRows }).map((_, i) => (
+          <div key={`filler-${i}`} className="flex items-center gap-2.5" aria-hidden="true">
+            <div className="w-4 flex-shrink-0" />
+            <span className="text-sm">&nbsp;</span>
+          </div>
+        ))}
+        {/* Toggle row — always present so a card without a "+N more days"
+            control is the same height as one that has it. */}
+        <div className="ml-[26px] text-xs leading-5">
+          {hasMore ? (
+            <button
+              onClick={onToggle}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Show fewer availability times' : 'Show more availability times'}
+              className="text-spill-blue-800 hover:underline font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
+            >
+              {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more days`}
+            </button>
+          ) : (
+            <span aria-hidden="true" className="invisible">&nbsp;</span>
+          )}
+        </div>
+        {/* Footer row — one line either way: the direct-booking shortcut when
+            the therapist has a booking link, otherwise the "more times"
+            reassurance (or a reserved blank line for the on-request state). */}
+        <div className="ml-[26px] mt-1.5 text-xs leading-5">
+          {bookNowButton ? (
+            bookNowButton
+          ) : hasAvailability ? (
+            <span className="text-spill-grey-400">More times available upon request</span>
+          ) : (
+            <span aria-hidden="true" className="invisible">&nbsp;</span>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -224,11 +244,12 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         />
       </div>
 
-      {/* Availability panel — min-height keeps the grey box a consistent
-          height across cards whose slot counts differ (the "+N more days"
-          toggle only appears above 2 days, which would otherwise make some
-          panels a line taller than others). */}
-      <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3 min-h-[140px]">
+      {/* Availability panel. Bottom-anchored via mt-auto so it lines up with
+          the panels in sibling cards (which are the same height thanks to the
+          grid's default stretch). The panel's own height is kept consistent by
+          reserving the slot rows and toggle row inside AvailabilityDisplay,
+          rather than a hard-coded min-height. */}
+      <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3">
         <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-2">
           Availability
         </span>
