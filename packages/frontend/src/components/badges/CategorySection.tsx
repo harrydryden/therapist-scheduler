@@ -18,7 +18,7 @@ export function CategorySection({ label, items, categoryType, isExpanded, onTogg
 
   return (
     <div>
-      <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block mb-1.5">
+      <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-1.5">
         {label}
       </span>
       <div className="flex flex-wrap gap-1.5 items-start content-start">

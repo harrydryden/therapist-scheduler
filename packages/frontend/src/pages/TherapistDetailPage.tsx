@@ -7,9 +7,51 @@ import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
   AREAS_OF_FOCUS_OPTIONS,
+  CATEGORY_COLORS,
+  CATEGORY_LABELS,
+  type CategoryOption,
 } from '../config/therapist-categories';
 import { useVoucher } from '../hooks/useVoucher';
 import { getFrontendSettings } from '../api/client';
+import { getCountryFlag, getCountryLabel } from '@therapist-scheduler/shared';
+import placeholderImage from '../assets/placeholder-spill-grey.png';
+
+// Shared markup for the three category groups — same eyebrow label +
+// pill badge treatment as the directory cards.
+function CategoryGroup({
+  label,
+  items,
+  options,
+  categoryType,
+}: {
+  label: string;
+  items: string[];
+  options: readonly CategoryOption[];
+  categoryType: keyof typeof CATEGORY_COLORS;
+}) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  return (
+    <div>
+      <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-1.5">
+        {label}
+      </span>
+      <div className="flex flex-wrap gap-1.5">
+        {items.map((item) => {
+          const option = options.find((o) => o.type === item);
+          return (
+            <span
+              key={item}
+              className={`inline-block px-2.5 py-[3px] text-xs font-medium rounded-full border cursor-help ${CATEGORY_COLORS[categoryType]}`}
+              title={option?.explainer}
+            >
+              {item}
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export default function TherapistDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -39,16 +81,16 @@ export default function TherapistDetailPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-2 border-spill-grey-200 border-t-spill-blue-800"></div>
       </div>
     );
   }
 
   if (error || !therapist) {
     return (
-      <div className="text-center py-12">
-        <p className="text-red-600 mb-4">Therapist not found.</p>
-        <Link to="/" className="text-primary-600 hover:text-primary-700 font-medium">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center py-12">
+        <p className="text-spill-red-600 mb-4">Therapist not found.</p>
+        <Link to="/" className="text-spill-blue-800 hover:underline font-medium">
           &larr; Back to all therapists
         </Link>
       </div>
@@ -56,117 +98,81 @@ export default function TherapistDetailPage() {
   }
 
   return (
-    <div>
-      <Link to="/" className="inline-flex items-center text-primary-600 hover:text-primary-700 mb-6">
-        <svg className="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-7 w-full">
+      <Link
+        to="/"
+        className="inline-flex items-center gap-1 text-sm font-medium text-spill-blue-800 hover:underline mb-6 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
+      >
+        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
         </svg>
         Back to all therapists
       </Link>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main content */}
         <div className="lg:col-span-2">
-          <div className="bg-white rounded-lg shadow-md overflow-hidden">
+          <div className="bg-white rounded-xl border border-spill-grey-200 overflow-hidden">
             <div className="md:flex">
               <div className="md:w-1/3">
-                <div className="aspect-square bg-gray-100">
-                  {sanitizeImageUrl(therapist.profileImage) ? (
-                    <img src={sanitizeImageUrl(therapist.profileImage)!} alt={therapist.name} className="w-full h-full object-cover" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-gray-400">
-                      <svg className="w-24 h-24" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" />
-                      </svg>
-                    </div>
-                  )}
+                <div className="aspect-square bg-spill-grey-100">
+                  <img
+                    src={sanitizeImageUrl(therapist.profileImage) ?? placeholderImage}
+                    alt={therapist.name}
+                    className="w-full h-full object-cover"
+                  />
                 </div>
               </div>
 
-              <div className="p-6 md:w-2/3">
-                <h1 className="text-2xl font-bold text-gray-900 mb-2 break-words">{therapist.name}</h1>
-
-                {/* Categories */}
-                <div className="space-y-3 mb-4">
-                  {/* Approach */}
-                  {Array.isArray(therapist.approach) && therapist.approach.length > 0 && (
-                    <div>
-                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Approach</span>
-                      <div className="flex flex-wrap gap-1.5 mt-1">
-                        {therapist.approach.map((item) => {
-                          const option = APPROACH_OPTIONS.find((o) => o.type === item);
-                          return (
-                            <span
-                              key={item}
-                              className="inline-block px-2.5 py-1 text-xs font-medium bg-primary-50 text-primary-700 rounded-full"
-                              title={option?.explainer}
-                            >
-                              {item}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Style */}
-                  {Array.isArray(therapist.style) && therapist.style.length > 0 && (
-                    <div>
-                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Style</span>
-                      <div className="flex flex-wrap gap-1.5 mt-1">
-                        {therapist.style.map((item) => {
-                          const option = STYLE_OPTIONS.find((o) => o.type === item);
-                          return (
-                            <span
-                              key={item}
-                              className="inline-block px-2.5 py-1 text-xs font-medium bg-indigo-50 text-indigo-700 rounded-full"
-                              title={option?.explainer}
-                            >
-                              {item}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Areas of Focus */}
-                  {Array.isArray(therapist.areasOfFocus) && therapist.areasOfFocus.length > 0 && (
-                    <div>
-                      <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Focus Areas</span>
-                      <div className="flex flex-wrap gap-1.5 mt-1">
-                        {therapist.areasOfFocus.map((item) => {
-                          const option = AREAS_OF_FOCUS_OPTIONS.find((o) => o.type === item);
-                          return (
-                            <span
-                              key={item}
-                              className="inline-block px-2.5 py-1 text-xs font-medium bg-spill-yellow-100 text-spill-yellow-600 rounded-full"
-                              title={option?.explainer}
-                            >
-                              {item}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+              <div className="p-7 md:w-2/3">
+                <div className="flex items-baseline gap-2.5 flex-wrap mb-1.5">
+                  <h2 className="font-display font-bold text-3xl leading-[39px] tracking-[-0.6px] text-black break-words">
+                    {therapist.name}
+                  </h2>
+                  <span className="text-sm text-spill-grey-400">
+                    {getCountryFlag(therapist.country)} {getCountryLabel(therapist.country)}
+                  </span>
                 </div>
 
-                <p className="text-gray-600 mb-4">{therapist.bio}</p>
+                <p className="text-base tracking-[-0.31px] leading-normal text-spill-grey-600 mb-5">{therapist.bio}</p>
 
-                <div className="border-t pt-4">
-                  <h3 className="text-sm font-semibold text-gray-900 mb-2">Availability</h3>
+                {/* Categories */}
+                <div className="flex flex-col gap-3.5 mb-5">
+                  <CategoryGroup
+                    label={CATEGORY_LABELS.approach}
+                    items={therapist.approach || []}
+                    options={APPROACH_OPTIONS}
+                    categoryType="approach"
+                  />
+                  <CategoryGroup
+                    label={CATEGORY_LABELS.style}
+                    items={therapist.style || []}
+                    options={STYLE_OPTIONS}
+                    categoryType="style"
+                  />
+                  <CategoryGroup
+                    label={CATEGORY_LABELS.areasOfFocus}
+                    items={therapist.areasOfFocus || []}
+                    options={AREAS_OF_FOCUS_OPTIONS}
+                    categoryType="areasOfFocus"
+                  />
+                </div>
+
+                <div className="border-t border-spill-grey-200 pt-4">
+                  <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-2">
+                    Availability
+                  </span>
                   {therapist.availability && Array.isArray(therapist.availability.slots) && therapist.availability.slots.length > 0 ? (
                     <div className="space-y-1">
                       {therapist.availability.slots.map((slot) => (
-                        <p key={`${slot.day}-${slot.start}-${slot.end}`} className="text-sm text-gray-600">
-                          <span className="font-medium">{slot.day}:</span> {slot.start} - {slot.end}
+                        <p key={`${slot.day}-${slot.start}-${slot.end}`} className="text-sm text-spill-grey-600">
+                          <span className="font-medium text-black">{slot.day}:</span> {slot.start} &ndash; {slot.end}
                         </p>
                       ))}
-                      <p className="text-xs text-gray-500 mt-2">Timezone: {therapist.availability.timezone}</p>
+                      <p className="text-xs text-spill-grey-400 pt-1">Timezone: {therapist.availability.timezone}</p>
                     </div>
                   ) : (
-                    <p className="text-sm text-gray-600">{therapist.availabilitySummary}</p>
+                    <p className="text-sm text-spill-grey-600">{therapist.availabilitySummary}</p>
                   )}
                 </div>
               </div>

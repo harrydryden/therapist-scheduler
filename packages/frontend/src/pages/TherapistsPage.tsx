@@ -1,15 +1,46 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import ReactMarkdown from 'react-markdown';
 import { getTherapists, getFrontendSettings } from '../api/client';
 import TherapistCard from '../components/TherapistCard';
 import FilterBar from '../components/FilterBar';
 import HoldingPage from '../components/HoldingPage';
 import { useVoucher } from '../hooks/useVoucher';
 
+const DEFAULT_HERO_HEADING = 'Book a free therapy session';
+const DEFAULT_HERO_PARAGRAPH =
+  "We've partnered with hand-picked, vetted therapists to offer free one-to-one sessions. " +
+  "Choose a therapist below and we'll arrange a time that works for you — sessions are 50 minutes, held over video call.";
+
+/**
+ * The hero band sources its copy from the `frontend.therapistPageIntro`
+ * markdown setting: first heading becomes the h1, first paragraph the
+ * subtitle. Anything beyond that (extra paragraphs, formatting) is
+ * intentionally dropped — the hero is a fixed-height band, not the old
+ * collapsible markdown block.
+ */
+function parseHeroContent(markdown: string): { heading: string; paragraph: string } {
+  const stripInline = (line: string) =>
+    line
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/_(.+?)_/g, '$1');
+
+  const lines = markdown
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const headingLine = lines.find((l) => /^#{1,6}\s/.test(l));
+  const paragraphLine = lines.find((l) => !/^#{1,6}\s/.test(l));
+
+  return {
+    heading: headingLine ? stripInline(headingLine) : DEFAULT_HERO_HEADING,
+    paragraph: paragraphLine ? stripInline(paragraphLine) : DEFAULT_HERO_PARAGRAPH,
+  };
+}
+
 export default function TherapistsPage() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [isIntroExpanded, setIsIntroExpanded] = useState(false);
 
   const {
     data: therapists,
@@ -33,6 +64,8 @@ export default function TherapistsPage() {
   const voucherExpiryDays = frontendSettings?.['voucher.expiryDays'] ?? 14;
 
   const voucher = useVoucher(voucherExpiryDays);
+
+  const hero = useMemo(() => parseHeroContent(introText), [introText]);
 
   // Filter to only show active therapists
   const activeTherapists = useMemo(() => {
@@ -67,27 +100,27 @@ export default function TherapistsPage() {
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
-        <div className="animate-spin rounded-full h-10 w-10 border-2 border-slate-200 border-t-spill-blue-800"></div>
-        <p className="text-sm text-slate-500">Loading therapists...</p>
+        <div className="animate-spin rounded-full h-10 w-10 border-2 border-spill-grey-200 border-t-spill-blue-800"></div>
+        <p className="text-sm text-spill-grey-400">Loading therapists...</p>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="text-center py-16">
-        <div className="inline-flex items-center justify-center w-16 h-16 bg-red-100 rounded-full mb-4">
-          <svg className="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center py-16">
+        <div className="inline-flex items-center justify-center w-16 h-16 bg-spill-red-100 rounded-full mb-4">
+          <svg className="w-8 h-8 text-spill-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
         </div>
-        <h2 className="text-lg font-semibold text-slate-900 mb-2">Unable to load therapists</h2>
-        <p className="text-slate-600 mb-4">Please check your connection and try again.</p>
+        <h2 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">Unable to load therapists</h2>
+        <p className="text-spill-grey-600 mb-4">Please check your connection and try again.</p>
         <button
           type="button"
           onClick={() => window.location.reload()}
           aria-label="Refresh page to reload therapists"
-          className="px-6 py-3 text-sm font-semibold text-white bg-spill-blue-800 rounded-full hover:bg-spill-blue-400 transition-colors"
+          className="px-6 py-3 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
         >
           Refresh Page
         </button>
@@ -97,87 +130,72 @@ export default function TherapistsPage() {
 
   return (
     <div>
-      {/* Introduction Text - Collapsible section */}
-      {introText && (
-        <div className="mb-6">
-          <div
-            className={`prose prose-slate prose-sm max-w-none prose-headings:text-slate-900 prose-h3:text-base prose-h3:font-semibold prose-h3:mt-0 prose-h3:mb-2 prose-p:text-slate-600 prose-p:leading-relaxed prose-p:my-2 prose-strong:text-slate-900 ${
-              !isIntroExpanded ? 'line-clamp-2' : ''
-            }`}
-          >
-            <ReactMarkdown>{introText}</ReactMarkdown>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsIntroExpanded(!isIntroExpanded)}
-            className="mt-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400 transition-colors flex items-center gap-1"
-            aria-expanded={isIntroExpanded}
-          >
-            {isIntroExpanded ? 'Show less' : 'Read more'}
-            <svg
-              className={`w-4 h-4 transition-transform ${isIntroExpanded ? 'rotate-180' : ''}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+      {/* Hero band — full-bleed under the header */}
+      <div className="bg-spill-teal-100 border-b border-spill-teal-200">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 md:py-12">
+          <h1 className="font-display font-bold text-[40px] leading-[52px] tracking-[-0.8px] text-black max-w-[720px] mb-3">
+            {hero.heading}
+          </h1>
+          <p className="text-base tracking-[-0.31px] leading-normal text-spill-grey-600 max-w-[640px]">
+            {hero.paragraph}
+          </p>
+        </div>
+      </div>
+
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 pt-9 pb-6 w-full">
+        {/* Filter Bar - Areas of Focus */}
+        {areasOfFocusOptions.length > 0 && (
+          <FilterBar
+            categories={areasOfFocusOptions}
+            selectedCategory={selectedCategory}
+            onFilterChange={handleFilterChange}
+          />
+        )}
+
+        {/* Therapist Grid */}
+        {activeTherapists.length === 0 ? (
+          // Directory is completely empty — no therapists currently
+          // accepting bookings. Show the full holding page, not the
+          // compact "no results for filter" empty state.
+          <HoldingPage />
+        ) : filteredTherapists.length === 0 ? (
+          // Active therapists exist, but the current filter has narrowed
+          // the list to zero. Keep the compact empty state with a
+          // "Clear filter" affordance — the visitor's next move is to
+          // broaden the filter, not give up.
+          <div className="text-center py-16">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-spill-grey-100 rounded-full mb-4">
+              <svg className="w-8 h-8 text-spill-grey-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
+            </div>
+            <h2 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">No therapists found</h2>
+            <p className="text-spill-grey-600">
+              No therapists available for &ldquo;{selectedCategory}&rdquo;. Try a different filter.
+            </p>
+            <button
+              type="button"
+              onClick={() => setSelectedCategory(null)}
+              aria-label={`Clear filter for ${selectedCategory}`}
+              className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue-800 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-        </div>
-      )}
-
-      {/* Filter Bar - Areas of Focus */}
-      {areasOfFocusOptions.length > 0 && (
-        <FilterBar
-          categories={areasOfFocusOptions}
-          selectedCategory={selectedCategory}
-          onFilterChange={handleFilterChange}
-        />
-      )}
-
-      {/* Therapist Grid */}
-      {activeTherapists.length === 0 ? (
-        // Directory is completely empty — no therapists currently
-        // accepting bookings. Show the full holding page, not the
-        // compact "no results for filter" empty state.
-        <HoldingPage />
-      ) : filteredTherapists.length === 0 ? (
-        // Active therapists exist, but the current filter has narrowed
-        // the list to zero. Keep the compact empty state with a
-        // "Clear filter" affordance — the visitor's next move is to
-        // broaden the filter, not give up.
-        <div className="text-center py-16">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-slate-100 rounded-full mb-4">
-            <svg className="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-            </svg>
+              Clear filter
+            </button>
           </div>
-          <h2 className="text-lg font-semibold text-slate-900 mb-2">No therapists found</h2>
-          <p className="text-slate-600">
-            No therapists available for &ldquo;{selectedCategory}&rdquo;. Try a different filter.
-          </p>
-          <button
-            type="button"
-            onClick={() => setSelectedCategory(null)}
-            aria-label={`Clear filter for ${selectedCategory}`}
-            className="mt-4 px-4 py-2 text-sm font-medium text-spill-blue-800 hover:text-spill-blue-400"
-          >
-            Clear filter
-          </button>
-        </div>
-      ) : (
-        <>
-          <p className="text-sm text-slate-500 mb-6">
-            Showing {filteredTherapists.length} therapist{filteredTherapists.length !== 1 ? 's' : ''}
-            {selectedCategory && ` for "${selectedCategory}"`}
-          </p>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-5 gap-y-8">
-            {filteredTherapists.map((therapist) => (
-              <TherapistCard key={therapist.id} therapist={therapist} voucher={voucherEnabled ? voucher : undefined} voucherRequired={voucherRequired} />
-            ))}
-          </div>
-        </>
-      )}
+        ) : (
+          <>
+            <p className="text-sm text-spill-grey-400 mb-5">
+              Showing {filteredTherapists.length} therapist{filteredTherapists.length !== 1 ? 's' : ''}
+              {selectedCategory && ` for "${selectedCategory}"`}
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+              {filteredTherapists.map((therapist) => (
+                <TherapistCard key={therapist.id} therapist={therapist} voucher={voucherEnabled ? voucher : undefined} voucherRequired={voucherRequired} />
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

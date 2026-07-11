@@ -60,7 +60,7 @@ function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, 
         window.open(bookingLink, '_blank', 'noopener,noreferrer');
         onBookNowClick?.();
       }}
-      className="inline-flex items-center gap-1.5 text-xs font-semibold text-spill-teal-600 hover:text-spill-teal-400 transition-colors focus:outline-none focus:ring-2 focus:ring-spill-teal-400 rounded"
+      className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-spill-blue-800 hover:underline transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
     >
       Book now <ExternalLinkIcon />
     </button>
@@ -97,7 +97,7 @@ function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, 
             onClick={onToggle}
             aria-expanded={isExpanded}
             aria-label={isExpanded ? 'Show fewer availability times' : 'Show more availability times'}
-            className="ml-[26px] text-xs text-spill-blue-800 hover:text-spill-blue-400 font-medium focus:outline-none focus:ring-2 focus:ring-spill-blue-400 rounded"
+            className="ml-[26px] text-xs text-spill-blue-800 hover:underline font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
           >
             {isExpanded ? 'Show less' : `+${formattedSlots.length - UI.MAX_AVAILABILITY_SLOTS} more days`}
           </button>
@@ -106,6 +106,30 @@ function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, 
         {bookNowButton && <div className="ml-[26px] mt-1.5">{bookNowButton}</div>}
       </div>
     </div>
+  );
+}
+
+// Small helper for the avatar initials — first letter of each name part.
+function getInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .slice(0, 3)
+    .join('')
+    .toUpperCase();
+}
+
+// Spinner used inside pending submit buttons
+function PendingLabel() {
+  return (
+    <span className="flex items-center justify-center gap-2">
+      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+      </svg>
+      Sending...
+    </span>
   );
 }
 
@@ -136,27 +160,31 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
 
   const isExpanded = (section: string) => expandedSections.has(section);
 
-  return (
-    <div className="bg-white rounded-2xl border border-spill-grey-200 overflow-hidden hover:shadow-lg transition-all duration-300 grid grid-rows-subgrid row-span-8 group">
-      {/* Row 1: Teal accent bar */}
-      <div className="h-1.5 bg-spill-teal-400" />
+  const inputClasses = 'w-full px-3 py-2.5 text-sm bg-white border rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-shadow duration-150';
 
-      {/* Row 2: Card header */}
-      <div className="px-6 pt-5">
-        <div className="flex items-start justify-between gap-2 mb-1">
-          <h3 className="text-lg font-bold text-spill-black leading-tight">
+  return (
+    <div className="bg-white rounded-xl border border-spill-grey-200 p-6 flex flex-col gap-4 hover:border-spill-grey-400 transition-colors duration-200">
+      {/* Header row: avatar + name + country */}
+      <div className="flex items-center gap-3">
+        <div className="w-11 h-11 rounded-full bg-spill-teal-100 text-spill-teal-600 flex items-center justify-center font-display font-bold text-[15px] flex-shrink-0" aria-hidden="true">
+          {getInitials(therapist.name)}
+        </div>
+        <div className="min-w-0">
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black">
             {therapist.name}
           </h3>
-          <span
-            className="text-xl leading-none flex-shrink-0"
-            role="img"
-            aria-label={`Based in ${getCountryLabel(therapist.country)}`}
-            title={`Based in ${getCountryLabel(therapist.country)}`}
-          >
-            {getCountryFlag(therapist.country)}
-          </span>
+          <p className="text-[13px] text-spill-grey-400 mt-0.5">
+            <span role="img" aria-label={`Based in ${getCountryLabel(therapist.country)}`}>
+              {getCountryFlag(therapist.country)}
+            </span>{' '}
+            {getCountryLabel(therapist.country)}
+          </p>
         </div>
-        <p className={`text-sm text-spill-grey-400 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
+      </div>
+
+      {/* Bio */}
+      <div>
+        <p className={`text-sm text-spill-grey-600 leading-relaxed ${isExpanded('bio') ? '' : 'line-clamp-2'}`}>
           {therapist.bio ?? ''}
         </p>
         {therapist.bio !== null && therapist.bio.length > UI.BIO_TRUNCATE_LENGTH && (
@@ -164,15 +192,15 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
             onClick={() => toggleSection('bio')}
             aria-expanded={isExpanded('bio')}
             aria-label={isExpanded('bio') ? 'Show less of the bio' : 'Read more of the bio'}
-            className="text-xs font-medium text-spill-blue-800 hover:text-spill-blue-400 mt-0.5 focus:outline-none focus:ring-2 focus:ring-spill-blue-400 rounded transition-colors"
+            className="text-[13px] font-medium text-spill-blue-800 hover:underline mt-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
           >
             {isExpanded('bio') ? 'Show less' : 'Read more'}
           </button>
         )}
       </div>
 
-      {/* Row 3: Approach */}
-      <div className="px-6">
+      {/* Category sections */}
+      <div className="flex flex-col gap-3">
         <CategorySection
           label={CATEGORY_LABELS.approach}
           items={therapist.approach || []}
@@ -180,10 +208,6 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
           isExpanded={isExpanded('approach')}
           onToggle={() => toggleSection('approach')}
         />
-      </div>
-
-      {/* Row 4: Style */}
-      <div className="px-6">
         <CategorySection
           label={CATEGORY_LABELS.style}
           items={therapist.style || []}
@@ -191,10 +215,6 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
           isExpanded={isExpanded('style')}
           onToggle={() => toggleSection('style')}
         />
-      </div>
-
-      {/* Row 5: Areas of Focus */}
-      <div className="px-6">
         <CategorySection
           label={CATEGORY_LABELS.areasOfFocus}
           items={therapist.areasOfFocus || []}
@@ -204,15 +224,11 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         />
       </div>
 
-      {/* Row 6: Availability title */}
-      <div className="px-6 self-end">
-        <span className="text-[11px] font-semibold text-spill-grey-400 uppercase tracking-wider block">
+      {/* Availability panel */}
+      <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3">
+        <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-2">
           Availability
         </span>
-      </div>
-
-      {/* Row 7: Availability content */}
-      <div className="px-6">
         <AvailabilityDisplay
           availability={therapist.availability}
           bookingLink={therapist.bookingLink}
@@ -225,32 +241,32 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         />
       </div>
 
-      {/* Row 8: Bottom action bar */}
-      <div className="px-6 pb-5">
+      {/* Bottom action area */}
+      <div>
         {/* Voucher gate: only block when voucher is required */}
         {voucherRequired && voucher && !voucher.voucherToken ? (
-          <div className="text-center py-3 px-4 bg-slate-50 border border-slate-200 rounded-xl">
-            <p className="text-xs text-slate-500">
+          <div className="text-center py-3 px-4 bg-spill-grey-100 border border-spill-grey-200 rounded-lg">
+            <p className="text-xs text-spill-grey-400">
               A session code is required to book. Check your email from Spill.
             </p>
           </div>
         ) : voucherRequired && voucher && voucher.isExpired ? (
-          <div className="text-center py-3 px-4 bg-amber-50 border border-amber-200 rounded-xl">
-            <p className="text-xs text-amber-700">
+          <div className="text-center py-3 px-4 bg-spill-yellow-100 border border-spill-yellow-200 rounded-lg">
+            <p className="text-xs text-spill-yellow-600">
               Your session code has expired. Check your email for a new one.
             </p>
           </div>
         ) : mutation.isSuccess ? (
-          <div className="text-center py-3 bg-spill-teal-100 rounded-xl">
+          <div className="text-center py-3.5 px-4 bg-spill-teal-100 rounded-lg">
             <div className="flex items-center justify-center gap-2">
-              <svg className="w-5 h-5 text-spill-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-[18px] h-[18px] text-spill-teal-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
               <span className="text-sm font-semibold text-spill-teal-600">
                 {enteredViaDirectLink ? 'Details received!' : 'Request sent!'}
               </span>
             </div>
-            <p className="text-xs text-spill-grey-400 mt-1">
+            <p className="text-xs text-spill-grey-600 mt-1">
               {enteredViaDirectLink
                 ? "We'll follow up to confirm your booking time."
                 : "We'll email you to schedule your session."
@@ -275,7 +291,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                   value={firstName}
                   onChange={(e) => setFirstName(e.target.value)}
                   placeholder="First name"
-                  className="w-full px-3 py-2.5 text-sm border border-spill-grey-200 rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-all bg-spill-grey-100"
+                  className={`${inputClasses} border-spill-grey-200`}
                   disabled={mutation.isPending}
                   required
                 />
@@ -290,7 +306,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="Email"
-                  className={`w-full px-3 py-2.5 text-sm border rounded-xl focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-all bg-spill-grey-100 ${showEmailError ? 'border-spill-red-400' : 'border-spill-grey-200'}`}
+                  className={`${inputClasses} ${showEmailError ? 'border-spill-red-400' : 'border-spill-grey-200'}`}
                   disabled={mutation.isPending}
                   required
                 />
@@ -300,11 +316,11 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               <p className="text-xs text-spill-red-600">Please enter a valid email address</p>
             )}
             {voucher?.displayCode && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-green-50 border border-green-200 rounded-lg">
-                <svg className="w-3.5 h-3.5 text-green-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-spill-teal-100 border border-spill-teal-200 rounded-lg">
+                <svg className="w-3.5 h-3.5 text-spill-teal-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
-                <span className="text-xs text-green-800 font-medium">Voucher code: {voucher.displayCode}</span>
+                <span className="text-xs text-spill-teal-600 font-medium">Voucher code: {voucher.displayCode}</span>
               </div>
             )}
             <div className="flex gap-2">
@@ -314,7 +330,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                   setShowBookingForm(false);
                   setEnteredViaDirectLink(false);
                 }}
-                className="px-4 py-2.5 text-sm font-medium text-spill-grey-400 bg-spill-grey-100 rounded-full hover:bg-spill-grey-200 transition-colors"
+                className="px-4 py-2.5 text-sm font-medium text-spill-grey-600 bg-white border border-spill-grey-200 rounded-lg hover:bg-spill-grey-100 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400"
               >
                 Cancel
               </button>
@@ -323,19 +339,9 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                 <button
                   type="submit"
                   disabled={!canSubmit}
-                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150"
                 >
-                  {mutation.isPending ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      Sending...
-                    </span>
-                  ) : (
-                    'Confirm details'
-                  )}
+                  {mutation.isPending ? <PendingLabel /> : 'Confirm details'}
                 </button>
               ) : therapist.bookingLink ? (
                 /* User entered via "Get started" but therapist has a booking link — offer both paths */
@@ -343,7 +349,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                   <button
                     type="submit"
                     disabled={!canSubmit}
-                    className="flex-1 py-2.5 px-4 text-sm font-medium text-spill-teal-600 bg-spill-teal-100 rounded-full hover:bg-spill-teal-200 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                    className="flex-1 py-2.5 px-4 text-sm font-medium text-spill-grey-600 bg-white border border-spill-grey-200 rounded-lg hover:bg-spill-grey-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150"
                   >
                     Request booking
                   </button>
@@ -354,19 +360,9 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                       handleDirectBooking();
                       window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
                     }}
-                    className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-1.5"
+                    className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150 flex items-center justify-center gap-1.5"
                   >
-                    {mutation.isPending ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        Sending...
-                      </span>
-                    ) : (
-                      <>Book now <ExternalLinkIcon /></>
-                    )}
+                    {mutation.isPending ? <PendingLabel /> : <>Book now <ExternalLinkIcon /></>}
                   </button>
                 </>
               ) : (
@@ -374,19 +370,9 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                 <button
                   type="submit"
                   disabled={!canSubmit}
-                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150"
                 >
-                  {mutation.isPending ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      Sending...
-                    </span>
-                  ) : (
-                    'Book session'
-                  )}
+                  {mutation.isPending ? <PendingLabel /> : 'Book session'}
                 </button>
               )}
             </div>
@@ -399,16 +385,16 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
             )}
           </form>
         ) : (
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-3.5 flex-wrap">
             <button
               type="button"
               onClick={() => setShowBookingForm(true)}
-              className="px-5 py-2 text-sm font-semibold text-white bg-spill-teal-600 rounded-full hover:bg-spill-teal-400 focus:ring-2 focus:ring-spill-teal-600 focus:ring-offset-2 transition-all shadow-sm"
+              className="px-5 py-2.5 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 transition-colors duration-150"
             >
               Get started
             </button>
             {/* Spill-style indicator tags */}
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-spill-teal-600">
+            <span className="inline-flex items-center gap-1 text-[13px] font-medium text-spill-teal-600">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
