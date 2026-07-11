@@ -299,6 +299,32 @@ This is often the fastest path to a confirmed session. When proposing options to
   const userProfileSection = userProfile ? formatUserProfileForPrompt(userProfile) : '';
   const therapistProfileSection = therapistProfile ? formatTherapistProfileForPrompt(therapistProfile) : '';
 
+  // Anchor for relative-date resolution. The prompt repeatedly instructs the
+  // model to resolve "next Tuesday" / "tomorrow" against today's date, and the
+  // record_availability_window tool asks it to produce absolute ISO timestamps
+  // — neither works unless the model is actually told what "now" is. Rendered
+  // from the same referenceDate used for slot generation so the two agree, in
+  // the platform timezone plus each party's zone when confidently resolved.
+  const nowIso = referenceDate.toISOString();
+  const currentDateTimeLines = [
+    `- **Now (${timezone}):** ${formatInTimezone(nowIso, timezone)}`,
+  ];
+  if (!therapistTzResolved.needsClarification && therapistTzResolved.timezone !== timezone) {
+    currentDateTimeLines.push(
+      `- **Therapist's local time (${therapistTzResolved.timezone}):** ${formatInTimezone(nowIso, therapistTzResolved.timezone)}`,
+    );
+  }
+  if (!userTzResolved.needsClarification && userTzResolved.timezone !== timezone) {
+    currentDateTimeLines.push(
+      `- **Client's local time (${userTzResolved.timezone}):** ${formatInTimezone(nowIso, userTzResolved.timezone)}`,
+    );
+  }
+  const currentDateTimeSection = `## Current date & time
+${currentDateTimeLines.join('\n')}
+
+Resolve ALL relative date references ("tomorrow", "next Tuesday", "the 17th") against the date above — never against a guessed or remembered date. When passing dates to tools (resolve_local_time, record_availability_window, mark_scheduling_complete), derive the calendar components from this anchor.
+`;
+
   return `# ${agentName} - Scheduling Coordinator
 
 You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilitate appointment booking between therapy clients and therapists via email.
@@ -312,6 +338,7 @@ You are ${agentName}, a scheduling coordinator at Spill. Your job is to facilita
 ## Tone & Communication Style
 ${toneGuidance}
 
+${currentDateTimeSection}
 ## Current Scheduling Request
 - **Client name:** ${context.userName}
 - **Client email:** ${context.userEmail}

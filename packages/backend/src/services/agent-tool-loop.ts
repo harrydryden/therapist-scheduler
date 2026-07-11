@@ -231,7 +231,7 @@ export const schedulingTools: Anthropic.Tool[] = [
   },
   {
     name: 'mark_scheduling_complete',
-    description: "Mark the scheduling as complete and send final confirmation emails to both parties. Use this AFTER the therapist confirms they will send the meeting link.\n\nPREFERRED CALL SHAPE: supply the structured form — `timezone` + `year` + `month` + `day` + `hour` + `minute` — and the executor synthesises the canonical ISO 8601 datetime via the same DST-aware path resolve_local_time uses. Use Europe/London (UK time) as the timezone in line with the 'Database / source of truth' rule from the Timezones section.\n\nLEGACY CALL SHAPE: pass `confirmed_datetime` as a freeform string like \"Monday 3rd February at 10:00am\". Kept for backward compatibility; chrono-parsed downstream. Prefer the structured form for new calls — it eliminates a class of date-resolution errors.",
+    description: "Mark the scheduling as complete and send final confirmation emails to both parties. Use this AFTER the therapist confirms they will send the meeting link.\n\nPREFERRED CALL SHAPE: supply the structured form — `timezone` + `year` + `month` + `day` + `hour` + `minute` — with the wall-clock components AS THE TIME WAS AGREED and the IANA timezone they were agreed in (e.g. the client confirmed \"3pm my time\" from New York → hour: 15, timezone: \"America/New_York\"). The executor converts to the canonical stored form via the same DST-aware path resolve_local_time uses. Do NOT convert the agreed time to another timezone yourself — freehand conversion is exactly the DST-prone step this form exists to eliminate.\n\nLEGACY CALL SHAPE: pass `confirmed_datetime` as a freeform string like \"Monday 3rd February at 10:00am\" — interpreted as UK time (Europe/London), so ONLY use this form when the agreed time is already expressed in UK time. Prefer the structured form for new calls — it eliminates a class of date-resolution and timezone-conversion errors.",
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -241,12 +241,12 @@ export const schedulingTools: Anthropic.Tool[] = [
         },
         timezone: {
           type: 'string',
-          description: 'PREFERRED: IANA timezone of the confirmed time. Use "Europe/London" — appointment times are canonical in UK time per the Timezones section.',
+          description: 'PREFERRED: IANA timezone the confirmed time was AGREED in (e.g. "America/New_York" when the client confirmed a time in their own zone). The executor converts DST-safely — never pre-convert the wall-clock to a different zone yourself.',
         },
         year: { type: 'number', description: 'PREFERRED: four-digit year of the confirmed appointment.' },
         month: { type: 'number', description: 'PREFERRED: month 1-12 of the confirmed appointment.' },
         day: { type: 'number', description: 'PREFERRED: day of month 1-31 of the confirmed appointment.' },
-        hour: { type: 'number', description: 'PREFERRED: hour 0-23 of the confirmed appointment (UK time).' },
+        hour: { type: 'number', description: 'PREFERRED: hour 0-23 of the confirmed appointment, as agreed in `timezone`.' },
         minute: { type: 'number', description: 'PREFERRED: minute 0-59 of the confirmed appointment.' },
         notes: {
           type: 'string',

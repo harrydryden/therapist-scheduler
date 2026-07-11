@@ -25,6 +25,7 @@ import {
 import { getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
+import { formatLondonDate } from '../utils/date';
 import { emailProcessingService } from '../services/email-processing.service';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
@@ -321,7 +322,7 @@ export async function resendInvitationEmail(id: string): Promise<ResendResult> {
     `Hi ${recipientFirstName},\n\n` +
     `Just a reminder about your Spill therapy session invitation. ` +
     `Please use the original signup link sent to you previously. The link ` +
-    `expires on ${row.expiresAt.toDateString()}.\n\n` +
+    `expires on ${formatLondonDate(row.expiresAt)}.\n\n` +
     `If you can't find the original email, reply to this message and we'll ` +
     `issue a new invitation.`;
 
@@ -364,7 +365,7 @@ export async function sendInvitationEmail(params: SendInvitationEmailParams): Pr
   const variables = {
     recipientName: firstName(params.recipientName),
     invitationUrl: params.invitationUrl,
-    expiryDate: params.expiresAt.toDateString(),
+    expiryDate: formatLondonDate(params.expiresAt),
   };
 
   const subject = renderTemplate(subjectTemplate, variables);
@@ -580,7 +581,7 @@ export async function sendInvitationReminder(invitationId: string): Promise<bool
   const variables = {
     recipientName: firstName(row.name),
     daysRemaining: String(daysRemaining),
-    expiryDate: row.expiresAt.toDateString(),
+    expiryDate: formatLondonDate(row.expiresAt),
   };
 
   const subject = renderTemplate(subjectTemplate, variables);

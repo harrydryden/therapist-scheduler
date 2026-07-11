@@ -157,66 +157,58 @@ export function resolveWallClock(
   // Treat the wall-clock as UTC for an initial guess.
   const naiveUtcMs = Date.UTC(year, monthIndex, day, hour, minute);
 
-  // Compute the offset the target zone is using at that guess, and
-  // shift the guess by that offset. After this shift, the resulting
-  // instant SHOULD render as the requested wall-clock in the target
-  // zone — unless a DST transition straddles the chosen instant.
-  const guessOffset = offsetAtInstant(timezone, naiveUtcMs);
-  const firstAttempt = naiveUtcMs - guessOffset * 60000;
-  if (landsOn(timezone, firstAttempt, year, monthIndex, day, hour, minute)) {
-    return {
-      ok: true,
-      resolved: {
-        utcMs: firstAttempt,
-        offsetMinutes: offsetAtInstant(timezone, firstAttempt),
-      },
-    };
-  }
+  // Sample the zone's offset a day either side of the target moment (and
+  // at the guess itself). In steady state all three probes agree; around
+  // a DST transition they yield BOTH the pre- and post-transition
+  // offsets, which is exactly the candidate set we need to detect
+  // ambiguity rather than silently picking one side.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const candidateOffsets = new Set<number>([
+    offsetAtInstant(timezone, naiveUtcMs - DAY_MS),
+    offsetAtInstant(timezone, naiveUtcMs),
+    offsetAtInstant(timezone, naiveUtcMs + DAY_MS),
+  ]);
 
-  // First attempt didn't round-trip. Re-measure offset at the new
-  // candidate instant and try a second time. This handles the common
-  // DST cutover case where the initial offset reflects the pre-
-  // transition zone but the actual instant falls on the other side.
-  const secondOffset = offsetAtInstant(timezone, firstAttempt);
-  const secondAttempt = naiveUtcMs - secondOffset * 60000;
-  if (landsOn(timezone, secondAttempt, year, monthIndex, day, hour, minute)) {
-    // Check whether the OTHER offset also lands on the same wall-clock —
-    // i.e. an ambiguous (fall-back) hour where both 02:30 BST and
-    // 02:30 GMT exist on the same nominal date+time.
-    if (
-      guessOffset !== secondOffset &&
-      landsOn(timezone, firstAttempt, year, monthIndex, day, hour, minute)
-    ) {
-      // Unreachable in practice because we already returned above, but
-      // kept for symmetry — defensive against algorithm tweaks.
-      return {
-        ok: false,
-        error: 'ambiguous',
-        detail: `Wall-clock ${year}-${monthIndex + 1}-${day} ${hour}:${minute} occurs twice in ${timezone} (DST fall-back)`,
-      };
+  // A candidate offset "lands" when shifting the naive guess by it
+  // round-trips to the requested wall-clock. Zero landings = the
+  // wall-clock was skipped (spring-forward gap); exactly one =
+  // unambiguous; two distinct instants = the wall-clock occurs twice
+  // (fall-back ambiguity).
+  const landings: ResolvedInstant[] = [];
+  for (const offset of candidateOffsets) {
+    const utcMs = naiveUtcMs - offset * 60000;
+    if (landsOn(timezone, utcMs, year, monthIndex, day, hour, minute)) {
+      // A landing's offset equals the candidate by construction
+      // (wall-clock UTC minus instant = the shift we just applied).
+      landings.push({ utcMs, offsetMinutes: offset });
     }
+  }
+
+  if (landings.length === 1) {
+    return { ok: true, resolved: landings[0] };
+  }
+
+  if (landings.length > 1) {
+    const offsets = landings.map((l) => `${l.offsetMinutes >= 0 ? '+' : ''}${l.offsetMinutes / 60}h`).join(' and ');
     return {
-      ok: true,
-      resolved: {
-        utcMs: secondAttempt,
-        offsetMinutes: offsetAtInstant(timezone, secondAttempt),
-      },
+      ok: false,
+      error: 'ambiguous',
+      detail: `Wall-clock ${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')} ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} occurs twice in ${timezone} (DST fall-back; valid at both ${offsets} offsets). Ask which occurrence is meant, or pick a time outside the transition hour.`,
     };
   }
 
-  // Neither attempt round-trips. The wall-clock is either non-existent
-  // (spring-forward gap) or sits in an unusual DST configuration. Try
-  // a few neighbouring offsets to distinguish.
-  for (const candidateOffset of [guessOffset - 60, guessOffset + 60, secondOffset - 60, secondOffset + 60]) {
-    const candidate = naiveUtcMs - candidateOffset * 60000;
-    if (landsOn(timezone, candidate, year, monthIndex, day, hour, minute)) {
-      return {
-        ok: true,
-        resolved: {
-          utcMs: candidate,
-          offsetMinutes: offsetAtInstant(timezone, candidate),
-        },
-      };
+  // No sampled offset landed. Before concluding the wall-clock doesn't
+  // exist, probe half-hour neighbours — zones like Australia/Lord_Howe
+  // shift by 30 minutes, which the day-probes straddle without hitting.
+  for (const base of candidateOffsets) {
+    for (const delta of [-30, 30, -60, 60]) {
+      const candidate = naiveUtcMs - (base + delta) * 60000;
+      if (landsOn(timezone, candidate, year, monthIndex, day, hour, minute)) {
+        return {
+          ok: true,
+          resolved: { utcMs: candidate, offsetMinutes: base + delta },
+        };
+      }
     }
   }
 

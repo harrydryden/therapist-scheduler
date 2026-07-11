@@ -73,19 +73,29 @@ describe('resolveWallClock — DST transitions', () => {
     if (!r.ok) expect(r.error).toBe('non_existent');
   });
 
-  it('accepts a wall-clock straddling the autumn fall-back via the post-transition offset', () => {
+  it('rejects an ambiguous UK fall-back wall-clock (01:30 on the cutover Sunday occurs twice)', () => {
     // UK 2026 fall back: Sun 25 October, 02:00 → 01:00. 01:30 occurs
-    // twice in local time. The resolver returns the post-fallback
-    // instant (the second 01:30), matching JS Date's resolution.
+    // twice in local time (once at +01:00, once at +00:00). The
+    // resolver's contract — promised to the agent in the prompt and
+    // tool descriptions — is to reject this so the agent can ask
+    // which occurrence is meant, not silently pick a side.
     const r = resolveWallClock('Europe/London', 2026, 9, 25, 1, 30);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('ambiguous');
+  });
+
+  it('accepts an unambiguous wall-clock on the fall-back day outside the transition hour', () => {
+    const r = resolveWallClock('Europe/London', 2026, 9, 25, 9, 0);
     expect(r.ok).toBe(true);
-    if (r.ok) {
-      // Either +00:00 (post-fallback) or +01:00 (pre-fallback) is
-      // semantically defensible; we accept either rather than over-
-      // pin the algorithm to one branch. The important thing is the
-      // round-trip wall-clock matches.
-      expect([0, 60]).toContain(r.resolved.offsetMinutes);
-    }
+    if (r.ok) expect(r.resolved.offsetMinutes).toBe(0); // GMT by 9am
+  });
+
+  it('resolves a 30-minute-shift zone (Lord Howe) without misreporting non-existence', () => {
+    // Australia/Lord_Howe uses +10:30/+11:00 with a 30-minute DST
+    // shift — exercises the half-hour neighbour probing.
+    const r = resolveWallClock('Australia/Lord_Howe', 2026, 5, 15, 9, 0); // June = LHST +10:30
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.resolved.offsetMinutes).toBe(10 * 60 + 30);
   });
 
   it('rejects an invalid IANA timezone', () => {

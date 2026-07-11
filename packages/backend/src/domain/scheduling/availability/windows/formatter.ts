@@ -340,7 +340,7 @@ function normalizeAvailability(
 
       // Skip non-day keys like 'timezone'
       if (day.toLowerCase() === 'timezone') continue;
-      if (!DAY_INDEX[day.toLowerCase()]) {
+      if (DAY_INDEX[day.toLowerCase()] === undefined) {
         logger.warn({ day }, 'Unrecognized day name in availability, skipping');
         continue;
       }

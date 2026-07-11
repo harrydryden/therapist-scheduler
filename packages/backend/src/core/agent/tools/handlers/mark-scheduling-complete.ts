@@ -30,7 +30,6 @@ import {
   isValidIanaTimezone,
   resolveWallClock,
   formatIsoWithOffset,
-  resolveRecipientTimezone,
 } from '../../../timezone';
 import { markCompleteInputSchema } from '../../../../schemas/tool-inputs';
 import { availabilityResolver } from '../../../../domain/scheduling/availability/resolver';
@@ -200,22 +199,21 @@ async function markComplete(
 
   // Parse the confirmed datetime for post-booking follow-ups.
   //
-  // Timezone interpretation: the agent emits the datetime in a single
-  // wall-clock rendering (e.g. "Monday 10am"); we parse it as the
-  // USER's local time. The user reads the confirmation email first,
-  // and the agent's prompt asks it to communicate in the user's
-  // timezone. Falling back to platform default (Europe/London) when
-  // the user's country is unknown or multi-timezone (US/CA/AU).
-  const userTimezone = await resolveRecipientTimezone(context.userEmail);
-  const confirmedDateTimeParsed = parseConfirmedDateTime(
-    params.confirmed_datetime,
-    new Date(),
-    userTimezone ? { timezone: userTimezone } : {},
-  );
+  // Timezone interpretation: the platform scheduling timezone
+  // (config.timezone, Europe/London), matching the Timezones prompt
+  // section ("values passed to tools MUST be expressed in UK time"),
+  // `validateMarkComplete` (which lead-time-checks the same string with
+  // the platform default), and every downstream re-parse (post-booking
+  // follow-ups, stale-check, admin routes). Parsing here in the USER's
+  // timezone — as an earlier revision did — made the stored instant
+  // disagree with the validated one by the full tz delta for non-UK
+  // clients. Structured-form calls arrive as ISO-with-offset and are
+  // timezone-unambiguous either way.
+  const confirmedDateTimeParsed = parseConfirmedDateTime(params.confirmed_datetime);
 
   if (!confirmedDateTimeParsed) {
     logger.warn(
-      { traceId, confirmedDateTime: params.confirmed_datetime, userTimezone },
+      { traceId, confirmedDateTime: params.confirmed_datetime },
       'Could not parse confirmed datetime - follow-up emails may not be sent automatically',
     );
   }

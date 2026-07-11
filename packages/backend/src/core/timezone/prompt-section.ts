@@ -59,7 +59,7 @@ export function buildTimezoneSection(
   return `
 ## Timezones
 
-- **Database / source of truth:** All appointment times in our database are stored in UK time (\`Europe/London\`). When you call \`mark_scheduling_complete\` or any other tool that records a time, the value MUST be expressed in UK time. Do NOT pass a converted time to a tool.
+- **Database / source of truth:** All appointment times in our database are canonical in UK time (\`Europe/London\`). You never perform that conversion yourself: tools that record a time take the wall-clock IN THE TIMEZONE IT WAS AGREED plus the IANA zone (\`mark_scheduling_complete\` structured form, \`resolve_local_time\`) and convert DST-safely internally. Only \`mark_scheduling_complete\`'s LEGACY freeform \`confirmed_datetime\` string is interpreted as UK time — use it only when the agreed time is already expressed in UK time.
 - **Scheduling timezone (for slot calculation):** \`${schedulingTimezone}\`
 - **Client (${context.userName}) is based in:** ${userLabel} — local timezone: ${userTzLine}
 - **Therapist (${context.therapistName}) is based in:** ${therapistLabel} — local timezone: ${therapistTzLine}

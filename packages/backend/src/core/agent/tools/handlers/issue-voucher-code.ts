@@ -18,6 +18,7 @@
 import { logger } from '../../../../utils/logger';
 import { prisma } from '../../../../utils/database';
 import { generateVoucherUrl } from '../../../../utils/voucher-token';
+import { formatVoucherExpiry } from '../../../../utils/voucher-section';
 import { getSettingValue } from '../../../../services/settings.service';
 import { issueVoucherCodeInputSchema } from '../../../../schemas/tool-inputs';
 import type {
@@ -79,9 +80,7 @@ export async function handleIssueVoucherCode(
     'Agent issued voucher code for user',
   );
 
-  const voucherExpiry = voucherResult.expiresAt.toLocaleDateString('en-GB', {
-    day: 'numeric', month: 'long', year: 'numeric',
-  });
+  const voucherExpiry = formatVoucherExpiry(voucherResult.expiresAt);
   return {
     success: true,
     toolName: 'issue_voucher_code',

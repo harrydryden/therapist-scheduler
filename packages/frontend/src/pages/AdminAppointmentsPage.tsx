@@ -16,7 +16,7 @@ import {
   STATUS_LABELS,
   ALL_STATUSES,
 } from '../types';
-import { formatDateTime, toDatetimeLocalValue } from '../utils/date-format';
+import { formatDateTime, toDatetimeLocalValue, datetimeLocalToLondonProse } from '../utils/date-format';
 import StatusBadge from '../components/StatusBadge';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useDebounce } from '../hooks/useDebounce';
@@ -219,7 +219,12 @@ function EditableDate({
         type="button"
         onClick={() => {
           if (value) {
-            onSave(appointmentId, new Date(value).toISOString());
+            // The picker value is UK wall-clock (seeded via
+            // toDatetimeLocalValue, which renders London time). Submit the
+            // same explicit UK prose string the detail-panel editor sends —
+            // NOT new Date(value).toISOString(), which would re-encode the
+            // wall-clock against the admin's browser timezone.
+            onSave(appointmentId, datetimeLocalToLondonProse(value));
           }
           setIsEditing(false);
         }}
@@ -424,7 +429,9 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
       userName,
       therapistHandle: selectedTherapistHandle,
       stage,
-      confirmedDateTime: new Date(confirmedDateTime).toISOString(),
+      // Picker value is UK wall-clock; submit the shared UK prose format
+      // rather than a browser-timezone-dependent toISOString().
+      confirmedDateTime: datetimeLocalToLondonProse(confirmedDateTime),
       adminId: 'admin',
       notes: notes || undefined,
     });
@@ -552,7 +559,7 @@ function CreateAppointmentForm({ onSuccess }: { onSuccess: () => void }) {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1.5">Appointment Date/Time</label>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">Appointment Date/Time <span className="text-slate-400 font-normal">(UK time)</span></label>
                 <input
                   type="datetime-local"
                   value={confirmedDateTime}

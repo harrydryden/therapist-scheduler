@@ -13,6 +13,7 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { PeriodicService } from '../utils/periodic-service';
 import { slackNotificationService } from './slack-notification.service';
 import { SLACK_NOTIFICATIONS, PRE_BOOKING_STATUSES } from '../constants';
+import { getDateInTimezone } from '../utils/date';
 
 const LAST_SUMMARY_KEY = SLACK_NOTIFICATIONS.LAST_SUMMARY_KEY;
 
@@ -45,20 +46,23 @@ class SlackWeeklySummaryService extends PeriodicService {
   }
 
   protected async runCheck(): Promise<void> {
-    // Get current time in UK timezone
+    // Get current time in UK timezone. Intl-based — never round-trip a
+    // toLocaleString rendering through new Date(), which re-parses it in
+    // the SERVER's zone and only works while the server happens to run UTC.
     const now = new Date();
-    const ukTime = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
-    const day = ukTime.getDay();
-    const hour = ukTime.getHours();
+    const uk = getDateInTimezone(now, 'Europe/London');
+    const day = uk.dayOfWeek;
+    const hour = uk.hours;
 
     // Check if it's Monday (day 1) and 9am hour
     if (day !== SLACK_NOTIFICATIONS.WEEKLY_SUMMARY_DAY || hour !== SLACK_NOTIFICATIONS.WEEKLY_SUMMARY_HOUR) {
       return;
     }
 
-    // Check if we already sent today
+    // Check if we already sent today (dedupe key = the LONDON calendar date)
     const lastSendDate = await redis.get(LAST_SUMMARY_KEY);
-    const today = ukTime.toISOString().split('T')[0];
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const today = `${uk.year}-${pad(uk.month + 1)}-${pad(uk.day)}`;
 
     if (lastSendDate === today) {
       logger.debug('Weekly summary already sent today');
