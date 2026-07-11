@@ -161,55 +161,6 @@ export function formatLondonDate(date: Date): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Apply a timezone to a date that was parsed as if in local time.
- * Converts "this wall-clock time, in <timezone>" to the correct UTC instant.
- */
-function applyTimezoneToDate(date: Date, timezone: string): Date {
-  try {
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    const day = date.getDate();
-    const hours = date.getHours();
-    const minutes = date.getMinutes();
-    const seconds = date.getSeconds();
-
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-
-    const tempDate = new Date(year, month, day, hours, minutes, seconds);
-    const parts = formatter.formatToParts(tempDate);
-
-    const getPart = (type: string): number => {
-      const part = parts.find((p) => p.type === type);
-      return part ? parseInt(part.value, 10) : 0;
-    };
-
-    const tzYear = getPart('year');
-    const tzMonth = getPart('month') - 1;
-    const tzDay = getPart('day');
-    const tzHours = getPart('hour');
-    const tzMinutes = getPart('minute');
-
-    const localMs = new Date(year, month, day, hours, minutes, seconds).getTime();
-    const tzMs = new Date(tzYear, tzMonth, tzDay, tzHours, tzMinutes, seconds).getTime();
-    const offsetMs = localMs - tzMs;
-
-    return new Date(tempDate.getTime() + offsetMs);
-  } catch (error) {
-    logger.warn({ timezone, error }, 'Failed to apply timezone - using local time');
-    return date;
-  }
-}
-
-/**
  * Get date components in a specific timezone.
  *
  * Exported because callers outside this module need to format a Date as it
@@ -355,22 +306,36 @@ export function parseConfirmedDateTime(
       .replace(/\s+at\s+/gi, ' ')
       .trim();
 
-    const chronoOptions: { forwardDate: boolean; timezone?: string } = { forwardDate };
-    if (timezone) {
-      chronoOptions.timezone = timezone;
-    }
-
-    const results = chronoParse(normalized, referenceDate, chronoOptions);
+    // `forwardDate` is the only chrono option in play. (An earlier revision
+    // also passed `timezone` here, which chrono v2 does not recognise as a
+    // ParsingOption — the conversion to the target zone happens explicitly
+    // below instead.)
+    const results = chronoParse(normalized, referenceDate, { forwardDate });
 
     if (results.length > 0 && results[0].date()) {
+      const start = results[0].start;
       let parsedDate = results[0].date();
 
-      // Only reinterpret as a wall-clock in `timezone` when the input
+      // Reinterpret as a wall-clock in `timezone` only when the input
       // carried NO offset of its own. isCertain — not a truthiness check
       // on get(): a Z-suffixed UTC string has offset 0, which is falsy,
       // and reinterpreting it shifted stored instants by the BST hour.
-      if (timezone && !results[0].start.isCertain('timezoneOffset')) {
-        parsedDate = applyTimezoneToDate(parsedDate, timezone);
+      //
+      // The conversion reads chrono's resolved calendar components
+      // (certain + implied) and maps them through the Intl-based
+      // wallClockToUtc — no server-local Date construction, so the result
+      // is identical whatever TZ the Node process happens to run in.
+      if (timezone && !start.isCertain('timezoneOffset')) {
+        const base = wallClockToUtc(
+          start.get('year') ?? referenceDate.getUTCFullYear(),
+          (start.get('month') ?? 1) - 1,
+          start.get('day') ?? 1,
+          start.get('hour') ?? 0,
+          start.get('minute') ?? 0,
+          timezone,
+        );
+        const seconds = start.get('second') ?? 0;
+        parsedDate = seconds ? new Date(base.getTime() + seconds * 1000) : base;
       }
 
       logger.debug(
@@ -428,17 +393,27 @@ function parseWithRegex(
     hour = 0;
   }
 
-  const year = referenceDate.getFullYear();
   const monthNum = monthMap[month.toLowerCase()];
+  const dayNum = parseInt(day, 10);
+  const minuteNum = parseInt(minutes, 10);
 
-  let result = new Date(year, monthNum, parseInt(day, 10), hour, parseInt(minutes, 10));
+  // Build the candidate instant from the wall-clock components directly in
+  // the target timezone (Intl-based, server-TZ-independent). The year is
+  // taken from the reference date's calendar in that SAME timezone — the
+  // old getFullYear() read sat on the wrong side of New Year for a few
+  // hours depending on the process TZ.
+  const buildInYear = (year: number): Date =>
+    timezone
+      ? wallClockToUtc(year, monthNum, dayNum, hour, minuteNum, timezone)
+      : new Date(year, monthNum, dayNum, hour, minuteNum);
 
+  const refYear = timezone
+    ? getDateInTimezone(referenceDate, timezone).year
+    : referenceDate.getFullYear();
+
+  let result = buildInYear(refYear);
   if (forwardDate && result < referenceDate) {
-    result.setFullYear(year + 1);
-  }
-
-  if (timezone) {
-    result = applyTimezoneToDate(result, timezone);
+    result = buildInYear(refYear + 1);
   }
 
   return result;

@@ -81,6 +81,10 @@ order of the clock skew between the app instance and Postgres.
 - **Email header dates** → display only, never authoritative
 - **Cron schedules** → server time is fine; document the timezone
   expectation explicitly (`general.timezone` setting handles this)
+- **Process timezone** → pinned to `TZ=UTC` in the Dockerfile. All date
+  logic is Intl-based with explicit IANA zones, so this is a determinism
+  guarantee, not a knob — never change `TZ` to "fix" a displayed time;
+  pass the right timezone at the call site instead
 
 ## Future scaling note
 

@@ -36,6 +36,14 @@ RUN npm run build
 # Production stage
 FROM node:18-alpine AS production
 
+# Pin the process timezone explicitly. All date logic is written to be
+# server-TZ-independent (Intl-based, explicit IANA zones), so this is a
+# determinism guarantee rather than a behavioural knob: chrono's relative-date
+# resolution and any residual Date construction behave identically across
+# hosts. Keep as UTC — do NOT "fix" times by changing this; pass an explicit
+# timezone at the call site instead.
+ENV TZ=UTC
+
 WORKDIR /app
 
 # Install dumb-init for proper signal handling and OpenSSL for Prisma migrations
