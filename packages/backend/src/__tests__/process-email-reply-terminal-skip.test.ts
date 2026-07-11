@@ -98,6 +98,17 @@ jest.mock('../utils/conversation-facts', () => ({
   updateFacts: () => ({}),
 }));
 
+// Turn serialization defaults off; these tests exercise the unserialized
+// path. Mocked (rather than left unmocked) because appointment-turn-lock.ts
+// transitively imports the real Redis client, which this file's mocks
+// don't otherwise cover.
+jest.mock('../services/settings.service', () => ({
+  getSettingValue: jest.fn(),
+}));
+jest.mock('../services/appointment-turn-lock', () => ({
+  withAppointmentTurnLock: jest.fn(),
+}));
+
 import { JustinTimeService } from '../services/justin-time.service';
 import type { EmailClassification } from '../services/email-classifier.service';
 

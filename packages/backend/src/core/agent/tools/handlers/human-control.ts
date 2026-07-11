@@ -69,16 +69,30 @@ export async function flagForHumanReview(
     ? `Agent uncertain: ${params.reason}\n\nSuggested action: ${params.suggested_action}`
     : `Agent uncertain: ${params.reason}`;
 
-  await prisma.appointmentRequest.update({
-    where: { id: context.appointmentRequestId },
+  // Atomic: only take the flag if human control isn't already enabled.
+  // This is also reachable from the tool loop's runaway-loop circuit
+  // breaker (flagForHumanReviewFromLoop), which can fire after an admin
+  // has already taken control mid-turn — an unconditional update would
+  // overwrite the admin's humanControlTakenBy/TakenAt/Reason with
+  // 'agent-flagged' metadata and fire a spurious Slack alert on an
+  // appointment already under human review.
+  const flipped = await prisma.appointmentRequest.updateMany({
+    where: { id: context.appointmentRequestId, humanControlEnabled: false },
     data: {
       humanControlEnabled: true,
       humanControlTakenBy: 'agent-flagged',
       humanControlTakenAt: new Date(),
       humanControlReason: controlReason,
     },
-    select: { id: true },
   });
+
+  if (flipped.count === 0) {
+    logger.info(
+      { traceId, appointmentRequestId: context.appointmentRequestId },
+      'flagForHumanReview: human control already enabled — preserving existing takeover record',
+    );
+    return;
+  }
 
   logger.info(
     { traceId, appointmentRequestId: context.appointmentRequestId },

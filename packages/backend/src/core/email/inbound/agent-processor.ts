@@ -32,6 +32,16 @@ export interface AgentProcessorResult {
   success: boolean;
   message: string;
   loggedWhilePaused?: boolean;
+  /**
+   * The agent deferred this turn rather than processing it — e.g. another
+   * turn for the same appointment was already in flight and the turn lock
+   * (see appointment-turn-lock.ts, gated behind `agent.turnSerialization`)
+   * timed out waiting. Same contract as `loggedWhilePaused`: the pipeline
+   * must SKIP `markMessageProcessed` so a later pass (missed-message
+   * scanner, next Pub/Sub delivery) redelivers this message instead of it
+   * being silently dropped as "successfully processed."
+   */
+  deferredForRetry?: boolean;
 }
 
 export interface AgentProcessor {

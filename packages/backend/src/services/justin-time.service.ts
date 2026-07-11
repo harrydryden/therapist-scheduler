@@ -51,6 +51,8 @@ import {
 } from './terminal-appointment-guard';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
 import { AIToolExecutorService } from '../core/agent/tools';
+import { getSettingValue } from './settings.service';
+import { withAppointmentTurnLock } from './appointment-turn-lock';
 import { ConcurrentModificationError } from '../errors';
 import { emailEquals } from '../utils/email-equals';
 import {
@@ -73,9 +75,50 @@ export class JustinTimeService {
   }
 
   /**
-   * Start a new scheduling conversation
+   * Start a new scheduling conversation.
+   *
+   * Behind `agent.turnSerialization`, takes an exclusive per-appointment
+   * lock for the duration of the turn — see appointment-turn-lock.ts. With
+   * the setting off (the default), delegates straight through with no
+   * behaviour change.
    */
   async startScheduling(context: SchedulingContext): Promise<{
+    success: boolean;
+    message: string;
+    conversationId?: string;
+  }> {
+    let turnSerializationEnabled = false;
+    try {
+      turnSerializationEnabled = await getSettingValue<boolean>('agent.turnSerialization');
+    } catch (err) {
+      logger.warn(
+        { err, traceId: this.traceId, appointmentRequestId: context.appointmentRequestId },
+        'Failed to read agent.turnSerialization setting; defaulting to unserialized',
+      );
+    }
+    if (!turnSerializationEnabled) {
+      return this.startSchedulingInner(context);
+    }
+
+    const lockResult = await withAppointmentTurnLock(
+      context.appointmentRequestId,
+      this.traceId,
+      () => this.startSchedulingInner(context),
+    );
+    if (!lockResult.acquired) {
+      // Throwing (rather than returning success/failure) matches
+      // startSchedulingInner's own contract: the caller's promise
+      // rejects, so appointments.routes.ts marks the justintime_start
+      // outbox row 'failed' and the retry runner re-drives it later,
+      // once the other turn has released the lock.
+      throw new Error(
+        `startScheduling: could not acquire turn lock for appointment ${context.appointmentRequestId} (another turn in progress)`,
+      );
+    }
+    return lockResult.result;
+  }
+
+  private async startSchedulingInner(context: SchedulingContext): Promise<{
     success: boolean;
     message: string;
     conversationId?: string;
@@ -197,7 +240,15 @@ export class JustinTimeService {
   }
 
   /**
-   * Process an incoming email reply and continue the conversation
+   * Process an incoming email reply and continue the conversation.
+   *
+   * Behind `agent.turnSerialization`, takes an exclusive per-appointment
+   * lock for the duration of the turn — see appointment-turn-lock.ts. With
+   * the setting off (the default), delegates straight through with no
+   * behaviour change. If the lock can't be acquired within its wait
+   * budget (another turn for this appointment is already in flight),
+   * returns `deferredForRetry: true` so the caller leaves the triggering
+   * message unmarked for redelivery instead of dropping it.
    *
    * @param appointmentRequestId - The appointment request ID
    * @param emailContent - The content of the new email
@@ -205,6 +256,41 @@ export class JustinTimeService {
    * @param threadContext - Optional complete thread history for full context
    */
   async processEmailReply(
+    appointmentRequestId: string,
+    emailContent: string,
+    fromEmail: string,
+    threadContext?: string,
+    precomputedClassification?: EmailClassification,
+  ): Promise<{ success: boolean; message: string; loggedWhilePaused?: boolean; deferredForRetry?: boolean }> {
+    let turnSerializationEnabled = false;
+    try {
+      turnSerializationEnabled = await getSettingValue<boolean>('agent.turnSerialization');
+    } catch (err) {
+      logger.warn(
+        { err, traceId: this.traceId, appointmentRequestId },
+        'Failed to read agent.turnSerialization setting; defaulting to unserialized',
+      );
+    }
+    if (!turnSerializationEnabled) {
+      return this.processEmailReplyInner(appointmentRequestId, emailContent, fromEmail, threadContext, precomputedClassification);
+    }
+
+    const lockResult = await withAppointmentTurnLock(
+      appointmentRequestId,
+      this.traceId,
+      () => this.processEmailReplyInner(appointmentRequestId, emailContent, fromEmail, threadContext, precomputedClassification),
+    );
+    if (!lockResult.acquired) {
+      return {
+        success: false,
+        message: 'Another turn is already in progress for this appointment; deferring',
+        deferredForRetry: true,
+      };
+    }
+    return lockResult.result;
+  }
+
+  private async processEmailReplyInner(
     appointmentRequestId: string,
     emailContent: string,
     fromEmail: string,

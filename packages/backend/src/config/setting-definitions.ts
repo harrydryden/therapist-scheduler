@@ -118,6 +118,13 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     valueType: 'boolean',
     defaultValue: false,
   },
+  'agent.turnSerialization': {
+    category: 'agent',
+    label: 'Per-appointment Turn Serialization',
+    description: 'When enabled, startScheduling and processEmailReply take an exclusive per-appointment lock for the duration of the turn, so two overlapping turns (e.g. a fast double-reply, or a reply arriving while startScheduling is still saving) can no longer race on the same conversation state. Once turns are serialized, a ConcurrentModificationError on the final save is treated as a real conflict (the turn aborts and the triggering message is left for redelivery) instead of silently adopting the other writer\'s version. Defaults off; enable after confirming Redis lock behaviour in your environment.',
+    valueType: 'boolean',
+    defaultValue: false,
+  },
   'agent.languageStyle': {
     category: 'agent',
     label: 'Language Style',

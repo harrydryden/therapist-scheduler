@@ -518,8 +518,13 @@ export async function processMessage(messageId: string, traceId: string): Promis
       // never reached the agent after release. Failure tracking
       // stays cleared either way — the message wasn't a failure,
       // just deferred.
-      if (agentResult?.loggedWhilePaused !== true) {
+      if (agentResult?.loggedWhilePaused !== true && agentResult?.deferredForRetry !== true) {
         await markMessageProcessed(messageId, 'successfully-processed');
+      } else if (agentResult?.deferredForRetry === true) {
+        logger.info(
+          { traceId, messageId, appointmentId: appointmentRequest.id },
+          'Skipping markMessageProcessed — agent deferred this turn, will be re-delivered later',
+        );
       } else {
         logger.info(
           { traceId, messageId, appointmentId: appointmentRequest.id },
