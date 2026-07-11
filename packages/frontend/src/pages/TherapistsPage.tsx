@@ -148,7 +148,7 @@ export default function TherapistsPage() {
       {/* Hero band — full-bleed under the header */}
       <div className="bg-spill-teal-100 border-b border-spill-teal-200">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 md:py-12">
-          <h1 className="font-display font-bold text-[40px] leading-[52px] tracking-[-0.8px] text-black mb-3">
+          <h1 className="font-display font-bold text-[32px] leading-[42px] tracking-[-0.64px] md:text-[40px] md:leading-[52px] md:tracking-[-0.8px] text-black mb-3">
             {hero.heading}
           </h1>
           {hero.body ? (
