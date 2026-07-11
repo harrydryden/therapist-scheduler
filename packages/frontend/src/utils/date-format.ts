@@ -81,20 +81,19 @@ export function datetimeLocalToLondonProse(localValue: string): string {
   const iso = londonWallClockToIso(localValue);
   if (!iso) return '';
   const d = new Date(iso);
-  const dateStr = d.toLocaleDateString('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    timeZone: LONDON_TZ,
-  });
+  // Composed from individual parts rather than one toLocaleDateString call:
+  // ICU versions disagree on punctuation ("Tuesday, 14 July" vs "Tuesday 14
+  // July"), and this string is a wire format the backend chrono-parses — it
+  // must be byte-identical across every admin's browser.
+  const part = (opts: Intl.DateTimeFormatOptions) =>
+    d.toLocaleDateString('en-GB', { ...opts, timeZone: LONDON_TZ });
   const timeStr = d.toLocaleTimeString('en-GB', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
     timeZone: LONDON_TZ,
   });
-  return `${dateStr} at ${timeStr}`;
+  return `${part({ weekday: 'long' })} ${part({ day: 'numeric' })} ${part({ month: 'long' })} ${part({ year: 'numeric' })} at ${timeStr}`;
 }
 
 /**

@@ -114,10 +114,10 @@ describe('parseConfirmedDateTime', () => {
     it('handles pm times correctly', () => {
       const result = parseConfirmedDateTime('Monday 10th March at 2:00pm', refDate);
       expect(result).not.toBeNull();
-      // The hour should be 14 in 24h format
-      const hours = result!.getHours();
-      // Account for possible timezone differences
-      expect(hours === 14 || hours === 13 || hours === 15).toBe(true);
+      // 2pm parsed under the platform default (Europe/London, GMT on 10
+      // March) = 14:00 UTC. Assert the absolute instant rather than the
+      // server-local getHours(), so the test passes under any system TZ.
+      expect(result!.toISOString()).toBe('2025-03-10T14:00:00.000Z');
     });
   });
 

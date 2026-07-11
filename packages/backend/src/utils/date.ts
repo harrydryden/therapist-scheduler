@@ -365,7 +365,11 @@ export function parseConfirmedDateTime(
     if (results.length > 0 && results[0].date()) {
       let parsedDate = results[0].date();
 
-      if (timezone && !results[0].start.get('timezoneOffset')) {
+      // Only reinterpret as a wall-clock in `timezone` when the input
+      // carried NO offset of its own. isCertain — not a truthiness check
+      // on get(): a Z-suffixed UTC string has offset 0, which is falsy,
+      // and reinterpreting it shifted stored instants by the BST hour.
+      if (timezone && !results[0].start.isCertain('timezoneOffset')) {
         parsedDate = applyTimezoneToDate(parsedDate, timezone);
       }
 
