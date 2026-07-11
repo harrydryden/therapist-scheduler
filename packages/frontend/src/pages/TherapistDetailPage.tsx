@@ -115,7 +115,9 @@ export default function TherapistDetailPage() {
           <div className="bg-white rounded-xl border border-spill-grey-200 overflow-hidden">
             <div className="md:flex">
               <div className="md:w-1/3">
-                <div className="aspect-square bg-spill-grey-100">
+                {/* Full-width square photos swallow the whole first
+                    viewport on phones — use a shorter crop below md. */}
+                <div className="aspect-[4/3] md:aspect-square bg-spill-grey-100">
                   <img
                     src={sanitizeImageUrl(therapist.profileImage) ?? placeholderImage}
                     alt={therapist.name}
