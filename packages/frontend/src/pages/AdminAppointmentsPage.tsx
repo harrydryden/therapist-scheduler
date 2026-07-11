@@ -869,7 +869,7 @@ function AppointmentsTable() {
                     Updated <SortIcon column="updatedAt" />
                   </button>
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-slate-500">Actions</th>
+                <th className="w-24 px-3 py-3 text-right font-medium text-slate-500">Feedback</th>
               </tr>
             </thead>
             <tbody>
@@ -920,7 +920,7 @@ function AppointmentsTable() {
                   <td className="px-4 py-3 text-slate-500 text-xs">
                     {formatDateTime(apt.updatedAt)}
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                  <td className="w-24 px-3 py-3 text-right whitespace-nowrap">
                     {POST_BOOKING_STATUSES.includes(apt.status) && apt.trackingCode ? (
                       <button
                         type="button"
@@ -931,7 +931,7 @@ function AppointmentsTable() {
                         className="px-2.5 py-1 text-xs font-medium border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
                         title="Discard any prior submission and re-send the feedback form to the client"
                       >
-                        Re-request feedback
+                        Request
                       </button>
                     ) : (
                       <span className="text-slate-300 text-xs">-</span>
