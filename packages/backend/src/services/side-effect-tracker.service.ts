@@ -480,6 +480,25 @@ class SideEffectTrackerService {
   }
 
   /**
+   * Best-effort update of a pending effect's stored payload — used to
+   * persist incremental progress within a single execute call (e.g. "the
+   * user side of a paired send has landed") so a crash mid-execute leaves
+   * a durable record a subsequent retry can read, instead of resending
+   * work that already completed. Never throws — a failed update just
+   * means the retry falls back to today's behaviour for that one row.
+   */
+  async updatePayload(idempotencyKey: string, payload: unknown): Promise<void> {
+    try {
+      await prisma.sideEffectLog.update({
+        where: { idempotencyKey },
+        data: { payload: payload as Prisma.InputJsonValue },
+      });
+    } catch (err) {
+      logger.warn({ err, idempotencyKey }, 'Failed to persist incremental side-effect payload progress');
+    }
+  }
+
+  /**
    * Mark a side effect as abandoned (won't be retried)
    */
   async markAbandoned(idempotencyKey: string, reason: string): Promise<void> {

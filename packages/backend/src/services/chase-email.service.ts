@@ -11,6 +11,7 @@ import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
+import { finalizeChase } from './periodic-effect-finalizers';
 import { PRE_BOOKING_STATUSES } from '../constants';
 
 class ChaseEmailService {
@@ -306,75 +307,20 @@ class ChaseEmailService {
                 execute: async (payload) => {
                   await emailProcessingService.sendEmail(payload);
 
-                  const now = new Date();
-
-                  // Atomic update via the checkpoint helper: verify sentinel still ours,
-                  // advance the JSON checkpoint via `sent_chase_followup` (which derives
-                  // stage = 'chased'), record chase metadata. The column `checkpointStage`
-                  // is derived from the JSON — do NOT write it directly.
-                  const checkpointResult = await aiConversationService.applyCheckpointAction(
-                    appointment.id,
-                    'sent_chase_followup',
-                    {
-                      extraWhere: { chaseSentAt: new Date(0) }, // sentinel guard
-                      extraUpdates: {
-                        chaseSentAt: now,
-                        chaseSentTo: target,
-                        chaseTargetEmail: email,
-                        lastActivityAt: now,
-                        isStale: false,
-                      },
-                    }
-                  );
-
-                  if (!checkpointResult.applied) {
-                    logger.error(
-                      { checkId, appointmentId: appointment.id },
-                      'ALERT: Chase email sent but sentinel update failed - possible duplicate'
-                    );
-                    return;
-                  }
-
-                  await recordAppointmentEvent({
+                  // Same finalization (checkpoint advance + chase-sent
+                  // metadata + audit event) runs whether this is the first
+                  // attempt or a retry replaying the stored payload — see
+                  // finalizeChase's own doc comment.
+                  await finalizeChase({
                     appointmentId: appointment.id,
-                    type: 'chase_sent',
-                    actor: 'system',
-                    reason: `Inactive ${inactiveHours}h, chasing ${target}`,
-                    payload: {
-                      target,
-                      chasedEmail: email,
-                      inactiveHours,
-                      userName: appointment.userName,
-                      therapistName: appointment.therapistName,
-                    },
-                    slack: {
-                      // PII discipline: drop the chased email (PII for clients).
-                      // Therapist's full name is fine; client uses first name.
-                      // appointmentId in the alert metadata gives admins a
-                      // click-through to the full record.
-                      title: 'Chase follow-up sent',
-                      severity: 'medium',
-                      details:
-                        `${target === 'therapist' ? 'Therapist' : 'Client'} hasn't responded for ` +
-                        `*${inactiveHours}h*. Sent a follow-up nudge.`,
-                      additionalFields: {
-                        'Client': firstName(appointment.userName, '(unknown)'),
-                        'Therapist': appointment.therapistName || '(unknown)',
-                      },
-                    },
+                    target,
+                    targetEmail: email,
+                    now: new Date(),
+                    checkId,
+                    userName: appointment.userName,
+                    therapistName: appointment.therapistName,
+                    inactiveHours,
                   });
-
-                  logger.info(
-                    {
-                      checkId,
-                      appointmentId: appointment.id,
-                      target,
-                      email,
-                      userName: appointment.userName,
-                      therapistName: appointment.therapistName,
-                    },
-                    `Sent chase follow-up email to ${target}`
-                  );
                 },
               },
               {
