@@ -7,7 +7,7 @@ interface StatusBadgeProps {
 
 export default function StatusBadge({ status }: StatusBadgeProps) {
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+    <span className={`inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
       {STATUS_LABELS[status as keyof typeof STATUS_LABELS] || status}
     </span>
   );
