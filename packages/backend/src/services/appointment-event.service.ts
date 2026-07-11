@@ -5,7 +5,7 @@
  * an audit log entry and optionally fires a Slack alert.
  *
  * transition-side-effects.service.ts handles status-change side effects
- * (therapist freezes, deactivation, SSE broadcast) — that's the parallel
+ * (therapist freeze/unfreeze, SSE broadcast) — that's the parallel
  * concept keyed off `status` rather than checkpoint events.
  */
 

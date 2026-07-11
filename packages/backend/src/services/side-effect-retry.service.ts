@@ -19,7 +19,7 @@ import { slackNotificationService } from './slack-notification.service';
 import { JustinTimeService } from './justin-time.service';
 import { fetchSchedulingContext } from './scheduling-context.service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { APPOINTMENT_STATUS, ACTIVE_STATUSES } from '../constants';
+import { APPOINTMENT_STATUS } from '../constants';
 
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
@@ -476,20 +476,11 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         const handle = appointment.therapistHandle;
         await therapistBookingStatusService.unmarkConfirmed(handle);
         await therapistBookingStatusService.recalculateUniqueRequestCount(handle);
-        // Conditional deactivation: only if no other active appointments.
-        const otherActive = await prisma.appointmentRequest.count({
-          where: {
-            therapistHandle: handle,
-            id: { not: appointment.id },
-            status: { in: [...ACTIVE_STATUSES] },
-          },
-        });
-        if (otherActive === 0) {
-          await prisma.therapist.updateMany({
-            where: { OR: [{ notionId: handle }, { id: handle }] },
-            data: { active: false },
-          });
-        }
+        // Note: the therapist's `active` flag is deliberately not touched
+        // here. Booking-page visibility is an admin-only toggle, decoupled
+        // from the appointment lifecycle — a terminated appointment must
+        // not deactivate the therapist. (Mirrors onCancelled/onCompleted in
+        // transition-side-effects.service.ts.)
         break;
       }
 
