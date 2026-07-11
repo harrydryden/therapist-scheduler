@@ -4,8 +4,9 @@ import type { AppointmentControls } from '../../hooks/useAppointmentControls';
 import HumanControlSection from './HumanControlSection';
 import ScanResultsPanel from './ScanResultsPanel';
 import DeleteSection from './DeleteSection';
+import ReRequestFeedbackSection, { FEEDBACK_ELIGIBLE_STATUSES } from './ReRequestFeedbackSection';
 
-type ControlView = null | 'control' | 'scan' | 'delete';
+type ControlView = null | 'control' | 'scan' | 'delete' | 'feedback';
 
 interface CompactControlPanelProps {
   appointment: AppointmentDetail;
@@ -20,6 +21,7 @@ export default function CompactControlPanel({
 
   const hasThreads = appointment.gmailThreadId || appointment.therapistGmailThreadId;
   const isControlActive = appointment.humanControlEnabled;
+  const canReRequestFeedback = FEEDBACK_ELIGIBLE_STATUSES.includes(appointment.status);
 
   // Auto-expand human control section if control is active
   const effectiveExpanded = isControlActive && expandedView === null ? 'control' : expandedView;
@@ -65,6 +67,19 @@ export default function CompactControlPanel({
           </button>
         )}
 
+        {canReRequestFeedback && (
+          <button
+            onClick={() => setExpandedView(effectiveExpanded === 'feedback' ? null : 'feedback')}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+              effectiveExpanded === 'feedback'
+                ? 'bg-slate-100 border-slate-300 text-slate-700'
+                : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            Feedback
+          </button>
+        )}
+
         <button
           onClick={() => setExpandedView(effectiveExpanded === 'delete' ? null : 'delete')}
           className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
@@ -96,6 +111,12 @@ export default function CompactControlPanel({
             onDismissPreview={controls.dismissReprocessPreview}
             onDismissResult={controls.dismissReprocessResult}
           />
+        </div>
+      )}
+
+      {effectiveExpanded === 'feedback' && canReRequestFeedback && (
+        <div className="px-4 pb-3">
+          <ReRequestFeedbackSection appointment={appointment} />
         </div>
       )}
 

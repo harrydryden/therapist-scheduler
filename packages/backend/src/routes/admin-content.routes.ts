@@ -508,6 +508,10 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
 
         const submission = await prisma.feedbackSubmission.findFirst({
           where: { trackingCode: code.toUpperCase() },
+          // Multiple rows per tracking code are an expected state (e.g. a
+          // stale anonymous submission plus a fresh linked one) — return the
+          // newest deterministically.
+          orderBy: { createdAt: 'desc' },
           include: {
             appointment: {
               select: {
@@ -619,6 +623,29 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
     } catch (error) {
       logger.error({ error }, 'Failed to export feedback submissions');
       return Errors.internal(reply, 'Failed to export submissions');
+    }
+  });
+
+  /**
+   * DELETE /api/admin/forms/feedback/submissions/:id
+   * Delete a single feedback submission by id. Scoped alternative to the
+   * bulk-delete endpoint below — lets an admin remove one erroneous/too-early
+   * submission without wiping every submission in the system.
+   */
+  fastify.delete('/api/admin/forms/feedback/submissions/:id', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const { id } = request.params;
+    try {
+      // deleteMany (not delete) so a missing row returns count 0 instead of
+      // throwing a Prisma P2025 — lets us return a clean 404.
+      const result = await prisma.feedbackSubmission.deleteMany({ where: { id } });
+      if (result.count === 0) {
+        return Errors.notFound(reply, 'Feedback submission');
+      }
+      logger.warn({ submissionId: id }, 'Feedback submission deleted');
+      return sendSuccess(reply, { id }, { message: 'Feedback submission deleted' });
+    } catch (error) {
+      logger.error({ error, submissionId: id }, 'Failed to delete feedback submission');
+      return Errors.internal(reply, 'Failed to delete submission');
     }
   });
 
