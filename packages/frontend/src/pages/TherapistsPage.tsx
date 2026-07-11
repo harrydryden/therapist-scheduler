@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
 import { getTherapists, getFrontendSettings } from '../api/client';
 import TherapistCard from '../components/TherapistCard';
 import FilterBar from '../components/FilterBar';
@@ -11,14 +12,30 @@ const DEFAULT_HERO_PARAGRAPH =
   "We've partnered with hand-picked, vetted therapists to offer free one-to-one sessions. " +
   "Choose a therapist below and we'll arrange a time that works for you — sessions are 50 minutes, held over video call.";
 
+// Body text below this length renders in full — no point in a
+// "Read more" toggle for a sentence or two.
+const INTRO_COLLAPSE_THRESHOLD = 150;
+
+/**
+ * Admins sometimes write the intro heading in ALL CAPS. The hero h1
+ * should read in sentence case, so fully-uppercase headings get
+ * normalised (preserving the "Spill" brand name); mixed-case text is
+ * left exactly as written.
+ */
+function toSentenceCase(text: string): string {
+  const letters = text.replace(/[^a-zA-Z]/g, '');
+  if (!letters || letters !== letters.toUpperCase()) return text;
+  const lower = text.toLowerCase();
+  return (lower.charAt(0).toUpperCase() + lower.slice(1)).replace(/\bspill\b/g, 'Spill');
+}
+
 /**
  * The hero band sources its copy from the `frontend.therapistPageIntro`
- * markdown setting: first heading becomes the h1, first paragraph the
- * subtitle. Anything beyond that (extra paragraphs, formatting) is
- * intentionally dropped — the hero is a fixed-height band, not the old
- * collapsible markdown block.
+ * markdown setting: the first heading becomes the h1, and everything
+ * else renders below it as the collapsible markdown body ("Read more"
+ * expands it), so the full intro text is always reachable.
  */
-function parseHeroContent(markdown: string): { heading: string; paragraph: string } {
+function parseHeroContent(markdown: string): { heading: string; body: string } {
   const stripInline = (line: string) =>
     line
       .replace(/^#{1,6}\s+/, '')
@@ -26,21 +43,19 @@ function parseHeroContent(markdown: string): { heading: string; paragraph: strin
       .replace(/\*(.+?)\*/g, '$1')
       .replace(/_(.+?)_/g, '$1');
 
-  const lines = markdown
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const headingLine = lines.find((l) => /^#{1,6}\s/.test(l));
-  const paragraphLine = lines.find((l) => !/^#{1,6}\s/.test(l));
+  const lines = markdown.split('\n');
+  const headingIdx = lines.findIndex((l) => /^#{1,6}\s/.test(l.trim()));
+  const heading = headingIdx >= 0 ? stripInline(lines[headingIdx].trim()) : DEFAULT_HERO_HEADING;
+  const body = (headingIdx >= 0 ? [...lines.slice(0, headingIdx), ...lines.slice(headingIdx + 1)] : lines)
+    .join('\n')
+    .trim();
 
-  return {
-    heading: headingLine ? stripInline(headingLine) : DEFAULT_HERO_HEADING,
-    paragraph: paragraphLine ? stripInline(paragraphLine) : DEFAULT_HERO_PARAGRAPH,
-  };
+  return { heading: toSentenceCase(heading), body };
 }
 
 export default function TherapistsPage() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [isIntroExpanded, setIsIntroExpanded] = useState(false);
 
   const {
     data: therapists,
@@ -133,12 +148,42 @@ export default function TherapistsPage() {
       {/* Hero band — full-bleed under the header */}
       <div className="bg-spill-teal-100 border-b border-spill-teal-200">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8 md:py-12">
-          <h1 className="font-display font-bold text-[40px] leading-[52px] tracking-[-0.8px] text-black max-w-[720px] mb-3">
+          <h1 className="font-display font-bold text-[40px] leading-[52px] tracking-[-0.8px] text-black mb-3">
             {hero.heading}
           </h1>
-          <p className="text-base tracking-[-0.31px] leading-normal text-spill-grey-600 max-w-[640px]">
-            {hero.paragraph}
-          </p>
+          {hero.body ? (
+            <>
+              <div
+                className={`prose max-w-none text-base tracking-[-0.31px] leading-normal text-spill-grey-600 prose-p:my-2 prose-p:text-spill-grey-600 prose-headings:text-black prose-headings:font-display prose-strong:text-black prose-a:text-spill-blue-800 ${
+                  !isIntroExpanded && hero.body.length > INTRO_COLLAPSE_THRESHOLD ? 'line-clamp-2' : ''
+                }`}
+              >
+                <ReactMarkdown>{hero.body}</ReactMarkdown>
+              </div>
+              {hero.body.length > INTRO_COLLAPSE_THRESHOLD && (
+                <button
+                  type="button"
+                  onClick={() => setIsIntroExpanded(!isIntroExpanded)}
+                  className="mt-2 text-sm font-medium text-spill-blue-800 hover:underline flex items-center gap-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
+                  aria-expanded={isIntroExpanded}
+                >
+                  {isIntroExpanded ? 'Show less' : 'Read more'}
+                  <svg
+                    className={`w-4 h-4 transition-transform ${isIntroExpanded ? 'rotate-180' : ''}`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+              )}
+            </>
+          ) : (
+            <p className="text-base tracking-[-0.31px] leading-normal text-spill-grey-600">
+              {DEFAULT_HERO_PARAGRAPH}
+            </p>
+          )}
         </div>
       </div>
 
