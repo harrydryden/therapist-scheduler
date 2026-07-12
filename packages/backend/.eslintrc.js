@@ -18,8 +18,10 @@
  * list — are caught immediately. Started at ~46 edges across 21 files
  * when this rule landed (Stage D1); Stage D2 moved core/agent/tools/'s
  * policy half to domain/scheduling/agent/ and removed its 15 entries.
- * Stage D3 does the same for core/email/inbound/. Entries here should
- * shrink, not grow.
+ * Stage D3 did the same for core/email/inbound/'s policy half (moved to
+ * domain/scheduling/inbound/), removing its 5 entries — only
+ * core/timezone/prompt-section.ts's milder type-only coupling (finding
+ * #19) is still open. Entries here should shrink, not grow.
  */
 
 const KERNEL_BOUNDARY_MESSAGE =
@@ -55,13 +57,14 @@ const SCHEDULING_SERVICE_GLOBS = [
 // per-line suppression comments, which would be noisier than the file
 // list itself.
 const ALLOWLISTED_VIOLATORS = [
-  // core/agent/tools/* moved to domain/scheduling/agent/ in Stage D2 —
-  // no longer under core/, so no longer needs (or gets) an entry here.
-  'src/core/email/inbound/availability-routing.ts',
-  'src/core/email/inbound/closure-auto-dismiss.ts',
-  'src/core/email/inbound/divergence-handling.ts',
-  'src/core/email/inbound/nudge-reply.ts',
-  'src/core/email/inbound/process.ts',
+  // core/agent/tools/* moved to domain/scheduling/agent/ in Stage D2, and
+  // core/email/inbound/{process,availability-routing,closure-auto-dismiss,
+  // divergence-handling,nudge-reply}.ts moved to domain/scheduling/inbound/
+  // in Stage D3 — none of them are under core/ any more, so none of them
+  // need (or get) an entry here.
+  //
+  // core/timezone/prompt-section.ts is a milder, type-only coupling
+  // (finding #19) that neither Stage D2 nor D3 addresses — still open.
   'src/core/timezone/prompt-section.ts',
 ];
 

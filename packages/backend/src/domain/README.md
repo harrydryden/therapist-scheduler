@@ -16,6 +16,10 @@ domain/
     agent/               Booking agent's tool handlers, dispatch, and send
                          wrapper (moved from core/agent/tools/ in Stage D2 —
                          see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md).
+    inbound/             Inbound Gmail-message routing: appointment
+                         matching, agent invocation, nudge/weekly-mailing/
+                         closure branches (moved from core/email/inbound/
+                         in Stage D3).
     availability/        Availability extraction, windows, formatter, and
                          its own agent/ (the availability-collection agent).
     lifecycle/           Appointment state machine + side effects

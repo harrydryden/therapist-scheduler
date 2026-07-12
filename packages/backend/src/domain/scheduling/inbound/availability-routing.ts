@@ -23,7 +23,7 @@
  */
 
 import { logger } from '../../../utils/logger';
-import { markMessageProcessed } from '../../messaging/message-dedup';
+import { markMessageProcessed } from '../../../core/messaging/message-dedup';
 import { extendTraceContext } from '../../../utils/request-tracing';
 import { threadFetchingService } from '../../../services/thread-fetching.service';
 import { AvailabilityAgentService } from '../../../domain/scheduling/availability/agent/service';

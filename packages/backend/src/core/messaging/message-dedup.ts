@@ -13,8 +13,9 @@
  * upsert pattern for marking processed. The point is to give the
  * contract a single home, not to change semantics.
  *
- * The primary callsites in `core/email/inbound/process.ts` were
- * migrated to this facade in Phase 2b. `releaseMessageLock` is
+ * The primary callsites in `domain/scheduling/inbound/process.ts`
+ * (moved there from core/email/inbound/ in Stage D3) were migrated to
+ * this facade in Phase 2b. `releaseMessageLock` is
  * available but unused — the email pipeline currently uses the
  * lower-level `utils/redis-locks.releaseLock` to match the pre-
  * refactor pattern. Migrating that callsite is a small follow-up

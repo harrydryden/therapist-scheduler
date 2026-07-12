@@ -23,7 +23,7 @@
  *     helper to lock in the contract.
  */
 
-import type { AgentProcessorResult } from '../core/email/inbound/agent-processor';
+import type { AgentProcessorResult } from '../domain/scheduling/inbound/agent-processor';
 
 /**
  * The pipeline's logic distilled: "should I mark this message

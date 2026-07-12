@@ -2,7 +2,8 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
-import { emailMessageProcessorService, getLastProcessingErrors } from '../core/email';
+import { getLastProcessingErrors } from '../core/email';
+import { processMessage } from '../domain/scheduling/inbound';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
@@ -248,7 +249,7 @@ export class EmailIngestService {
               );
               for (const msg of recentMessages.data.messages) {
                 if (msg.id) {
-                  await emailMessageProcessorService.processMessage(msg.id, traceId);
+                  await processMessage(msg.id, traceId);
                 }
               }
             }
@@ -301,7 +302,7 @@ export class EmailIngestService {
 
       // Process each unique message
       for (const messageId of seenMessageIds) {
-        await emailMessageProcessorService.processMessage(messageId, traceId);
+        await processMessage(messageId, traceId);
       }
 
       // Update to the actual latest history ID from the API response
@@ -357,7 +358,7 @@ export class EmailIngestService {
       for (const message of unreadMessages) {
         if (message.id) {
           processedIds.add(message.id);
-          const wasProcessed = await emailMessageProcessorService.processMessage(message.id, traceId);
+          const wasProcessed = await processMessage(message.id, traceId);
           if (wasProcessed) processed++;
         }
       }
@@ -379,7 +380,7 @@ export class EmailIngestService {
 
       for (const message of allRecentMessages) {
         if (message.id && !processedIds.has(message.id)) {
-          const wasProcessed = await emailMessageProcessorService.processMessage(message.id, traceId);
+          const wasProcessed = await processMessage(message.id, traceId);
           if (wasProcessed) processed++;
         }
       }
@@ -564,7 +565,7 @@ export class EmailIngestService {
           'Found unprocessed message in stale thread - attempting recovery'
         );
 
-        const wasProcessed = await emailMessageProcessorService.processMessage(message.id, traceId);
+        const wasProcessed = await processMessage(message.id, traceId);
         if (wasProcessed) processed++;
       }
 

@@ -6,16 +6,8 @@ into:
 ```
 core/email/
 ├── inbound/
-│   ├── process.ts                top-level orchestrator (Gmail message → handled)
-│   ├── availability-routing.ts   route inbound to availability-collection agent
-│   ├── nudge-reply.ts            therapist-nudge reply detection (threadId + sender fallback)
-│   ├── weekly-mailing.ts         weekly promotional reply branch
-│   ├── closure-auto-dismiss.ts   dismiss stale closure recommendation on incoming reply
-│   ├── divergence-handling.ts    thread-divergence check + retry/abandon
-│   ├── unmatched-attempts.ts     DB-authoritative unmatched-attempt tracking
 │   ├── processing-failures.ts    MessageProcessingFailure CRUD + read helpers
 │   ├── lock-renewal.ts           Redis lock renewal manager for long processing
-│   ├── agent-processor.ts        AgentProcessor interface + DI registry
 │   └── index.ts
 ├── outbound/
 │   ├── send.ts                   sendEmail via Gmail API (threading preserved)
@@ -25,20 +17,31 @@ core/email/
 └── README.md                     you are here
 ```
 
+Stage D3 (see `docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md`) moved everything
+else that used to live under `inbound/` — `process.ts` (the orchestrator),
+`availability-routing.ts`, `nudge-reply.ts`, `weekly-mailing.ts`,
+`closure-auto-dismiss.ts`, `divergence-handling.ts`,
+`unmatched-attempts.ts`, and `agent-processor.ts` — to
+`domain/scheduling/inbound/`. All of it read/wrote `AppointmentRequest`,
+routed to the booking/availability agents, or was typed on scheduling
+concepts (finding #5): scheduling policy, not kernel mechanism. What's
+left here is generic per-message bookkeeping (failure tracking, lock
+renewal) that `domain/scheduling/inbound/process.ts` imports back from
+`core/` — domain depending on core is the intended direction.
+
 ## What does NOT live here
 
 - The booking agent / availability agent themselves
   (`services/justin-time.service.ts`,
-  `domain/scheduling/availability/agent/`). They're invoked from
-  `inbound/process.ts` via the AgentProcessor DI interface, but their
-  logic lives elsewhere.
+  `domain/scheduling/availability/agent/`), nor the inbound routing that
+  invokes them (`domain/scheduling/inbound/`, see above).
 - The dedup primitives — those moved to `core/messaging/message-dedup`
-  in Phase 1b. `inbound/process.ts` calls the facade for
-  `acquireMessageLock`, `markMessageProcessed`, `isMessageProcessed`,
+  in Phase 1b. `domain/scheduling/inbound/process.ts` calls the facade
+  for `acquireMessageLock`, `markMessageProcessed`, `isMessageProcessed`,
   `shouldEmitProcessingAlert`, `releaseDbLock`.
 - The thread divergence detector itself
   (`services/thread-divergence.service.ts`). Only the retry/abandon
-  orchestration around it lives here in `divergence-handling.ts`.
+  orchestration around it lives in `domain/scheduling/inbound/divergence-handling.ts`.
 - The MIME parser / email encoders (`utils/email-mime-parser.ts` and
   friends) — still in `utils/`, since they're consumed by both inbound
   and outbound.
@@ -46,12 +49,12 @@ core/email/
 ## Public surface
 
 The legacy `emailMessageProcessorService` singleton is preserved as an
-object literal binding the standalone functions:
+object literal binding the standalone functions (outbound only —
+`processMessage` moved to `domain/scheduling/inbound/`, see above):
 
 ```ts
 import { emailMessageProcessorService } from '../core/email';
 
-emailMessageProcessorService.processMessage(...);
 emailMessageProcessorService.sendEmail(...);
 emailMessageProcessorService.processPendingEmails(...);
 ```
@@ -59,9 +62,9 @@ emailMessageProcessorService.processPendingEmails(...);
 New code should prefer named imports:
 
 ```ts
-import { processMessage, sendEmail } from '../core/email';
-import { registerAgentProcessor } from '../core/email';
+import { sendEmail } from '../core/email';
 import { getLastProcessingErrors } from '../core/email';
+import { processMessage, registerAgentProcessor } from '../domain/scheduling/inbound';
 ```
 
 ## Invariants preserved
@@ -103,7 +106,8 @@ state, just like the lifecycle service in Phase 2a.
 The dedup migration happened in the same PR: direct calls to
 `redis.eval(ATOMIC_LOCK_CHECK_SCRIPT, ...)` and
 `prisma.processedGmailMessage.upsert(...)` are now routed through
-`core/messaging/message-dedup`. The unmatched-attempt logic stays
-local in `unmatched-attempts.ts` because it's DB-authoritative — the
-facade's version is Redis-only with a different reliability shape;
-aligning is a future PR.
+`core/messaging/message-dedup`. The unmatched-attempt logic (now in
+`domain/scheduling/inbound/unmatched-attempts.ts`, moved there in Stage
+D3) stays DB-authoritative rather than using the facade's Redis-only
+version, which has a different reliability shape; aligning the two is
+still a future PR.

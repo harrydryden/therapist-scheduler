@@ -29,6 +29,14 @@ jest.mock('../core/email', () => ({
   emailMessageProcessorService: {},
   getLastProcessingErrors: jest.fn().mockResolvedValue([]),
 }));
+// processMessage moved to domain/scheduling/inbound/ in Stage D3 — it's a
+// separate import in email-ingest.service.ts now, so it needs its own mock
+// alongside '../core/email' above to keep this test isolated from the real
+// (heavy) module graph.
+jest.mock('../domain/scheduling/inbound', () => ({
+  processMessage: jest.fn(),
+  registerAgentProcessor: jest.fn(),
+}));
 jest.mock('../utils/gmail-auth', () => ({
   acquireTokenRefreshLock: jest.fn(),
   releaseTokenRefreshLock: jest.fn(),

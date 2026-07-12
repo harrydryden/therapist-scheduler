@@ -28,14 +28,14 @@ jest.mock('../services/thread-fetching.service', () => ({
     formatThreadForAgent: jest.fn(),
   },
 }));
-jest.mock('../core/email/inbound/agent-processor', () => ({
+jest.mock('../domain/scheduling/inbound/agent-processor', () => ({
   getAgentProcessor: jest.fn(),
   registerAgentProcessor: jest.fn(),
 }));
 jest.mock('../services/settings.service', () => ({ getSettingValue: jest.fn() }));
 
 import type { EmailMessage } from '../utils/email-mime-parser';
-import { isWeeklyMailingReply } from '../core/email/inbound/weekly-mailing';
+import { isWeeklyMailingReply } from '../domain/scheduling/inbound/weekly-mailing';
 import { getSettingValue } from '../services/settings.service';
 
 function email(subject: string): EmailMessage {
