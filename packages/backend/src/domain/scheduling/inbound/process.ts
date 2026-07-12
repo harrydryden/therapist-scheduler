@@ -65,9 +65,9 @@ import {
   markMessageProcessed,
   releaseDbLock,
   shouldEmitProcessingAlert,
-} from '../../messaging/message-dedup';
+} from '../../../core/messaging/message-dedup';
 
-import { createLockRenewal } from './lock-renewal';
+import { createLockRenewal } from '../../../core/email/inbound/lock-renewal';
 import { getAgentProcessor } from './agent-processor';
 import { routeToAvailabilityAgent } from './availability-routing';
 import {
@@ -86,7 +86,7 @@ import {
   clearProcessingFailure,
   markFailureAbandoned,
   trackProcessingFailure,
-} from './processing-failures';
+} from '../../../core/email/inbound/processing-failures';
 
 const {
   PROCESSED_MESSAGES_KEY,

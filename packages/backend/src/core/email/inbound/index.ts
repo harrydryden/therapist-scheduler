@@ -1,13 +1,13 @@
 /**
- * Public surface for the inbound email pipeline.
- *
- * Most callers only need `processMessage` (the orchestrator) and
- * `registerAgentProcessor` (DI plumbing). The other exports are for
- * tests and the admin UI's MISSED-message preview.
+ * Public surface for what's left of the inbound email pipeline under
+ * core/. The orchestrator (`processMessage`) and the agent-processor DI
+ * registry moved to `domain/scheduling/inbound/` in Stage D3 (see
+ * docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md) — both were scheduling policy,
+ * not kernel mechanism. What remains here is generic per-message
+ * processing-failure bookkeeping, used by tests and the admin UI's
+ * MISSED-message preview.
  */
 
-export { processMessage } from './process';
-export { registerAgentProcessor, type AgentProcessor } from './agent-processor';
 export {
   getLastProcessingError,
   getLastProcessingErrors,

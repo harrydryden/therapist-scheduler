@@ -27,7 +27,7 @@
 import { logger } from '../../../utils/logger';
 import { prisma } from '../../../utils/database';
 import { slackNotificationService } from '../../../services/slack-notification.service';
-import { markMessageProcessed } from '../../messaging/message-dedup';
+import { markMessageProcessed } from '../../../core/messaging/message-dedup';
 import {
   detectThreadDivergence,
   getDivergenceSummary,
@@ -41,7 +41,7 @@ import { EMAIL_PROCESSING } from '../../../constants';
 import {
   markFailureAbandoned,
   trackProcessingFailure,
-} from './processing-failures';
+} from '../../../core/email/inbound/processing-failures';
 
 const { MAX_PROCESSING_FAILURES } = EMAIL_PROCESSING;
 
