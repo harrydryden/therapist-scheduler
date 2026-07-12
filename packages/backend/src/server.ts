@@ -371,7 +371,7 @@ async function buildServer() {
     // The scanner writes a heartbeat to Redis on every successful scan.
     // If it's stale (or missing), the scanner is unhealthy and incoming
     // therapist replies may be sitting unprocessed.
-    const scannerStatus = await missedMessageScannerService.getStatus();
+    const scannerStatus = await missedMessageScannerService.getHealthStatus();
     checks.missedMessageScanner = {
       status: scannerStatus.healthy ? 'ok' : 'degraded',
       ...scannerStatus,

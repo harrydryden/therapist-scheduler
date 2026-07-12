@@ -96,6 +96,33 @@ describe('processSentinelBatch', () => {
     );
   });
 
+  it("releases the sentinel and counts as skipped when schedule returns 'skip-and-release'", async () => {
+    // Models chase-email's pre-send safety check: the claim succeeds,
+    // then schedule() discovers (post-claim) a reason to abort and wants
+    // the sentinel released back — the opposite direction from 'skipped'
+    // (a post-claim tombstone where the callback advances it forward).
+    mockTryClaim.mockResolvedValue(true);
+    const schedule = jest.fn().mockResolvedValueOnce('skip-and-release').mockResolvedValueOnce(undefined);
+
+    await processSentinelBatch({
+      checkId: 'tick-1',
+      effectName: 'chase',
+      sentinelField: 'chaseSentAt',
+      fetchCandidates: async () => [{ id: 'apt-1' }, { id: 'apt-2' }],
+      schedule,
+    });
+
+    expect(mockReleaseClaim).toHaveBeenCalledWith('apt-1', 'chaseSentAt');
+    // Unlike the thrown-error path, this must NOT log at error level —
+    // it's an expected business-rule block, not a prep failure. schedule()
+    // itself is responsible for whatever logging/alerting it wants.
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ sent: 1, skipped: 1, checked: 2 }),
+      'chase processing complete',
+    );
+  });
+
   it('skips claim + schedule when preCheck returns wait (silent)', async () => {
     const schedule = jest.fn();
 

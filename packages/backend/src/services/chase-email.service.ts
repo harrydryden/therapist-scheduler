@@ -1,11 +1,6 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import {
-  tryClaimSentinel,
-  releaseSentinelClaim,
-  cleanupStuckSentinels,
-  EPOCH_SENTINEL,
-} from '../utils/atomic-sentinel-claim';
+import { cleanupStuckSentinels, EPOCH_SENTINEL } from '../utils/atomic-sentinel-claim';
 import { slackNotificationService } from './slack-notification.service';
 import { sendEmail } from '../core/email';
 import { emailIngestService } from './email-ingest.service';
@@ -18,7 +13,27 @@ import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { finalizeChase } from './periodic-effect-finalizers';
+import { processSentinelBatch } from './sentinel-batch-runner';
 import { PRE_BOOKING_STATUSES } from '../constants';
+
+interface ChaseCandidate {
+  id: string;
+  userName: string | null;
+  userEmail: string;
+  therapistName: string;
+  therapistEmail: string;
+  checkpointStage: string | null;
+  checkpointAt: Date | null;
+  gmailThreadId: string | null;
+  therapistGmailThreadId: string | null;
+  lastActivityAt: Date;
+}
+
+interface ChaseTarget {
+  target: 'user' | 'therapist';
+  email: string;
+  threadId: string | null;
+}
 
 class ChaseEmailService {
   /**
@@ -50,314 +65,303 @@ class ChaseEmailService {
         logger.warn({ checkId, resetCount: stuckCounts.chaseSentAt }, 'Reset stuck chase sentinels');
       }
 
-      // Find stale conversations that haven't been chased yet
-      // Includes pre-booking statuses AND confirmed-but-rescheduling appointments.
-      // Excludes appointments with an ACTIVE closure recommendation; previously
-      // dismissed/actioned recommendations are fine — see dismissClosureRecommendation
-      // for why we preserve closureRecommendedAt and gate on actioned instead.
-      const candidates = await prisma.appointmentRequest.findMany({
-        where: {
-          AND: [
-            {
-              OR: [
-                { status: { in: [...PRE_BOOKING_STATUSES] } },
-                { status: 'confirmed', reschedulingInProgress: true },
-              ],
-            },
-            {
-              OR: [
-                { closureRecommendedAt: null },
-                { closureRecommendationActioned: true },
-              ],
-            },
-          ],
-          lastActivityAt: { lt: chaseThreshold },
-          chaseSentAt: null, // Never chased (and not currently being sent)
-          humanControlEnabled: false, // Don't chase while under human control
-        },
-        select: {
-          id: true,
-          userName: true,
-          userEmail: true,
-          therapistName: true,
-          therapistEmail: true,
-          checkpointStage: true,
-          // Denormalised in column form (PR #268). The pre-send reply
-          // check below only needs the timestamp; pulling the full
-          // conversationState JSON blob (up to 500KB per row) just for
-          // this one field was the largest chase-tick cost identified
-          // by the DB hot-path audit.
-          checkpointAt: true,
-          gmailThreadId: true,
-          therapistGmailThreadId: true,
-          lastActivityAt: true,
-          // determineChaseTarget reads conversationState.checkpoint.context.lastEmailSentTo
-          // only for the `initial_contact`/`stalled`/no-checkpoint inference branch — a
-          // small fraction of candidates. Read on demand below to keep the hot path lean.
-        },
-        take: await getSettingValue<number>('chase.maxChaseBatchSize'),
-      });
+      // preCheck (run before the sentinel claim, per candidate) populates
+      // this with the target it computed so schedule() (run after the
+      // claim) doesn't have to redo the lazy conversationState fetch.
+      // Safe as a plain Map: processSentinelBatch runs preCheck then
+      // schedule sequentially per candidate before moving to the next.
+      const chaseTargets = new Map<string, ChaseTarget>();
 
-      if (candidates.length === 0) {
-        return 0;
-      }
-
-      let chasedCount = 0;
-
-      for (const appointment of candidates) {
-        try {
-          // For most stages the chase target is determined purely from
-          // `checkpointStage` (denormalised column). Only the three legacy
-          // branches (`initial_contact`, `stalled`, no-checkpoint) need to
-          // peek at `conversationState.checkpoint.context.lastEmailSentTo`,
-          // and those are a minority of candidates. Fetch the blob on
-          // demand for just those rows so the hot path stays lean.
-          let lastEmailSentTo: 'user' | 'therapist' | null = null;
-          const stage = appointment.checkpointStage;
-          if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
-            const lazy = await prisma.appointmentRequest.findUnique({
-              where: { id: appointment.id },
-              select: { conversationState: true },
-            });
-            const state = lazy?.conversationState as
-              | { checkpoint?: { context?: { lastEmailSentTo?: 'user' | 'therapist' } } }
-              | null;
-            lastEmailSentTo = state?.checkpoint?.context?.lastEmailSentTo ?? null;
-          }
-
-          // Determine who to chase based on checkpoint stage
-          const chaseTarget = this.determineChaseTarget(appointment, lastEmailSentTo);
-          if (!chaseTarget) {
-            logger.debug(
-              { checkId, appointmentId: appointment.id },
-              'Cannot determine chase target - skipping'
-            );
-            continue;
-          }
-
-          const { target, email, threadId } = chaseTarget;
-
-          // OPTIMISTIC LOCKING: claim this appointment via the shared
-          // sentinel helper (utils/atomic-sentinel-claim.ts). Returns
-          // false if another process beat us to it.
-          if (!(await tryClaimSentinel(appointment.id, 'chaseSentAt'))) {
-            continue;
-          }
-
+      const { sent: chasedCount } = await processSentinelBatch<ChaseCandidate>({
+        checkId,
+        effectName: 'chase',
+        sentinelField: 'chaseSentAt',
+        // Find stale conversations that haven't been chased yet
+        // Includes pre-booking statuses AND confirmed-but-rescheduling appointments.
+        // Excludes appointments with an ACTIVE closure recommendation; previously
+        // dismissed/actioned recommendations are fine — see dismissClosureRecommendation
+        // for why we preserve closureRecommendedAt and gate on actioned instead.
+        fetchCandidates: () => prisma.appointmentRequest.findMany({
+          where: {
+            AND: [
+              {
+                OR: [
+                  { status: { in: [...PRE_BOOKING_STATUSES] } },
+                  { status: 'confirmed', reschedulingInProgress: true },
+                ],
+              },
+              {
+                OR: [
+                  { closureRecommendedAt: null },
+                  { closureRecommendationActioned: true },
+                ],
+              },
+            ],
+            lastActivityAt: { lt: chaseThreshold },
+            chaseSentAt: null, // Never chased (and not currently being sent)
+            humanControlEnabled: false, // Don't chase while under human control
+          },
+          select: {
+            id: true,
+            userName: true,
+            userEmail: true,
+            therapistName: true,
+            therapistEmail: true,
+            checkpointStage: true,
+            // Denormalised in column form (PR #268). The pre-send reply
+            // check below only needs the timestamp; pulling the full
+            // conversationState JSON blob (up to 500KB per row) just for
+            // this one field was the largest chase-tick cost identified
+            // by the DB hot-path audit.
+            checkpointAt: true,
+            gmailThreadId: true,
+            therapistGmailThreadId: true,
+            lastActivityAt: true,
+            // determineChaseTarget reads conversationState.checkpoint.context.lastEmailSentTo
+            // only for the `initial_contact`/`stalled`/no-checkpoint inference branch — a
+            // small fraction of candidates. Read on demand below to keep the hot path lean.
+          },
+        }),
+        preCheck: async (appointment) => {
           try {
-            // PRE-SEND SAFETY CHECK: Verify the Gmail thread for an inbound
-            // reply that arrived AFTER the current checkpoint stage was entered.
-            // The cutoff is the checkpoint's `checkpoint_at` — older inbound
-            // messages are the very replies that advanced the conversation INTO
-            // this stage (or pre-existed it) and have already been accounted
-            // for. Per-checkpoint chasers (one chase per stage) would otherwise
-            // false-positive against those legitimately-processed replies.
-            //
-            // A reply newer than the cutoff is genuinely concerning: either it
-            // was abandoned after MAX_UNMATCHED_ATTEMPTS / MAX_PROCESSING_FAILURES,
-            // or the recipient replied without our processing catching up. We
-            // block the chase and alert so admins can recover by hand.
-            //
-            // If no checkpoint_at is present (legacy/malformed state), fall back
-            // to the old "any inbound reply blocks" safety-first behaviour.
-            //
-            // We check both the therapist and user threads — a fresh reply on
-            // either side means the conversation is not truly stale.
-            const threadIdsToCheck = new Set<string>();
-            if (threadId) threadIdsToCheck.add(threadId);
-            if (appointment.therapistGmailThreadId) threadIdsToCheck.add(appointment.therapistGmailThreadId);
-            if (appointment.gmailThreadId) threadIdsToCheck.add(appointment.gmailThreadId);
-
-            // Read from the denormalised column populated by storeConversationState +
-            // applyCheckpointUpdate (PR #268). Replaces the previous JSON path
-            // extraction from `appointment.conversationState` — the row no longer
-            // includes the blob, so this hot path doesn't pull MB of payload per
-            // tick for one timestamp.
-            const sinceMs = appointment.checkpointAt?.getTime();
-
-            if (threadIdsToCheck.size > 0) {
-              try {
-                let hasReply = false;
-                for (const tid of threadIdsToCheck) {
-                  if (await emailIngestService.threadContainsInboundReplies(
-                    tid,
-                    `chase-presend:${appointment.id}`,
-                    sinceMs,
-                  )) {
-                    hasReply = true;
-                    break;
-                  }
-                }
-
-                if (hasReply) {
-                  logger.warn(
-                    {
-                      checkId,
-                      appointmentId: appointment.id,
-                      target,
-                      sinceMs,
-                    },
-                    'Thread contains inbound reply newer than current stage — skipping chase'
-                  );
-
-                  // Release the sentinel so the appointment can be re-evaluated.
-                  await releaseSentinelClaim(appointment.id, 'chaseSentAt');
-
-                  // Also attempt to recover any unprocessed messages (best-effort).
-                  // This handles the case where the reply was never processed at all.
-                  for (const tid of threadIdsToCheck) {
-                    try {
-                      await emailIngestService.checkThreadForUnprocessedReplies(
-                        tid,
-                        `chase-presend-recovery:${appointment.id}`
-                      );
-                    } catch {
-                      // Non-fatal — the important thing is we don't send the chase
-                    }
-                  }
-
-                  // Alert admins so they can investigate why the reply wasn't
-                  // processed successfully through normal paths. PII discipline:
-                  // first name only for the user (utils/first-name.ts).
-                  slackNotificationService.sendAlert({
-                    title: 'Chase prevented — reply exists on thread',
-                    severity: 'high',
-                    appointmentId: appointment.id,
-                    therapistName: appointment.therapistName,
-                    details:
-                      `Blocked chase to *${target}* because the Gmail thread received ` +
-                      `an inbound reply after the current checkpoint stage was entered ` +
-                      `and our system hasn't acted on it — investigate and manually recover.`,
-                    additionalFields: {
-                      'Client': firstName(appointment.userName, '(unknown)'),
-                      'Chase target': target,
-                    },
-                  }).catch(() => {});
-
-                  continue; // Skip to next candidate
-                }
-              } catch (preCheckErr) {
-                // Non-fatal: if the thread check fails (OAuth issue, API error),
-                // still send the chase rather than silently dropping it.
-                logger.warn(
-                  { checkId, appointmentId: appointment.id, error: preCheckErr },
-                  'Pre-chase thread check failed — proceeding with chase send'
-                );
-              }
+            // For most stages the chase target is determined purely from
+            // `checkpointStage` (denormalised column). Only the three legacy
+            // branches (`initial_contact`, `stalled`, no-checkpoint) need to
+            // peek at `conversationState.checkpoint.context.lastEmailSentTo`,
+            // and those are a minority of candidates. Fetch the blob on
+            // demand for just those rows so the hot path stays lean.
+            let lastEmailSentTo: 'user' | 'therapist' | null = null;
+            const stage = appointment.checkpointStage;
+            if (stage === 'initial_contact' || stage === 'stalled' || !stage) {
+              const lazy = await prisma.appointmentRequest.findUnique({
+                where: { id: appointment.id },
+                select: { conversationState: true },
+              });
+              const state = lazy?.conversationState as
+                | { checkpoint?: { context?: { lastEmailSentTo?: 'user' | 'therapist' } } }
+                | null;
+              lastEmailSentTo = state?.checkpoint?.context?.lastEmailSentTo ?? null;
             }
 
-            const therapistFirstName = firstName(appointment.therapistName);
-            // 'the client' for the therapist-facing email body (so they
-            // read "your client X"); 'there' for the user-facing greeting
-            // (so they see "Hi there,").
-            const clientFirstName = firstName(appointment.userName, 'the client');
-            const userGreetingName = firstName(appointment.userName);
-
-            // Build the chase email using templates. Templates address the
-            // recipient by first name only — see utils/first-name.ts. Done
-            // synchronously here (still inside the inner try) so a
-            // template-load failure flows through the catch-block sentinel
-            // release; if we deferred it to renderPayload inside the
-            // harness, a render throw would prevent registration and the
-            // sentinel would be stuck at EPOCH with no retry.
-            let subject: string;
-            let body: string;
-
-            if (target === 'user') {
-              subject = await getEmailSubject('chaseUser', {
-                therapistName: therapistFirstName,
-              });
-              body = await getEmailBody('chaseUser', {
-                userName: userGreetingName,
-                therapistName: therapistFirstName,
-              });
-            } else {
-              subject = await getEmailSubject('chaseTherapist', {
-                clientFirstName,
-              });
-              body = await getEmailBody('chaseTherapist', {
-                therapistFirstName,
-                clientFirstName,
-              });
+            // Determine who to chase based on checkpoint stage
+            const chaseTarget = this.determineChaseTarget(appointment, lastEmailSentTo);
+            if (!chaseTarget) {
+              return { kind: 'skip' as const, debugLog: 'Cannot determine chase target - skipping' };
             }
 
-            const inactiveHours = Math.round(
-              (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
-            );
-            const effectType = target === 'user' ? 'email_chase_user' : 'email_chase_therapist';
-
-            // Tracked side effect. Send + checkpoint advance + audit
-            // recording all live in execute so retry replays the whole
-            // unit if the process dies mid-flight. The sentinel claim
-            // above still protects against concurrent ticks (the harness's
-            // `pending` state doesn't block parallel execute calls), and
-            // the stored payload lets retry replay the email without
-            // re-rendering against drifted template settings.
-            runPeriodicTrackedSideEffect(
-              { kind: 'appointment', appointmentId: appointment.id },
-              effectType,
-              {
-                renderPayload: async () => ({
-                  to: email,
-                  subject,
-                  body,
-                  threadId: threadId || undefined,
-                }),
-                execute: async (payload) => {
-                  await sendEmail(payload);
-
-                  // Same finalization (checkpoint advance + chase-sent
-                  // metadata + audit event) runs whether this is the first
-                  // attempt or a retry replaying the stored payload — see
-                  // finalizeChase's own doc comment.
-                  await finalizeChase({
-                    appointmentId: appointment.id,
-                    target,
-                    targetEmail: email,
-                    now: new Date(),
-                    checkId,
-                    userName: appointment.userName,
-                    therapistName: appointment.therapistName,
-                    inactiveHours,
-                  });
-                },
-              },
-              {
-                name: 'chase-email',
-                context: { appointmentId: appointment.id, target },
-              },
-            );
-
-            // Counted at queue time, not at completion — the harness is
-            // fire-and-forget. A failure inside execute is logged + retried
-            // by the side-effect-retry runner; this count reflects "chases
-            // queued in this tick", which is what the periodic runner
-            // observability wants.
-            chasedCount++;
+            chaseTargets.set(appointment.id, chaseTarget);
+            return { kind: 'proceed' as const };
           } catch (error) {
-            // Errors from the pre-send safety check or template render
-            // land here. Reset the sentinel so the appointment can be
-            // re-evaluated on the next tick. Failures inside the harness
-            // execute do NOT flow through this catch — the harness marks
-            // its row failed and the retry runner handles them.
-            await prisma.appointmentRequest.update({
-              where: { id: appointment.id },
-              data: { chaseSentAt: null },
-              select: { id: true },
-            });
-
+            // Mirrors the pre-migration outer catch: a failure determining
+            // the chase target (e.g. the lazy conversationState fetch)
+            // doesn't abort the whole batch — skip this candidate and let
+            // the next tick's candidate query re-evaluate it.
             logger.error(
               { checkId, appointmentId: appointment.id, error },
-              'Failed to prepare chase follow-up email - will retry next cycle'
+              'Failed to process chase follow-up for appointment'
             );
+            return { kind: 'skip' as const };
           }
-        } catch (error) {
-          logger.error(
-            { checkId, appointmentId: appointment.id, error },
-            'Failed to process chase follow-up for appointment'
+        },
+        schedule: async (appointment) => {
+          // Set by preCheck above — proceed only reaches schedule() when
+          // this was populated.
+          const { target, email, threadId } = chaseTargets.get(appointment.id)!;
+          chaseTargets.delete(appointment.id);
+
+          // PRE-SEND SAFETY CHECK: Verify the Gmail thread for an inbound
+          // reply that arrived AFTER the current checkpoint stage was entered.
+          // The cutoff is the checkpoint's `checkpoint_at` — older inbound
+          // messages are the very replies that advanced the conversation INTO
+          // this stage (or pre-existed it) and have already been accounted
+          // for. Per-checkpoint chasers (one chase per stage) would otherwise
+          // false-positive against those legitimately-processed replies.
+          //
+          // A reply newer than the cutoff is genuinely concerning: either it
+          // was abandoned after MAX_UNMATCHED_ATTEMPTS / MAX_PROCESSING_FAILURES,
+          // or the recipient replied without our processing catching up. We
+          // block the chase and alert so admins can recover by hand.
+          //
+          // If no checkpoint_at is present (legacy/malformed state), fall back
+          // to the old "any inbound reply blocks" safety-first behaviour.
+          //
+          // We check both the therapist and user threads — a fresh reply on
+          // either side means the conversation is not truly stale.
+          const threadIdsToCheck = new Set<string>();
+          if (threadId) threadIdsToCheck.add(threadId);
+          if (appointment.therapistGmailThreadId) threadIdsToCheck.add(appointment.therapistGmailThreadId);
+          if (appointment.gmailThreadId) threadIdsToCheck.add(appointment.gmailThreadId);
+
+          // Read from the denormalised column populated by storeConversationState +
+          // applyCheckpointUpdate (PR #268). Replaces the previous JSON path
+          // extraction from `appointment.conversationState` — the row no longer
+          // includes the blob, so this hot path doesn't pull MB of payload per
+          // tick for one timestamp.
+          const sinceMs = appointment.checkpointAt?.getTime();
+
+          if (threadIdsToCheck.size > 0) {
+            try {
+              let hasReply = false;
+              for (const tid of threadIdsToCheck) {
+                if (await emailIngestService.threadContainsInboundReplies(
+                  tid,
+                  `chase-presend:${appointment.id}`,
+                  sinceMs,
+                )) {
+                  hasReply = true;
+                  break;
+                }
+              }
+
+              if (hasReply) {
+                logger.warn(
+                  {
+                    checkId,
+                    appointmentId: appointment.id,
+                    target,
+                    sinceMs,
+                  },
+                  'Thread contains inbound reply newer than current stage — skipping chase'
+                );
+
+                // Also attempt to recover any unprocessed messages (best-effort).
+                // This handles the case where the reply was never processed at all.
+                for (const tid of threadIdsToCheck) {
+                  try {
+                    await emailIngestService.checkThreadForUnprocessedReplies(
+                      tid,
+                      `chase-presend-recovery:${appointment.id}`
+                    );
+                  } catch {
+                    // Non-fatal — the important thing is we don't send the chase
+                  }
+                }
+
+                // Alert admins so they can investigate why the reply wasn't
+                // processed successfully through normal paths. PII discipline:
+                // first name only for the user (utils/first-name.ts).
+                slackNotificationService.sendAlert({
+                  title: 'Chase prevented — reply exists on thread',
+                  severity: 'high',
+                  appointmentId: appointment.id,
+                  therapistName: appointment.therapistName,
+                  details:
+                    `Blocked chase to *${target}* because the Gmail thread received ` +
+                    `an inbound reply after the current checkpoint stage was entered ` +
+                    `and our system hasn't acted on it — investigate and manually recover.`,
+                  additionalFields: {
+                    'Client': firstName(appointment.userName, '(unknown)'),
+                    'Chase target': target,
+                  },
+                }).catch(() => {});
+
+                // Release the sentinel (runner does this for
+                // 'skip-and-release') so the appointment can be
+                // re-evaluated next tick, without the runner's generic
+                // "prep failed" error-level log — this is an expected
+                // business-rule block, not a failure, and the specific
+                // warn + Slack alert above already cover it.
+                return 'skip-and-release';
+              }
+            } catch (preCheckErr) {
+              // Non-fatal: if the thread check fails (OAuth issue, API error),
+              // still send the chase rather than silently dropping it.
+              logger.warn(
+                { checkId, appointmentId: appointment.id, error: preCheckErr },
+                'Pre-chase thread check failed — proceeding with chase send'
+              );
+            }
+          }
+
+          const therapistFirstName = firstName(appointment.therapistName);
+          // 'the client' for the therapist-facing email body (so they
+          // read "your client X"); 'there' for the user-facing greeting
+          // (so they see "Hi there,").
+          const clientFirstName = firstName(appointment.userName, 'the client');
+          const userGreetingName = firstName(appointment.userName);
+
+          // Build the chase email using templates. Templates address the
+          // recipient by first name only — see utils/first-name.ts. Done
+          // synchronously here (still inside schedule()) so a
+          // template-load failure flows through the runner's own
+          // catch-and-release-sentinel handling; if we deferred it to
+          // renderPayload inside the harness, a render throw would
+          // prevent registration and the sentinel would be stuck at
+          // EPOCH with no retry.
+          let subject: string;
+          let body: string;
+
+          if (target === 'user') {
+            subject = await getEmailSubject('chaseUser', {
+              therapistName: therapistFirstName,
+            });
+            body = await getEmailBody('chaseUser', {
+              userName: userGreetingName,
+              therapistName: therapistFirstName,
+            });
+          } else {
+            subject = await getEmailSubject('chaseTherapist', {
+              clientFirstName,
+            });
+            body = await getEmailBody('chaseTherapist', {
+              therapistFirstName,
+              clientFirstName,
+            });
+          }
+
+          const inactiveHours = Math.round(
+            (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
           );
-        }
-      }
+          const effectType = target === 'user' ? 'email_chase_user' : 'email_chase_therapist';
+
+          // Tracked side effect. Send + checkpoint advance + audit
+          // recording all live in execute so retry replays the whole
+          // unit if the process dies mid-flight. The sentinel claim
+          // still protects against concurrent ticks (the harness's
+          // `pending` state doesn't block parallel execute calls), and
+          // the stored payload lets retry replay the email without
+          // re-rendering against drifted template settings.
+          runPeriodicTrackedSideEffect(
+            { kind: 'appointment', appointmentId: appointment.id },
+            effectType,
+            {
+              renderPayload: async () => ({
+                to: email,
+                subject,
+                body,
+                threadId: threadId || undefined,
+              }),
+              execute: async (payload) => {
+                await sendEmail(payload);
+
+                // Same finalization (checkpoint advance + chase-sent
+                // metadata + audit event) runs whether this is the first
+                // attempt or a retry replaying the stored payload — see
+                // finalizeChase's own doc comment.
+                await finalizeChase({
+                  appointmentId: appointment.id,
+                  target,
+                  targetEmail: email,
+                  now: new Date(),
+                  checkId,
+                  userName: appointment.userName,
+                  therapistName: appointment.therapistName,
+                  inactiveHours,
+                });
+              },
+            },
+            {
+              name: 'chase-email',
+              context: { appointmentId: appointment.id, target },
+            },
+          );
+
+          // Returning void counts this candidate as 'sent' in the
+          // runner's tally — counted at queue time, not at completion,
+          // since the harness is fire-and-forget. A failure inside
+          // execute is logged + retried by the side-effect-retry runner.
+        },
+      });
 
       return chasedCount;
     } catch (error) {
