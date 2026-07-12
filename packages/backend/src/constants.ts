@@ -126,6 +126,16 @@ export {
   CONFIRMED_ACTIVE_STATUSES,
 } from '@therapist-scheduler/shared';
 
+// Post-booking follow-up distributed lock. Was the only appointment-
+// mutating periodic runner with no lock at all (single-writer sends were
+// protected only by the per-appointment sentinel columns, not a
+// process-level lock) — see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md.
+export const POST_BOOKING_FOLLOWUP_LOCK = {
+  KEY: 'post-booking-followup:processing-lock',
+  TTL_SECONDS: 300, // 5 minutes - runs 6 sequential sub-checks per tick
+  RENEWAL_INTERVAL_MS: 60 * 1000, // Renew every 60 seconds
+} as const;
+
 // Post-booking follow-up — DEFAULTS ONLY, runtime values come from postBooking.* settings
 export const POST_BOOKING = {
   MEETING_LINK_CHECK_DELAY_HOURS: 24,

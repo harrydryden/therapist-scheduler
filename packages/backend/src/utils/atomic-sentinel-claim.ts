@@ -141,3 +141,42 @@ export async function releaseSentinelClaim(
   });
   return result.count > 0;
 }
+
+/**
+ * Reset stuck sentinels — rows where `gateField` is still the EPOCH
+ * sentinel (claimed but never confirmed/released) because the process
+ * that claimed them crashed or was killed mid-tick before it could
+ * confirm or release. Each periodic runner calls this once per tick,
+ * before evaluating candidates, so a crash never permanently strands a
+ * row past `olderThanMs`.
+ *
+ * Every caller previously hand-rolled this exact updateMany with an
+ * inline `new Date(0)` literal for the sentinel value — consolidated
+ * here so there's one place that defines "stuck" and one shared
+ * implementation of the reset.
+ *
+ * Returns the reset count per field, so callers can log per-field
+ * warnings exactly as before.
+ */
+export async function cleanupStuckSentinels(
+  fields: readonly AppointmentSentinelField[],
+  olderThanMs: number,
+): Promise<Record<string, number>> {
+  const cutoff = new Date(Date.now() - olderThanMs);
+  const counts: Record<string, number> = {};
+
+  const results = await Promise.all(
+    fields.map((field) =>
+      prisma.appointmentRequest.updateMany({
+        where: { [field]: EPOCH_SENTINEL, updatedAt: { lt: cutoff } },
+        data: { [field]: null },
+      }),
+    ),
+  );
+
+  fields.forEach((field, i) => {
+    counts[field] = results[i].count;
+  });
+
+  return counts;
+}

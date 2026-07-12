@@ -44,7 +44,7 @@ import {
 } from '../../../utils/email-mime-parser';
 import { runWithTrace, extendTraceContext } from '../../../utils/request-tracing';
 import { ConcurrentModificationError } from '../../../errors';
-import { EMAIL, EMAIL_PROCESSING } from '../../../constants';
+import { EMAIL, EMAIL_PROCESSING, PRE_BOOKING_STATUSES } from '../../../constants';
 import { isGmail404 } from '../../../utils/gmail-errors';
 import { classifyEmail } from '../../../services/email-classifier.service';
 import { emailBounceService } from '../../../services/email-bounce.service';
@@ -415,7 +415,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
             { userEmail: email.from },
             { therapistEmail: email.from },
           ],
-          status: { in: ['pending', 'contacted', 'negotiating', 'confirmed'] },
+          status: { in: [...PRE_BOOKING_STATUSES, 'confirmed'] },
         },
         select: {
           id: true,

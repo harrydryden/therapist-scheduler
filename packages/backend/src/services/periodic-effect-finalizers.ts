@@ -21,7 +21,7 @@
 
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
-import { confirmSentinelClaim } from '../utils/atomic-sentinel-claim';
+import { confirmSentinelClaim, EPOCH_SENTINEL } from '../utils/atomic-sentinel-claim';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
@@ -82,7 +82,7 @@ export async function finalizeChase(args: {
     appointmentId,
     'sent_chase_followup',
     {
-      extraWhere: { chaseSentAt: new Date(0) }, // sentinel guard
+      extraWhere: { chaseSentAt: EPOCH_SENTINEL }, // sentinel guard
       extraUpdates: {
         chaseSentAt: now,
         chaseSentTo: target,

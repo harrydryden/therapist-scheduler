@@ -92,6 +92,7 @@ export class LockedTaskRunner {
     }
 
     let lockValid = true;
+    let timedOut = false;
     let renewalId: NodeJS.Timeout | null = null;
 
     // Start lock renewal
@@ -119,6 +120,7 @@ export class LockedTaskRunner {
         new Promise<never>((_, reject) => {
           setTimeout(() => {
             lockValid = false;
+            timedOut = true;
             reject(new Error(
               `Locked task '${context}' exceeded max execution time (${maxExecutionMs}ms)`
             ));
@@ -135,7 +137,21 @@ export class LockedTaskRunner {
         clearInterval(renewalId);
         renewalId = null;
       }
-      await releaseLock(lockKey, instanceId, context);
+      if (timedOut) {
+        // Promise.race doesn't cancel the loser — the timed-out task keeps
+        // running in the background. Releasing the lock here would let a
+        // new claimant (the next scheduled tick, or another instance) start
+        // work concurrently with that zombie. Leave the lock in place —
+        // renewal already stopped above, so its TTL fences the zombie and
+        // expires on its own, bounded by lockTtlSeconds, instead of being
+        // handed to a new owner immediately.
+        logger.error(
+          { lockKey, context, maxExecutionMs },
+          'Locked task timed out — NOT releasing the lock (task may still be running in the background); it will expire via TTL',
+        );
+      } else {
+        await releaseLock(lockKey, instanceId, context);
+      }
     }
   }
 }

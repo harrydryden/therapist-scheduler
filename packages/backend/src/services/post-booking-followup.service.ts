@@ -16,8 +16,12 @@
 
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { confirmSentinelClaim } from '../utils/atomic-sentinel-claim';
-import { PeriodicService } from '../utils/periodic-service';
+import {
+  confirmSentinelClaim,
+  cleanupStuckSentinels as cleanupStuckSentinelFields,
+} from '../utils/atomic-sentinel-claim';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
+import type { LockedTaskContext } from '../utils/locked-task-runner';
 import { emailProcessingService } from './email-processing.service';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import {
@@ -41,7 +45,7 @@ import {
   type SessionReminderPairPayload,
 } from './periodic-effect-finalizers';
 import { processSentinelBatch } from './sentinel-batch-runner';
-import { POST_BOOKING, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
+import { POST_BOOKING, POST_BOOKING_FOLLOWUP_LOCK, APPOINTMENT_STATUS, POST_BOOKING_PROCESSING } from '../constants';
 import { buildFeedbackEmailPayload, buildFeedbackFormUrl } from './feedback-email.helper';
 
 // Processing constants — imported from centralized constants
@@ -58,7 +62,7 @@ interface ParseFailureEntry {
   firstFailure: number; // Track when we first started failing to enable daily reparse
 }
 
-class PostBookingFollowupService extends PeriodicService {
+class PostBookingFollowupService extends LockedPeriodicService<void> {
   // Track parse failures with timestamps to allow retry after reset period
   // Bounded to prevent unbounded memory growth
   private static MAX_PARSE_FAILURES = POST_BOOKING_PROCESSING.MAX_PARSE_FAILURES;
@@ -68,20 +72,23 @@ class PostBookingFollowupService extends PeriodicService {
     super({
       name: 'post-booking-followup',
       intervalMs: POST_BOOKING.CHECK_INTERVAL_MS,
+      lockKey: POST_BOOKING_FOLLOWUP_LOCK.KEY,
+      lockTtlSeconds: POST_BOOKING_FOLLOWUP_LOCK.TTL_SECONDS,
+      renewalIntervalMs: POST_BOOKING_FOLLOWUP_LOCK.RENEWAL_INTERVAL_MS,
     });
   }
 
   /**
    * Get service status for health checks
    */
-  getStatus(): { running: boolean; intervalMs: number; parseFailures: number } {
+  getStatus(): ReturnType<LockedPeriodicService<void>['getStatus']> & { parseFailures: number } {
     return {
       ...super.getStatus(),
       parseFailures: this.parseFailures.size,
     };
   }
 
-  protected async runCheck(): Promise<void> {
+  protected async tick(_ctx: LockedTaskContext): Promise<void> {
     await this.processFollowUps();
   }
 
@@ -123,10 +130,8 @@ class PostBookingFollowupService extends PeriodicService {
    * during frequent process restarts (e.g., deployments)
    */
   private async cleanupStuckSentinels(checkId: string): Promise<void> {
-    const epochDate = new Date(0);
-    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
-
-    // All 4 sentinel resets are independent — run concurrently
+    // All 4 sentinel resets are independent — the shared helper runs
+    // them concurrently.
     const sentinelFields = [
       { field: 'meetingLinkCheckSentAt', label: 'meeting link check' },
       { field: 'feedbackFormSentAt', label: 'feedback form' },
@@ -134,20 +139,16 @@ class PostBookingFollowupService extends PeriodicService {
       { field: 'feedbackReminderSentAt', label: 'feedback reminder' },
     ] as const;
 
-    const results = await Promise.all(
-      sentinelFields.map(({ field }) =>
-        prisma.appointmentRequest.updateMany({
-          where: { [field]: epochDate, updatedAt: { lt: twoMinutesAgo } },
-          data: { [field]: null },
-        })
-      )
+    const counts = await cleanupStuckSentinelFields(
+      sentinelFields.map((f) => f.field),
+      2 * 60 * 1000,
     );
 
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].count > 0) {
+    for (const { field, label } of sentinelFields) {
+      if (counts[field] > 0) {
         logger.warn(
-          { checkId, resetCount: results[i].count },
-          `Reset stuck ${sentinelFields[i].label} sentinels`
+          { checkId, resetCount: counts[field] },
+          `Reset stuck ${label} sentinels`
         );
       }
     }

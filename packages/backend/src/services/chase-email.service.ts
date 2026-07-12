@@ -1,6 +1,11 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { tryClaimSentinel, releaseSentinelClaim } from '../utils/atomic-sentinel-claim';
+import {
+  tryClaimSentinel,
+  releaseSentinelClaim,
+  cleanupStuckSentinels,
+  EPOCH_SENTINEL,
+} from '../utils/atomic-sentinel-claim';
 import { slackNotificationService } from './slack-notification.service';
 import { emailProcessingService } from './email-processing.service';
 import { getSettingValue } from './settings.service';
@@ -39,16 +44,9 @@ class ChaseEmailService {
       const chaseThreshold = new Date(Date.now() - chaseAfterHours * 60 * 60 * 1000);
 
       // Clean up stuck sentinels from crashed processes (>2 min old)
-      const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
-      const stuckReset = await prisma.appointmentRequest.updateMany({
-        where: {
-          chaseSentAt: new Date(0),
-          updatedAt: { lt: twoMinutesAgo },
-        },
-        data: { chaseSentAt: null },
-      });
-      if (stuckReset.count > 0) {
-        logger.warn({ checkId, resetCount: stuckReset.count }, 'Reset stuck chase sentinels');
+      const stuckCounts = await cleanupStuckSentinels(['chaseSentAt'], 2 * 60 * 1000);
+      if (stuckCounts.chaseSentAt > 0) {
+        logger.warn({ checkId, resetCount: stuckCounts.chaseSentAt }, 'Reset stuck chase sentinels');
       }
 
       // Find stale conversations that haven't been chased yet
@@ -488,7 +486,7 @@ class ChaseEmailService {
             },
           ],
           chaseSentAt: {
-            gt: new Date(0), // Exclude null and sentinels (in-flight sends)
+            gt: EPOCH_SENTINEL, // Exclude null and sentinels (in-flight sends)
             lt: closureThreshold, // Chase sent > threshold ago
           },
           lastActivityAt: { lt: closureThreshold },
@@ -622,7 +620,7 @@ class ChaseEmailService {
         where: {
           status: 'feedback_requested',
           feedbackReminderSentAt: {
-            gt: new Date(0), // Excludes both null and epoch sentinel
+            gt: EPOCH_SENTINEL, // Excludes both null and epoch sentinel
             lt: threshold, // Reminder sent > threshold ago
           },
         },

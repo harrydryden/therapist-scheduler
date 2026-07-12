@@ -1,6 +1,7 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
-import { LockedTaskRunner } from '../utils/locked-task-runner';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
+import type { LockedTaskContext } from '../utils/locked-task-runner';
 import { getSettingValue } from './settings.service';
 import { emailProcessingService } from './email-processing.service';
 import { renderTemplate } from '../utils/email-templates';
@@ -20,54 +21,21 @@ const LOCK_CONFIG = {
   RENEWAL_INTERVAL_MS: 60 * 1000,
 };
 
-class TherapistNudgeService {
-  private intervalId: NodeJS.Timeout | null = null;
-  private instanceId: string;
-  private taskRunner: LockedTaskRunner;
-
+class TherapistNudgeService extends LockedPeriodicService<void> {
   constructor() {
-    this.instanceId = `${process.pid}-${Date.now().toString(36)}-nudge`;
-    this.taskRunner = new LockedTaskRunner({
+    super({
+      name: 'therapist-nudge',
+      intervalMs: CHECK_INTERVAL_MS,
+      // Delay initial run by 3 minutes to let other services initialize.
+      startupDelayMs: 3 * 60 * 1000,
       lockKey: LOCK_CONFIG.KEY,
       lockTtlSeconds: LOCK_CONFIG.TTL_SECONDS,
       renewalIntervalMs: LOCK_CONFIG.RENEWAL_INTERVAL_MS,
-      instanceId: this.instanceId,
-      context: 'therapist-nudge',
     });
   }
 
-  start(): void {
-    if (this.intervalId) {
-      logger.warn('Therapist nudge service already running');
-      return;
-    }
-
-    logger.info('Starting therapist nudge service (checks every 6 hours)');
-
-    // Delay initial run by 3 minutes to let other services initialize
-    setTimeout(() => {
-      this.runSafe();
-    }, 3 * 60 * 1000);
-
-    this.intervalId = setInterval(() => {
-      this.runSafe();
-    }, CHECK_INTERVAL_MS);
-  }
-
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    logger.info('Therapist nudge service stopped');
-  }
-
-  private async runSafe(): Promise<void> {
-    try {
-      await this.taskRunner.run((ctx) => this.sendNudges(ctx.isLockValid));
-    } catch (err) {
-      logger.error({ err }, 'Therapist nudge check failed');
-    }
+  protected async tick(ctx: LockedTaskContext): Promise<void> {
+    await this.sendNudges(ctx.isLockValid);
   }
 
   /**

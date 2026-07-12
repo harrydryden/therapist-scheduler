@@ -5,7 +5,7 @@ import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { slackNotificationService } from './slack-notification.service';
 import { emailQueueService } from './email-queue.service';
-import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES, RESCHEDULE_OVERDUE_GRACE_MS } from '../constants';
+import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES, RESCHEDULE_OVERDUE_GRACE_MS, TERMINAL_STATUSES } from '../constants';
 import { parseConfirmedDateTime } from '../utils/date';
 import { getSettingValue } from './settings.service';
 import { chaseEmailService } from './chase-email.service';
@@ -323,7 +323,7 @@ class StaleCheckService extends LockedPeriodicService {
             { userId: null },
             { therapistId: null },
           ],
-          status: { notIn: ['cancelled', 'completed'] },
+          status: { notIn: [...TERMINAL_STATUSES] },
         },
       });
       if (orphanedCount > 0) {
@@ -475,7 +475,7 @@ class StaleCheckService extends LockedPeriodicService {
       // These appointments are no longer active and should not show alerts
       const clearedTerminalStallResult = await prisma.appointmentRequest.updateMany({
         where: {
-          status: { in: ['completed', 'cancelled'] },
+          status: { in: [...TERMINAL_STATUSES] },
           conversationStallAlertAt: { not: null },
         },
         data: {
