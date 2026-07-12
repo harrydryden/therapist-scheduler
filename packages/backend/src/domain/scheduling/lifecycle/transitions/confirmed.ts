@@ -36,6 +36,7 @@ import {
 } from '../../../../errors';
 import { appointmentNotificationsService } from '../../../../services/appointment-notifications.service';
 import { transitionSideEffectsService } from '../../../../services/transition-side-effects.service';
+import { sideEffectTrackerService } from '../../../../services/side-effect-tracker.service';
 import { addAuditMessage, recordStatusChangeEvent } from '../audit';
 import {
   CLEAR_RESCHEDULING_STATE,
@@ -129,6 +130,12 @@ export async function transitionToConfirmed(
   const isReschedule = wasConfirmed && !areDatetimesEqual(appointment.confirmedDateTime, confirmedDateTime);
   const reschedule = params.reschedule;
 
+  // Fetched before the transaction so the intent-registration inside it
+  // knows which effect rows to pre-register (register-in-tx-design.md §6).
+  // A settings toggle flipped in the narrow window between this fetch and
+  // the post-commit dispatch is an accepted, bounded edge case.
+  const notificationSettings = await appointmentNotificationsService.getNotificationSettings();
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const updateData: any = {
     status: APPOINTMENT_STATUS.CONFIRMED,
@@ -191,21 +198,109 @@ export async function transitionToConfirmed(
     ...(atomic?.requireHumanControlDisabled ? { humanControlEnabled: false } : {}),
   };
 
+  // Register the confirmed-side intent rows atomically with the status
+  // update — closes the crash window (finding #10) between the commit and
+  // the post-commit fireAndForget dispatch below, matching the Phase 1
+  // treatment of cancelled/completed (register-in-tx-design.md).
+  //
+  // Unlike those two, transitionToConfirmed was NOT previously wrapped in
+  // a transaction — its atomicity came from a single `update` whose WHERE
+  // encodes every precondition. To make the intent INSERTs atomic with
+  // that commit, the update now runs inside an explicit $transaction.
+  //
+  // Isolation: Read Committed (Prisma's default), NOT Serializable. The
+  // concurrency safety here comes entirely from the WHERE-clause
+  // preconditions on the single UPDATE plus PG's row lock (a concurrent
+  // confirmation blocks on the lock, then re-evaluates its WHERE against
+  // the committed row and matches 0 rows → P2025 → idempotent skip) — not
+  // from snapshot isolation. The added INSERTs read no contested state.
+  // Escalating to Serializable would introduce serialization-conflict
+  // aborts this hot path has never had to handle, for no safety gain (see
+  // register-in-tx-design.md §5).
+  //
+  // Effect idempotency keys MUST match what the post-commit dispatch code
+  // computes, or that code creates a duplicate row instead of finding this
+  // one: the three notification effects are keyed WITH the post-update
+  // generation (matching notifyConfirmed), while therapist_freeze_sync is
+  // keyed WITHOUT one (matching transitionSideEffectsService.onConfirmed).
+  const registerConfirmedIntents = async (
+    tx: Prisma.TransactionClient,
+    generation: number,
+  ): Promise<void> => {
+    if (appointment.therapistHandle) {
+      await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'confirmed', {
+        effectType: 'therapist_freeze_sync',
+      });
+    }
+    if (notificationSettings.slack.confirmed) {
+      await sideEffectTrackerService.registerInTransaction(
+        tx,
+        appointmentId,
+        'confirmed',
+        { effectType: 'slack_notify_confirmed' },
+        generation,
+      );
+    }
+    if (sendEmails && notificationSettings.email.clientConfirmation) {
+      await sideEffectTrackerService.registerInTransaction(
+        tx,
+        appointmentId,
+        'confirmed',
+        { effectType: 'email_client_confirmation' },
+        generation,
+      );
+    }
+    if (sendEmails && notificationSettings.email.therapistConfirmation && appointment.therapistEmail) {
+      await sideEffectTrackerService.registerInTransaction(
+        tx,
+        appointmentId,
+        'confirmed',
+        { effectType: 'email_therapist_confirmation' },
+        generation,
+      );
+    }
+  };
+
+  // Private sentinel: distinguishes "the update matched 0 rows (P2025)"
+  // from any other error, so the outer catch can run the failure-
+  // attribution re-fetch. The update matching 0 rows performs no writes,
+  // so the (empty) transaction rolling back on this throw is a no-op —
+  // and the re-fetch stays non-transactional, exactly as before, rather
+  // than depending on the transaction still being usable after a caught
+  // query error.
+  class ConfirmPreconditionFailed extends Error {}
+
   let postUpdateGeneration: number;
   try {
-    const updated = await prisma.appointmentRequest.update({
-      where: whereClause,
-      data: updateData,
-      select: { transitionGeneration: true },
-    });
-    postUpdateGeneration = updated.transitionGeneration;
+    postUpdateGeneration = await prisma.$transaction(
+      async (tx) => {
+        const updated = await tx.appointmentRequest
+          .update({
+            where: whereClause,
+            data: updateData,
+            select: { transitionGeneration: true },
+          })
+          .catch((err: unknown) => {
+            if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+              throw new ConfirmPreconditionFailed();
+            }
+            throw err;
+          });
+        await registerConfirmedIntents(tx, updated.transitionGeneration);
+        return updated.transitionGeneration;
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        timeout: 10000,
+      },
+    );
     logger.info({ ...logContext, atomic: !!atomic }, 'Appointment confirmed atomically');
   } catch (err) {
     // Prisma throws P2025 (RecordNotFound) when the where preconditions
     // don't match — i.e. status drifted, human control flipped on, or
     // a concurrent caller already wrote our exact target datetime.
     // Re-fetch to attribute the failure precisely.
-    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2025') {
+    if (!(err instanceof ConfirmPreconditionFailed)) {
       throw err;
     }
 
