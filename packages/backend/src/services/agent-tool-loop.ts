@@ -505,6 +505,48 @@ export interface ToolLoopResult {
  * @param logContext - Context string for log messages (e.g., "startScheduling")
  * @returns Final messagesForClaude array (for callers that need it) and loop result
  */
+
+/**
+ * Shared escalation orchestration for both loops' safety circuits (turn
+ * budget/same-hash breaker, tool-error breaker, iteration ceiling). Each
+ * circuit differs only in its trigger condition and the reason/message
+ * text it builds (see tool-loop-helpers.ts's build* functions) — the
+ * "log + push an admin message + best-effort flagForHumanReview" sequence
+ * that follows was previously copy-pasted three times per loop, twice
+ * over (once per loop), and had already drifted in wording once.
+ *
+ * Lives here (not in tool-loop-helpers.ts) because it calls `logger`,
+ * and tool-loop-helpers.ts is deliberately logger-free so its own unit
+ * tests don't need to mock the config/logger module graph.
+ */
+async function escalateToHumanReview(args: {
+  traceId: string;
+  idFields: Record<string, unknown>;
+  logContext: string;
+  logMessage: string;
+  logExtra?: Record<string, unknown>;
+  adminMessageContent: string;
+  flagReason: string;
+  flagForHumanReview?: (reason: string) => Promise<void>;
+  pushAdminMessage: (content: string) => void;
+}): Promise<void> {
+  logger.warn(
+    { traceId: args.traceId, ...args.idFields, ...args.logExtra },
+    `${args.logContext} - ${args.logMessage}`,
+  );
+  args.pushAdminMessage(args.adminMessageContent);
+  if (args.flagForHumanReview) {
+    try {
+      await args.flagForHumanReview(args.flagReason);
+    } catch (flagErr) {
+      logger.error(
+        { traceId: args.traceId, ...args.idFields, err: flagErr },
+        `${args.logContext} - Failed to flag for human review`,
+      );
+    }
+  }
+}
+
 export async function runToolLoop(
   systemPrompt: string,
   initialMessages: Anthropic.MessageParam[],
@@ -836,32 +878,23 @@ export async function runToolLoop(
         turnGuard.budgetExhausted ? 'budget' : 'same_hash',
         { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
       );
-      logger.warn(
-        {
-          traceId,
-          appointmentRequestId: context.appointmentRequestId,
+      await escalateToHumanReview({
+        traceId,
+        idFields: { appointmentRequestId: context.appointmentRequestId },
+        logContext,
+        logMessage: `Turn-level circuit breaker tripped — ${reason}`,
+        logExtra: {
           toolsThisTurn: turnGuard.toolsThisTurn,
           iteration,
           budgetExhausted: turnGuard.budgetExhausted,
           sameHashAborted: turnGuard.sameHashAborted,
           bucket: turnGuard.budgetExhausted ? 'turn_budget_exhausted' : 'same_hash_aborted',
         },
-        `${logContext} - Turn-level circuit breaker tripped — ${reason}`,
-      );
-      conversationState.messages.push({
-        role: 'admin' as const,
-        content: `[System: ${reason}]`,
+        adminMessageContent: `[System: ${reason}]`,
+        flagReason: reason,
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
       });
-      if (callbacks.flagForHumanReview) {
-        try {
-          await callbacks.flagForHumanReview(reason);
-        } catch (flagErr) {
-          logger.error(
-            { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
-            `${logContext} - Failed to flag for human review at turn-level breaker`,
-          );
-        }
-      }
       flaggedForHumanReview = true;
       stopLoop = true;
     }
@@ -876,31 +909,17 @@ export async function runToolLoop(
     // exits without sending them back to Claude (same pattern as
     // flag_for_human_review).
     if (!stopLoop && !flaggedForHumanReview && totalToolErrors >= TURN_ERROR_LIMIT) {
-      logger.warn(
-        {
-          traceId,
-          appointmentRequestId: context.appointmentRequestId,
-          totalToolErrors,
-          limit: TURN_ERROR_LIMIT,
-          iteration,
-          bucket: 'error',
-        },
-        `${logContext} - Tool error circuit breaker tripped — stopping loop and flagging for review`,
-      );
-      conversationState.messages.push({
-        role: 'admin' as const,
-        content: buildErrorBreakerAdminMessage(totalToolErrors),
+      await escalateToHumanReview({
+        traceId,
+        idFields: { appointmentRequestId: context.appointmentRequestId },
+        logContext,
+        logMessage: 'Tool error circuit breaker tripped — stopping loop and flagging for review',
+        logExtra: { totalToolErrors, limit: TURN_ERROR_LIMIT, iteration, bucket: 'error' },
+        adminMessageContent: buildErrorBreakerAdminMessage(totalToolErrors),
+        flagReason: buildErrorBreakerFlagReason(totalToolErrors),
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
       });
-      if (callbacks.flagForHumanReview) {
-        try {
-          await callbacks.flagForHumanReview(buildErrorBreakerFlagReason(totalToolErrors));
-        } catch (flagErr) {
-          logger.error(
-            { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
-            `${logContext} - Failed to flag for human review at circuit breaker`,
-          );
-        }
-      }
       flaggedForHumanReview = true;
       stopLoop = true;
     }
@@ -931,29 +950,17 @@ export async function runToolLoop(
     !loopFinishedNaturally
   ) {
     const reason = buildMaxIterationsFlagReason(MAX_TOOL_ITERATIONS);
-    logger.warn(
-      {
-        traceId,
-        appointmentRequestId: context.appointmentRequestId,
-        iterations: iteration,
-        bucket: 'max_iterations',
-      },
-      `${logContext} - Max tool iterations reached without natural completion — flagging for review`,
-    );
-    conversationState.messages.push({
-      role: 'admin' as const,
-      content: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+    await escalateToHumanReview({
+      traceId,
+      idFields: { appointmentRequestId: context.appointmentRequestId },
+      logContext,
+      logMessage: 'Max tool iterations reached without natural completion — flagging for review',
+      logExtra: { iterations: iteration, bucket: 'max_iterations' },
+      adminMessageContent: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+      flagReason: reason,
+      flagForHumanReview: callbacks.flagForHumanReview,
+      pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
     });
-    if (callbacks.flagForHumanReview) {
-      try {
-        await callbacks.flagForHumanReview(reason);
-      } catch (flagErr) {
-        logger.error(
-          { traceId, appointmentRequestId: context.appointmentRequestId, err: flagErr },
-          `${logContext} - Failed to flag for human review at iteration ceiling`,
-        );
-      }
-    }
     flaggedForHumanReview = true;
   }
 
@@ -1223,31 +1230,22 @@ export async function runAvailabilityToolLoop(
         turnGuard.budgetExhausted ? 'budget' : 'same_hash',
         { budget: TURN_TOOL_BUDGET, sameHashAbortLimit: SAME_HASH_TURN_ABORT },
       );
-      logger.warn(
-        {
-          traceId,
-          conversationId: context.conversationId,
+      await escalateToHumanReview({
+        traceId,
+        idFields: { conversationId: context.conversationId },
+        logContext,
+        logMessage: `availability turn-level circuit breaker tripped — ${reason}`,
+        logExtra: {
           toolsThisTurn: turnGuard.toolsThisTurn,
           iteration,
           budgetExhausted: turnGuard.budgetExhausted,
           sameHashAborted: turnGuard.sameHashAborted,
         },
-        `${logContext} - availability turn-level circuit breaker tripped — ${reason}`,
-      );
-      conversationState.messages.push({
-        role: 'admin' as const,
-        content: `[System: ${reason}]`,
+        adminMessageContent: `[System: ${reason}]`,
+        flagReason: reason,
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
       });
-      if (callbacks.flagForHumanReview) {
-        try {
-          await callbacks.flagForHumanReview(reason);
-        } catch (flagErr) {
-          logger.error(
-            { traceId, conversationId: context.conversationId, err: flagErr },
-            `${logContext} - Failed to flag for human review at turn-level breaker`,
-          );
-        }
-      }
       flaggedForHumanReview = true;
       stopLoop = true;
     }
@@ -1256,31 +1254,17 @@ export async function runAvailabilityToolLoop(
     // failures in one runAvailabilityToolLoop invocation means the agent
     // is thrashing; escalate to human control rather than continue.
     if (!stopLoop && !flaggedForHumanReview && !markedComplete && totalToolErrors >= TURN_ERROR_LIMIT) {
-      logger.warn(
-        {
-          traceId,
-          conversationId: context.conversationId,
-          totalToolErrors,
-          limit: TURN_ERROR_LIMIT,
-          iteration,
-          bucket: 'error',
-        },
-        `${logContext} - availability tool error circuit breaker tripped — stopping loop and flagging for review`,
-      );
-      conversationState.messages.push({
-        role: 'admin' as const,
-        content: buildErrorBreakerAdminMessage(totalToolErrors),
+      await escalateToHumanReview({
+        traceId,
+        idFields: { conversationId: context.conversationId },
+        logContext,
+        logMessage: 'availability tool error circuit breaker tripped — stopping loop and flagging for review',
+        logExtra: { totalToolErrors, limit: TURN_ERROR_LIMIT, iteration, bucket: 'error' },
+        adminMessageContent: buildErrorBreakerAdminMessage(totalToolErrors),
+        flagReason: buildErrorBreakerFlagReason(totalToolErrors),
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
       });
-      if (callbacks.flagForHumanReview) {
-        try {
-          await callbacks.flagForHumanReview(buildErrorBreakerFlagReason(totalToolErrors));
-        } catch (flagErr) {
-          logger.error(
-            { traceId, conversationId: context.conversationId, err: flagErr },
-            `${logContext} - Failed to flag for human review at circuit breaker`,
-          );
-        }
-      }
       flaggedForHumanReview = true;
       stopLoop = true;
     }
@@ -1311,29 +1295,17 @@ export async function runAvailabilityToolLoop(
     !loopFinishedNaturally
   ) {
     const reason = buildMaxIterationsFlagReason(MAX_TOOL_ITERATIONS);
-    logger.warn(
-      {
-        traceId,
-        conversationId: context.conversationId,
-        iterations: iteration,
-        bucket: 'max_iterations',
-      },
-      `${logContext} - availability agent hit max tool iterations without natural completion — flagging for review`,
-    );
-    conversationState.messages.push({
-      role: 'admin' as const,
-      content: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+    await escalateToHumanReview({
+      traceId,
+      idFields: { conversationId: context.conversationId },
+      logContext,
+      logMessage: 'availability agent hit max tool iterations without natural completion — flagging for review',
+      logExtra: { iterations: iteration, bucket: 'max_iterations' },
+      adminMessageContent: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
+      flagReason: reason,
+      flagForHumanReview: callbacks.flagForHumanReview,
+      pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
     });
-    if (callbacks.flagForHumanReview) {
-      try {
-        await callbacks.flagForHumanReview(reason);
-      } catch (flagErr) {
-        logger.error(
-          { traceId, conversationId: context.conversationId, err: flagErr },
-          `${logContext} - Failed to flag for human review at availability iteration ceiling`,
-        );
-      }
-    }
     flaggedForHumanReview = true;
   }
 

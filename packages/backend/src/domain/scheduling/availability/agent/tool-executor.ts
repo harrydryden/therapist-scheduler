@@ -24,19 +24,21 @@
  *     cap already bounds runaway within a turn; cross-turn ceiling
  *     can be added later if abuse patterns emerge.
  *
- * Idempotency uses the same Redis-backed pattern as the booking
- * executor, with a distinct key prefix so the two namespaces can't
- * collide even if the same toolName and input were ever to hash the
- * same (they wouldn't, because conversationId is in the hash).
+ * Idempotency shares the canonical fail-closed implementation with the
+ * booking executor (core/agent/tools/idempotency.ts), passing a
+ * distinct key prefix so the two namespaces can't collide even if the
+ * same toolName and input were ever to hash the same (they wouldn't,
+ * because conversationId is in the hash).
  */
 
-import crypto from 'crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../../../../utils/logger';
 import { prisma } from '../../../../utils/database';
-import { redis } from '../../../../utils/redis';
-import { canonicalStringify } from '../../../../utils/canonical-json';
+import { firstName } from '../../../../utils/first-name';
+import { getSettingValue } from '../../../../services/settings.service';
 import { TOOL_EXECUTION } from '../../../../constants';
+import { hashToolCall, wasToolExecuted, markToolExecuted } from '../../../../core/agent/tools/idempotency';
+import { normalizeAgentOutboundEmail } from '../../../../core/agent/tools/email-normalization';
 import {
   availabilityRecordWindowInputSchema,
   availabilityMarkCompleteInputSchema,
@@ -55,48 +57,10 @@ import type { ToolExecutionResult } from '../../../../services/scheduling-contex
 import type { AvailabilityAgentContext } from '../../../../services/agent-tool-loop';
 
 // Distinct prefix from the booking executor's idempotency namespace
-// (TOOL_EXECUTION.PREFIX, used in ai-tool-executor.service.ts). Same
-// TTL — the practical window for duplicate tool calls is the same.
+// (TOOL_EXECUTION.PREFIX, used in ai-tool-executor.service.ts). Passed
+// into the canonical wasToolExecuted/markToolExecuted so both agents
+// share one fail-closed implementation without colliding on keys.
 const AVAILABILITY_TOOL_PREFIX = `${TOOL_EXECUTION.PREFIX}avail:`;
-const AVAILABILITY_TOOL_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
-
-function hashToolCall(conversationId: string, toolName: string, input: unknown): string {
-  // canonicalStringify sorts keys at every depth so {a,b} and {b,a}
-  // hash identically — important because the Anthropic API doesn't
-  // guarantee property ordering across retries or model versions.
-  const data = canonicalStringify({ conversationId, toolName, input });
-  return crypto.createHash('sha256').update(data).digest('hex').substring(0, 32);
-}
-
-async function wasToolExecuted(hash: string): Promise<boolean> {
-  try {
-    const result = await redis.get(`${AVAILABILITY_TOOL_PREFIX}${hash}`);
-    return result !== null;
-  } catch (err) {
-    // Redis flap shouldn't paralyse the agent — allow re-execution. The
-    // tool handlers themselves are individually idempotent (window
-    // dedup by content hash; remember dedup by note hash; mark_complete
-    // and flag_for_human_review use updateMany with status predicates).
-    logger.warn({ err, hash }, 'availability-tool-executor: redis unavailable for idempotency check');
-    return false;
-  }
-}
-
-async function markToolExecuted(hash: string, traceId: string): Promise<void> {
-  try {
-    await redis.set(
-      `${AVAILABILITY_TOOL_PREFIX}${hash}`,
-      traceId,
-      'EX',
-      AVAILABILITY_TOOL_TTL_SECONDS,
-    );
-  } catch (err) {
-    logger.warn(
-      { err, hash, traceId },
-      'availability-tool-executor: failed to mark tool executed — idempotency may not hold',
-    );
-  }
-}
 
 export class AvailabilityToolExecutorService {
   private traceId: string;
@@ -192,7 +156,7 @@ export class AvailabilityToolExecutorService {
     }
 
     const hash = hashToolCall(context.conversationId, name, input);
-    if (await wasToolExecuted(hash)) {
+    if (await wasToolExecuted(hash, AVAILABILITY_TOOL_PREFIX)) {
       logger.info(
         { traceId: this.traceId, conversationId: context.conversationId, tool: name },
         'availability-tool-executor: skipping — duplicate tool call within TTL',
@@ -244,7 +208,7 @@ export class AvailabilityToolExecutorService {
     }
 
     if (result.success && !result.skipped) {
-      await markToolExecuted(hash, this.traceId);
+      await markToolExecuted(hash, this.traceId, AVAILABILITY_TOOL_PREFIX);
     }
 
     return result;
@@ -262,8 +226,9 @@ export class AvailabilityToolExecutorService {
    * recipient hint and always sends to the therapist on this
    * conversation.
    *
-   * Subject normalisation: "Spill" prefix is added if absent, mirroring
-   * the booking agent's pattern.
+   * Subject + body normalisation is shared with the booking agent via
+   * normalizeAgentOutboundEmail (Spill prefix + signature/line-ending
+   * cleanup) so the two agents' emails can't drift in formatting.
    *
    * Thread continuity: on first successful send, the returned Gmail
    * thread ID and message ID are stashed back onto the conversation
@@ -283,10 +248,13 @@ export class AvailabilityToolExecutorService {
       };
     }
 
-    const subject = parsed.data.subject.toLowerCase().includes('spill')
-      ? parsed.data.subject
-      : `Spill - ${parsed.data.subject}`;
-    const body = parsed.data.body;
+    const agentName = await getSettingValue<string>('agent.fromName');
+    const agentFirstName = firstName(agentName);
+    const { subject, body } = normalizeAgentOutboundEmail(
+      parsed.data.subject,
+      parsed.data.body,
+      agentFirstName,
+    );
 
     // Reuse the existing thread ID if we already have one (continuation
     // turns); first send leaves this null so a new thread is opened.

@@ -15,9 +15,9 @@
  * The fix wraps the transition in the same InvalidTransitionError-as-no-op
  * idiom startScheduling already uses for its pending → contacted call.
  *
- * Also covers the confirmed-reschedule branch: its write is status-guarded
- * (updateMany WHERE status='confirmed') so a concurrent cancel/complete can't
- * resurrect reschedule fields onto a terminal row.
+ * Also covers the confirmed-reschedule branch: it's a pure no-op now — the
+ * `initiate_reschedule` tool handler is the only writer of the reschedule
+ * fields (see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md finding #16).
  */
 
 jest.mock('../utils/logger', () => ({
@@ -131,7 +131,13 @@ describe('reconcileStatusAfterReply — pending/contacted → negotiating', () =
 });
 
 describe('reconcileStatusAfterReply — confirmed appointment', () => {
-  it('clears the confirmed datetime and flags reschedule when initiate_reschedule ran', async () => {
+  it('does NOT re-apply the reschedule write when initiate_reschedule ran — the tool handler already did it', async () => {
+    // executedTools only ever records SUCCESSFUL, non-skipped tool calls, so
+    // 'initiate_reschedule' appearing here means handlers/initiate-reschedule.ts
+    // already wrote startReschedulingState with initiatedBy: 'agent'. The
+    // reconciler used to redundantly re-apply it with initiatedBy: fromEmail,
+    // silently overwriting that attribution on every reschedule (see
+    // docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md finding #16) — it must be a no-op now.
     await reconcileStatusAfterReply({
       appointmentRequest: { id: APT, status: 'confirmed', confirmedDateTime: 'Mon 3 Feb 10am' },
       appointmentRequestId: APT,
@@ -141,39 +147,7 @@ describe('reconcileStatusAfterReply — confirmed appointment', () => {
     });
 
     expect(transitionToNegotiatingMock).not.toHaveBeenCalled();
-    expect(appointmentUpdateManyMock).toHaveBeenCalledTimes(1);
-    const arg = appointmentUpdateManyMock.mock.calls[0][0];
-    // Status-guarded so a concurrent cancel/complete can't be overwritten.
-    expect(arg.where).toEqual({ id: APT, status: 'confirmed' });
-    expect(arg.data).toMatchObject({
-      reschedulingInProgress: true,
-      reschedulingInitiatedBy: FROM,
-      previousConfirmedDateTime: 'Mon 3 Feb 10am',
-      confirmedDateTime: null,
-      confirmedDateTimeParsed: null,
-      // Via the shared startReschedulingState fragment — the old slot's
-      // follow-up sentinels are void once a reschedule begins.
-      meetingLinkCheckSentAt: null,
-      reminderSentAt: null,
-    });
-  });
-
-  it('does not throw when the row drifted off confirmed before the reschedule write (count 0)', async () => {
-    // A concurrent cancel/complete landed between the tool loop and here;
-    // the status-guarded updateMany matches no rows. Must be a benign no-op.
-    appointmentUpdateManyMock.mockResolvedValue({ count: 0 });
-
-    await expect(
-      reconcileStatusAfterReply({
-        appointmentRequest: { id: APT, status: 'confirmed', confirmedDateTime: 'Mon 3 Feb 10am' },
-        appointmentRequestId: APT,
-        fromEmail: FROM,
-        executedTools: [tool('initiate_reschedule')],
-        traceId: TRACE,
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(appointmentUpdateManyMock).toHaveBeenCalledTimes(1);
+    expect(appointmentUpdateManyMock).not.toHaveBeenCalled();
   });
 
   it('is a no-op when mark_scheduling_complete finalised the reschedule', async () => {

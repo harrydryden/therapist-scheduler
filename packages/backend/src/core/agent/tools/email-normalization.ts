@@ -18,6 +18,23 @@
  * fine.
  */
 
+/**
+ * Shared outbound-email normalization for both agent loops (booking's
+ * core/agent/tools/send.ts and the availability agent's
+ * domain/scheduling/availability/agent/tool-executor.ts): the "Spill"
+ * subject prefix plus normalizeEmailBody. Kept in one place so the two
+ * agents' emails can't drift in formatting or brand-prefix policy.
+ */
+export function normalizeAgentOutboundEmail(
+  subject: string,
+  body: string,
+  agentFirstName?: string,
+): { subject: string; body: string } {
+  const normalizedSubject = subject.toLowerCase().includes('spill') ? subject : `Spill - ${subject}`;
+  const normalizedBody = normalizeEmailBody(body, agentFirstName);
+  return { subject: normalizedSubject, body: normalizedBody };
+}
+
 export function normalizeEmailBody(body: string, agentFirstName?: string): string {
   let normalized = body
     .replace(/\r\n/g, '\n')
