@@ -92,10 +92,21 @@ export class EmailIngestService {
   }
 
   /**
+   * Register Gmail push notifications and persist the returned historyId
+   * as our sync checkpoint. Combines emailOAuthService's watch-registration
+   * call with this service's own checkpoint persistence — lives here
+   * (rather than in email-oauth.service.ts) because storing the
+   * checkpoint is this service's job, not OAuth's.
+   */
+  async setupPushNotifications(topicName: string): Promise<{ historyId: string; expiration: string }> {
+    const result = await emailOAuthService.setupPushNotifications(topicName);
+    await this.setHistoryId(parseInt(result.historyId, 10));
+    return result;
+  }
+
+  /**
    * Persist the Gmail history ID checkpoint to both Redis and database.
    * Redis provides fast access; database provides durability across Redis restarts.
-   *
-   * Public so the facade can store the history ID after setupPushNotifications().
    */
   async setHistoryId(historyId: number): Promise<void> {
     // Write to Redis (fast, primary)

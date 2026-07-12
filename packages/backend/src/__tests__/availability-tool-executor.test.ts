@@ -22,7 +22,7 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-// email-processing.service transitively validates the env-loaded
+// core/email's outbound send path transitively validates the env-loaded
 // config at module load. Stub the config + the email module itself
 // so the executor's `send_email` handler import doesn't trip config
 // validation.
@@ -48,11 +48,9 @@ const mockSendEmail = jest.fn(
     messageId: 'msg-default',
   }),
 );
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
-      mockSendEmail(params),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
+    mockSendEmail(params),
 }));
 
 // send_email now shares normalizeAgentOutboundEmail with the booking

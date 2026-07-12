@@ -18,7 +18,7 @@ import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
 import { EMAIL, PENDING_EMAIL_LOCK } from '../constants';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail, processPendingEmails } from '../core/email';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 
 // Redis keys for reliability features
@@ -326,7 +326,7 @@ class EmailQueueService {
     }
 
     // Use top-level import (circular dependency resolved via event bus architecture)
-    await emailProcessingService.sendEmail({
+    await sendEmail({
       to,
       subject,
       body,
@@ -646,7 +646,7 @@ class PendingEmailService {
 
     const taskResult = await this.lockedRunner.run(async (ctx) => {
       logger.debug({ processId, trigger, instanceId: this.instanceId }, 'Processing pending emails');
-      return emailProcessingService.processPendingEmails(processId, ctx.isLockValid);
+      return processPendingEmails(processId, ctx.isLockValid);
     });
 
     if (!taskResult.acquired) {

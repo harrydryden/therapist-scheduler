@@ -41,10 +41,8 @@ jest.mock('../services/settings.service', () => ({
   getSettingValue: jest.fn(),
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: jest.fn(),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn(),
 }));
 
 jest.mock('../utils/unsubscribe-token', () => ({
@@ -67,7 +65,7 @@ jest.mock('../utils/redis', () => ({
 import Fastify from 'fastify';
 import { prisma } from '../utils/database';
 import { getSettingValue } from '../services/settings.service';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 import { adminVoucherRoutes } from '../routes/admin-vouchers.routes';
 import { generateVoucherToken } from '../utils/voucher-token';
 
@@ -365,7 +363,7 @@ describe('Admin Voucher Routes', () => {
     it('creates voucher and returns display code and voucherUrl', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
       (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
-      (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+      (sendEmail as jest.Mock).mockResolvedValue(undefined);
 
       const res = await app.inject({
         method: 'POST',
@@ -389,7 +387,7 @@ describe('Admin Voucher Routes', () => {
     it('returns emailSent=false when email sending fails', async () => {
       (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
       (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
-      (emailProcessingService.sendEmail as jest.Mock).mockRejectedValue(new Error('SMTP down'));
+      (sendEmail as jest.Mock).mockRejectedValue(new Error('SMTP down'));
 
       const res = await app.inject({
         method: 'POST',
@@ -423,7 +421,7 @@ describe('Admin Voucher Routes', () => {
 
       expect(res.statusCode).toBe(201);
       expect(res.json().data.emailSent).toBe(false);
-      expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+      expect(sendEmail).not.toHaveBeenCalled();
     });
 
     it('re-subscribes in Postgres when issuing to previously unsubscribed user', async () => {
@@ -598,7 +596,7 @@ describe('Admin Voucher Routes', () => {
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
       (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
-      (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+      (sendEmail as jest.Mock).mockResolvedValue(undefined);
 
       const res = await app.inject({
         method: 'POST',
@@ -608,8 +606,8 @@ describe('Admin Voucher Routes', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.json().data.emailSent).toBe(true);
-      expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
-      const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+      expect(sendEmail).toHaveBeenCalledTimes(1);
+      const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
       expect(emailCall.to).toBe('user@example.com');
     });
 
@@ -619,7 +617,7 @@ describe('Admin Voucher Routes', () => {
       );
       (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
       (prisma.user.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
-      (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+      (sendEmail as jest.Mock).mockResolvedValue(undefined);
 
       const res = await app.inject({
         method: 'POST',

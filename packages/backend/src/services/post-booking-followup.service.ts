@@ -22,7 +22,7 @@ import {
 } from '../utils/atomic-sentinel-claim';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import type { LockedTaskContext } from '../utils/locked-task-runner';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
 import {
   parseConfirmedDateTime,
@@ -368,7 +368,7 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
 
               if (!userSent) {
                 try {
-                  await emailProcessingService.sendEmail(envelope.user);
+                  await sendEmail(envelope.user);
                   userSent = true;
                   await updateStoredPayload({ sentTo: { user: true, therapist: therapistSent } });
                 } catch (userError) {
@@ -381,7 +381,7 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
 
               if (!therapistSent) {
                 try {
-                  await emailProcessingService.sendEmail(envelope.therapist);
+                  await sendEmail(envelope.therapist);
                   therapistSent = true;
                   await updateStoredPayload({ sentTo: { user: userSent, therapist: true } });
                 } catch (therapistError) {
@@ -522,7 +522,7 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
           {
             renderPayload: async () => payload,
             execute: async (envelope) => {
-              await emailProcessingService.sendEmail(envelope);
+              await sendEmail(envelope);
               await finalizeMeetingLinkCheck({
                 appointmentId: appointment.id,
                 now,
@@ -646,14 +646,14 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
             }),
             execute: async (envelope) => {
               // User feedback-form email — always sent.
-              await emailProcessingService.sendEmail(envelope.user);
+              await sendEmail(envelope.user);
 
               // Therapist post-session notification — captured at render
               // time. If disabled in settings then, the renderer returned
               // null and we skip; a setting toggle between render and
               // retry does NOT cause us to start sending.
               if (envelope.therapist) {
-                await emailProcessingService.sendEmail(envelope.therapist);
+                await sendEmail(envelope.therapist);
                 logger.info(
                   { appointmentId: appointment.id, therapistEmail: envelope.therapist.to },
                   'Sent therapist feedback notification email'
@@ -872,7 +872,7 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
           {
             renderPayload: async () => payload,
             execute: async (envelope) => {
-              await emailProcessingService.sendEmail(envelope);
+              await sendEmail(envelope);
               await finalizeFeedbackReminder({
                 appointmentId: appointment.id,
                 now,

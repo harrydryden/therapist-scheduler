@@ -1,4 +1,4 @@
-import { emailProcessingService } from './email-processing.service';
+import { emailIngestService } from './email-ingest.service';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 
@@ -108,7 +108,7 @@ class GmailWatchService {
     logger.info({ renewalId, trigger, topicName }, 'Attempting Gmail watch renewal');
 
     try {
-      const result = await emailProcessingService.setupPushNotifications(topicName);
+      const result = await emailIngestService.setupPushNotifications(topicName);
 
       this.lastRenewalTime = new Date();
       this.lastExpirationTime = result.expiration;
@@ -153,7 +153,7 @@ class GmailWatchService {
     }
 
     try {
-      const result = await emailProcessingService.setupPushNotifications(topicName);
+      const result = await emailIngestService.setupPushNotifications(topicName);
       this.lastRenewalTime = new Date();
       this.lastExpirationTime = result.expiration;
       return { success: true, expiration: result.expiration };

@@ -88,10 +88,8 @@ jest.mock('../utils/redis', () => ({
 
 // --- downstream side-effecting services - shallow mocks ----------------------
 const mockSendEmail = jest.fn();
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (...a: unknown[]) => mockSendEmail(...(a as [unknown])),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (...a: unknown[]) => mockSendEmail(...(a as [unknown])),
 }));
 
 jest.mock('../services/email-queue.service', () => ({

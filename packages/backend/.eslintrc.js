@@ -34,9 +34,11 @@ const KERNEL_BOUNDARY_MESSAGE =
 // generic infra that happens to live in services/ (settings, email
 // OAuth/bounce/thread-fetching, tracking-code's string helpers) is
 // deliberately NOT listed here; those are legitimately usable from
-// core/. email-processing.service.ts is also deliberately excluded: its
-// disposition (dissolve the backward-compat shim) is Stage D3's job, not
-// this rule's.
+// core/. (services/email-processing.service.ts, the backward-compat
+// facade this list used to carve out an exception for, was dissolved
+// in Stage D3 — every caller now imports sendEmail/processPendingEmails
+// from core/email directly, or the relevant emailOAuthService /
+// emailIngestService method.)
 const SCHEDULING_SERVICE_GLOBS = [
   '**/services/scheduling-context.service.*',
   '**/services/conversation-checkpoint.service.*',

@@ -2,9 +2,10 @@
  * Shared Gmail OAuth utilities
  *
  * Extracts duplicated Gmail credential loading and token refresh lock logic
- * previously copied between thread-fetching.service.ts and email-processing.service.ts.
+ * previously copied between thread-fetching.service.ts and what's now split
+ * across email-oauth.service.ts / email-ingest.service.ts.
  *
- * Used by: thread-fetching.service, email-processing.service
+ * Used by: thread-fetching.service, email-oauth.service, email-ingest.service
  */
 
 import { OAuth2Client } from 'google-auth-library';

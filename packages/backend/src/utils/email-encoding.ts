@@ -1,6 +1,6 @@
 /**
  * Shared email encoding/decoding utilities
- * Used by both email-processing.service.ts and thread-fetching.service.ts
+ * Used by both core/email/outbound/send.ts and thread-fetching.service.ts
  */
 
 /**

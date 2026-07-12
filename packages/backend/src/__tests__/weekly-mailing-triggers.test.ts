@@ -76,8 +76,8 @@ jest.mock('../services/therapist-booking-status.service', () => ({
   },
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: { sendEmail: jest.fn() },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn(),
 }));
 
 jest.mock('../utils/unsubscribe-token', () => ({
@@ -110,7 +110,7 @@ import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
 import { getSettingValue, getSettingValues } from '../services/settings.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 import { weeklyMailingListService } from '../services/weekly-mailing-list.service';
 import { WEEKLY_MAILING } from '../constants';
 
@@ -169,7 +169,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
     (prisma.therapist.findMany as jest.Mock).mockResolvedValue(testTherapistRows);
     (prisma.therapist.count as jest.Mock).mockResolvedValue(0); // default: no new therapists
     (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
-    (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+    (sendEmail as jest.Mock).mockResolvedValue(undefined);
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
   });
 
@@ -178,7 +178,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
     expect(prisma.therapist.count).not.toHaveBeenCalled();
   });
 
@@ -187,7 +187,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('fires the event-triggered fast lane when a new therapist exists since last send', async () => {
@@ -197,7 +197,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
     // Verify the count query targeted active therapists with ingestedAt > lastSent
     const countCall = (prisma.therapist.count as jest.Mock).mock.calls[0][0];
     expect(countCall.where.active).toBe(true);
@@ -215,7 +215,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 
   it('skips when below threshold AND no new therapists since last send', async () => {
@@ -225,7 +225,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('respects the 7-day ceiling — same day re-trigger is a no-op', async () => {
@@ -234,7 +234,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
     // Ceiling check must short-circuit before evaluating trigger conditions.
     expect(prisma.therapist.count).not.toHaveBeenCalled();
   });
@@ -245,7 +245,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('treats every active therapist as new on the first-ever run (no lastSent)', async () => {
@@ -254,7 +254,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
     // The query should filter ingestedAt != null (rather than gt: lastSent)
     const countCall = (prisma.therapist.count as jest.Mock).mock.calls[0][0];
     expect(countCall.where.ingestedAt).toEqual({ not: null });
@@ -267,7 +267,7 @@ describe('Weekly Mailing — periodic trigger gating', () => {
 
     await weeklyMailingListService.trigger();
 
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
     // LAST_SEND_KEY should now be a fresh timestamp
     const lastSent = testRedis.__store.get(WEEKLY_MAILING.LAST_SEND_KEY);
     expect(lastSent).toBeTruthy();
@@ -367,7 +367,7 @@ describe('Weekly Mailing — forceSend() availability gate', () => {
     (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.therapist.findMany as jest.Mock).mockResolvedValue(testTherapistRows);
     (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
-    (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+    (sendEmail as jest.Mock).mockResolvedValue(undefined);
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
   });
 
@@ -375,7 +375,7 @@ describe('Weekly Mailing — forceSend() availability gate', () => {
     (prisma.therapist.findMany as jest.Mock).mockResolvedValue([]);
 
     await expect(weeklyMailingListService.forceSend()).rejects.toThrow(/no available therapists/i);
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('refuses to send when every active therapist is frozen/unavailable', async () => {
@@ -384,13 +384,13 @@ describe('Weekly Mailing — forceSend() availability gate', () => {
     );
 
     await expect(weeklyMailingListService.forceSend()).rejects.toThrow(/no available therapists/i);
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('sends when at least one therapist is available', async () => {
     const result = await weeklyMailingListService.forceSend();
 
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(result.sent).toBe(1);
   });
 
@@ -398,6 +398,6 @@ describe('Weekly Mailing — forceSend() availability gate', () => {
     (prisma.therapist.findMany as jest.Mock).mockResolvedValue([]);
 
     await expect(weeklyMailingListService.forceSend(true)).rejects.toThrow(/no available therapists/i);
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 });

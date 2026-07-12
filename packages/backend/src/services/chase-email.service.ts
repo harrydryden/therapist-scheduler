@@ -7,7 +7,8 @@ import {
   EPOCH_SENTINEL,
 } from '../utils/atomic-sentinel-claim';
 import { slackNotificationService } from './slack-notification.service';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
+import { emailIngestService } from './email-ingest.service';
 import { getSettingValue } from './settings.service';
 import { getEmailSubject, getEmailBody } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
@@ -178,7 +179,7 @@ class ChaseEmailService {
               try {
                 let hasReply = false;
                 for (const tid of threadIdsToCheck) {
-                  if (await emailProcessingService.threadContainsInboundReplies(
+                  if (await emailIngestService.threadContainsInboundReplies(
                     tid,
                     `chase-presend:${appointment.id}`,
                     sinceMs,
@@ -206,7 +207,7 @@ class ChaseEmailService {
                   // This handles the case where the reply was never processed at all.
                   for (const tid of threadIdsToCheck) {
                     try {
-                      await emailProcessingService.checkThreadForUnprocessedReplies(
+                      await emailIngestService.checkThreadForUnprocessedReplies(
                         tid,
                         `chase-presend-recovery:${appointment.id}`
                       );
@@ -303,7 +304,7 @@ class ChaseEmailService {
                   threadId: threadId || undefined,
                 }),
                 execute: async (payload) => {
-                  await emailProcessingService.sendEmail(payload);
+                  await sendEmail(payload);
 
                   // Same finalization (checkpoint advance + chase-sent
                   // metadata + audit event) runs whether this is the first

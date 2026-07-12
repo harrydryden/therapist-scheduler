@@ -172,11 +172,9 @@ const mockSendEmail = jest.fn(
     messageId: 'msg-nudge-1',
   }),
 );
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
-      mockSendEmail(params),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
+    mockSendEmail(params),
 }));
 
 // Renderer is pure; let the real implementation run so we exercise

@@ -1,7 +1,9 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail, processPendingEmails } from '../core/email';
+import { emailOAuthService } from '../services/email-oauth.service';
+import { emailIngestService } from '../services/email-ingest.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { redis } from '../utils/redis';
 import { logger } from '../utils/logger';
@@ -64,7 +66,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        const result = await emailProcessingService.setupPushNotifications(topicName);
+        const result = await emailIngestService.setupPushNotifications(topicName);
 
         return sendSuccess(reply, {
           ...result,
@@ -86,7 +88,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
     '/api/admin/gmail/status',
     async (request: FastifyRequest, reply: FastifyReply) => {
       try {
-        const health = await emailProcessingService.checkHealth();
+        const health = await emailOAuthService.checkHealth();
         return sendSuccess(reply, health);
       } catch (err) {
         logger.error({ err }, 'Failed to check Gmail status');
@@ -150,7 +152,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       logger.info({ requestId }, 'Manual email poll triggered');
 
       try {
-        const result = await emailProcessingService.pollForNewEmails(requestId);
+        const result = await emailIngestService.pollForNewEmails(requestId);
         return sendSuccess(reply, result);
       } catch (err) {
         logger.error({ err, requestId }, 'Error polling for emails');
@@ -179,7 +181,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       logger.info({ requestId }, 'Processing pending emails');
 
       try {
-        const result = await emailProcessingService.processPendingEmails(requestId);
+        const result = await processPendingEmails(requestId);
         return sendSuccess(reply, result);
       } catch (err) {
         logger.error({ err, requestId }, 'Error processing pending emails');
@@ -215,7 +217,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       logger.info({ requestId, to, subject }, 'Sending email directly');
 
       try {
-        const result = await emailProcessingService.sendEmail({ to, subject, body });
+        const result = await sendEmail({ to, subject, body });
         return sendSuccess(reply, result);
       } catch (err) {
         logger.error({ err, requestId }, 'Error sending email');
@@ -278,7 +280,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
         });
 
         // Send the email
-        await emailProcessingService.sendEmail({
+        await sendEmail({
           to: email,
           subject,
           body,

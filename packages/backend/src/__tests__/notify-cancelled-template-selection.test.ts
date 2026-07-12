@@ -61,10 +61,8 @@ async function flushPendingSideEffects(): Promise<void> {
   }
 }
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: jest.fn().mockResolvedValue({ messageId: 'm1', threadId: 't1' }),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn().mockResolvedValue({ messageId: 'm1', threadId: 't1' }),
 }));
 
 jest.mock('../services/slack-notification.service', () => ({

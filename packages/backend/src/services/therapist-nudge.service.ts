@@ -3,7 +3,7 @@ import { logger } from '../utils/logger';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import type { LockedTaskContext } from '../utils/locked-task-runner';
 import { getSettingValue } from './settings.service';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { ACTIVE_STATUSES, THERAPIST_NUDGE } from '../constants';
@@ -236,7 +236,7 @@ class TherapistNudgeService extends LockedPeriodicService<void> {
               body,
             }),
             execute: async (envelope) => {
-              const { threadId, messageId } = await emailProcessingService.sendEmail({
+              const { threadId, messageId } = await sendEmail({
                 to: envelope.to,
                 subject: envelope.subject,
                 body: envelope.body,

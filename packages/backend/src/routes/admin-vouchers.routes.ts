@@ -15,7 +15,7 @@ import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-to
 import { formatVoucherExpiry } from '../utils/voucher-section';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderTemplate } from '../utils/email-templates';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 import { config } from '../config';
 
 // Zod schemas
@@ -115,7 +115,7 @@ async function sendVoucherEmail(
       unsubscribeUrl,
     });
 
-    await emailProcessingService.sendEmail({ to: email, subject, body });
+    await sendEmail({ to: email, subject, body });
     return true;
   } catch (error) {
     logger.error({ error, email }, 'Failed to send voucher email (voucher still created)');

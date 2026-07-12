@@ -2,7 +2,9 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { OAuth2Client } from 'google-auth-library';
 import { config } from '../config';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail, processPendingEmails } from '../core/email';
+import { emailOAuthService } from '../services/email-oauth.service';
+import { emailIngestService } from '../services/email-ingest.service';
 import { logger } from '../utils/logger';
 import { RATE_LIMITS } from '../constants';
 import { sendSuccess, Errors } from '../utils/response';
@@ -172,7 +174,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
 
         // Process the notification asynchronously
         // FIX H12: Added retry tracking for failed notifications
-        emailProcessingService
+        emailIngestService
           .processGmailNotification(emailAddress, historyId, requestId)
           .then(() => {
             logger.info({ requestId, historyId }, 'Gmail notification processed successfully');
@@ -229,7 +231,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       markDeprecated(reply, requestId, '/api/webhooks/gmail/poll', '/api/admin/gmail/poll');
 
       try {
-        const result = await emailProcessingService.pollForNewEmails(requestId);
+        const result = await emailIngestService.pollForNewEmails(requestId);
         return reply.send({ success: true, data: result });
       } catch (err) {
         logger.error({ err, requestId }, 'Error polling for emails');
@@ -248,7 +250,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       markDeprecated(reply, request.id, '/api/webhooks/gmail/health', '/api/admin/gmail/status');
 
       try {
-        const status = await emailProcessingService.checkHealth();
+        const status = await emailOAuthService.checkHealth();
         return reply.send({ success: true, data: status });
       } catch (err) {
         logger.error({ err }, 'Gmail health check failed');
@@ -268,7 +270,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       markDeprecated(reply, requestId, '/api/webhooks/gmail/send-pending', '/api/admin/gmail/send-pending');
 
       try {
-        const result = await emailProcessingService.processPendingEmails(requestId);
+        const result = await processPendingEmails(requestId);
         return reply.send({ success: true, data: result });
       } catch (err) {
         logger.error({ err, requestId }, 'Error processing pending emails');
@@ -295,7 +297,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       }
 
       try {
-        const result = await emailProcessingService.setupPushNotifications(topicName);
+        const result = await emailIngestService.setupPushNotifications(topicName);
         return sendSuccess(reply, {
           ...result,
           message: 'Gmail watch set up successfully. Push notifications will be sent to /api/webhooks/gmail/push',
@@ -324,7 +326,7 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       const { to, subject, body } = validation.data;
 
       try {
-        const result = await emailProcessingService.sendEmail({ to, subject, body });
+        const result = await sendEmail({ to, subject, body });
         return reply.send({ success: true, data: result });
       } catch (err) {
         logger.error({ err, requestId }, 'Error sending email');

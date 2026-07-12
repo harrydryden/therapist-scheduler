@@ -38,7 +38,7 @@ import { redis } from '../utils/redis';
 import { prisma } from '../utils/database';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate, TemplateVariables } from '../utils/email-templates';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
@@ -691,7 +691,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       { userName: userFirstName, webAppUrl: sections.webAppUrl, unsubscribeUrl: sections.unsubscribeUrl },
       sections.voucherSection,
     );
-    await emailProcessingService.sendEmail({ to: user.email, subject, body });
+    await sendEmail({ to: user.email, subject, body });
   }
 
   /**
@@ -714,7 +714,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       unsubscribeUrl,
     });
 
-    await emailProcessingService.sendEmail({ to: user.email, subject, body });
+    await sendEmail({ to: user.email, subject, body });
 
     // Update tracking with final strike count and unsubscribe timestamp
     const now = new Date();

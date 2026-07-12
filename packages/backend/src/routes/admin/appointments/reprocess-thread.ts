@@ -19,7 +19,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
-import { emailProcessingService } from '../../../services/email-processing.service';
+import { emailIngestService } from '../../../services/email-ingest.service';
 import { sendSuccess, Errors } from '../../../utils/response';
 import { isGmail404 } from '../../../utils/gmail-errors';
 
@@ -92,7 +92,7 @@ export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<vo
           }> = [];
 
           if (appointment.therapistGmailThreadId) {
-            const result = await emailProcessingService.previewThreadMessages(
+            const result = await emailIngestService.previewThreadMessages(
               appointment.therapistGmailThreadId,
               traceId,
             );
@@ -104,7 +104,7 @@ export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<vo
           }
 
           if (appointment.gmailThreadId) {
-            const result = await emailProcessingService.previewThreadMessages(
+            const result = await emailIngestService.previewThreadMessages(
               appointment.gmailThreadId,
               traceId,
             );
@@ -136,7 +136,7 @@ export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<vo
         const results: Array<{ threadId: string; type: string; cleared: number; reprocessed: number }> = [];
 
         if (appointment.therapistGmailThreadId) {
-          const result = await emailProcessingService.reprocessThread(
+          const result = await emailIngestService.reprocessThread(
             appointment.therapistGmailThreadId,
             traceId,
             forceMessageIds,
@@ -149,7 +149,7 @@ export async function reprocessThreadRoute(fastify: FastifyInstance): Promise<vo
         }
 
         if (appointment.gmailThreadId) {
-          const result = await emailProcessingService.reprocessThread(
+          const result = await emailIngestService.reprocessThread(
             appointment.gmailThreadId,
             traceId,
             forceMessageIds,

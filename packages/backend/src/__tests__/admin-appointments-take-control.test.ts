@@ -78,8 +78,8 @@ jest.mock('../services/therapist-booking-status.service', () => ({
   therapistBookingStatusService: {},
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: { sendEmail: jest.fn() },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn(),
 }));
 
 jest.mock('../services/ai-conversation.service', () => ({
