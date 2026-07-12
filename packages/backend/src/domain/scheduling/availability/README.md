@@ -41,8 +41,9 @@ availability/
 - The booking agent (which uses these as a read source).
 - The recurring weekly schedule on `Therapist.availability` is written
   by the booking agent's `update_therapist_availability` tool (in
-  `services/ai-tool-executor.service.ts`); the parser + persistence
-  shape that tool uses lives here at `windows/parser.ts`.
+  `domain/scheduling/agent/handlers/update-therapist-availability.ts`);
+  the parser + persistence shape that tool uses lives here at
+  `windows/parser.ts`.
 - The booking-side timezone resolution: that's in `core/timezone/`.
 
 ## Migration note
