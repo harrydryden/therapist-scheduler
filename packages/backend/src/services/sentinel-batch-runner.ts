@@ -51,13 +51,27 @@ export type PreCheckDecision =
  * Schedule outcome. Returned from `schedule` to tell the runner whether
  * this candidate consumed a queue slot or was tombstoned post-claim.
  *
- * - undefined / void — queued an effect (counted as `sent`)
- * - 'skipped'        — post-claim tombstone (e.g. missing FK; the
- *                      callback has already advanced the sentinel
- *                      itself via confirmSentinelClaim). Counted as
- *                      `skipped` in the summary log.
+ * - undefined / void   — queued an effect (counted as `sent`)
+ * - 'skipped'          — post-claim tombstone (e.g. missing FK; the
+ *                        callback has already advanced the sentinel
+ *                        itself via confirmSentinelClaim). Counted as
+ *                        `skipped` in the summary log. The runner does
+ *                        NOT touch the sentinel in this case — the
+ *                        callback already moved it forward.
+ * - 'skip-and-release' — the callback discovered mid-flight (after the
+ *                        claim) that this candidate must NOT be
+ *                        processed after all, and wants the sentinel
+ *                        released back so a future tick can
+ *                        re-evaluate it — the opposite direction from
+ *                        'skipped'. Counted as `skipped` in the summary
+ *                        log; the runner calls `releaseSentinelClaim`
+ *                        on the callback's behalf (same primitive the
+ *                        catch block below uses for a thrown prep
+ *                        error, but without the "prep failed" framing —
+ *                        this is an expected business-rule block, not
+ *                        an error).
  */
-export type ScheduleOutcome = void | 'skipped';
+export type ScheduleOutcome = void | 'skipped' | 'skip-and-release';
 
 export interface SentinelBatchSpec<Candidate extends { id: string }> {
   /** Trace id from the outer periodic-check tick — included in every log line. */
@@ -102,15 +116,18 @@ export interface SentinelBatchSpec<Candidate extends { id: string }> {
 
 /**
  * Run the candidate-query → claim → schedule → summary loop for one
- * periodic effect. Returns silently when the candidate batch is empty;
- * emits a single info-level "X processing complete" log when at least
- * one candidate was acted on.
+ * periodic effect. Returns `{ sent: 0, skipped: 0 }` silently when the
+ * candidate batch is empty; emits a single info-level "X processing
+ * complete" log when at least one candidate was acted on. Callers that
+ * need the tally for their own return value (e.g. chase-email.service.ts,
+ * whose `sendChaseFollowUps` reports a count to its own caller) can read
+ * it directly instead of re-deriving it with a parallel counter.
  */
 export async function processSentinelBatch<C extends { id: string }>(
   spec: SentinelBatchSpec<C>,
-): Promise<void> {
+): Promise<{ sent: number; skipped: number }> {
   const candidates = await spec.fetchCandidates();
-  if (candidates.length === 0) return;
+  if (candidates.length === 0) return { sent: 0, skipped: 0 };
 
   let sent = 0;
   let skipped = 0;
@@ -144,7 +161,10 @@ export async function processSentinelBatch<C extends { id: string }>(
 
     try {
       const outcome = await spec.schedule(candidate);
-      if (outcome === 'skipped') {
+      if (outcome === 'skip-and-release') {
+        await releaseSentinelClaim(candidate.id, spec.sentinelField);
+        skipped++;
+      } else if (outcome === 'skipped') {
         skipped++;
       } else {
         sent++;
@@ -168,4 +188,6 @@ export async function processSentinelBatch<C extends { id: string }>(
       `${spec.effectName} processing complete`,
     );
   }
+
+  return { sent, skipped };
 }

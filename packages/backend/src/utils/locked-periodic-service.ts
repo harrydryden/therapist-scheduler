@@ -87,9 +87,12 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
   /**
    * Subclass implements with the per-tick work. The `LockedTaskContext`
    * exposes `isLockValid()` for long-running ticks that want to abort
-   * cleanly if the lock is lost mid-run.
+   * cleanly if the lock is lost mid-run. `trigger` distinguishes the
+   * delayed first run, a regular scheduled run, and an explicit
+   * `.trigger()` call — most subclasses ignore it (a 0- or 1-arg override
+   * is a valid implementation of this abstract method).
    */
-  protected abstract tick(ctx: LockedTaskContext): Promise<TResult>;
+  protected abstract tick(ctx: LockedTaskContext, trigger: 'startup' | 'scheduled' | 'manual'): Promise<TResult>;
 
   /**
    * Hook called when tick throws. Default behaviour is a no-op —
@@ -97,22 +100,40 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
    * for extras like exponential-backoff retry. Returning normally means
    * the scheduler continues; throwing here is swallowed by the safety net.
    */
-  protected onError(err: Error): void {
+  protected onError(err: Error, trigger: 'startup' | 'scheduled' | 'manual'): void {
     void err;
+    void trigger;
+  }
+
+  /**
+   * Hook called when the lock could not be acquired (another instance
+   * holds it). Default behaviour is a no-op — LockedTaskRunner already
+   * logs this at debug level. Subclasses that track consecutive-skip
+   * health (e.g. missed-message-scanner: repeated lock contention across
+   * ticks can mean a stuck lock) can override.
+   */
+  protected onLockNotAcquired(trigger: 'startup' | 'scheduled' | 'manual'): void {
+    void trigger;
   }
 
   /** Concrete implementation of PeriodicService's abstract runCheck. */
-  protected async runCheck(): Promise<void> {
-    await this.runOnceWithLock();
+  protected async runCheck(trigger: 'startup' | 'scheduled'): Promise<void> {
+    await this.runOnceWithLock(trigger);
   }
 
-  private async runOnceWithLock(): Promise<LockedTaskResult<TResult>> {
-    const taskResult = await this.lockedRunner.run((ctx) => this.tick(ctx));
+  private async runOnceWithLock(trigger: 'startup' | 'scheduled' | 'manual'): Promise<LockedTaskResult<TResult>> {
+    const taskResult = await this.lockedRunner.run((ctx) => this.tick(ctx, trigger));
     this.lastRunAt = new Date();
     this.lastResult = taskResult;
-    if (taskResult.error) {
+    if (!taskResult.acquired) {
       try {
-        this.onError(taskResult.error);
+        this.onLockNotAcquired(trigger);
+      } catch (hookErr) {
+        logger.error({ err: hookErr, service: this.serviceName }, 'onLockNotAcquired hook threw');
+      }
+    } else if (taskResult.error) {
+      try {
+        this.onError(taskResult.error, trigger);
       } catch (hookErr) {
         logger.error({ err: hookErr, service: this.serviceName }, 'onError hook threw');
       }
@@ -126,7 +147,7 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
    * from "ran with result" from "ran but errored".
    */
   async trigger(): Promise<LockedTaskResult<TResult>> {
-    return this.runOnceWithLock();
+    return this.runOnceWithLock('manual');
   }
 
   getStatus(): LockedPeriodicStatus<TResult> {

@@ -38,8 +38,16 @@ export abstract class PeriodicService {
     this.startupDelayMs = options.startupDelayMs ?? 0;
   }
 
-  /** Implement this with the service's core logic */
-  protected abstract runCheck(): Promise<void>;
+  /**
+   * Implement this with the service's core logic. `trigger` distinguishes
+   * the delayed first run after `start()` from every subsequent scheduled
+   * run — most subclasses ignore it (a 0-arg override is a valid
+   * implementation of this abstract method), but a subclass whose
+   * health-monitoring needs to reason about "have we ever completed a
+   * scheduled run" (e.g. missed-message-scanner's trigger-reason logging)
+   * can accept it.
+   */
+  protected abstract runCheck(trigger: 'startup' | 'scheduled'): Promise<void>;
 
   start(): void {
     if (this.intervalId) {
@@ -52,14 +60,14 @@ export abstract class PeriodicService {
     if (this.startupDelayMs > 0) {
       this.startupTimeoutId = setTimeout(() => {
         this.startupTimeoutId = null;
-        this.runSafe();
+        this.runSafe('startup');
       }, this.startupDelayMs);
     } else {
-      this.runSafe();
+      this.runSafe('startup');
     }
 
     this.intervalId = setInterval(() => {
-      this.runSafe();
+      this.runSafe('scheduled');
     }, this.intervalMs);
   }
 
@@ -82,7 +90,7 @@ export abstract class PeriodicService {
     };
   }
 
-  private async runSafe(): Promise<void> {
+  private async runSafe(trigger: 'startup' | 'scheduled'): Promise<void> {
     if (this.isRunning) {
       logger.debug(`${this.serviceName} already in progress, skipping`);
       return;
@@ -90,7 +98,7 @@ export abstract class PeriodicService {
 
     this.isRunning = true;
     try {
-      await this.runCheck();
+      await this.runCheck(trigger);
     } catch (error) {
       logger.error({ error }, `Unhandled error in ${this.serviceName} — will retry next interval`);
     } finally {

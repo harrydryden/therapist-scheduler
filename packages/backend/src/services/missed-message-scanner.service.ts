@@ -1,7 +1,8 @@
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
-import { LockedTaskRunner } from '../utils/locked-task-runner';
+import { LockedPeriodicService } from '../utils/locked-periodic-service';
+import type { LockedTaskContext } from '../utils/locked-task-runner';
 import { runWithTrace } from '../utils/request-tracing';
 import { emailOAuthService } from './email-oauth.service';
 import { emailIngestService } from './email-ingest.service';
@@ -23,6 +24,8 @@ const {
   CONSECUTIVE_SKIP_ALERT_THRESHOLD,
 } = MISSED_MESSAGE_SCANNER_INTERVALS;
 
+type ScanTrigger = 'startup' | 'scheduled' | 'manual';
+
 /**
  * Missed Message Scanner Service
  *
@@ -39,101 +42,46 @@ const {
  * - Respects humanControlEnabled flag (skips admin-controlled appointments)
  * - Sends Slack alerts when messages are recovered or when the scanner is unhealthy
  *
- * Uses LockedTaskRunner for distributed locking so only one instance runs at a time
- * in multi-replica deployments.
+ * Extends LockedPeriodicService for the standard start/stop/interval +
+ * distributed-lock lifecycle. Consecutive-skip health tracking (including
+ * lock-contention skips) and trigger-reason logging — the reason this
+ * didn't get the mechanical LockedPeriodicService swap the other four
+ * services got in Stage C — use the onLockNotAcquired/onError hooks and
+ * the trigger argument tick() receives, both added to the base class for
+ * exactly this (see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md).
  */
-class MissedMessageScannerService {
-  private intervalId: NodeJS.Timeout | null = null;
-  private startupTimeoutId: NodeJS.Timeout | null = null;
-  private instanceId: string;
-  private taskRunner: LockedTaskRunner;
+class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
   private consecutiveSkips = 0;
 
   constructor() {
-    this.instanceId = `${process.pid}-${Date.now().toString(36)}-missed-scanner`;
-
-    this.taskRunner = new LockedTaskRunner({
+    super({
+      name: 'missed-message-scanner',
+      intervalMs: SCAN_INTERVAL_MS,
+      startupDelayMs: STARTUP_DELAY_MS,
       lockKey: MISSED_MESSAGE_SCANNER_LOCK.KEY,
       lockTtlSeconds: MISSED_MESSAGE_SCANNER_LOCK.TTL_SECONDS,
       renewalIntervalMs: MISSED_MESSAGE_SCANNER_LOCK.RENEWAL_INTERVAL_MS,
-      instanceId: this.instanceId,
-      context: 'missed-message-scanner',
     });
   }
 
-  /**
-   * Start the periodic missed message scanner
-   */
-  start(): void {
-    if (this.intervalId) {
-      logger.warn('Missed message scanner already running');
-      return;
-    }
-
-    const intervalMinutes = Math.round(SCAN_INTERVAL_MS / (60 * 1000));
-    logger.info(
-      { intervalMs: SCAN_INTERVAL_MS, intervalMinutes },
-      `Starting missed message scanner (runs every ${intervalMinutes} minutes)`
-    );
-
-    // Delay first scan to allow Gmail client and other services to initialize
-    this.startupTimeoutId = setTimeout(() => {
-      this.startupTimeoutId = null;
-      this.runSafeScan('startup');
-    }, STARTUP_DELAY_MS);
-
-    // Then run at the configured interval
-    this.intervalId = setInterval(() => {
-      this.runSafeScan('scheduled');
-    }, SCAN_INTERVAL_MS);
-  }
-
-  /**
-   * Stop the scanner
-   */
-  stop(): void {
-    if (this.startupTimeoutId) {
-      clearTimeout(this.startupTimeoutId);
-      this.startupTimeoutId = null;
-    }
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    logger.info('Missed message scanner stopped');
-  }
-
-  /**
-   * Run a scan with distributed locking and error handling.
-   *
-   * Skip tracking lives here (not inside scanActiveThreads) so that
-   * the reset-on-success at the end only fires when we truly completed a scan.
-   */
-  private async runSafeScan(trigger: 'startup' | 'scheduled' | 'manual'): Promise<ScanResult> {
+  protected async tick(ctx: LockedTaskContext, trigger: ScanTrigger): Promise<ScanResult> {
     const scanId = `scan-${Date.now().toString(36)}`;
-
-    const result = await this.taskRunner.run(async (ctx) => {
-      return this.scanActiveThreads(scanId, trigger, ctx.isLockValid);
-    });
-
-    if (!result.acquired) {
-      logger.debug({ scanId, trigger }, 'Missed message scan skipped — another instance holds the lock');
-      this.trackSkip(scanId, trigger, 'lock_contention');
-      return EMPTY_RESULT;
-    }
-
-    if (result.error) {
-      logger.error(
-        { scanId, trigger, error: result.error },
-        'Missed message scan failed'
-      );
-      this.trackSkip(scanId, trigger, 'error', result.error.message);
-      return EMPTY_RESULT;
-    }
-
-    // Successful scan — reset skip counter
+    const result = await this.scanActiveThreads(scanId, trigger, ctx.isLockValid);
+    // Reached the end without throwing — a real completed scan (possibly a
+    // no-op, if there was nothing to scan). Reset the skip counter.
     this.consecutiveSkips = 0;
-    return result.result || EMPTY_RESULT;
+    return result;
+  }
+
+  protected onLockNotAcquired(trigger: ScanTrigger): void {
+    const scanId = `scan-${Date.now().toString(36)}`;
+    logger.debug({ scanId, trigger }, 'Missed message scan skipped — another instance holds the lock');
+    this.trackSkip(scanId, trigger, 'lock_contention');
+  }
+
+  protected onError(err: Error, trigger: ScanTrigger): void {
+    logger.error({ trigger, error: err }, 'Missed message scan failed');
+    this.trackSkip(`scan-${Date.now().toString(36)}`, trigger, 'error', err.message);
   }
 
   /**
@@ -344,7 +292,8 @@ class MissedMessageScannerService {
    */
   async triggerManualScan(): Promise<ScanResult> {
     logger.info('Manual missed message scan triggered');
-    return this.runSafeScan('manual');
+    const result = await this.trigger();
+    return result.result ?? EMPTY_RESULT;
   }
 
   /**
@@ -377,8 +326,13 @@ class MissedMessageScannerService {
    * Get service status, including a freshness check on the heartbeat.
    * "healthy" means the scanner has completed a scan recently — within
    * 2× the scan interval, with a 5-minute floor for short intervals.
+   *
+   * Named getHealthStatus (not getStatus) because it's async and returns
+   * a different, richer shape than LockedPeriodicService's synchronous
+   * getStatus() — overriding that method would be an incompatible
+   * override, not an extension of it.
    */
-  async getStatus(): Promise<{
+  async getHealthStatus(): Promise<{
     running: boolean;
     intervalMs: number;
     intervalMinutes: number;
@@ -393,14 +347,15 @@ class MissedMessageScannerService {
       ? Math.round((now - lastScanAt.getTime()) / 1000)
       : null;
 
+    const baseStatus = super.getStatus();
     const stalenessThresholdMs = Math.max(2 * SCAN_INTERVAL_MS, 5 * 60 * 1000);
     const healthy =
-      this.intervalId !== null &&
+      baseStatus.running &&
       lastScanAt !== null &&
       now - lastScanAt.getTime() < stalenessThresholdMs;
 
     return {
-      running: this.intervalId !== null,
+      running: baseStatus.running,
       intervalMs: SCAN_INTERVAL_MS,
       intervalMinutes: Math.round(SCAN_INTERVAL_MS / (60 * 1000)),
       consecutiveSkips: this.consecutiveSkips,
