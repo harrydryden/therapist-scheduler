@@ -28,6 +28,14 @@ import {
   finalizeSessionReminderPair,
   type SessionReminderPairPayload,
 } from './periodic-effect-finalizers';
+import {
+  renderClientConfirmationEmail,
+  renderTherapistConfirmationEmail,
+  renderClientCancellationEmail,
+  renderTherapistCancellationEmail,
+  type CancellationInitiator,
+  type RenderedTransitionEmail,
+} from './transition-email-renderers';
 
 const LOCK_KEY = 'side-effect-retry:processing-lock';
 const LOCK_TTL_SECONDS = 120;
@@ -37,6 +45,119 @@ const MAX_RETRY_ATTEMPTS = 5;
 const MIN_RETRY_AFTER_MS = 60 * 1000;
 const MAX_EFFECTS_PER_RUN = 50;
 const STARTUP_DELAY_MS = 30 * 1000;
+
+/**
+ * Minimal render context persisted at register-in-tx time for the two
+ * cancellation email types — `cancelledBy`/`reason` aren't durable
+ * appointment columns (only baked into the `notes` prepend as a
+ * human-readable string), so they can't be re-derived from a fresh
+ * appointment read the way the confirmation emails' fields can. Not the
+ * full rendered envelope — distinguished from one by the absence of
+ * `to`/`subject`/`body`. See register-in-tx-design.md's implementation
+ * notes.
+ */
+interface RenderContextPayload {
+  cancelledBy?: string;
+  reason?: string;
+}
+
+function isRenderedTransitionEmail(
+  payload: RenderedTransitionEmail | RenderContextPayload | null | undefined,
+): payload is RenderedTransitionEmail {
+  return (
+    !!payload &&
+    typeof (payload as RenderedTransitionEmail).to === 'string' &&
+    typeof (payload as RenderedTransitionEmail).subject === 'string' &&
+    typeof (payload as RenderedTransitionEmail).body === 'string'
+  );
+}
+
+const CANCELLATION_INITIATORS: readonly CancellationInitiator[] = ['client', 'therapist', 'admin', 'system'];
+
+function isCancellationInitiator(value: string | undefined): value is CancellationInitiator {
+  return !!value && (CANCELLATION_INITIATORS as readonly string[]).includes(value);
+}
+
+/**
+ * Render one of the four one-shot transition emails fresh, for a row
+ * registered pre-commit (register-in-tx) whose original render never ran
+ * before a crash. Safe specifically because a payload in this shape means
+ * nothing was ever sent — there's no prior render to have drifted from.
+ */
+async function renderTransitionEmailFresh(
+  effectType: 'email_client_confirmation' | 'email_therapist_confirmation' | 'email_client_cancellation' | 'email_therapist_cancellation',
+  appointment: {
+    userName: string | null;
+    userEmail: string;
+    therapistName: string | null;
+    therapistEmail: string | null;
+    confirmedDateTime: string | null;
+    confirmedDateTimeParsed: Date | null;
+    gmailThreadId: string | null;
+    therapistGmailThreadId: string | null;
+  },
+  renderCtx: RenderContextPayload | null,
+): Promise<RenderedTransitionEmail> {
+  switch (effectType) {
+    case 'email_client_confirmation':
+      return renderClientConfirmationEmail({
+        userEmail: appointment.userEmail,
+        userName: appointment.userName,
+        therapistName: appointment.therapistName,
+        confirmedDateTime: appointment.confirmedDateTime || '',
+        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+      });
+
+    case 'email_therapist_confirmation':
+      if (!appointment.therapistEmail) {
+        throw new Error(
+          `Cannot re-render ${effectType}: appointment has no therapistEmail`,
+        );
+      }
+      return renderTherapistConfirmationEmail({
+        therapistEmail: appointment.therapistEmail,
+        therapistName: appointment.therapistName,
+        userName: appointment.userName,
+        userEmail: appointment.userEmail,
+        confirmedDateTime: appointment.confirmedDateTime || '',
+        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+      });
+
+    case 'email_client_cancellation':
+      if (!isCancellationInitiator(renderCtx?.cancelledBy) || !renderCtx?.reason) {
+        throw new Error(
+          `Cannot re-render ${effectType}: missing cancellation render context (cancelledBy/reason) — registration predates render-context support`,
+        );
+      }
+      return renderClientCancellationEmail({
+        userEmail: appointment.userEmail,
+        userName: appointment.userName,
+        therapistName: appointment.therapistName,
+        cancelledBy: renderCtx.cancelledBy,
+        reason: renderCtx.reason,
+        confirmedDateTime: appointment.confirmedDateTime,
+        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+        gmailThreadId: appointment.gmailThreadId,
+      });
+
+    case 'email_therapist_cancellation':
+      if (!appointment.therapistEmail || !isCancellationInitiator(renderCtx?.cancelledBy) || !renderCtx?.reason) {
+        throw new Error(
+          `Cannot re-render ${effectType}: missing therapistEmail or cancellation render context`,
+        );
+      }
+      return renderTherapistCancellationEmail({
+        therapistEmail: appointment.therapistEmail,
+        therapistName: appointment.therapistName,
+        userName: appointment.userName,
+        cancelledBy: renderCtx.cancelledBy,
+        reason: renderCtx.reason,
+        confirmedDateTime: appointment.confirmedDateTime,
+        confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
+        therapistGmailThreadId: appointment.therapistGmailThreadId,
+      });
+  }
+}
 
 interface RetryCycleResult {
   retried: number;
@@ -263,6 +384,9 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         therapistHandle: true,
         status: true,
         confirmedDateTime: true,
+        confirmedDateTimeParsed: true,
+        gmailThreadId: true,
+        therapistGmailThreadId: true,
         trackingCode: true,
         notes: true,
         lastActivityAt: true,
@@ -363,21 +487,29 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         // One-shot transition emails registered via
         // runReplayableTrackedSideEffect — not sentinel-gated, no
         // finalization step beyond the send itself. The renderer
-        // captures a fully-rendered {to, subject, body, threadId?}
-        // envelope at original-send time, and we enqueue it verbatim on
-        // retry. We deliberately do NOT re-render on retry: settings
-        // drift (e.g. tracking URL, salutation template) between
-        // original send and retry would produce a surprising second
-        // email.
-        const payload = effect.payload as
-          | { to: string; subject: string; body: string; threadId?: string | null }
-          | null
-          | undefined;
-        if (!payload || typeof payload.to !== 'string' || typeof payload.subject !== 'string' || typeof payload.body !== 'string') {
-          throw new Error(
-            `Cannot retry ${effect.effectType}: missing or invalid stored payload — registration predates payload support`,
-          );
+        // normally captures a fully-rendered {to, subject, body,
+        // threadId?} envelope at original-send time, and we enqueue it
+        // verbatim on retry. We deliberately do NOT re-render an
+        // ALREADY-rendered envelope: settings drift (e.g. tracking URL,
+        // salutation template) between original send and retry would
+        // produce a surprising second email.
+        //
+        // Since register-in-tx (register-in-tx-design.md), these rows
+        // can also be pre-registered atomically with the status commit,
+        // BEFORE the original render ever ran — payload is then either
+        // absent (confirmation types, fully derivable from the
+        // appointment row) or a small render-context object (cancellation
+        // types, which additionally need cancelledBy/reason — not
+        // persisted appointment columns). Rendering fresh in that case is
+        // safe specifically because nothing was ever sent yet.
+        let payload = effect.payload as RenderedTransitionEmail | RenderContextPayload | null | undefined;
+
+        if (!isRenderedTransitionEmail(payload)) {
+          const rendered = await renderTransitionEmailFresh(effect.effectType, appointment, payload ?? null);
+          await sideEffectTrackerService.updatePayload(effect.idempotencyKey, rendered);
+          payload = rendered;
         }
+
         await emailQueueService.enqueue({
           to: payload.to,
           subject: payload.subject,

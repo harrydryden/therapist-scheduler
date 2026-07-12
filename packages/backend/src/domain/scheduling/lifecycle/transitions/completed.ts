@@ -11,6 +11,7 @@ import { APPOINTMENT_STATUS } from '../../../../constants';
 import { InvalidTransitionError } from '../../../../errors';
 import { appointmentNotificationsService } from '../../../../services/appointment-notifications.service';
 import { transitionSideEffectsService } from '../../../../services/transition-side-effects.service';
+import { sideEffectTrackerService } from '../../../../services/side-effect-tracker.service';
 import { addAuditMessage } from '../audit';
 import { CLEAR_RESCHEDULING_STATE } from '../update-fragments';
 import { progressionResetsFor } from '../status-order';
@@ -27,6 +28,11 @@ export async function transitionToCompleted(
 ): Promise<TransitionResult> {
   const { appointmentId, source, note, adminId, feedbackSubmissionId, feedbackData } = params;
   const logContext = { appointmentId, source, adminId };
+
+  // Fetched before the transaction so the intent-registration hook below
+  // knows whether to pre-register the Slack row. See
+  // docs/agent-harness-review/register-in-tx-design.md §6.
+  const notificationSettings = await appointmentNotificationsService.getNotificationSettings();
 
   // Valid transitions to completed
   const validFromStatuses = [
@@ -84,6 +90,32 @@ export async function transitionToCompleted(
       newStatus: APPOINTMENT_STATUS.COMPLETED,
       reason: note,
     }),
+    // Pre-register durable intent rows atomically with the status update —
+    // closes the crash window between commit and the post-commit
+    // fireAndForget dispatch below (finding #10). See
+    // register-in-tx-design.md §3 for why the post-commit dispatch code
+    // needs no changes (idempotency-key dedup finds these rows).
+    //
+    // therapist_unfreeze_sync mirrors onCompleted: keyed WITHOUT a
+    // transitionGeneration (matches transitionSideEffectsService
+    // .onCompleted's call). slack_notify_completed IS keyed with the
+    // post-update generation (matches notifyCompleted's call).
+    registerEffects: async (tx, row, postUpdateGeneration) => {
+      if (row.therapist_handle) {
+        await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'completed', {
+          effectType: 'therapist_unfreeze_sync',
+        });
+      }
+      if (feedbackSubmissionId || notificationSettings.slack.completed) {
+        await sideEffectTrackerService.registerInTransaction(
+          tx,
+          appointmentId,
+          'completed',
+          { effectType: 'slack_notify_completed' },
+          postUpdateGeneration,
+        );
+      }
+    },
   });
 
   if (outcome.kind === 'idempotent') {

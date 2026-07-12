@@ -132,6 +132,21 @@ jest.mock('../services/therapist-booking-status.service', () => ({
   },
 }));
 
+// Rendering itself is covered by notify-cancelled-template-selection.test.ts
+// and the confirmed/cancelled transition tests — mocked here so this file
+// stays focused on side-effect-retry.service.ts's dispatch logic (when it
+// renders fresh vs. replays a stored envelope verbatim).
+const renderClientConfirmationEmailMock = jest.fn();
+const renderTherapistConfirmationEmailMock = jest.fn();
+const renderClientCancellationEmailMock = jest.fn();
+const renderTherapistCancellationEmailMock = jest.fn();
+jest.mock('../services/transition-email-renderers', () => ({
+  renderClientConfirmationEmail: (...args: unknown[]) => renderClientConfirmationEmailMock(...args),
+  renderTherapistConfirmationEmail: (...args: unknown[]) => renderTherapistConfirmationEmailMock(...args),
+  renderClientCancellationEmail: (...args: unknown[]) => renderClientCancellationEmailMock(...args),
+  renderTherapistCancellationEmail: (...args: unknown[]) => renderTherapistCancellationEmailMock(...args),
+}));
+
 import type { SideEffectType } from '../services/side-effect-tracker.service';
 
 type ExecuteEffect = (effect: {
@@ -491,6 +506,135 @@ describe('executeEffect — email_meeting_link_check / email_feedback_reminder (
         payload: null,
       }),
     ).rejects.toThrow(/missing or invalid stored payload/i);
+  });
+});
+
+describe('executeEffect — email_client_confirmation / email_therapist_confirmation / email_client_cancellation / email_therapist_cancellation (register-in-tx null-payload fallback)', () => {
+  const TRANSITION_APPOINTMENT_ROW = {
+    ...APPOINTMENT_ROW,
+    confirmedDateTime: '2026-06-01T10:00:00Z',
+    confirmedDateTimeParsed: new Date('2026-06-01T10:00:00Z'),
+    gmailThreadId: 'thread-c',
+    therapistGmailThreadId: 'thread-t',
+  };
+
+  it('replays a fully-rendered stored payload verbatim without re-rendering', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(TRANSITION_APPOINTMENT_ROW);
+
+    await executeEffect({
+      id: 'log-e',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_client_confirmation',
+      idempotencyKey: 'key-e',
+      attempts: 1,
+      payload: { to: 'alice@example.com', subject: 'stored subj', body: 'stored body' },
+    });
+
+    expect(renderClientConfirmationEmailMock).not.toHaveBeenCalled();
+    expect(emailEnqueueMock).toHaveBeenCalledWith({
+      to: 'alice@example.com',
+      subject: 'stored subj',
+      body: 'stored body',
+      appointmentId: 'apt-1',
+    });
+  });
+
+  it('renders fresh and persists the payload when null (registered pre-commit, crashed before the original render ever ran)', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(TRANSITION_APPOINTMENT_ROW);
+    renderClientConfirmationEmailMock.mockResolvedValue({
+      to: 'alice@example.com',
+      subject: 'fresh subj',
+      body: 'fresh body',
+    });
+
+    await executeEffect({
+      id: 'log-e',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_client_confirmation',
+      idempotencyKey: 'key-e',
+      attempts: 0,
+      payload: null,
+    });
+
+    expect(renderClientConfirmationEmailMock).toHaveBeenCalledWith({
+      userEmail: 'alice@example.com',
+      userName: 'Alice',
+      therapistName: 'Dr T',
+      confirmedDateTime: '2026-06-01T10:00:00Z',
+      confirmedDateTimeParsed: TRANSITION_APPOINTMENT_ROW.confirmedDateTimeParsed,
+    });
+    // Persisted so a second crash (between this render and the send)
+    // finds a full, verbatim-replayable envelope instead of re-rendering.
+    expect(sideEffectUpdateMock).toHaveBeenCalledWith({
+      where: { idempotencyKey: 'key-e' },
+      data: { payload: { to: 'alice@example.com', subject: 'fresh subj', body: 'fresh body' } },
+    });
+    expect(emailEnqueueMock).toHaveBeenCalledWith({
+      to: 'alice@example.com',
+      subject: 'fresh subj',
+      body: 'fresh body',
+      appointmentId: 'apt-1',
+    });
+  });
+
+  it('renders fresh for email_therapist_cancellation using the stored render context (cancelledBy/reason)', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(TRANSITION_APPOINTMENT_ROW);
+    renderTherapistCancellationEmailMock.mockResolvedValue({
+      to: 't@example.com',
+      subject: 'thx subj',
+      body: 'thx body',
+      threadId: 'thread-t',
+    });
+
+    await executeEffect({
+      id: 'log-tc',
+      appointmentId: 'apt-1',
+      therapistId: null,
+      effectType: 'email_therapist_cancellation',
+      idempotencyKey: 'key-tc',
+      attempts: 0,
+      // Render context registered in-tx (cancelledBy/reason aren't durable
+      // appointment columns) — NOT a rendered envelope.
+      payload: { cancelledBy: 'client', reason: 'no longer needed' },
+    });
+
+    expect(renderTherapistCancellationEmailMock).toHaveBeenCalledWith({
+      therapistEmail: 't@example.com',
+      therapistName: 'Dr T',
+      userName: 'Alice',
+      cancelledBy: 'client',
+      reason: 'no longer needed',
+      confirmedDateTime: '2026-06-01T10:00:00Z',
+      confirmedDateTimeParsed: TRANSITION_APPOINTMENT_ROW.confirmedDateTimeParsed,
+      therapistGmailThreadId: 'thread-t',
+    });
+    expect(emailEnqueueMock).toHaveBeenCalledWith({
+      to: 't@example.com',
+      subject: 'thx subj',
+      body: 'thx body',
+      appointmentId: 'apt-1',
+      threadId: 'thread-t',
+    });
+  });
+
+  it('throws for email_client_cancellation when payload has neither an envelope nor a render context', async () => {
+    appointmentFindUniqueMock.mockResolvedValue(TRANSITION_APPOINTMENT_ROW);
+
+    await expect(
+      executeEffect({
+        id: 'log-cc',
+        appointmentId: 'apt-1',
+        therapistId: null,
+        effectType: 'email_client_cancellation',
+        idempotencyKey: 'key-cc',
+        attempts: 0,
+        payload: null,
+      }),
+    ).rejects.toThrow(/missing cancellation render context/i);
+
+    expect(emailEnqueueMock).not.toHaveBeenCalled();
   });
 });
 

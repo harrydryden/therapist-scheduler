@@ -124,6 +124,7 @@ const sampleRow = {
   id: 'apt-1',
   status: 'session_held',
   notes: null as string | null,
+  transition_generation: 5,
 };
 
 describe('runTerminalTransitionTx', () => {
@@ -203,6 +204,66 @@ describe('runTerminalTransitionTx', () => {
         actor: 'admin:admin-7',
         payload: auditPayload,
       },
+    });
+  });
+
+  describe('registerEffects hook (register-in-tx)', () => {
+    it('calls registerEffects with (tx, row, postUpdateGeneration) after the audit event, on the proceed path', async () => {
+      const registerEffects = jest.fn().mockResolvedValue(undefined);
+      const callOrder: string[] = [];
+      mockTx.appointmentAuditEvent.create.mockImplementation(async () => {
+        callOrder.push('audit');
+      });
+      registerEffects.mockImplementation(async () => {
+        callOrder.push('registerEffects');
+      });
+
+      await runTerminalTransitionTx({
+        ...baseArgs,
+        fetchAndLock: async () => sampleRow,
+        classify: () => 'proceed',
+        buildUpdateData: () => ({}),
+        buildAuditPayload: () => ({}),
+        registerEffects,
+      });
+
+      expect(registerEffects).toHaveBeenCalledWith(mockTx, sampleRow, sampleRow.transition_generation + 1);
+      expect(callOrder).toEqual(['audit', 'registerEffects']);
+    });
+
+    it('does not call registerEffects on the idempotent or atomicSkipped paths', async () => {
+      const registerEffects = jest.fn().mockResolvedValue(undefined);
+
+      await runTerminalTransitionTx({
+        ...baseArgs,
+        fetchAndLock: async () => sampleRow,
+        classify: () => 'idempotent',
+        buildUpdateData: () => ({}),
+        buildAuditPayload: () => ({}),
+        registerEffects,
+      });
+      await runTerminalTransitionTx({
+        ...baseArgs,
+        fetchAndLock: async () => sampleRow,
+        classify: () => 'atomicSkipped',
+        buildUpdateData: () => ({}),
+        buildAuditPayload: () => ({}),
+        registerEffects,
+      });
+
+      expect(registerEffects).not.toHaveBeenCalled();
+    });
+
+    it('is optional — proceeds without it exactly as before', async () => {
+      await expect(
+        runTerminalTransitionTx({
+          ...baseArgs,
+          fetchAndLock: async () => sampleRow,
+          classify: () => 'proceed',
+          buildUpdateData: () => ({}),
+          buildAuditPayload: () => ({}),
+        }),
+      ).resolves.toMatchObject({ kind: 'success' });
     });
   });
 

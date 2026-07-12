@@ -39,7 +39,9 @@ export type TerminalTxOutcome<TRow> =
   | { kind: 'atomicSkipped'; row: TRow; previousStatus: AppointmentStatus }
   | { kind: 'success'; row: TRow; previousStatus: AppointmentStatus };
 
-export interface RunTerminalTransitionTxArgs<TRow extends { id: string; status: string }> {
+export interface RunTerminalTransitionTxArgs<
+  TRow extends { id: string; status: string; transition_generation: number },
+> {
   appointmentId: string;
   source: TransitionSource;
   adminId?: string;
@@ -47,11 +49,32 @@ export interface RunTerminalTransitionTxArgs<TRow extends { id: string; status: 
   classify: (row: TRow) => 'idempotent' | 'atomicSkipped' | 'proceed';
   buildUpdateData: (row: TRow) => Prisma.AppointmentRequestUpdateInput;
   buildAuditPayload: (row: TRow) => Prisma.InputJsonObject;
+  /**
+   * Register durable side-effect intent rows atomically with the status
+   * update, closing the crash window described in
+   * docs/agent-harness-review/register-in-tx-design.md (finding #10): a
+   * process death between commit and the post-commit fire-and-forget
+   * dispatch used to leave zero durable trace that a notification was
+   * ever due. Called after the audit event insert, still inside the
+   * transaction. `postUpdateGeneration` is `row.transition_generation + 1`
+   * (every `buildUpdateData` bumps `transitionGeneration` by exactly 1).
+   *
+   * Callers must register each row with the SAME idempotency-key inputs
+   * (effect type + whether `transitionGeneration` is included) the
+   * post-commit dispatch code uses for that effect type — otherwise the
+   * post-commit call creates a second, duplicate row instead of finding
+   * this one. See the per-effect-type generation table in the design doc.
+   */
+  registerEffects?: (
+    tx: Prisma.TransactionClient,
+    row: TRow,
+    postUpdateGeneration: number,
+  ) => Promise<void>;
 }
 
-export async function runTerminalTransitionTx<TRow extends { id: string; status: string }>(
-  args: RunTerminalTransitionTxArgs<TRow>,
-): Promise<TerminalTxOutcome<TRow>> {
+export async function runTerminalTransitionTx<
+  TRow extends { id: string; status: string; transition_generation: number },
+>(args: RunTerminalTransitionTxArgs<TRow>): Promise<TerminalTxOutcome<TRow>> {
   return prisma.$transaction(
     async (tx) => {
       const row = await args.fetchAndLock(tx);
@@ -81,6 +104,10 @@ export async function runTerminalTransitionTx<TRow extends { id: string; status:
           payload: args.buildAuditPayload(row),
         },
       });
+
+      if (args.registerEffects) {
+        await args.registerEffects(tx, row, row.transition_generation + 1);
+      }
 
       return { kind: 'success' as const, row, previousStatus };
     },
