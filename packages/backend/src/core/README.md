@@ -36,8 +36,16 @@ core/
                      timezone resolution for users/therapists/recipients,
                      audit classifier, prompt-section fragment.
   messaging/         Email/message deduplication facade (Redis + DB).
-                     More to follow: email send queue, classifier,
-                     MIME parsing, polling primitives.
+  agent/             The tool-call loop's mechanism (dispatch, idempotency,
+                     email normalization, escalation). NOTE: as of Stage
+                     D1 this also still contains core/agent/tools/ handlers
+                     and dispatch code that fails rules 1-2 above —
+                     grandfathered into .eslintrc.js's allowlist pending
+                     Stage D2 (moves the policy half to
+                     domain/scheduling/agent/).
+  email/             Outbound send/queue/dedup transport (rules-compliant)
+                     plus email/inbound/ routing, which — like
+                     core/agent/tools/ — is grandfathered pending Stage D3.
 ```
 
 ## Migration policy
@@ -47,6 +55,13 @@ codebase point to `core/<module>` directly. Old re-export shims at the
 previous paths are NOT kept — call sites are updated as part of each
 consolidation PR.
 
-The kernel boundary is enforced by code review, not yet by lint rules.
-A follow-up will add an ESLint rule banning `core/**` files from
-importing `domain/**` or `services/<scheduling-specific>.service`.
+The kernel boundary is enforced by `.eslintrc.js`'s `import/no-restricted-paths`
+rule, which bans `core/**` files from importing `domain/**` or a
+scheduling-specific `services/*.service` module (see the config file for
+the exact list). It's allowlist-first: files that violated the rule at
+the time it landed are named explicitly in `.eslintrc.js` and grandfathered
+in, but any new violation — a new file, or a new import added to a file
+NOT already on that list — fails `npm run lint` immediately. The
+allowlist shrinks as violating modules move to `domain/scheduling/`
+(see `docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md` Stage D); don't add new
+entries to it.
