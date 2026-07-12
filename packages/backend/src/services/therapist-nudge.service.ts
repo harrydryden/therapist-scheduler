@@ -6,7 +6,7 @@ import { getSettingValue } from './settings.service';
 import { sendEmail } from '../core/email';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
-import { ACTIVE_STATUSES, THERAPIST_NUDGE } from '../constants';
+import { ACTIVE_STATUSES, TERMINAL_STATUSES, THERAPIST_NUDGE } from '../constants';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
 import { runPeriodicTrackedSideEffect } from './side-effect-harness';
 import { slackNotificationService } from './slack-notification.service';
@@ -43,11 +43,17 @@ class TherapistNudgeService extends LockedPeriodicService<void> {
    *
    * A therapist is eligible if ALL of the following are true:
    *  1. They have an ingestedAt date (were added through the ingestion flow)
-   *  2. They have NO appointments in an active status (pending → feedback_requested)
-   *  3. They have NO completed appointments (they've never been matched)
-   *  4. Enough time has passed since ingestedAt or lastNudgeAt (whichever is later)
-   *  5. They are active in Postgres (active = true)
-   *  6. They are not frozen/unavailable (no active booking threads)
+   *  2. They have NO appointment thread in ANY status — active, completed, OR
+   *     cancelled. A therapist who was matched to a client counts as "already
+   *     has a thread" even if that booking later ended: re-nudging them
+   *     ("still finding you a client") right after an admin cancels the stale
+   *     conversation is exactly the counsellor-spam / lifecycle-restart bug we
+   *     are guarding against. `cancelled` must be in the exclusion set because
+   *     cancellation also unfreezes the therapist, so nothing else keeps them
+   *     out of the candidate pool.
+   *  3. Enough time has passed since ingestedAt or lastNudgeAt (whichever is later)
+   *  4. They are active in Postgres (active = true)
+   *  5. They are not frozen/unavailable (no active booking threads)
    */
   private async sendNudges(isLockValid: () => boolean): Promise<void> {
     const enabled = await getSettingValue<boolean>('therapistNudge.enabled');
@@ -74,9 +80,16 @@ class TherapistNudgeService extends LockedPeriodicService<void> {
       getSettingValue<string>('agent.fromName'),
       getSettingValue<string>('email.therapistNudgeSubject'),
       getSettingValue<string>('email.therapistNudgeBody'),
+      // Exclude therapists who have an appointment thread in ANY status —
+      // active OR terminal (completed/cancelled). ACTIVE_STATUSES ∪
+      // TERMINAL_STATUSES is the full status set, so this matches "has ever
+      // been in an appointment". `cancelled` was previously missing here: a
+      // therapist whose only booking had just been cancelled (and thereby
+      // unfrozen) fell straight back into the candidate pool and was
+      // re-nudged, which is the counsellor-spam / lifecycle-restart bug.
       prisma.appointmentRequest.findMany({
         where: {
-          status: { in: [...ACTIVE_STATUSES, 'completed'] },
+          status: { in: [...ACTIVE_STATUSES, ...TERMINAL_STATUSES] },
         },
         select: { therapistHandle: true },
         distinct: ['therapistHandle'],
@@ -144,7 +157,8 @@ class TherapistNudgeService extends LockedPeriodicService<void> {
     });
 
     // Filter out:
-    //  - therapists with active/completed appointments (already have a thread)
+    //  - therapists with an appointment in any status — active or terminal
+    //    (completed/cancelled) — i.e. they already have/had a thread
     //  - therapists not active (deactivated)
     //  - therapists that are frozen/unavailable (have active booking threads)
     //
