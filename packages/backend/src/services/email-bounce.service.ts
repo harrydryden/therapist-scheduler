@@ -362,7 +362,7 @@ export async function processPotentialBounce(email: {
   return result.handled;
 }
 
-// Export for use in email-processing.service.ts
+// Export for use in domain/scheduling/inbound/process.ts
 export const emailBounceService = {
   detectBounce,
   handleBounce,

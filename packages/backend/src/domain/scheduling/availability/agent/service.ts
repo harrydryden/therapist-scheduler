@@ -31,7 +31,7 @@ import { Prisma } from '@prisma/client';
 import { logger } from '../../../../utils/logger';
 import { prisma } from '../../../../utils/database';
 import { ConcurrentModificationError } from '../../../../errors';
-import { emailProcessingService } from '../../../../services/email-processing.service';
+import { sendEmail } from '../../../../core/email';
 import { runAvailabilityToolLoop, type AvailabilityAgentContext } from '../../../../services/agent-tool-loop';
 import { AvailabilityToolExecutorService } from './tool-executor';
 import { truncateMessageContent } from '../../../../services/ai-conversation.service';
@@ -259,7 +259,7 @@ export class AvailabilityAgentService {
     const body = substituteVars(bodyTemplate, { therapistFirstName });
 
     try {
-      await emailProcessingService.sendEmail({
+      await sendEmail({
         to: row.therapist.email,
         subject: subject.toLowerCase().includes('spill') ? subject : `Spill - ${subject}`,
         body,

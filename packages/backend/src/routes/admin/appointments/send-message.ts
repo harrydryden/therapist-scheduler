@@ -19,7 +19,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
-import { emailProcessingService } from '../../../services/email-processing.service';
+import { sendEmail } from '../../../core/email';
 import { aiConversationService } from '../../../services/ai-conversation.service';
 import { RATE_LIMITS } from '../../../constants';
 import { sendSuccess, Errors } from '../../../utils/response';
@@ -74,7 +74,7 @@ export async function sendMessageRoute(fastify: FastifyInstance): Promise<void> 
           return Errors.badRequest(reply, 'Email recipient must be either the client or therapist for this appointment');
         }
 
-        const result = await emailProcessingService.sendEmail({
+        const result = await sendEmail({
           to,
           subject,
           body,

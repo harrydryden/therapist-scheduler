@@ -83,10 +83,8 @@ jest.mock('../utils/redis', () => ({
 }));
 
 const sendEmailMock = jest.fn();
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (...args: unknown[]) => sendEmailMock(...args),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (...args: unknown[]) => sendEmailMock(...args),
 }));
 
 // Avoid pulling the BullMQ + Worker modules into the test process —

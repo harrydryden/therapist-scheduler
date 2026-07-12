@@ -65,10 +65,8 @@ jest.mock('../services/ai.service', () => ({
 }));
 
 const sendEmailMock = jest.fn();
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (...args: unknown[]) => sendEmailMock(...args),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (...args: unknown[]) => sendEmailMock(...args),
 }));
 
 const sendAlertMock = jest.fn();

@@ -40,7 +40,7 @@ import {
 } from '../constants';
 import { AppointmentNotFoundError, BadRequestError, ConflictError } from '../errors';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { buildFeedbackEmailPayload } from './feedback-email.helper';
 
 /**
@@ -189,7 +189,7 @@ export async function reRequestFeedback(params: {
   //    stable and invisible to the cron, and a retry re-claims from the fresh
   //    read. Submissions were already discarded, which is idempotent.
   const emailPayload = await buildFeedbackEmailPayload(appointment);
-  await emailProcessingService.sendEmail(emailPayload);
+  await sendEmail(emailPayload);
 
   // 5. Transition to feedback_requested — stamps the real feedbackFormSentAt
   //    (overwriting the claim) and writes the audit trail. Admin source allows

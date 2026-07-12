@@ -41,8 +41,8 @@ jest.mock('../domain/scheduling/lifecycle', () => ({
 }));
 
 const mockSendEmail = jest.fn();
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: { sendEmail: (...a: unknown[]) => mockSendEmail(...a) },
+jest.mock('../core/email', () => ({
+  sendEmail: (...a: unknown[]) => mockSendEmail(...a),
 }));
 
 const mockBuildPayload = jest.fn();

@@ -61,10 +61,8 @@ jest.mock('../services/settings.service', () => ({
   ),
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: jest.fn().mockResolvedValue(undefined),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../utils/redis', () => ({
@@ -78,7 +76,7 @@ jest.mock('../utils/redis', () => ({
 
 import Fastify, { FastifyInstance } from 'fastify';
 import { adminInvitationRoutes } from '../routes/admin-invitations.routes';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 import { prisma } from '../utils/database';
 
 // Pull the proxy back out so we can attach mocks per test. Cast through
@@ -215,7 +213,7 @@ describe('admin invitation routes', () => {
       );
 
       // sendEmail called with rendered subject + body
-      expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+      expect(sendEmail).toHaveBeenCalledTimes(1);
     });
 
     it('honours sendEmail=false (admin shares link manually)', async () => {
@@ -230,7 +228,7 @@ describe('admin invitation routes', () => {
 
       expect(res.statusCode).toBe(201);
       expect(res.json().data.emailSent).toBe(false);
-      expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+      expect(sendEmail).not.toHaveBeenCalled();
     });
 
     it('rejects malformed email at the gate', async () => {
@@ -359,7 +357,7 @@ describe('admin invitation routes', () => {
       expect(res.statusCode).toBe(200);
       expect(res.json().data.invitation.sendCount).toBe(2);
       expect(res.json().data.emailSent).toBe(true);
-      expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+      expect(sendEmail).toHaveBeenCalledTimes(1);
     });
 
     it('refuses to resend a non-pending invitation', async () => {
@@ -374,7 +372,7 @@ describe('admin invitation routes', () => {
       });
 
       expect(res.statusCode).toBe(400);
-      expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+      expect(sendEmail).not.toHaveBeenCalled();
     });
   });
 

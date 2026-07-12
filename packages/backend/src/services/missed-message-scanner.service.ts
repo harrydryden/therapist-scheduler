@@ -3,7 +3,8 @@ import { logger } from '../utils/logger';
 import { redis } from '../utils/redis';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
 import { runWithTrace } from '../utils/request-tracing';
-import { emailProcessingService } from './email-processing.service';
+import { emailOAuthService } from './email-oauth.service';
+import { emailIngestService } from './email-ingest.service';
 import { slackNotificationService } from './slack-notification.service';
 import { firstName } from '../utils/first-name';
 import { MISSED_MESSAGE_SCANNER_LOCK, MISSED_MESSAGE_SCANNER_INTERVALS, ACTIVE_STATUSES } from '../constants';
@@ -195,7 +196,7 @@ class MissedMessageScannerService {
     const startTime = Date.now();
 
     // Pre-validate OAuth token — throw so caller tracks this as a skip
-    const tokenStatus = await emailProcessingService.ensureValidToken(10);
+    const tokenStatus = await emailOAuthService.ensureValidToken(10);
     if (!tokenStatus.valid) {
       throw new Error(`OAuth token invalid: ${tokenStatus.error || 'unknown'}`);
     }
@@ -269,7 +270,7 @@ class MissedMessageScannerService {
               // The therapist and client threads are independent Gmail API calls.
               const results = await Promise.all(
                 threadIds.map(threadId =>
-                  emailProcessingService.checkThreadForUnprocessedReplies(threadId, traceId)
+                  emailIngestService.checkThreadForUnprocessedReplies(threadId, traceId)
                 )
               );
               return results.reduce((sum, n) => sum + n, 0);

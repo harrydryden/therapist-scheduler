@@ -52,7 +52,7 @@ import {
 import { resolveWallClock, formatIsoWithOffset, isValidIanaTimezone } from '../../../../core/timezone';
 import { addUpcomingAvailability, recordTherapistBookingLink } from '../windows/therapist-store';
 import { addConversationNote } from '../../../../services/therapist-conversation-memory.service';
-import { emailProcessingService } from '../../../../services/email-processing.service';
+import { sendEmail } from '../../../../core/email';
 import type { ToolExecutionResult } from '../../../../services/scheduling-context.service';
 import type { AvailabilityAgentContext } from '../../../../services/agent-tool-loop';
 
@@ -266,7 +266,7 @@ export class AvailabilityToolExecutorService {
 
     let result: { threadId: string; messageId: string };
     try {
-      result = await emailProcessingService.sendEmail({
+      result = await sendEmail({
         to: context.therapistEmail,
         subject,
         body,

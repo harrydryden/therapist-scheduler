@@ -22,9 +22,7 @@ jest.mock('../config/models', () => ({
   MODEL_CONFIG: {},
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {},
-}));
+jest.mock('../core/email', () => ({}));
 
 jest.mock('../services/email-queue.service', () => ({
   emailQueueService: {},

@@ -14,7 +14,7 @@
 
 import { logger } from '../utils/logger';
 import { slackNotificationService } from './slack-notification.service';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { getSettingValues } from './settings.service';
 import { loadEmailTemplate } from '../utils/email-templates';
 import { ensureVoucherUrlForUser, resolveBookingUrl } from './voucher-url.service';
@@ -266,7 +266,7 @@ class AppointmentNotificationsService {
               return { to: userEmail, subject, body };
             },
             execute: async (payload) => {
-              await emailProcessingService.sendEmail(payload);
+              await sendEmail(payload);
               logger.info({ ...logContext, userEmail }, 'Sent confirmation email to client');
             },
           },
@@ -307,7 +307,7 @@ class AppointmentNotificationsService {
               return { to: therapistEmail, subject, body };
             },
             execute: async (payload) => {
-              await emailProcessingService.sendEmail(payload);
+              await sendEmail(payload);
               logger.info({ ...logContext, therapistEmail }, 'Sent confirmation email to therapist');
             },
           },
@@ -516,7 +516,7 @@ class AppointmentNotificationsService {
             return { to: userEmail, subject, body, threadId: gmailThreadId || null };
           },
           execute: async (payload) => {
-            await emailProcessingService.sendEmail({
+            await sendEmail({
               to: payload.to,
               subject: payload.subject,
               body: payload.body,
@@ -588,7 +588,7 @@ class AppointmentNotificationsService {
             return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
           },
           execute: async (payload) => {
-            await emailProcessingService.sendEmail({
+            await sendEmail({
               to: payload.to,
               subject: payload.subject,
               body: payload.body,

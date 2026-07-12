@@ -15,7 +15,7 @@ import { CLAUDE_MODELS, MODEL_CONFIG } from '../config/models';
 import { logger } from '../utils/logger';
 import { firstName } from '../utils/first-name';
 import { prisma } from '../utils/database';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { emailQueueService } from './email-queue.service';
 import { parseConversationState } from '../utils/json-parser';
 import { extractConversationMeta } from '../utils/conversation-meta';
@@ -777,7 +777,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
 
           // Try to send directly, fall back to queue
           try {
-            await emailProcessingService.sendEmail({
+            await sendEmail({
               to: input.to,
               subject: normalizedSubject,
               body: input.body,

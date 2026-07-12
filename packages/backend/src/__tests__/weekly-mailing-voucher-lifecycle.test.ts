@@ -79,10 +79,8 @@ jest.mock('../services/therapist-booking-status.service', () => ({
   },
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: jest.fn(),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn(),
 }));
 
 jest.mock('../utils/unsubscribe-token', () => ({
@@ -104,7 +102,7 @@ import { redis } from '../utils/redis';
 import { SETTING_DEFINITIONS } from '../config/setting-definitions';
 import { getSettingValue, getSettingValues } from '../services/settings.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 
 // Import after mocks — the singleton is created at import time
 import { weeklyMailingListService } from '../services/weekly-mailing-list.service';
@@ -200,7 +198,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.therapist.findMany as jest.Mock).mockResolvedValue(testTherapists);
     (therapistBookingStatusService.getUnavailableTherapistIds as jest.Mock).mockResolvedValue([]);
-    (emailProcessingService.sendEmail as jest.Mock).mockResolvedValue(undefined);
+    (sendEmail as jest.Mock).mockResolvedValue(undefined);
     (prisma.voucherTracking.upsert as jest.Mock).mockResolvedValue({});
     (prisma.voucherTracking.update as jest.Mock).mockResolvedValue({});
   });
@@ -213,10 +211,10 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     const result = await weeklyMailingListService.forceSend(true);
 
     expect(result.sent).toBe(1);
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
 
     // Verify email uses the unified subject (no voucher code in subject)
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     expect(emailCall.to).toBe('alice@example.com');
     expect(emailCall.subject).toBe('Your weekly therapy update');
 
@@ -253,7 +251,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     await weeklyMailingListService.forceSend(true);
 
     // Should send unified email (same subject), not separate reminder
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     expect(emailCall.subject).toBe('Your weekly therapy update');
 
     // Body should contain reminder text
@@ -294,7 +292,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     expect(upsertCall.update.strikeCount).toBe(0);
 
     // New voucher should be issued
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 
   // ---- Expired unused voucher: increment strike ----
@@ -334,7 +332,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     await weeklyMailingListService.forceSend(true);
 
     // Should send final notice email (not a voucher email)
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     expect(emailCall.subject).toMatch(/Goodbye/i);
 
     // Should update tracking with unsubscribedAt and clear token
@@ -372,8 +370,8 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     // The user gets a normal weekly email with a fresh code, NOT the
     // final "freeing up your spot" notice.
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     expect(emailCall.subject).toBe('Your weekly therapy update');
     expect(emailCall.subject).not.toMatch(/Goodbye/i);
 
@@ -422,7 +420,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     await weeklyMailingListService.forceSend(true);
 
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
     // Should NOT touch voucher tracking at all
     expect(prisma.voucherTracking.findUnique).not.toHaveBeenCalled();
     expect(prisma.voucherTracking.upsert).not.toHaveBeenCalled();
@@ -434,7 +432,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     setupSettings({ 'weeklyMailing.enabled': false });
 
     await expect(weeklyMailingListService.forceSend(true)).rejects.toThrow(/disabled/i);
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   // ---- Multiple users ----
@@ -448,7 +446,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     expect(result.sent).toBe(2);
     expect(result.total).toBe(2);
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(2);
+    expect(sendEmail).toHaveBeenCalledTimes(2);
     expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(2);
   });
 
@@ -458,7 +456,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
     const user2 = { id: 'user-2', email: 'bob@example.com', name: 'Bob' };
     (prisma.user.findMany as jest.Mock).mockResolvedValue([testUser, user2]);
     (prisma.voucherTracking.findUnique as jest.Mock).mockResolvedValue(null);
-    (emailProcessingService.sendEmail as jest.Mock)
+    (sendEmail as jest.Mock)
       .mockRejectedValueOnce(new Error('SMTP error'))
       .mockResolvedValueOnce(undefined);
 
@@ -483,7 +481,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     // Should issue new voucher, not send reminder
     expect(prisma.voucherTracking.upsert).toHaveBeenCalledTimes(1);
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     // Should contain new booking link text, not reminder text
     expect(emailCall.body).toContain('new personal booking link');
   });
@@ -500,7 +498,7 @@ describe('Weekly Mailing Voucher Lifecycle', () => {
 
     await weeklyMailingListService.forceSend(true);
 
-    const emailCall = (emailProcessingService.sendEmail as jest.Mock).mock.calls[0][0];
+    const emailCall = (sendEmail as jest.Mock).mock.calls[0][0];
     // The marker bookends should appear adjacent (no content between them)
     // and the literal `{newTherapistsSection}` token must not survive.
     expect(emailCall.body).not.toContain('{newTherapistsSection}');

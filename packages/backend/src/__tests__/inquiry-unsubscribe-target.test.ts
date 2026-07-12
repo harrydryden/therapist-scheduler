@@ -38,8 +38,8 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: { sendEmail: jest.fn() },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn(),
 }));
 jest.mock('../services/email-queue.service', () => ({
   emailQueueService: { enqueue: jest.fn() },

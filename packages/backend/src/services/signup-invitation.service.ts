@@ -26,7 +26,7 @@ import { getSettingValues } from './settings.service';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
 import { formatLondonDate } from '../utils/date';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 
 export type InvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
 
@@ -328,7 +328,7 @@ export async function resendInvitationEmail(id: string): Promise<ResendResult> {
 
   let emailSent = false;
   try {
-    await emailProcessingService.sendEmail({ to: row.email, subject, body });
+    await sendEmail({ to: row.email, subject, body });
     emailSent = true;
   } catch (err) {
     logger.error({ err, invitationId: id, email: row.email }, 'Failed to resend invitation email');
@@ -372,7 +372,7 @@ export async function sendInvitationEmail(params: SendInvitationEmailParams): Pr
   const body = renderTemplate(bodyTemplate, variables);
 
   try {
-    await emailProcessingService.sendEmail({ to: params.email, subject, body });
+    await sendEmail({ to: params.email, subject, body });
     return true;
   } catch (err) {
     logger.error({ err, email: params.email }, 'Failed to send invitation email');
@@ -588,7 +588,7 @@ export async function sendInvitationReminder(invitationId: string): Promise<bool
   const body = renderTemplate(bodyTemplate, variables);
 
   try {
-    await emailProcessingService.sendEmail({ to: row.email, subject, body });
+    await sendEmail({ to: row.email, subject, body });
     return true;
   } catch (err) {
     // Send failed but the claim has already stamped reminderSentAt — we

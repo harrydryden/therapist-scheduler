@@ -342,11 +342,9 @@ const mockSendEmail = jest.fn(
     messageId: 'msg-default',
   }),
 );
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
-      mockSendEmail(params),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: (params: { to: string; subject: string; body: string; threadId?: string }) =>
+    mockSendEmail(params),
 }));
 
 import {

@@ -30,7 +30,7 @@ import { aiConversationService } from '../../../services/ai-conversation.service
 import { auditEventService } from '../../../services/audit-event.service';
 import { sseService } from '../../../services/sse.service';
 import { resetAppointmentToolCount } from '../../../services/appointment-tool-counter';
-import { emailProcessingService } from '../../../services/email-processing.service';
+import { emailIngestService } from '../../../services/email-ingest.service';
 import { runBackgroundTask } from '../../../utils/background-task';
 import { RATE_LIMITS } from '../../../constants';
 import { sendSuccess, sendError, Errors } from '../../../utils/response';
@@ -57,7 +57,7 @@ function replayPausedMessages(
 ): void {
   for (const threadId of threadIds) {
     runBackgroundTask(
-      () => emailProcessingService.checkThreadForUnprocessedReplies(
+      () => emailIngestService.checkThreadForUnprocessedReplies(
         threadId,
         `release-replay:${appointmentId}`,
       ),

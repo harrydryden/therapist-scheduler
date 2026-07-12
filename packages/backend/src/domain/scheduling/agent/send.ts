@@ -1,8 +1,7 @@
 /**
  * Agent-side email send for appointment-scoped conversations.
  *
- * Wraps `emailProcessingService.sendEmail` with the per-appointment
- * concerns:
+ * Wraps core/email's `sendEmail` with the per-appointment concerns:
  *
  *   - "Spill" prefix on subjects (brand consistency)
  *   - Body normalization (signature fixup, line-ending normalization)
@@ -24,7 +23,7 @@
 import { logger } from '../../../utils/logger';
 import { prisma } from '../../../utils/database';
 import { firstName } from '../../../utils/first-name';
-import { emailProcessingService } from '../../../services/email-processing.service';
+import { sendEmail } from '../../../core/email';
 import { emailQueueService } from '../../../services/email-queue.service';
 import { auditEventService } from '../../../services/audit-event.service';
 import { getSettingValue } from '../../../services/settings.service';
@@ -33,7 +32,7 @@ import { EMAIL, TERMINAL_STATUSES } from '../../../constants';
 import { normalizeAgentOutboundEmail } from '../../../core/agent/tools/email-normalization';
 
 /**
- * Send an email via the email-processing service, with all
+ * Send an email via core/email's Gmail wrapper, with all
  * per-appointment threading + tracking-code + human-control
  * defences applied. Falls through to the BullMQ pending-email
  * queue on direct-send failure.
@@ -165,7 +164,7 @@ export async function sendAppointmentEmail(
       ? prependTrackingCodeToSubject(emailParams.subject, trackingCode)
       : emailParams.subject;
 
-    const result = await emailProcessingService.sendEmail({
+    const result = await sendEmail({
       ...emailParams,
       subject: subjectWithTracking,
       threadId: existingThreadId || undefined,

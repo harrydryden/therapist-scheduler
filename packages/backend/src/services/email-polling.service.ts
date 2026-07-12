@@ -1,4 +1,5 @@
-import { emailProcessingService } from './email-processing.service';
+import { emailOAuthService } from './email-oauth.service';
+import { emailIngestService } from './email-ingest.service';
 import { logger } from '../utils/logger';
 
 /**
@@ -102,7 +103,7 @@ class EmailPollingService {
 
     try {
       // Proactively refresh OAuth token before polling to prevent mid-operation expiry
-      const tokenStatus = await emailProcessingService.ensureValidToken(10);
+      const tokenStatus = await emailOAuthService.ensureValidToken(10);
       if (!tokenStatus.valid) {
         logger.warn(
           { pollId, trigger, error: tokenStatus.error },
@@ -113,7 +114,7 @@ class EmailPollingService {
 
       logger.info({ pollId, trigger }, 'Running backup email poll');
 
-      const result = await emailProcessingService.pollForNewEmails(pollId);
+      const result = await emailIngestService.pollForNewEmails(pollId);
 
       if (result.processed > 0) {
         logger.info(
@@ -148,7 +149,7 @@ class EmailPollingService {
 
     try {
       logger.info({ pollId }, 'Manual email poll triggered');
-      const result = await emailProcessingService.pollForNewEmails(pollId);
+      const result = await emailIngestService.pollForNewEmails(pollId);
       logger.info({ pollId, processed: result.processed }, 'Manual poll complete');
       return result;
     } catch (error) {

@@ -48,10 +48,8 @@ jest.mock('../services/settings.service', () => ({
   ),
 }));
 
-jest.mock('../services/email-processing.service', () => ({
-  emailProcessingService: {
-    sendEmail: jest.fn().mockResolvedValue(undefined),
-  },
+jest.mock('../core/email', () => ({
+  sendEmail: jest.fn().mockResolvedValue(undefined),
 }));
 
 import {
@@ -59,7 +57,7 @@ import {
   sendInvitationReminder,
   archiveOldInvitations,
 } from '../services/signup-invitation.service';
-import { emailProcessingService } from '../services/email-processing.service';
+import { sendEmail } from '../core/email';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -145,7 +143,7 @@ describe('sendInvitationReminder', () => {
     const sent = await sendInvitationReminder('inv-1');
 
     expect(sent).toBe(true);
-    expect(emailProcessingService.sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
 
     // The updateMany must include reminderSentAt: null in the where so
     // a concurrent second tick can't double-send.
@@ -167,7 +165,7 @@ describe('sendInvitationReminder', () => {
 
     expect(sent).toBe(false);
     expect(mockUpdateMany).not.toHaveBeenCalled();
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('skips when the invitation is no longer pending', async () => {
@@ -186,13 +184,13 @@ describe('sendInvitationReminder', () => {
     const sent = await sendInvitationReminder('inv-1');
 
     expect(sent).toBe(false);
-    expect(emailProcessingService.sendEmail).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('returns false when send fails after claim (no retry)', async () => {
     mockFindUnique.mockResolvedValue(makeRow());
     mockUpdateMany.mockResolvedValue({ count: 1 });
-    (emailProcessingService.sendEmail as jest.Mock).mockRejectedValueOnce(new Error('SMTP'));
+    (sendEmail as jest.Mock).mockRejectedValueOnce(new Error('SMTP'));
 
     const sent = await sendInvitationReminder('inv-1');
 

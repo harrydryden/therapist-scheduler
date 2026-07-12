@@ -28,7 +28,7 @@ import { redis } from '../utils/redis';
 import { getSettingValue } from './settings.service';
 import { knowledgeService } from './knowledge.service';
 import { AIService } from './ai.service';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 import { slackNotificationService } from './slack-notification.service';
 import { firstName } from '../utils/first-name';
 import type { EmailMessage } from '../utils/email-mime-parser';
@@ -136,7 +136,7 @@ export async function tryHandleInvitationReply(
       ? email.subject
       : `Re: ${email.subject}`;
 
-    await emailProcessingService.sendEmail({
+    await sendEmail({
       to: fromEmail,
       subject: replySubject,
       body: replyBody,

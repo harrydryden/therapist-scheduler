@@ -43,7 +43,7 @@ import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderVoucherSection, formatVoucherExpiry } from '../utils/voucher-section';
 import { renderTemplate } from '../utils/email-templates';
 import { firstName } from '../utils/first-name';
-import { emailProcessingService } from './email-processing.service';
+import { sendEmail } from '../core/email';
 
 interface IssueWelcomeVoucherParams {
   email: string;
@@ -162,7 +162,7 @@ export async function issueWelcomeVoucher(
     });
     // Second pass: inject the shared voucher section verbatim.
     const body = rendered.replace(/\{voucherSection\}/g, voucherSection);
-    await emailProcessingService.sendEmail({ to: emailLower, subject, body });
+    await sendEmail({ to: emailLower, subject, body });
     emailSent = true;
   } catch (err) {
     // Token is already persisted at this point — the user can still
