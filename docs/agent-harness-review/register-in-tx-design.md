@@ -1,6 +1,6 @@
 # Design: closing the register-in-tx crash window for confirm/cancel/complete
 
-Status: **draft — for review before any implementation.**
+Status: **implemented and shipped** (Phase 1 → PR #304, Phase 2 → PR #305; both merged). Implementation notes recorded in §10 (Phase 1) and §11 (Phase 2). The "open decisions" in §9 were resolved as noted there before any code was written.
 
 This is finding #10 from `docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md`, the last of the three items deferred out of the original refactor pass. Per the review's own note (`stage-b-design.md` §6 open decision 4), this was intentionally kept separate from Stage B because it touches the hot confirm/cancel/complete path directly, not the periodic-effects code Stage B covered.
 

@@ -67,6 +67,28 @@ Migrate the five hand-rolled interval+lock services (therapist-nudge, missed-mes
 
 Stage A fixes live bugs with no structural risk. Stage B is the surgery, sequenced early because four confirmed findings share its root cause; B1 before B2 so the compatibility window exists. Stage C is safe mechanical deletion that shrinks the surface Stage D has to move. Stage D last because moves are cheapest when the code being moved is already consolidated — and D1 (the lint rule) lands first within the stage so the boundary stops eroding while the moves proceed. Total: ~10 PRs. If capacity forces triage: A1, A2, and B2 carry the highest defect density; D can wait indefinitely without correctness cost (but blocks the ATS lift).
 
+## 3a. Execution status — COMPLETE
+
+All stages of the plan above shipped and merged. Recorded here so this document reads as history rather than a live plan.
+
+| Plan item | Shipped as | Notes |
+|---|---|---|
+| A1 — dead/broken recovery paths | merged | raw-SQL table-name fixes, compensation filter, `startScheduling` save-failure propagation |
+| A2 — mid-turn races | merged | per-appointment turn mutex, terminal send guard, human-control loop-break |
+| A3 — behavioral traps | merged | chase `scopeGeneration`, `tools-for-stage`, send fallback tracking-code + thread-ID stamping |
+| B (effects HIGH fix) | merged | retry now runs the FULL finalization (sentinel confirm + checkpoint/transition), not just the email half — the split-brain replay class is closed |
+| C1 / C2 — scaffolding consolidation | merged | periodic-runner + sentinel/status-set constant consolidation; agent-loop escalation/idempotency/normalization dedup |
+| D1 / D2 / D3 — boundary re-draw + enforcement | #300–302 | ESLint kernel-boundary rule (allowlist→strict), `core/agent/tools/`→`domain/scheduling/agent/`, `core/email/inbound/`→`domain/scheduling/inbound/`, email-shim dissolution |
+| Deferred follow-ups: `LockedPeriodicService` migration (missed-message-scanner, pending-email) + chase-email → `sentinel-batch-runner` | #303 | trigger-reason hooks + `onLockNotAcquired`; `processSentinelBatch` `'skip-and-release'` outcome |
+| Register-in-tx crash window (finding #10) | #303 (design), #304 (Phase 1: cancel/complete), #305 (Phase 2: confirm) | see `agent-harness-review/register-in-tx-design.md` |
+
+**Two conscious deviations from the plan as originally written, recorded for honesty:**
+
+1. **The register-in-tx fix shipped leaner than Stage B1's prose.** B1 called for a new `params` JSONB column, a full `lifecycle/effects/` handler registry (one handler per effect type), a renamed 30s drain runner with an in-process poke, and moving `transition-side-effects.service.ts` + `appointment-notifications.service.ts` into `domain/scheduling/lifecycle/`. **None of that was built.** The crash-window *defect* is fully closed for confirm/cancel/complete using the existing primitives (`registerInTransaction`, the `payload` column, idempotency-key dedup) — no schema migration, no handler-registry rebuild, no file moves. This was a deliberate, approved scope reduction (design doc §9 recommended the smaller/safer path and it was approved as written). The larger architectural rebuild B1 imagined remains available as future work but was not pursued, because the bug it was framed around is fixed by much less.
+2. **The `agent-processor.ts` DI-registry dissolution (D3's wording) was deliberately left in place.** Dissolving it risks a CommonJS require-ordering cycle on the Gmail-webhook entry point that only surfaces at real server boot — unverifiable in the CI sandbox. Documented as a conscious follow-up in `domain/scheduling/inbound/README.md`.
+
+The two items the plan explicitly deferred/rejected from the outset (two-loops-into-one; declarative rules engine) were correctly not attempted.
+
 ## 4. Runtime interaction map
 
 Produced by the mapping agent; paths relative to `packages/backend/src`.

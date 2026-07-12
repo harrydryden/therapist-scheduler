@@ -1,5 +1,21 @@
 # Architecture Consolidation Plan
 
+> **Status (2026-07-12): superseded by the findings-driven replan in
+> `AGENT_HARNESS_LIFECYCLE_REVIEW.md`, and now fully executed.** This
+> document is retained as historical context for Phases 1–3. The
+> July 2026 harness/lifecycle review challenged this plan's sequencing
+> and two placement decisions (see that doc's §2), added a hardening
+> track ahead of the structural work, and reversed the Phase 2b/2c
+> kernel placement (`core/agent/tools/` and `core/email/inbound/` moved
+> to `domain/scheduling/`). All of the review's Stages A–D shipped —
+> see its §3a execution table for the PR mapping. Where this document
+> and the review disagree, **the review is authoritative.** In
+> particular: the "Cross-cutting: kernel-boundary lint rule" section
+> below said to add the rule "in the Phase 1c PR" — it actually landed
+> in review Stage D1, allowlist-first, then tightened to strict in D3.
+> Phase 1c (availability consolidation) below is described as the "next
+> PR" but has already landed.
+
 This document captures the in-flight refactor staged across multiple
 PRs. The first PR (this one) lays the kernel boundary and consolidates
 the two lowest-risk concept fragmentations (timezone, message dedup).
