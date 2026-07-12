@@ -16,7 +16,7 @@
 import { logger } from '../../../../utils/logger';
 import { prisma } from '../../../../utils/database';
 import { recordUserTimezoneInputSchema } from '../../../../schemas/tool-inputs';
-import { isValidIanaTimezone } from '../../../timezone';
+import { isValidIanaTimezone } from '../../../../core/timezone';
 import type {
   SchedulingContext,
   ToolExecutionResult,

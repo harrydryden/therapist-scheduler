@@ -24,11 +24,11 @@ jest.mock('../utils/logger', () => ({
 }));
 
 const mockSendAppointmentEmail = jest.fn().mockResolvedValue(undefined);
-jest.mock('../core/agent/tools/send', () => ({
+jest.mock('../domain/scheduling/agent/send', () => ({
   sendAppointmentEmail: (...args: unknown[]) => mockSendAppointmentEmail(...args),
 }));
 
-import { handleSendEmail } from '../core/agent/tools/handlers/send-email';
+import { handleSendEmail } from '../domain/scheduling/agent/handlers/send-email';
 import type { SchedulingContext } from '../services/scheduling-context.service';
 
 const CONTEXT: SchedulingContext = {

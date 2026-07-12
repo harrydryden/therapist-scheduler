@@ -14,7 +14,7 @@
  */
 
 import { resolveLocalTimeInputSchema } from '../../../../schemas/tool-inputs';
-import { resolveWallClock, formatIsoWithOffset } from '../../../timezone';
+import { resolveWallClock, formatIsoWithOffset } from '../../../../core/timezone';
 import type { ToolExecutionResult } from '../../../../services/scheduling-context.service';
 
 export async function handleResolveLocalTime(rawInput: unknown): Promise<ToolExecutionResult> {
