@@ -51,7 +51,7 @@ jest.mock('../services/ai-conversation.service', () => ({
   })),
 }));
 
-jest.mock('../core/agent/tools', () => ({
+jest.mock('../domain/scheduling/agent', () => ({
   AIToolExecutorService: jest.fn().mockImplementation(() => ({
     executeToolCall: jest.fn(),
     flagForHumanReviewFromLoop: jest.fn(),

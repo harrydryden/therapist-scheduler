@@ -30,7 +30,7 @@ import { auditEventService } from '../../../services/audit-event.service';
 import { getSettingValue } from '../../../services/settings.service';
 import { prependTrackingCodeToSubject } from '../../../services/tracking-code.service';
 import { EMAIL, TERMINAL_STATUSES } from '../../../constants';
-import { normalizeAgentOutboundEmail } from './email-normalization';
+import { normalizeAgentOutboundEmail } from '../../../core/agent/tools/email-normalization';
 
 /**
  * Send an email via the email-processing service, with all

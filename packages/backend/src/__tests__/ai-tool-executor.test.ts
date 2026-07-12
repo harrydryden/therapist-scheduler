@@ -127,7 +127,7 @@ jest.mock('../domain/scheduling/availability/windows/parser', () => ({
   buildPersistedAvailability: jest.fn().mockReturnValue({}),
 }));
 
-import { AIToolExecutorService } from '../core/agent/tools';
+import { AIToolExecutorService } from '../domain/scheduling/agent';
 import type { SchedulingContext } from '../services/scheduling-context.service';
 import type Anthropic from '@anthropic-ai/sdk';
 

@@ -22,7 +22,7 @@
  * export, which is the most likely regression path.
  */
 
-import { PURE_TOOLS, isPureTool } from '../core/agent/tools/pure-tools';
+import { PURE_TOOLS, isPureTool } from '../domain/scheduling/agent/pure-tools';
 
 describe('PURE_TOOLS contract', () => {
   it('contains resolve_local_time (the budget-bypass + gate-bypass tool)', () => {

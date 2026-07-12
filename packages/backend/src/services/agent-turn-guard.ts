@@ -21,10 +21,10 @@
  * execute path. Only the genuinely-identical decision logic is consolidated.
  *
  * Pure tools (`PURE_TOOLS`, e.g. `resolve_local_time`) are exempt from the
- * budget but NOT from the same-hash guard — see `core/agent/tools/pure-tools`.
+ * budget but NOT from the same-hash guard — see `domain/scheduling/agent/pure-tools`.
  */
 
-import { PURE_TOOLS } from '../core/agent/tools/pure-tools';
+import { PURE_TOOLS } from '../domain/scheduling/agent/pure-tools';
 import {
   buildBudgetExhaustedMessage,
   buildSameHashAbortMessage,

@@ -13,8 +13,11 @@ domain code still lives at `services/<file>.service.ts`.
 ```
 domain/
   scheduling/
-    availability/        Availability extraction, windows, formatter
-                         (currently spread across 8 services/availability-*).
+    agent/               Booking agent's tool handlers, dispatch, and send
+                         wrapper (moved from core/agent/tools/ in Stage D2 —
+                         see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md).
+    availability/        Availability extraction, windows, formatter, and
+                         its own agent/ (the availability-collection agent).
     lifecycle/           Appointment state machine + side effects
                          (currently appointment-lifecycle.service.ts, 1972 lines).
     booking/             Voucher issuance, post-booking follow-up,

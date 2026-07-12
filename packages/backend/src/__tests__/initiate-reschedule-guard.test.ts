@@ -30,7 +30,7 @@ jest.mock('../utils/database', () => ({
   },
 }));
 
-import { handleInitiateReschedule } from '../core/agent/tools/handlers/initiate-reschedule';
+import { handleInitiateReschedule } from '../domain/scheduling/agent/handlers/initiate-reschedule';
 import { SESSION_END_BUFFER_MS } from '../constants';
 import type { SchedulingContext } from '../services/scheduling-context.service';
 

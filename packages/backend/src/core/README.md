@@ -36,16 +36,15 @@ core/
                      timezone resolution for users/therapists/recipients,
                      audit classifier, prompt-section fragment.
   messaging/         Email/message deduplication facade (Redis + DB).
-  agent/             The tool-call loop's mechanism (dispatch, idempotency,
-                     email normalization, escalation). NOTE: as of Stage
-                     D1 this also still contains core/agent/tools/ handlers
-                     and dispatch code that fails rules 1-2 above —
-                     grandfathered into .eslintrc.js's allowlist pending
-                     Stage D2 (moves the policy half to
-                     domain/scheduling/agent/).
+  agent/             Tool-call mechanism shared by both agent loops:
+                     Redis idempotency (fail-closed, key-prefixed) and
+                     outbound-email normalization. As of Stage D2 the
+                     booking agent's tool handlers/dispatch/send — the
+                     scheduling-policy half — live in
+                     domain/scheduling/agent/ instead.
   email/             Outbound send/queue/dedup transport (rules-compliant)
-                     plus email/inbound/ routing, which — like
-                     core/agent/tools/ — is grandfathered pending Stage D3.
+                     plus email/inbound/ routing, which is grandfathered
+                     pending Stage D3.
 ```
 
 ## Migration policy

@@ -30,7 +30,7 @@ import {
   isValidIanaTimezone,
   resolveWallClock,
   formatIsoWithOffset,
-} from '../../../timezone';
+} from '../../../../core/timezone';
 import { markCompleteInputSchema } from '../../../../schemas/tool-inputs';
 import { availabilityResolver } from '../../../../domain/scheduling/availability/resolver';
 import { parseConfirmedDateTime, areDatetimesEqual } from '../../../../utils/date';

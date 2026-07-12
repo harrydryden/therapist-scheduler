@@ -50,7 +50,7 @@ import {
   alertTerminalAppointmentInbound,
 } from './terminal-appointment-guard';
 import { AIConversationService, truncateMessageContent } from './ai-conversation.service';
-import { AIToolExecutorService } from '../core/agent/tools';
+import { AIToolExecutorService } from '../domain/scheduling/agent';
 import { getSettingValue } from './settings.service';
 import { withAppointmentTurnLock } from './appointment-turn-lock';
 import { ConcurrentModificationError } from '../errors';
@@ -712,7 +712,7 @@ ${formatClassificationForPrompt(emailClassification)}`;
       // the final save persists the same object with the same version
       // — and (b) threw COMod on the very common case where the
       // flag_for_human_review tool's own DB write (humanControlEnabled
-      // = true via core/agent/tools/handlers/human-control.ts) had
+      // = true via domain/scheduling/agent/handlers/human-control.ts) had
       // already bumped updatedAt. The throw propagated up to process.ts
       // which silently returned false on COMod, leaving the message
       // unmarked and stuck in a scanner-replay loop. Removing the

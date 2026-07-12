@@ -59,7 +59,7 @@ import {
   hashToolCall,
   markToolExecuted,
   wasToolExecuted,
-} from './idempotency';
+} from '../../../core/agent/tools/idempotency';
 import { isPureTool } from './pure-tools';
 import { handleResolveLocalTime } from './handlers/resolve-local-time';
 import { handleSendEmail } from './handlers/send-email';

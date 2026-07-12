@@ -13,12 +13,13 @@
  * boundary this file exists to enforce — out of scope for this PR.
  *
  * Allowlist-first: the second `overrides` entry below names every file
- * that violates the rule TODAY (~46 edges across 21 files, discovered by
- * grepping core/ for domain/ and scheduling-service imports) and turns
- * the rule off for exactly those files. New files under core/ — and new
- * imports added to files NOT in that list — are caught immediately. As
- * Stage D2/D3 move core/agent/tools/ and core/email/inbound/ into
- * domain/scheduling/, entries here should be deleted, not added to.
+ * that still violates the rule and turns it off for exactly those files.
+ * New files under core/ — and new imports added to files NOT in that
+ * list — are caught immediately. Started at ~46 edges across 21 files
+ * when this rule landed (Stage D1); Stage D2 moved core/agent/tools/'s
+ * policy half to domain/scheduling/agent/ and removed its 15 entries.
+ * Stage D3 does the same for core/email/inbound/. Entries here should
+ * shrink, not grow.
  */
 
 const KERNEL_BOUNDARY_MESSAGE =
@@ -54,21 +55,8 @@ const SCHEDULING_SERVICE_GLOBS = [
 // per-line suppression comments, which would be noisier than the file
 // list itself.
 const ALLOWLISTED_VIOLATORS = [
-  'src/core/agent/tools/dispatch.ts',
-  'src/core/agent/tools/send.ts',
-  'src/core/agent/tools/handlers/cancel-appointment.ts',
-  'src/core/agent/tools/handlers/human-control.ts',
-  'src/core/agent/tools/handlers/initiate-reschedule.ts',
-  'src/core/agent/tools/handlers/issue-voucher-code.ts',
-  'src/core/agent/tools/handlers/mark-scheduling-complete.ts',
-  'src/core/agent/tools/handlers/record-availability-window.ts',
-  'src/core/agent/tools/handlers/record-booking-link.ts',
-  'src/core/agent/tools/handlers/record-therapist-timezone.ts',
-  'src/core/agent/tools/handlers/record-user-timezone.ts',
-  'src/core/agent/tools/handlers/remember.ts',
-  'src/core/agent/tools/handlers/resolve-local-time.ts',
-  'src/core/agent/tools/handlers/send-email.ts',
-  'src/core/agent/tools/handlers/update-therapist-availability.ts',
+  // core/agent/tools/* moved to domain/scheduling/agent/ in Stage D2 —
+  // no longer under core/, so no longer needs (or gets) an entry here.
   'src/core/email/inbound/availability-routing.ts',
   'src/core/email/inbound/closure-auto-dismiss.ts',
   'src/core/email/inbound/divergence-handling.ts',
