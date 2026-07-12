@@ -64,8 +64,8 @@ lifecycle/
   scoped as a future PR.
 - **Specific tools that drive the FSM** — e.g. the agent's
   `mark_scheduling_complete` tool lives in
-  `services/ai-tool-executor.service.ts` and calls
-  `transitionToConfirmed`.
+  `domain/scheduling/agent/handlers/mark-scheduling-complete.ts` and
+  calls `transitionToConfirmed`.
 
 ## Invariants
 

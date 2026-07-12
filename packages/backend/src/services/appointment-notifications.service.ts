@@ -85,7 +85,8 @@ export interface NotifyConfirmedParams {
    * Post-update transition generation. Threaded into side-effect-tracker
    * idempotency keys so that re-confirmation after cancellation gets a
    * different key than the original confirmation's already-completed
-   * Slack/email rows. See appointment-lifecycle.service for the bump.
+   * Slack/email rows. The bump happens in the transition itself (e.g.
+   * domain/scheduling/lifecycle/transitions/confirmed.ts).
    */
   transitionGeneration?: number;
 }
@@ -386,33 +387,14 @@ class AppointmentNotificationsService {
       );
     }
 
-    // Send cancellation emails (non-blocking, tracked).
-    //
-    // Template selection branches on `cancelledBy`:
-    //
-    //   cancelledBy = 'therapist'
-    //     → Client gets `clientCancellationByTherapist`
-    //       (apology + voucher link to book another session).
-    //     → Therapist gets `therapistCancellation` (neutral
-    //       confirmation — the therapist already knows).
-    //
-    //   cancelledBy = 'client'
-    //     → Therapist gets `therapistCancellationByClient`
-    //       (apology + reassurance that we'll find a new client).
-    //     → Client gets `clientCancellation` (neutral confirmation
-    //       — the client already knows).
-    //
-    //   cancelledBy = 'admin' | 'system'
-    //     → Both parties get the neutral templates with the
-    //       cancellation reason injected in the same legacy
-    //       conditional manner. This preserves the pre-change
-    //       behaviour for bounce-handler / cron-driven cancels
-    //       and for admin-initiated cancels where the admin
-    //       didn't attribute the cancellation to either party.
-    //
-    // Same two-fallback pattern as the confirmation path: 'there'
-    // for the client-facing greeting, 'the client' / 'your
-    // therapist' for the body of the *other* party's email.
+    // Send cancellation emails (non-blocking, tracked). Which template
+    // each party gets — apology+voucher vs apology+reassurance vs neutral
+    // — is selected from `cancelledBy` inside the renderers themselves
+    // (renderClientCancellationEmail / renderTherapistCancellationEmail in
+    // transition-email-renderers.ts). That's the single source of truth
+    // for the branching; this service just decides whether to send at all
+    // (settings + thread-exists guards below) and wires the renderer to
+    // the tracked-side-effect harness.
     // ─── CLIENT EMAIL ────────────────────────────────────────────
     if (settings.email.clientCancellation && userEmail) {
       runReplayableTrackedSideEffect(
