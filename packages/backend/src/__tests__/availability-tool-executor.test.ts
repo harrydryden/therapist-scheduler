@@ -55,6 +55,14 @@ jest.mock('../services/email-processing.service', () => ({
   },
 }));
 
+// send_email now shares normalizeAgentOutboundEmail with the booking
+// agent, which needs agent.fromName. Stub settings.service directly
+// rather than letting it load — the real module subscribes to Redis
+// pubsub for cache invalidation at import time.
+jest.mock('../services/settings.service', () => ({
+  getSettingValue: jest.fn(async () => 'Justin Time'),
+}));
+
 // In-memory stores keyed by primary key — mirrors agent-memory.test.ts.
 type TherapistRow = {
   id: string;

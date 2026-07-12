@@ -30,7 +30,7 @@ import { auditEventService } from '../../../services/audit-event.service';
 import { getSettingValue } from '../../../services/settings.service';
 import { prependTrackingCodeToSubject } from '../../../services/tracking-code.service';
 import { EMAIL, TERMINAL_STATUSES } from '../../../constants';
-import { normalizeEmailBody } from './email-normalization';
+import { normalizeAgentOutboundEmail } from './email-normalization';
 
 /**
  * Send an email via the email-processing service, with all
@@ -52,19 +52,20 @@ export async function sendAppointmentEmail(
   appointmentRequestId: string | undefined,
   traceId: string,
 ): Promise<void> {
-  // Ensure subject includes "Spill" for brand consistency.
-  let normalizedSubject = params.subject;
-  if (!params.subject.toLowerCase().includes('spill')) {
-    normalizedSubject = `Spill - ${params.subject}`;
+  const agentName = await getSettingValue<string>('agent.fromName');
+  const agentFirstName = firstName(agentName);
+  const { subject: normalizedSubject, body: normalizedBody } = normalizeAgentOutboundEmail(
+    params.subject,
+    params.body,
+    agentFirstName,
+  );
+
+  if (normalizedSubject !== params.subject) {
     logger.info(
       { traceId, originalSubject: params.subject, normalizedSubject },
       'Added "Spill" prefix to email subject',
     );
   }
-
-  const agentName = await getSettingValue<string>('agent.fromName');
-  const agentFirstName = firstName(agentName);
-  const normalizedBody = normalizeEmailBody(params.body, agentFirstName);
 
   logger.debug(
     {

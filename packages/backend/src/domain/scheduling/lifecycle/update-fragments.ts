@@ -23,15 +23,22 @@ export const CLEAR_RESCHEDULING_STATE = {
 
 /**
  * Field set written when an appointment ENTERS rescheduling. Two writers
- * apply it and MUST stay in lock-step (defining the shape here is the
- * lock-step mechanism, same rationale as CLEAR_CHASE_STATE):
+ * apply it (defining the shape here is the lock-step mechanism, same
+ * rationale as CLEAR_CHASE_STATE):
  *   - the agent's `initiate_reschedule` tool handler (initiatedBy 'agent')
- *   - `reconcileStatusAfterReply`'s post-loop safety net (initiatedBy =
- *     the inbound sender)
+ *   - `adminForceUpdate`'s date-clear branch (initiatedBy `admin:<id>`)
+ *
+ * `reconcileStatusAfterReply` used to be a third writer (initiatedBy = the
+ * inbound sender) but that write was always redundant — executedTools only
+ * ever contains successful tool calls, so it only ever ran after the tool
+ * handler above had already applied this fragment, silently overwriting
+ * initiatedBy with the sender's email on every reschedule. See
+ * docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md finding #16; the reconciler is now
+ * a no-op in that branch.
  *
  * `confirmedDateTime` and its parsed mirror `confirmedDateTimeParsed` are
  * cleared TOGETHER. Clearing only the display string (a historical drift
- * between the two writers) left a stale parsed value behind, which let the
+ * between the writers) left a stale parsed value behind, which let the
  * lifecycle tick promote a mid-reschedule appointment to session_held off
  * the abandoned slot.
  */

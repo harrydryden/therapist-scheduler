@@ -19,9 +19,7 @@
  */
 
 import { logger } from '../utils/logger';
-import { prisma } from '../utils/database';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
-import { startReschedulingState } from '../domain/scheduling/lifecycle/update-fragments';
 import { InvalidTransitionError } from '../errors';
 
 export interface PostReplyAppointmentSnapshot {
@@ -35,7 +33,11 @@ export interface ReconcileStatusAfterReplyArgs {
   /** Snapshot taken BEFORE the tool loop — `status` may be stale. */
   appointmentRequest: PostReplyAppointmentSnapshot;
   appointmentRequestId: string;
-  /** Sender of the inbound email — recorded as the reschedule initiator. */
+  /**
+   * Sender of the inbound email. No longer used to attribute a reschedule
+   * (see the `initiatedReschedule` branch below) — kept for callers and
+   * for other diagnostics that may want it in scope.
+   */
   fromEmail: string;
   executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>;
   traceId: string;
@@ -56,7 +58,7 @@ export interface ReconcileStatusAfterReplyArgs {
 export async function reconcileStatusAfterReply(
   args: ReconcileStatusAfterReplyArgs,
 ): Promise<void> {
-  const { appointmentRequest, appointmentRequestId, fromEmail, executedTools, traceId } = args;
+  const { appointmentRequest, appointmentRequestId, executedTools, traceId } = args;
 
   // Use lifecycle service instead of a direct Prisma update for audit trail
   // & consistency.
@@ -108,35 +110,18 @@ export async function reconcileStatusAfterReply(
         'Skipping rescheduling flag update - mark_scheduling_complete already finalized the reschedule',
       );
     } else if (initiatedReschedule) {
-      // Agent confirmed this is a reschedule. Clear the confirmed date/time.
-      // checkpointStage is intentionally NOT set here — the agent tool loop
-      // already advanced the JSON checkpoint via the `initiated_reschedule`
-      // action, and the subsequent storeConversationState call will sync
-      // the denormalized column from the JSON.
-      //
-      // Status-guarded (updateMany WHERE status='confirmed') so a concurrent
-      // cancel/complete landing between the tool loop and here can't resurrect
-      // reschedule fields (confirmedDateTime=null, reschedulingInProgress=true)
-      // onto a terminal row. The normal path is unaffected — initiate_reschedule
-      // leaves the row 'confirmed'.
-      const rescheduleUpdate = await prisma.appointmentRequest.updateMany({
-        where: { id: appointmentRequestId, status: 'confirmed' },
-        data: startReschedulingState({
-          initiatedBy: fromEmail,
-          previousConfirmedDateTime: appointmentRequest.confirmedDateTime ?? null,
-        }),
-      });
-      if (rescheduleUpdate.count === 0) {
-        logger.warn(
-          { traceId, appointmentRequestId },
-          'Reschedule flag-update skipped — appointment no longer confirmed (concurrent cancel/complete)',
-        );
-      } else {
-        logger.info(
-          { traceId, appointmentRequestId, initiatedBy: fromEmail, previousDateTime: appointmentRequest.confirmedDateTime },
-          'Agent initiated reschedule for confirmed appointment - cleared stale date/time',
-        );
-      }
+      // No-op by design: executedTools only ever records SUCCESSFUL,
+      // non-skipped tool calls (agent-tool-loop.ts), so 'initiate_reschedule'
+      // appearing here means the tool handler (handlers/initiate-reschedule.ts)
+      // already applied startReschedulingState with initiatedBy: 'agent' and
+      // cleared the confirmed date/time. Re-applying it here with
+      // initiatedBy: fromEmail used to silently overwrite that attribution on
+      // every single reschedule (see docs/AGENT_HARNESS_LIFECYCLE_REVIEW.md
+      // finding #16) — the handler's write is the only one that should land.
+      logger.info(
+        { traceId, appointmentRequestId },
+        'Reschedule already applied by initiate_reschedule tool handler - no reconciler write needed',
+      );
     } else {
       // Informational reply — leave appointment state untouched.
       logger.info(

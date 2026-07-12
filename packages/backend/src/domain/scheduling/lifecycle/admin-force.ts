@@ -40,7 +40,7 @@ import { transitionSideEffectsService } from '../../../services/transition-side-
 import { recordAppointmentEvent } from '../../../services/appointment-event.service';
 import { isTerminalAppointmentStatus } from '../../../services/terminal-appointment-guard';
 import { addAuditMessage, recordStatusChangeEvent } from './audit';
-import { CLEAR_RESCHEDULING_STATE } from './update-fragments';
+import { CLEAR_RESCHEDULING_STATE, startReschedulingState } from './update-fragments';
 import {
   computeBackwardSentinelResets,
   progressionResetsFor,
@@ -197,13 +197,29 @@ export async function adminForceUpdate(
       updateData.confirmedDateTime = confirmedDateTime;
       updateData.confirmedDateTimeParsed = confirmedDateTimeParsed ?? null;
 
-      // When clearing the date on an active appointment, mark as rescheduling
+      // When clearing the date on an active appointment, mark as rescheduling.
+      // Routed through the shared startReschedulingState fragment (see
+      // update-fragments.ts) so this path picks up the
+      // meetingLinkCheckSentAt/reminderSentAt clears the agent-driven writers
+      // apply — previously omitted here, which left stale post-booking
+      // sentinels behind an admin-initiated reschedule.
+      //
+      // checkpointStage is still set directly here, unlike the agent's
+      // initiate_reschedule handler (which deliberately leaves it to the
+      // subsequent storeConversationState JSON-checkpoint sync): there is no
+      // such downstream sync on this admin-bypass path, so this is the only
+      // writer, and the admin dashboard's next-action label (next-action.ts)
+      // reads checkpointStage directly.
       const effectiveStatus = newStatus || previousStatus;
       const isActiveStatus = !isTerminalAppointmentStatus(effectiveStatus);
       if (!confirmedDateTime && isActiveStatus && appointment.confirmedDateTime) {
-        updateData.reschedulingInProgress = true;
-        updateData.previousConfirmedDateTime = appointment.confirmedDateTime;
-        updateData.reschedulingInitiatedBy = `admin:${adminId}`;
+        Object.assign(
+          updateData,
+          startReschedulingState({
+            initiatedBy: `admin:${adminId}`,
+            previousConfirmedDateTime: appointment.confirmedDateTime,
+          }),
+        );
         updateData.checkpointStage = 'rescheduling';
       }
 

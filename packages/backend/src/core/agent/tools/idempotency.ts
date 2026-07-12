@@ -18,6 +18,13 @@
  *
  * Marking happens AFTER successful completion (in the orchestrator)
  * so failed executions don't dedupe a real retry.
+ *
+ * Shared across both agent loops: the booking agent (keyed on
+ * appointmentRequestId, default key prefix) and the availability
+ * agent (keyed on conversationId, its own `keyPrefix` so the two
+ * namespaces can't collide). `wasToolExecuted`/`markToolExecuted`
+ * accept an optional `keyPrefix` for exactly this; omit it to use
+ * the default `TOOL_EXECUTION.PREFIX`.
  */
 
 import crypto from 'crypto';
@@ -46,14 +53,21 @@ export function hashToolCall(appointmentId: string, toolName: string, input: unk
  *
  * Fail-closed: returns true on Redis error so a Redis outage doesn't
  * produce duplicate side effects.
+ *
+ * `keyPrefix` defaults to the shared `TOOL_EXECUTION.PREFIX`; callers
+ * with their own namespace (e.g. the availability agent) pass their
+ * own prefix so the two hash spaces can't collide.
  */
-export async function wasToolExecuted(hash: string): Promise<boolean> {
+export async function wasToolExecuted(
+  hash: string,
+  keyPrefix: string = TOOL_EXECUTION_PREFIX,
+): Promise<boolean> {
   try {
-    const result = await redis.get(`${TOOL_EXECUTION_PREFIX}${hash}`);
+    const result = await redis.get(`${keyPrefix}${hash}`);
     return result !== null;
   } catch (err) {
     logger.error(
-      { err, hash },
+      { err, hash, keyPrefix },
       'Redis unavailable for idempotency check — failing closed (skipping tool to avoid duplicate)',
     );
     return true;
@@ -65,15 +79,19 @@ export async function wasToolExecuted(hash: string): Promise<boolean> {
  * so failed executions don't dedupe a real retry. Fail-soft: a Redis
  * write failure is logged but doesn't fail the tool call.
  */
-export async function markToolExecuted(hash: string, traceId: string): Promise<void> {
+export async function markToolExecuted(
+  hash: string,
+  traceId: string,
+  keyPrefix: string = TOOL_EXECUTION_PREFIX,
+): Promise<void> {
   try {
     await redis.set(
-      `${TOOL_EXECUTION_PREFIX}${hash}`,
+      `${keyPrefix}${hash}`,
       traceId,
       'EX',
       TOOL_EXECUTION_TTL_SECONDS,
     );
   } catch (err) {
-    logger.warn({ err, hash, traceId }, 'Failed to mark tool as executed - idempotency may not work');
+    logger.warn({ err, hash, traceId, keyPrefix }, 'Failed to mark tool as executed - idempotency may not work');
   }
 }
