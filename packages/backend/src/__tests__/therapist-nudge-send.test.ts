@@ -409,6 +409,40 @@ describe('therapistNudgeService — phase 5 conversation-row creation', () => {
   });
 });
 
+describe('therapistNudgeService — cancelled-appointment exclusion (regression)', () => {
+  it('includes cancelled in the "already has a thread" exclusion query', async () => {
+    seedTherapist();
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+
+    // The exclusion query must cover every status — active AND terminal —
+    // so a therapist whose only appointment was cancelled is treated as
+    // "already had a thread". Regression guard: `cancelled` was previously
+    // missing, so a just-cancelled therapist (also unfrozen by the cancel)
+    // fell back into the candidate pool and got re-nudged.
+    const exclusionQuery = appointmentFindMany.mock.calls[0][0];
+    expect(exclusionQuery.where.status.in).toContain('cancelled');
+    expect(exclusionQuery.where.status.in).toContain('completed');
+  });
+
+  it('does NOT nudge a therapist whose only appointment is cancelled', async () => {
+    seedTherapist();
+    // The therapist has a (cancelled) appointment on their handle, so the
+    // exclusion query surfaces it — they must be filtered out.
+    appointmentFindMany.mockReset();
+    appointmentFindMany.mockResolvedValue([{ therapistHandle: 'tx-1' }]);
+
+    await (therapistNudgeService as unknown as { sendNudges: (l: () => boolean) => Promise<void> }).sendNudges(
+      () => true,
+    );
+    await Promise.all(backgroundTaskPromises);
+
+    expect(mockSendEmail).not.toHaveBeenCalled();
+  });
+});
+
 describe('therapistNudgeService — nudge ceiling (THERAPIST_NUDGE.MAX_NUDGES)', () => {
   it('only considers therapists below the nudge ceiling', async () => {
     seedTherapist();
