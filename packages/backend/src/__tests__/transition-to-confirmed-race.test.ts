@@ -45,6 +45,26 @@ jest.mock('../utils/database', () => ({
       update: (...a: unknown[]) => mockUpdate(...a),
     },
     $executeRaw: (...a: unknown[]) => mockExecuteRaw(...a),
+    // transitionToConfirmed now wraps its update + register-in-tx intent
+    // rows in an explicit transaction. The update delegates to mockUpdate;
+    // a P2025 rejection there propagates out of the callback (converted to
+    // the private sentinel internally) so the outer failure-attribution
+    // re-fetch still runs against the non-tx prisma.findUnique, exactly as
+    // the pre-transaction code did.
+    $transaction: (cb: (tx: unknown) => unknown) =>
+      cb({ appointmentRequest: { update: (...a: unknown[]) => mockUpdate(...a) } }),
+  },
+}));
+
+const mockRegisterInTransaction = jest.fn().mockResolvedValue({
+  id: 'effect-1',
+  effectType: 'slack_notify_confirmed',
+  idempotencyKey: 'key-1',
+  status: 'pending',
+});
+jest.mock('../services/side-effect-tracker.service', () => ({
+  sideEffectTrackerService: {
+    registerInTransaction: (...a: unknown[]) => mockRegisterInTransaction(...a),
   },
 }));
 
@@ -69,6 +89,18 @@ jest.mock('../services/appointment-notifications.service', () => ({
     notifyConfirmed: (...a: unknown[]) => mockNotifyConfirmed(...a),
     notifyCancelled: jest.fn(),
     notifyCompleted: jest.fn(),
+    // Fetched pre-transaction to decide which intent rows to pre-register.
+    getNotificationSettings: jest.fn().mockResolvedValue({
+      slack: { requested: true, confirmed: true, completed: true, cancelled: true, escalation: true },
+      email: {
+        clientConfirmation: true,
+        therapistConfirmation: true,
+        sessionReminder: true,
+        feedbackForm: true,
+        clientCancellation: true,
+        therapistCancellation: true,
+      },
+    }),
   },
 }));
 
