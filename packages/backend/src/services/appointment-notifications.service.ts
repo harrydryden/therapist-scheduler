@@ -16,13 +16,14 @@ import { logger } from '../utils/logger';
 import { slackNotificationService } from './slack-notification.service';
 import { sendEmail } from '../core/email';
 import { getSettingValues } from './settings.service';
-import { loadEmailTemplate } from '../utils/email-templates';
-import { ensureVoucherUrlForUser, resolveBookingUrl } from './voucher-url.service';
-import { firstName } from '../utils/first-name';
-import { formatEmailDateFromSettings } from '../utils/date';
-import { resolveRecipientTimezone } from '../core/timezone';
 import { runBackgroundTask } from '../utils/background-task';
 import { runTrackedSideEffect, runReplayableTrackedSideEffect } from './side-effect-harness';
+import {
+  renderClientConfirmationEmail,
+  renderTherapistConfirmationEmail,
+  renderClientCancellationEmail,
+  renderTherapistCancellationEmail,
+} from './transition-email-renderers';
 import type { TransitionSource } from '../domain/scheduling/lifecycle';
 
 // ============================================
@@ -227,14 +228,6 @@ class AppointmentNotificationsService {
 
     // Send confirmation emails (non-blocking, tracked)
     if (sendEmails) {
-      // Two fallbacks: 'there' for the client-facing greeting (so they
-      // see "Hi there,"), and 'the client' for the therapist-facing
-      // body (so the therapist reads "your client X" rather than
-      // "your client there").
-      const therapistFirstName = firstName(therapistName, 'your therapist');
-      const clientGreetingName = firstName(userName);
-      const clientFirstName = firstName(userName, 'the client');
-
       // Send client confirmation email — replayable: payload rendered once
       // at registration time so the periodic retry runner replays the exact
       // localised subject/body if the original send fails.
@@ -244,29 +237,16 @@ class AppointmentNotificationsService {
           'confirmed',
           'email_client_confirmation',
           {
-            renderPayload: async () => {
-              const recipientTz = await resolveRecipientTimezone(userEmail);
-              const formattedDateTime = await formatEmailDateFromSettings(
-                confirmedDateTimeParsed,
+            renderPayload: () =>
+              renderClientConfirmationEmail({
+                userEmail,
+                userName,
+                therapistName,
                 confirmedDateTime,
-                recipientTz ?? undefined,
-              );
-              const { subject, body } = await loadEmailTemplate(
-                'clientConfirmation',
-                {
-                  therapistName: therapistFirstName,
-                  confirmedDateTime: formattedDateTime,
-                },
-                {
-                  userName: clientGreetingName,
-                  therapistName: therapistFirstName,
-                  confirmedDateTime: formattedDateTime,
-                },
-              );
-              return { to: userEmail, subject, body };
-            },
+                confirmedDateTimeParsed,
+              }),
             execute: async (payload) => {
-              await sendEmail(payload);
+              await sendEmail({ to: payload.to, subject: payload.subject, body: payload.body });
               logger.info({ ...logContext, userEmail }, 'Sent confirmation email to client');
             },
           },
@@ -287,27 +267,17 @@ class AppointmentNotificationsService {
           'confirmed',
           'email_therapist_confirmation',
           {
-            renderPayload: async () => {
-              const recipientTz = await resolveRecipientTimezone(therapistEmail);
-              const formattedDateTime = await formatEmailDateFromSettings(
-                confirmedDateTimeParsed,
+            renderPayload: () =>
+              renderTherapistConfirmationEmail({
+                therapistEmail,
+                therapistName,
+                userName,
+                userEmail,
                 confirmedDateTime,
-                recipientTz ?? undefined,
-              );
-              const { subject, body } = await loadEmailTemplate(
-                'therapistConfirmation',
-                { confirmedDateTime: formattedDateTime },
-                {
-                  therapistFirstName,
-                  clientFirstName,
-                  userEmail,
-                  confirmedDateTime: formattedDateTime,
-                },
-              );
-              return { to: therapistEmail, subject, body };
-            },
+                confirmedDateTimeParsed,
+              }),
             execute: async (payload) => {
-              await sendEmail(payload);
+              await sendEmail({ to: payload.to, subject: payload.subject, body: payload.body });
               logger.info({ ...logContext, therapistEmail }, 'Sent confirmation email to therapist');
             },
           },
@@ -443,15 +413,6 @@ class AppointmentNotificationsService {
     // Same two-fallback pattern as the confirmation path: 'there'
     // for the client-facing greeting, 'the client' / 'your
     // therapist' for the body of the *other* party's email.
-    const therapistFirstName = firstName(therapistName, 'your therapist');
-    const clientGreetingName = firstName(userName);
-    const clientFirstName = firstName(userName, 'the client');
-
-    // Legacy reason injection — only used for the neutral
-    // (admin / system) branch where templates carry the line.
-    const cancellationReasonForClient = cancelledBy === 'therapist' ? `\nReason: ${reason}` : '';
-    const cancellationReasonForTherapist = cancelledBy === 'client' ? `\nReason: ${reason}` : '';
-
     // ─── CLIENT EMAIL ────────────────────────────────────────────
     if (settings.email.clientCancellation && userEmail) {
       runReplayableTrackedSideEffect(
@@ -459,62 +420,17 @@ class AppointmentNotificationsService {
         'cancelled',
         'email_client_cancellation',
         {
-          renderPayload: async () => {
-            const recipientTz = await resolveRecipientTimezone(userEmail);
-            const formattedDateTime = await formatEmailDateFromSettings(
-              confirmedDateTimeParsed,
+          renderPayload: () =>
+            renderClientCancellationEmail({
+              userEmail,
+              userName,
+              therapistName,
+              cancelledBy,
+              reason,
               confirmedDateTime,
-              recipientTz ?? undefined,
-            );
-
-            if (cancelledBy === 'therapist') {
-              // Therapist-initiated → apology + voucher link.
-              //
-              // {voucherLine} is ALWAYS a markdown link so the
-              // HTML conversion (`convertPlainTextToHtml`) wraps
-              // it in `<a href>` regardless of which branch fired
-              // — keeps the booking link clickable for the user.
-              // Falls back to the platform's general booking URL
-              // (`weeklyMailing.webAppUrl` → `config.frontendUrl`)
-              // when no voucher can be issued (vouchers disabled,
-              // DB hiccup). The user still gets a working link.
-              const [voucherUrl, fallbackUrl] = await Promise.all([
-                ensureVoucherUrlForUser(userEmail),
-                resolveBookingUrl(),
-              ]);
-              const url = voucherUrl ?? fallbackUrl;
-              const voucherLine = `[Book another session](${url})`;
-              const { subject, body } = await loadEmailTemplate(
-                'clientCancellationByTherapist',
-                { therapistName: therapistFirstName },
-                {
-                  userName: clientGreetingName,
-                  therapistName: therapistFirstName,
-                  confirmedDateTime: formattedDateTime,
-                  voucherLine,
-                  // Optional placeholder — admins can edit the
-                  // template to include the reason if they want
-                  // it surfaced. Default templates omit it.
-                  cancellationReason: cancellationReasonForClient,
-                },
-              );
-              return { to: userEmail, subject, body, threadId: gmailThreadId || null };
-            }
-
-            // Default branch: neutral template (client-initiated,
-            // admin-initiated, or system-initiated cancellations).
-            const { subject, body } = await loadEmailTemplate(
-              'clientCancellation',
-              { therapistName: therapistFirstName },
-              {
-                userName: clientGreetingName,
-                therapistName: therapistFirstName,
-                confirmedDateTime: formattedDateTime,
-                cancellationReason: cancellationReasonForClient,
-              },
-            );
-            return { to: userEmail, subject, body, threadId: gmailThreadId || null };
-          },
+              confirmedDateTimeParsed,
+              gmailThreadId,
+            }),
           execute: async (payload) => {
             await sendEmail({
               to: payload.to,
@@ -548,45 +464,17 @@ class AppointmentNotificationsService {
         'cancelled',
         'email_therapist_cancellation',
         {
-          renderPayload: async () => {
-            const recipientTz = await resolveRecipientTimezone(therapistEmail);
-            const formattedDateTime = await formatEmailDateFromSettings(
-              confirmedDateTimeParsed,
+          renderPayload: () =>
+            renderTherapistCancellationEmail({
+              therapistEmail,
+              therapistName,
+              userName,
+              cancelledBy,
+              reason,
               confirmedDateTime,
-              recipientTz ?? undefined,
-            );
-
-            if (cancelledBy === 'client') {
-              // Client-initiated → apology + reassurance to therapist.
-              const { subject, body } = await loadEmailTemplate(
-                'therapistCancellationByClient',
-                { clientFirstName },
-                {
-                  therapistFirstName,
-                  clientFirstName,
-                  confirmedDateTime: formattedDateTime,
-                  // Optional placeholder — admins can edit the
-                  // template to include the reason if they want
-                  // it surfaced. Default templates omit it.
-                  cancellationReason: cancellationReasonForTherapist,
-                },
-              );
-              return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
-            }
-
-            // Default branch: neutral confirmation.
-            const { subject, body } = await loadEmailTemplate(
-              'therapistCancellation',
-              { clientFirstName },
-              {
-                therapistFirstName,
-                clientFirstName,
-                confirmedDateTime: formattedDateTime,
-                cancellationReason: cancellationReasonForTherapist,
-              },
-            );
-            return { to: therapistEmail, subject, body, threadId: therapistGmailThreadId };
-          },
+              confirmedDateTimeParsed,
+              therapistGmailThreadId,
+            }),
           execute: async (payload) => {
             await sendEmail({
               to: payload.to,

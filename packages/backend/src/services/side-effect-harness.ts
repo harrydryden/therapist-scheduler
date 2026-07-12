@@ -216,6 +216,15 @@ export function runReplayableTrackedSideEffect<P>(
           [{ effectType, payload }],
           transitionGeneration,
         );
+        // registerSideEffects no-ops (returns the existing row untouched)
+        // when the idempotency key already exists — the case for a row
+        // pre-registered in-tx as intent-only or render-context-only
+        // (register-in-tx-design.md). Persist the freshly-rendered
+        // payload explicitly so the DB row always ends up holding the
+        // envelope actually sent, and so a crash between render and
+        // send still leaves a full, verbatim-replayable envelope for
+        // retry instead of the smaller pre-commit context.
+        await sideEffectTrackerService.updatePayload(reg.idempotencyKey, payload);
         return reg;
       },
       () => spec.execute(payload),

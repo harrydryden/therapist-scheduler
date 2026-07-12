@@ -19,6 +19,7 @@ import { APPOINTMENT_STATUS, type AppointmentStatus } from '../../../../constant
 import { InvalidTransitionError } from '../../../../errors';
 import { appointmentNotificationsService } from '../../../../services/appointment-notifications.service';
 import { transitionSideEffectsService } from '../../../../services/transition-side-effects.service';
+import { sideEffectTrackerService } from '../../../../services/side-effect-tracker.service';
 import { addAuditMessage } from '../audit';
 import { CLEAR_RESCHEDULING_STATE, CLEAR_HUMAN_CONTROL_STATE } from '../update-fragments';
 import { progressionResetsFor } from '../status-order';
@@ -72,6 +73,15 @@ export async function transitionToCancelled(
   const logContext = { appointmentId, source, adminId, cancelledBy };
 
   validateCancellationInitiator(source, cancelledBy);
+
+  // Fetched before the transaction so the intent-registration hook below
+  // knows which effect rows to pre-register. A settings toggle flipped in
+  // the narrow window between this fetch and the post-commit dispatch is
+  // an accepted, bounded edge case — see
+  // docs/agent-harness-review/register-in-tx-design.md §6.
+  const notificationSettings = skipNotifications
+    ? null
+    : await appointmentNotificationsService.getNotificationSettings();
 
   type CancelledRow = {
     id: string;
@@ -161,6 +171,56 @@ export async function transitionToCancelled(
       reason,
       cancelledBy,
     }),
+    // Pre-register durable intent rows atomically with the status update —
+    // closes the crash window between commit and the post-commit
+    // fireAndForget dispatch below (finding #10). The post-commit dispatch
+    // code's own registerSideEffects call will find these rows by
+    // idempotency key and no-op instead of creating duplicates, so it
+    // needs no changes — see register-in-tx-design.md §3.
+    //
+    // therapist_unfreeze_sync mirrors onCancelled: it runs regardless of
+    // skipNotifications/settings, keyed WITHOUT a transitionGeneration
+    // (matches transitionSideEffectsService.onCancelled's call, which
+    // doesn't pass one either). The Slack/email rows below only exist
+    // when skipNotifications is false, matching notifyCancelled's guard
+    // in this same file; slack_notify_cancelled is keyed WITHOUT a
+    // generation (matches notifyCancelled's call), while both email
+    // types ARE keyed with the post-update generation (also matching).
+    registerEffects: async (tx, row, postUpdateGeneration) => {
+      if (row.therapist_handle) {
+        await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'cancelled', {
+          effectType: 'therapist_unfreeze_sync',
+        });
+      }
+      if (!notificationSettings) return;
+      if (notificationSettings.slack.cancelled) {
+        await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'cancelled', {
+          effectType: 'slack_notify_cancelled',
+        });
+      }
+      if (notificationSettings.email.clientCancellation && row.user_email) {
+        await sideEffectTrackerService.registerInTransaction(
+          tx,
+          appointmentId,
+          'cancelled',
+          { effectType: 'email_client_cancellation', payload: { cancelledBy, reason } },
+          postUpdateGeneration,
+        );
+      }
+      if (
+        notificationSettings.email.therapistCancellation &&
+        row.therapist_email &&
+        row.therapist_gmail_thread_id
+      ) {
+        await sideEffectTrackerService.registerInTransaction(
+          tx,
+          appointmentId,
+          'cancelled',
+          { effectType: 'email_therapist_cancellation', payload: { cancelledBy, reason } },
+          postUpdateGeneration,
+        );
+      }
+    },
   });
 
   if (outcome.kind === 'atomicSkipped') {

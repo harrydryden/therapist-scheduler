@@ -34,12 +34,37 @@ jest.mock('../services/slack-notification.service', () => ({
 jest.mock('../services/appointment-notifications.service', () => ({
   // fireAndForget calls `.catch` on the result, so the mocks have
   // to return Promises (not undefined).
-  appointmentNotificationsService: { notifyCancelled: jest.fn().mockResolvedValue(undefined) },
+  appointmentNotificationsService: {
+    notifyCancelled: jest.fn().mockResolvedValue(undefined),
+    // Fetched pre-transaction by transitionToCancelled to decide which
+    // side-effect intent rows to pre-register (register-in-tx-design.md).
+    getNotificationSettings: jest.fn().mockResolvedValue({
+      slack: { requested: true, confirmed: true, completed: true, cancelled: true, escalation: true },
+      email: {
+        clientConfirmation: true,
+        therapistConfirmation: true,
+        sessionReminder: true,
+        feedbackForm: true,
+        clientCancellation: true,
+        therapistCancellation: true,
+      },
+    }),
+  },
 }));
 jest.mock('../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {
     onCancelled: jest.fn().mockResolvedValue(undefined),
     notifyTransition: jest.fn(),
+  },
+}));
+jest.mock('../services/side-effect-tracker.service', () => ({
+  sideEffectTrackerService: {
+    registerInTransaction: jest.fn().mockResolvedValue({
+      id: 'effect-1',
+      effectType: 'therapist_unfreeze_sync',
+      idempotencyKey: 'key-1',
+      status: 'pending',
+    }),
   },
 }));
 jest.mock('../services/ai-conversation.service', () => ({
