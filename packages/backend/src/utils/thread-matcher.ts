@@ -281,6 +281,15 @@ function byMostRecent(
   return a.id.localeCompare(b.id);
 }
 
+/** Distinct client emails (case-insensitive) across a set of candidate matches. */
+function distinctClients(requests: Array<{ userEmail: string }>): string[] {
+  return [...new Set(requests.map((r) => r.userEmail.toLowerCase()))];
+}
+
+function distinctClientCount(requests: Array<{ userEmail: string }>): number {
+  return distinctClients(requests).length;
+}
+
 /**
  * Legacy fallback matching: sender email + therapist name in subject.
  * Limited to 50 results to prevent memory issues with high-volume users.
@@ -399,8 +408,26 @@ async function findByLegacyMatch(
     return nameMatches[0];
   }
 
-  // FIX E8 + H4: If multiple name matches, select deterministically
+  // FIX E8 + H4: Multiple name matches. Active-vs-active guard: if the tied
+  // candidates span more than one distinct client, an unstructured email is
+  // genuinely ambiguous between those clients' threads — reject rather than
+  // guess (see docs/THERAPIST_TARGET_AVAILABILITY.md §3). Only when every
+  // tied candidate is the SAME client (e.g. a reschedule created a second
+  // row) is most-recently-updated selection safe.
   if (nameMatches.length > 1) {
+    if (distinctClientCount(nameMatches) > 1) {
+      logger.error(
+        {
+          from: email.from,
+          subject: email.subject,
+          matchCount: nameMatches.length,
+          clients: distinctClients(nameMatches),
+        },
+        'AMBIGUOUS MATCH (active-vs-active): therapist name in subject matched multiple ' +
+        'clients with active appointments. Skipping legacy match to prevent cross-pollination — manual review needed.'
+      );
+      return null;
+    }
     nameMatches.sort(byMostRecent);
     logger.warn(
       {
@@ -408,7 +435,7 @@ async function findByLegacyMatch(
         selectedAppointmentId: nameMatches[0].id,
         therapistName: nameMatches[0].therapistName,
       },
-      'Multiple appointments matched therapist name - selecting most recently updated'
+      'Multiple appointments matched therapist name (same client) - selecting most recently updated'
     );
     return nameMatches[0];
   }
@@ -422,6 +449,22 @@ async function findByLegacyMatch(
     );
     return therapistMatches[0];
   } else if (therapistMatches.length > 1) {
+    // Same active-vs-active guard as the name branch: a therapist with more
+    // than one active client and no deterministic marker on the email cannot
+    // be attributed safely.
+    if (distinctClientCount(therapistMatches) > 1) {
+      logger.error(
+        {
+          therapistEmail: email.from,
+          subject: email.subject,
+          matchCount: therapistMatches.length,
+          clients: distinctClients(therapistMatches),
+        },
+        'AMBIGUOUS MATCH (active-vs-active): therapist has multiple active clients and the ' +
+        'email lacks a deterministic marker. Skipping legacy match to prevent cross-pollination — manual review needed.'
+      );
+      return null;
+    }
     therapistMatches.sort(byMostRecent);
     logger.warn(
       {
@@ -429,7 +472,7 @@ async function findByLegacyMatch(
         matchCount: therapistMatches.length,
         selectedAppointmentId: therapistMatches[0].id,
       },
-      'Multiple appointments for same therapist - selecting most recently updated'
+      'Multiple appointments for same therapist (same client) - selecting most recently updated'
     );
     return therapistMatches[0];
   }

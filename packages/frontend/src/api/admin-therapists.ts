@@ -19,9 +19,16 @@ export interface TherapistListItem {
   ingestedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  appointmentCount: number;
+  /** Distinct clients this therapist has a completed session with. */
+  completedAppointmentCount: number;
+  /** Per-therapist target of distinct completed clients before graduating off the finder. */
+  targetAppointments: number;
+  /** Whether the therapist currently has an active (non-terminal) appointment. */
+  hasActiveAppointment: boolean;
+  /** Manual admin freeze in effect. */
   frozen: boolean;
-  uniqueRequestCount: number;
+  /** Live on the public site: active, not frozen, short of target, and not in a session. */
+  live: boolean;
 }
 
 export interface TherapistListResponse {
@@ -39,7 +46,7 @@ export interface TherapistAppointment {
   updatedAt: string;
 }
 
-export interface TherapistDetail extends Omit<TherapistListItem, 'appointmentCount' | 'frozen' | 'uniqueRequestCount'> {
+export interface TherapistDetail extends Omit<TherapistListItem, 'frozen'> {
   bookingStatus: {
     frozen: boolean;
     frozenAt: string | null;
@@ -69,6 +76,7 @@ export interface TherapistUpdate {
   profileImage?: string | null;
   bookingLink?: string | null;
   active?: boolean;
+  targetAppointments?: number;
   approach?: string[];
   style?: string[];
   areasOfFocus?: string[];

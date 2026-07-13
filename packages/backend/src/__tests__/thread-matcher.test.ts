@@ -225,6 +225,102 @@ describe('findMatchingAppointmentRequest', () => {
       expect(mockFindFirst).not.toHaveBeenCalled();
     });
   });
+
+  describe('active-vs-active guard (forced-open therapist)', () => {
+    it('rejects as ambiguous when a therapist has two active clients and the email has no deterministic marker', async () => {
+      // Therapist is serving two different clients concurrently (forced open).
+      // An unstructured reply from them (no thread id / In-Reply-To / tracking
+      // code, no client-distinguishing subject) must NOT be attributed to the
+      // most-recently-updated appointment — it is genuinely ambiguous.
+      mockFindMany.mockResolvedValueOnce([]); // deterministic: no match
+      mockFindMany.mockResolvedValueOnce([
+        {
+          id: 'apt-clientA',
+          userEmail: 'clienta@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-10T10:00:00Z'),
+        },
+        {
+          id: 'apt-clientB',
+          userEmail: 'clientb@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-12T10:00:00Z'),
+        },
+      ]);
+      mockFindFirst.mockResolvedValueOnce(null); // no recent terminal
+
+      const email = makeEmail({
+        from: 'therapist@example.com',
+        subject: 'Quick question', // no therapist name, no client marker
+      });
+
+      const result = await findMatchingAppointmentRequest(email);
+      expect(result).toBeNull();
+    });
+
+    it('rejects as ambiguous when the subject names the therapist but spans two clients', async () => {
+      mockFindMany.mockResolvedValueOnce([]); // deterministic: no match
+      mockFindMany.mockResolvedValueOnce([
+        {
+          id: 'apt-clientA',
+          userEmail: 'clienta@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-10T10:00:00Z'),
+        },
+        {
+          id: 'apt-clientB',
+          userEmail: 'clientb@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-12T10:00:00Z'),
+        },
+      ]);
+      mockFindFirst.mockResolvedValueOnce(null);
+
+      const email = makeEmail({
+        from: 'therapist@example.com',
+        subject: 'Re: session with Alex Smith', // name matches BOTH candidates
+      });
+
+      const result = await findMatchingAppointmentRequest(email);
+      expect(result).toBeNull();
+    });
+
+    it('still resolves when the tied active appointments are the SAME client (e.g. reschedule)', async () => {
+      // Two active rows for one therapist but the SAME client — no misroute
+      // risk, so most-recently-updated selection is retained.
+      mockFindMany.mockResolvedValueOnce([]); // deterministic: no match
+      mockFindMany.mockResolvedValueOnce([
+        {
+          id: 'apt-old',
+          userEmail: 'client@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-10T10:00:00Z'),
+        },
+        {
+          id: 'apt-new',
+          userEmail: 'client@example.com',
+          therapistEmail: 'therapist@example.com',
+          therapistName: 'Alex Smith',
+          updatedAt: new Date('2026-07-12T10:00:00Z'),
+        },
+      ]);
+      mockFindFirst.mockResolvedValueOnce(null);
+
+      const email = makeEmail({
+        from: 'therapist@example.com',
+        subject: 'Quick question',
+      });
+
+      const result = await findMatchingAppointmentRequest(email);
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe('apt-new'); // most recently updated
+    });
+  });
 });
 
 describe('findMatchingTherapistConversation', () => {

@@ -66,6 +66,11 @@ export const STALL_DETECTION = {
 export const THERAPIST_BOOKING = {
   INACTIVITY_ALERT_HOURS: INACTIVITY_THRESHOLDS.ALERT_HOURS,
   MAX_UNIQUE_REQUESTS: 2,
+  // Default target number of distinct completed clients a NEW therapist must
+  // reach before graduating off the public finder. Runtime value:
+  // general.defaultTargetAppointments. See
+  // docs/THERAPIST_TARGET_AVAILABILITY.md.
+  DEFAULT_TARGET_APPOINTMENTS: 2,
 } as const;
 
 // Therapist nudge ceiling. The "still looking for a client" nudge runs on

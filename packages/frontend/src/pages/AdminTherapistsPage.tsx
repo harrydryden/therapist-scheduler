@@ -84,12 +84,75 @@ function StatusBadges({ row }: { row: TherapistListItem }) {
       >
         {row.active ? 'Active' : 'Archived'}
       </span>
+      {row.live && (
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800"
+          title="Live on the user site: short of target and not currently in a session"
+        >
+          Live
+        </span>
+      )}
       {row.frozen && (
         <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
           Frozen
         </span>
       )}
     </div>
+  );
+}
+
+/**
+ * Inline, mutable "Target appointments" cell. Editing here PATCHes the
+ * therapist's targetAppointments directly. Clicks are stopped from
+ * bubbling so tweaking the target doesn't open the detail drawer.
+ */
+function TargetCell({ row }: { row: TherapistListItem }) {
+  const queryClient = useQueryClient();
+  const { showToast } = useToastContext();
+  const [value, setValue] = useState(String(row.targetAppointments));
+
+  useEffect(() => {
+    setValue(String(row.targetAppointments));
+  }, [row.targetAppointments]);
+
+  const mutation = useMutation({
+    mutationFn: (target: number) => updateAdminTherapist(row.id, { targetAppointments: target }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-therapists'] });
+      showToast('Target updated', 'success');
+    },
+    onError: (err) => {
+      setValue(String(row.targetAppointments));
+      showToast(getErrorMessage(err, 'Failed to update target'), 'error');
+    },
+  });
+
+  const commit = () => {
+    const next = parseInt(value, 10);
+    if (!Number.isFinite(next) || next < 1) {
+      setValue(String(row.targetAppointments));
+      return;
+    }
+    if (next !== row.targetAppointments) {
+      mutation.mutate(next);
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      min={1}
+      max={50}
+      value={value}
+      disabled={mutation.isPending}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+      className="w-16 px-2 py-1 text-sm border border-slate-300 rounded focus:ring-2 focus:ring-spill-blue-400 outline-none disabled:opacity-50"
+    />
   );
 }
 
@@ -319,6 +382,24 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
             maxLength={4}
             className="w-full px-2 py-1 text-sm border border-slate-300 rounded font-mono"
           />
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-slate-500 mb-1">
+            Target appointments
+          </label>
+          <input
+            type="number"
+            min={1}
+            max={50}
+            value={merged.targetAppointments ?? 1}
+            onChange={(e) => setField('targetAppointments', Number(e.target.value))}
+            className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+          />
+          <p className="mt-1 text-xs text-slate-400">
+            {data.completedAppointmentCount} completed ·{' '}
+            {data.live ? 'live on site' : 'not live'}
+          </p>
         </div>
 
         <div>
@@ -619,7 +700,8 @@ export default function AdminTherapistsPage() {
                   <th className="text-left px-4 py-2.5">Email</th>
                   <th className="text-left px-4 py-2.5">Status</th>
                   <th className="text-left px-4 py-2.5">Country</th>
-                  <th className="text-left px-4 py-2.5">Appointments</th>
+                  <th className="text-left px-4 py-2.5">Completed</th>
+                  <th className="text-left px-4 py-2.5">Target</th>
                   <th className="text-left px-4 py-2.5">Ingested</th>
                 </tr>
               </thead>
@@ -647,7 +729,12 @@ export default function AdminTherapistsPage() {
                       <StatusBadges row={t} />
                     </td>
                     <td className="px-4 py-2.5 text-slate-700 font-mono text-xs">{t.country}</td>
-                    <td className="px-4 py-2.5 text-slate-700">{t.appointmentCount}</td>
+                    <td className="px-4 py-2.5 text-slate-700">
+                      {t.completedAppointmentCount}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <TargetCell row={t} />
+                    </td>
                     <td className="px-4 py-2.5 text-slate-500">{formatDate(t.ingestedAt)}</td>
                   </tr>
                 ))}

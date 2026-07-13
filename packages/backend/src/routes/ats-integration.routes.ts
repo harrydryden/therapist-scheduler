@@ -466,9 +466,11 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         if (!availabilityStatus.canAcceptNewRequests) {
           return Errors.badRequest(
             reply,
-            availabilityStatus.reason === 'confirmed'
+            availabilityStatus.reason === 'target_reached'
               ? 'Therapist is no longer accepting new appointments'
-              : 'Therapist has reached maximum pending requests'
+              : availabilityStatus.reason === 'in_session'
+                ? 'Therapist is currently with another client'
+                : 'Therapist is not currently accepting new appointments'
           );
         }
 

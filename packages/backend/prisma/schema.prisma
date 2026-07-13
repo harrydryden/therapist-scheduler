@@ -128,6 +128,17 @@ model Therapist {
   // legacy unbackfilled rows don't disappear from any Postgres-backed read.
   active       Boolean  @default(true)
 
+  // Target number of *distinct completed clients* this therapist must reach
+  // before they graduate off the public finder. Drives the target-based
+  // availability model (see docs/THERAPIST_TARGET_AVAILABILITY.md): a
+  // therapist is live on the user site iff active, not manually frozen,
+  // completed-distinct-clients < targetAppointments, and no active
+  // appointment currently exists. Seeded at creation time from the
+  // `general.defaultTargetAppointments` setting (default 2). The migration
+  // backfills all pre-release therapists to 1 so existing counsellors keep
+  // the old single-trial expectation.
+  targetAppointments Int @default(2) @map("target_appointments")
+
   ingestedAt        DateTime? @map("ingested_at") // When the therapist was added to the platform
   lastNudgeAt       DateTime? @map("last_nudge_at") // When the last "still looking" nudge email was sent
   lastNudgeThreadId String?   @map("last_nudge_thread_id") // Gmail thread ID of the last nudge email (for reply detection)

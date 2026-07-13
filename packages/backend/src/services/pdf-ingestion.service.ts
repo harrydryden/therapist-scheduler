@@ -12,6 +12,7 @@ import { prisma } from '../utils/database';
 import { generateUniqueTherapistId } from '../utils/unique-id';
 import { logger } from '../utils/logger';
 import { parseJsonFromLLMResponse } from '../utils/json-parser';
+import { getSettingValue } from './settings.service';
 import { runBackgroundTask } from '../utils/background-task';
 import { AvailabilityAgentService } from '../domain/scheduling/availability/agent/service';
 import { getDefaultTimezone, getCountryLabel } from '@therapist-scheduler/shared';
@@ -369,6 +370,10 @@ class PDFIngestionService {
 
       const odId = await generateUniqueTherapistId();
       const normalizedEmail = profile.email.toLowerCase().trim();
+      // Snapshot the configurable default onto the therapist at creation
+      // time so a later change to the global default doesn't retroactively
+      // move already-ingested therapists. See docs/THERAPIST_TARGET_AVAILABILITY.md.
+      const targetAppointments = await getSettingValue<number>('general.defaultTargetAppointments');
       let therapist;
       try {
         therapist = await prisma.therapist.create({
@@ -383,6 +388,7 @@ class PDFIngestionService {
             style: profile.style.slice(0, 5).map((c) => c.type),
             areasOfFocus: profile.areasOfFocus.slice(0, 10).map((c) => c.type),
             active: true,
+            targetAppointments,
             availability: availabilityForDb,
             ingestedAt: new Date(),
           },

@@ -19,7 +19,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
-import { RATE_LIMITS } from '../constants';
+import { RATE_LIMITS, ACTIVE_STATUSES } from '../constants';
 import {
   VALID_APPROACH_TYPES,
   VALID_STYLE_TYPES,
@@ -56,6 +56,8 @@ const updateTherapistSchema = z
     profileImage: z.string().url().max(2000).nullable().optional(),
     bookingLink: z.string().url().max(2000).nullable().optional(),
     active: z.boolean().optional(),
+    // Per-therapist completed-client target driving public-site availability.
+    targetAppointments: z.coerce.number().int().min(1).max(50).optional(),
     approach: z.array(z.enum(VALID_APPROACH_TYPES as [string, ...string[]])).max(20).optional(),
     style: z.array(z.enum(VALID_STYLE_TYPES as [string, ...string[]])).max(20).optional(),
     areasOfFocus: z
@@ -123,31 +125,58 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
             orderBy: { [query.sortBy]: query.sortOrder },
             skip: (query.page - 1) * query.limit,
             take: query.limit,
-            include: {
-              _count: { select: { appointments: true } },
-            },
           }),
           prisma.therapist.count({ where }),
         ]);
 
-        // Pull frozen state for the page in a single query rather than per row.
-        // Filter out null notionIds — post-Notion-deprecation therapists have
-        // notionId=null, and Prisma 5 throws on null entries inside `in:`.
-        // Their booking-status rows (when they exist) are keyed on the
-        // Postgres uuid instead, so we union both lookup keys.
-        const lookupKeys = therapists
-          .map((t) => t.notionId ?? t.id)
-          .filter((k): k is string => !!k);
-        const statuses = lookupKeys.length
-          ? await prisma.therapistBookingStatus.findMany({
-              where: { id: { in: lookupKeys } },
-              select: { id: true, frozenAt: true, hasConfirmedBooking: true, uniqueRequestCount: true },
-            })
-          : [];
-        const statusByLookupKey = new Map(statuses.map((s) => [s.id, s]));
+        // Booking-status rows and appointment aggregates are keyed on the
+        // public handle: notionId for legacy rows, Postgres uuid for post-
+        // Notion ingestions. `notionId ?? id` never yields null, so no need
+        // to filter (Prisma 5 would throw on null entries inside `in:`).
+        const lookupKeys = therapists.map((t) => t.notionId ?? t.id);
+
+        // Three aggregates for the page, in parallel:
+        //  - manual freeze markers (frozenAt)
+        //  - distinct completed clients per handle (the "Completed" column)
+        //  - handles with any active appointment (drives "live" + is busy)
+        const [statuses, completedRows, activeRows] = await Promise.all([
+          prisma.therapistBookingStatus.findMany({
+            where: { id: { in: lookupKeys } },
+            select: { id: true, frozenAt: true },
+          }),
+          prisma.appointmentRequest.groupBy({
+            by: ['therapistHandle', 'userEmail'],
+            where: { therapistHandle: { in: lookupKeys }, status: 'completed' },
+          }),
+          prisma.appointmentRequest.findMany({
+            where: { therapistHandle: { in: lookupKeys }, status: { in: [...ACTIVE_STATUSES] } },
+            select: { therapistHandle: true },
+            distinct: ['therapistHandle'],
+          }),
+        ]);
+
+        const frozenByHandle = new Map(statuses.map((s) => [s.id, !!s.frozenAt]));
+        const completedByHandle = new Map<string, number>();
+        for (const row of completedRows) {
+          completedByHandle.set(
+            row.therapistHandle,
+            (completedByHandle.get(row.therapistHandle) ?? 0) + 1,
+          );
+        }
+        const activeSet = new Set(activeRows.map((r) => r.therapistHandle));
 
         const items = therapists.map((t) => {
-          const status = statusByLookupKey.get(t.notionId ?? t.id);
+          const handle = t.notionId ?? t.id;
+          const frozen = frozenByHandle.get(handle) ?? false;
+          const completedAppointmentCount = completedByHandle.get(handle) ?? 0;
+          const hasActiveAppointment = activeSet.has(handle);
+          // Live on the user site iff active, not manually frozen, short of
+          // target, and not currently in a session (serial).
+          const live =
+            t.active &&
+            !frozen &&
+            !hasActiveAppointment &&
+            completedAppointmentCount < t.targetAppointments;
           return {
             id: t.id,
             odId: t.odId,
@@ -166,9 +195,11 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
             ingestedAt: t.ingestedAt?.toISOString() ?? null,
             createdAt: t.createdAt.toISOString(),
             updatedAt: t.updatedAt.toISOString(),
-            appointmentCount: t._count.appointments,
-            frozen: !!status?.frozenAt || !!status?.hasConfirmedBooking,
-            uniqueRequestCount: status?.uniqueRequestCount ?? 0,
+            completedAppointmentCount,
+            targetAppointments: t.targetAppointments,
+            hasActiveAppointment,
+            frozen,
+            live,
           };
         });
 
@@ -233,17 +264,35 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         // Booking-status rows are keyed on the public handle (notionId for
         // legacy rows, Postgres uuid for post-Notion ingestions). Same
         // resolution as the list endpoint at line ~125.
-        const status = await prisma.therapistBookingStatus.findUnique({
-          where: { id: therapist.notionId ?? therapist.id },
-          select: {
-            frozenAt: true,
-            hasConfirmedBooking: true,
-            uniqueRequestCount: true,
-            confirmedAt: true,
-            adminAlertAt: true,
-            adminAlertAcknowledged: true,
-          },
-        });
+        const handle = therapist.notionId ?? therapist.id;
+        const [status, completedRows] = await Promise.all([
+          prisma.therapistBookingStatus.findUnique({
+            where: { id: handle },
+            select: {
+              frozenAt: true,
+              hasConfirmedBooking: true,
+              uniqueRequestCount: true,
+              confirmedAt: true,
+              adminAlertAt: true,
+              adminAlertAcknowledged: true,
+            },
+          }),
+          prisma.appointmentRequest.groupBy({
+            by: ['userEmail'],
+            where: { therapistHandle: handle, status: 'completed' },
+          }),
+        ]);
+
+        const completedAppointmentCount = completedRows.length;
+        const hasActiveAppointment = therapist.appointments.some((a) =>
+          (ACTIVE_STATUSES as readonly string[]).includes(a.status),
+        );
+        const frozen = !!status?.frozenAt;
+        const live =
+          therapist.active &&
+          !frozen &&
+          !hasActiveAppointment &&
+          completedAppointmentCount < therapist.targetAppointments;
 
         return sendSuccess(reply, {
           id: therapist.id,
@@ -263,9 +312,13 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           ingestedAt: therapist.ingestedAt?.toISOString() ?? null,
           createdAt: therapist.createdAt.toISOString(),
           updatedAt: therapist.updatedAt.toISOString(),
+          targetAppointments: therapist.targetAppointments,
+          completedAppointmentCount,
+          hasActiveAppointment,
+          live,
           bookingStatus: status
             ? {
-                frozen: !!status.frozenAt || !!status.hasConfirmedBooking,
+                frozen,
                 frozenAt: status.frozenAt?.toISOString() ?? null,
                 hasConfirmedBooking: status.hasConfirmedBooking,
                 confirmedAt: status.confirmedAt?.toISOString() ?? null,
@@ -340,6 +393,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         if (updates.profileImage !== undefined) data.profileImage = updates.profileImage;
         if (updates.bookingLink !== undefined) data.bookingLink = updates.bookingLink;
         if (updates.active !== undefined) data.active = updates.active;
+        if (updates.targetAppointments !== undefined) data.targetAppointments = updates.targetAppointments;
         if (updates.approach !== undefined) data.approach = updates.approach;
         if (updates.style !== undefined) data.style = updates.style;
         if (updates.areasOfFocus !== undefined) data.areasOfFocus = updates.areasOfFocus;

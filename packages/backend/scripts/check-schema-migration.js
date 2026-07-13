@@ -53,15 +53,21 @@ const newMigrations = changedFiles.filter(
   (f) => /prisma\/migrations\/[^/]+\/migration\.sql$/.test(f)
 );
 
-// Get the actual git status of each migration file (added vs modified)
-const addedMigrations = newMigrations.filter((f) => {
-  try {
-    const status = git(`diff --diff-filter=A --name-only ${baseRef}...HEAD -- ${f}`);
-    return status.length > 0;
-  } catch {
-    return false;
-  }
-});
+// Get the set of files ADDED (status A) in this diff, then intersect with the
+// candidate migration files. Computed with a single pathspec-free git call so
+// it works regardless of the current working directory — `git diff -- <path>`
+// treats <path> as relative to CWD, but `changedFiles` paths are repo-root
+// relative, so a per-file pathspec silently matched nothing when the guard was
+// run from packages/backend (via `npm run check:schema-migration`).
+let addedSet = new Set();
+try {
+  addedSet = new Set(
+    git(`diff --diff-filter=A --name-only ${baseRef}...HEAD`).split('\n').filter(Boolean)
+  );
+} catch {
+  // Leave addedSet empty — treated as "no new migration" below.
+}
+const addedMigrations = newMigrations.filter((f) => addedSet.has(f));
 
 if (addedMigrations.length === 0) {
   fail(

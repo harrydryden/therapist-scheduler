@@ -309,19 +309,28 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
             'Therapist not accepting new requests'
           );
 
-          if (availabilityStatus.reason === 'confirmed') {
+          // 'target_reached' → graduated off the finder; 'in_session' → serial
+          // guard (busy with another client); 'frozen' → manual admin freeze.
+          // Any non-acceptance falls through to a generic rejection so a new
+          // reason can never silently let a booking through.
+          if (availabilityStatus.reason === 'target_reached') {
             return reply.status(400).send({
               success: false,
               error: 'This therapist is no longer accepting new appointment requests.',
             });
           }
 
-          if (availabilityStatus.reason === 'frozen') {
+          if (availabilityStatus.reason === 'in_session') {
             return reply.status(400).send({
               success: false,
-              error: 'This therapist has reached maximum pending requests. Please try again later or choose another therapist.',
+              error: 'This therapist is currently with another client. Please try again later or choose another therapist.',
             });
           }
+
+          return reply.status(400).send({
+            success: false,
+            error: 'This therapist is not currently accepting new appointment requests. Please choose another therapist.',
+          });
         }
 
         // OPTIMIZATION: Quick duplicate check outside transaction for fast rejection

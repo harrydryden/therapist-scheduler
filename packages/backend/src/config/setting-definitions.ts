@@ -206,6 +206,16 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     maxValue: 10,
     defaultValue: THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS,
   },
+  'general.defaultTargetAppointments': {
+    category: 'general',
+    label: 'Default Target Appointments (new therapists)',
+    description:
+      'Number of distinct completed clients a NEW therapist must reach before they graduate off the public finder. Snapshotted onto each therapist at creation time; adjust an individual therapist\'s target in the Therapists admin table.',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 10,
+    defaultValue: THERAPIST_BOOKING.DEFAULT_TARGET_APPOINTMENTS,
+  },
 
   // Agent identity and behaviour
   'agent.fromName': {
