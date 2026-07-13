@@ -581,6 +581,14 @@ model TherapistBookingStatus {
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
+  // Deliberate admin freeze under the target-availability model (see
+  // docs/THERAPIST_TARGET_AVAILABILITY.md). Distinct from the legacy
+  // `frozenAt`, which the retired auto-freeze set on EVERY booking request —
+  // reusing that column would have hidden every recently-booked therapist at
+  // cutover. This column starts null for all rows (no spurious freezes), and
+  // is set/cleared exclusively by the admin /freeze and /unfreeze endpoints.
+  manualFreezeAt         DateTime? @map("manual_freeze_at")
+
   // Admin alert for prolonged inactivity (72h with 2 threads)
   adminAlertAt           DateTime? @map("admin_alert_at")
   adminAlertAcknowledged Boolean   @default(false) @map("admin_alert_acknowledged")

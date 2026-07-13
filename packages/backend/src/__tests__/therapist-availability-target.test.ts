@@ -51,7 +51,7 @@ beforeEach(() => {
 
 describe('canAcceptNewRequest (target model)', () => {
   it('rejects when the therapist is manually frozen', async () => {
-    mockStatusFindUnique.mockResolvedValueOnce({ frozenAt: new Date() });
+    mockStatusFindUnique.mockResolvedValueOnce({ manualFreezeAt: new Date() });
 
     const result = await therapistBookingStatusService.canAcceptNewRequest('handle-1', 'user@x.com');
     expect(result).toEqual({ canAcceptNewRequests: false, reason: 'frozen' });

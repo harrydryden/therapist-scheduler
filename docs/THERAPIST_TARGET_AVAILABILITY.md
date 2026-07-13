@@ -46,8 +46,9 @@ without ever misrouting a reply between two of their clients.
   (`pending`, `contacted`, `negotiating`, `confirmed`, `session_held`,
   `feedback_requested`).
 - **Manual freeze** — an admin-set override
-  (`TherapistBookingStatus.frozenAt`), toggled by the
-  `/freeze` and `/unfreeze` admin endpoints.
+  (`TherapistBookingStatus.manualFreezeAt`), toggled by the
+  `/freeze` and `/unfreeze` admin endpoints. This is a **new** column,
+  deliberately separate from the legacy `frozenAt` (see §6, cutover safety).
 
 ### 2.2 The rule
 
@@ -55,7 +56,7 @@ A therapist is **live on the user site** (shown in the finder *and*
 accepting new booking requests) iff **all** of:
 
 1. `active = true` (admin archive toggle), **and**
-2. not manually frozen (`frozenAt` is null), **and**
+2. not manually frozen (`manualFreezeAt` is null), **and**
 3. `completedDistinctClients < targetAppointments`, **and**
 4. no active appointment currently exists (serial: one client at a time).
 
@@ -70,7 +71,7 @@ This single rule **replaces** the previous auto-freeze machinery
 behaviour). Availability is now derived directly from appointment state +
 the target, so there is one source of truth and no counter to drift.
 `TherapistBookingStatus` is retained **only** as the manual-override record
-(`frozenAt` = admin force-freeze). The write-side counter methods
+(`manualFreezeAt` = admin force-freeze). The write-side counter methods
 (`recordNewRequest`, `markConfirmed`, `unmarkConfirmed`,
 `recalculateUniqueRequestCount`) are reduced to no-ops so their existing
 call sites (booking transaction, transition side-effects) keep working
@@ -132,8 +133,11 @@ thread when the attribution is unambiguous; otherwise a human decides.
 ## 4. Interfaces changed
 
 ### Backend
-- `prisma/schema.prisma` — `Therapist.targetAppointments`.
+- `prisma/schema.prisma` — `Therapist.targetAppointments`,
+  `TherapistBookingStatus.manualFreezeAt`.
 - migration `…_add_therapist_target_appointments` — add column + backfill 1.
+- migration `…_add_manual_freeze_at` — add the admin-freeze column (NULL for
+  all rows; see §5).
 - `config/setting-definitions.ts` — `general.defaultTargetAppointments`.
 - `services/therapist-booking-status.service.ts` — new availability rule;
   counter methods reduced to no-ops.
@@ -151,7 +155,50 @@ thread when the attribution is unambiguous; otherwise a human decides.
 - `pages/AdminTherapistsPage.tsx` — "Completed" column (distinct completed),
   editable "Target" column, "Live" badge.
 
-## 5. Testing
+## 5. Cutover safety (live data)
+
+This change ships against a live database, so it was designed to avoid
+disrupting in-flight therapists and appointments:
+
+- **In-flight appointment lifecycles are untouched.** The state machine and
+  its transitions are unchanged. The counter methods reduced to no-ops
+  (`markConfirmed`/`unmarkConfirmed`/`recalculateUniqueRequestCount`/
+  `recordNewRequest`) only ever maintained availability *counters*; no
+  transition logic depends on their return value, so confirmations,
+  completions, cancellations, reschedules, and feedback collection all
+  proceed exactly as before.
+
+- **Legacy `frozenAt` is NOT reinterpreted.** In production, the retired
+  auto-freeze set `frozenAt` on *every* booking request — it was never a
+  reliable "admin froze this therapist" signal. Reading it as a manual
+  freeze would have hidden every recently-booked therapist at cutover, and
+  because `recalculateUniqueRequestCount` (which used to clear it) is now a
+  no-op, they would have stayed hidden permanently. The manual-freeze signal
+  therefore lives in a **new** column, `manualFreezeAt`, which starts NULL
+  for all rows. At cutover nobody is spuriously frozen.
+
+- **Busy therapists stay hidden via their appointment, not a stale freeze.**
+  A therapist mid-appointment at cutover is excluded from the finder by the
+  active-appointment clause. When that appointment completes, they become
+  live again if still short of target — no lingering freeze traps them.
+
+- **Trade-off (documented, accepted):** a therapist an admin had
+  *deliberately* force-frozen in the seconds before deploy would come back
+  as un-frozen (the new column is empty). Re-freeze via the admin UI. This
+  is strictly better than the alternative of mass-hiding live therapists.
+
+- **Intended behaviour change to call out:** existing therapists are
+  backfilled to target **1**, so any existing therapist who has already
+  completed a session with ≥1 distinct client is now at/over target and
+  drops off the public finder. This is the "existing = 1" requirement. To
+  keep a specific therapist taking clients, bump their target in the admin
+  Therapists table.
+
+- **No destructive migrations.** Both migrations are additive
+  (`ADD COLUMN IF NOT EXISTS`); the only `UPDATE` is the target backfill to
+  1. `TherapistBookingStatus` rows and legacy columns are left intact.
+
+## 6. Testing
 
 - Matcher: active-vs-active distinct clients → ambiguous (null); active-vs-
   active same client → most-recent; deterministic paths unaffected.

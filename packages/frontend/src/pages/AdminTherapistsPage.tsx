@@ -495,22 +495,22 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
               {data.bookingStatus ? (
                 <dl className="grid grid-cols-2 gap-2 text-sm">
                   <div>
-                    <dt className="text-xs text-slate-500">Has confirmed booking</dt>
+                    <dt className="text-xs text-slate-500">Completed clients</dt>
                     <dd className="text-slate-700">
-                      {data.bookingStatus.hasConfirmedBooking ? 'Yes' : 'No'}
+                      {data.completedAppointmentCount} / {data.targetAppointments}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-slate-500">Active requests</dt>
-                    <dd className="text-slate-700">{data.bookingStatus.uniqueRequestCount}</dd>
+                    <dt className="text-xs text-slate-500">Live on site</dt>
+                    <dd className="text-slate-700">{data.live ? 'Yes' : 'No'}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-slate-500">Frozen at</dt>
+                    <dt className="text-xs text-slate-500">Manually frozen at</dt>
                     <dd className="text-slate-700">{formatDate(data.bookingStatus.frozenAt)}</dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-slate-500">Confirmed at</dt>
-                    <dd className="text-slate-700">{formatDate(data.bookingStatus.confirmedAt)}</dd>
+                    <dt className="text-xs text-slate-500">In a session</dt>
+                    <dd className="text-slate-700">{data.hasActiveAppointment ? 'Yes' : 'No'}</dd>
                   </div>
                 </dl>
               ) : (
@@ -531,7 +531,7 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
                   {freezeMutation.isPending ? 'Freezing…' : 'Force freeze'}
                 </button>
               )}
-              {data.bookingStatus?.frozen && !data.bookingStatus.hasConfirmedBooking && (
+              {data.bookingStatus?.frozen && (
                 <button
                   type="button"
                   onClick={() => unfreezeMutation.mutate()}
@@ -543,10 +543,10 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
               )}
             </div>
           </div>
-          {data.bookingStatus?.hasConfirmedBooking && data.bookingStatus.frozen && (
+          {data.hasActiveAppointment && !data.bookingStatus?.frozen && (
             <p className="mt-2 text-xs text-slate-500">
-              Therapist is frozen due to a confirmed booking. Cancel the booking via the
-              Appointments admin to unfreeze.
+              Therapist is currently in a session (has an active appointment), so they are not
+              shown on the user site until it completes. This is not a freeze.
             </p>
           )}
         </div>

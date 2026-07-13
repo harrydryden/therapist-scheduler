@@ -161,7 +161,7 @@ describe('admin therapist routes', () => {
       ]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(1);
       (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
-        { id: 'notion-page-1', frozenAt: new Date() },
+        { id: 'notion-page-1', manualFreezeAt: new Date() },
       ]);
       // Two distinct completed clients.
       (prisma.appointmentRequest.groupBy as jest.Mock).mockResolvedValue([
@@ -261,7 +261,7 @@ describe('admin therapist routes', () => {
       (prisma.therapist.findMany as jest.Mock).mockResolvedValue([legacyTherapist, postNotionTherapist]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(2);
       (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
-        { id: 'notion-page-1', frozenAt: new Date(), hasConfirmedBooking: false, uniqueRequestCount: 1 },
+        { id: 'notion-page-1', manualFreezeAt: new Date() },
       ]);
 
       const res = await app.inject({
@@ -335,7 +335,7 @@ describe('admin therapist routes', () => {
       delete (therapist as any)._count;
       (prisma.therapist.findUnique as jest.Mock).mockResolvedValue(therapist);
       (prisma.therapistBookingStatus.findUnique as jest.Mock).mockResolvedValue({
-        frozenAt: null,
+        manualFreezeAt: null,
         hasConfirmedBooking: false,
         uniqueRequestCount: 0,
         confirmedAt: null,
@@ -468,7 +468,7 @@ describe('admin therapist routes', () => {
       expect(res.json().data).toEqual({ unfrozen: true });
       expect(prisma.therapistBookingStatus.updateMany).toHaveBeenCalledWith({
         where: { id: 'notion-page-1' },
-        data: { frozenAt: null, frozenUntil: null },
+        data: { manualFreezeAt: null },
       });
     });
 

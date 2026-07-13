@@ -26,12 +26,16 @@ export interface TherapistAvailabilityStatus {
  * single source of truth and no counter to drift:
  *
  *   live  ==  active
- *         &&  not manually frozen (TherapistBookingStatus.frozenAt is null)
+ *         &&  not manually frozen (TherapistBookingStatus.manualFreezeAt is null)
  *         &&  distinct completed clients  <  targetAppointments
  *         &&  no active appointment currently exists (serial)
  *
  * `TherapistBookingStatus` is retained ONLY as the manual-override record:
- * `frozenAt` is set/cleared by the admin /freeze and /unfreeze endpoints.
+ * `manualFreezeAt` is set/cleared by the admin /freeze and /unfreeze
+ * endpoints. We deliberately read `manualFreezeAt` and NOT the legacy
+ * `frozenAt` — the retired auto-freeze set `frozenAt` on every booking
+ * request, so reading it would hide every recently-booked therapist at
+ * cutover (see docs/THERAPIST_TARGET_AVAILABILITY.md, "cutover safety").
  * The former auto-freeze counter methods (recordNewRequest, markConfirmed,
  * unmarkConfirmed, recalculateUniqueRequestCount) are now no-ops — their
  * call sites (booking transaction, transition side-effects) are left in
@@ -97,9 +101,9 @@ class TherapistBookingStatusService {
       // 1. Manual admin freeze.
       const status = await client.therapistBookingStatus.findUnique({
         where: { id: therapistHandle },
-        select: { frozenAt: true },
+        select: { manualFreezeAt: true },
       });
-      if (status?.frozenAt) {
+      if (status?.manualFreezeAt) {
         return { canAcceptNewRequests: false, reason: 'frozen' };
       }
 
@@ -182,7 +186,7 @@ class TherapistBookingStatusService {
       const [frozenRows, activeRows, completedRows] = await Promise.all([
         // Manual admin freezes.
         prisma.therapistBookingStatus.findMany({
-          where: { frozenAt: { not: null }, id: { in: handles } },
+          where: { manualFreezeAt: { not: null }, id: { in: handles } },
           select: { id: true },
         }),
         // Handles with any active appointment.
@@ -268,8 +272,8 @@ class TherapistBookingStatusService {
 
   /**
    * Previously auto-unfroze therapists whose conversations went inactive.
-   * Retired under the target model: `frozenAt` now means a deliberate admin
-   * freeze, so auto-clearing it would silently undo admin intent. Stale
+   * Retired under the target model: the admin freeze (`manualFreezeAt`) is
+   * deliberate, so auto-clearing it would silently undo admin intent. Stale
    * conversations are surfaced to admins by the appointment-level stale
    * check instead.
    */

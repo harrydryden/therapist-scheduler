@@ -9,7 +9,7 @@
  * Mutations:
  *   - active toggle     → Postgres
  *   - profile fields    → Postgres
- *   - force unfreeze    → clears TherapistBookingStatus.frozenAt
+ *   - force unfreeze    → clears TherapistBookingStatus.manualFreezeAt
  */
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
@@ -136,13 +136,13 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         const lookupKeys = therapists.map((t) => t.notionId ?? t.id);
 
         // Three aggregates for the page, in parallel:
-        //  - manual freeze markers (frozenAt)
+        //  - manual freeze markers (manualFreezeAt)
         //  - distinct completed clients per handle (the "Completed" column)
         //  - handles with any active appointment (drives "live" + is busy)
         const [statuses, completedRows, activeRows] = await Promise.all([
           prisma.therapistBookingStatus.findMany({
             where: { id: { in: lookupKeys } },
-            select: { id: true, frozenAt: true },
+            select: { id: true, manualFreezeAt: true },
           }),
           prisma.appointmentRequest.groupBy({
             by: ['therapistHandle', 'userEmail'],
@@ -155,7 +155,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           }),
         ]);
 
-        const frozenByHandle = new Map(statuses.map((s) => [s.id, !!s.frozenAt]));
+        const frozenByHandle = new Map(statuses.map((s) => [s.id, !!s.manualFreezeAt]));
         const completedByHandle = new Map<string, number>();
         for (const row of completedRows) {
           completedByHandle.set(
@@ -269,7 +269,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           prisma.therapistBookingStatus.findUnique({
             where: { id: handle },
             select: {
-              frozenAt: true,
+              manualFreezeAt: true,
               hasConfirmedBooking: true,
               uniqueRequestCount: true,
               confirmedAt: true,
@@ -287,7 +287,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         const hasActiveAppointment = therapist.appointments.some((a) =>
           (ACTIVE_STATUSES as readonly string[]).includes(a.status),
         );
-        const frozen = !!status?.frozenAt;
+        const frozen = !!status?.manualFreezeAt;
         const live =
           therapist.active &&
           !frozen &&
@@ -319,7 +319,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
           bookingStatus: status
             ? {
                 frozen,
-                frozenAt: status.frozenAt?.toISOString() ?? null,
+                frozenAt: status.manualFreezeAt?.toISOString() ?? null,
                 hasConfirmedBooking: status.hasConfirmedBooking,
                 confirmedAt: status.confirmedAt?.toISOString() ?? null,
                 uniqueRequestCount: status.uniqueRequestCount,
@@ -481,12 +481,10 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
             id: handle,
             therapistName: therapist.name ?? '',
             uniqueRequestCount: 0,
-            frozenAt: now,
-            frozenUntil: null,
+            manualFreezeAt: now,
           },
           update: {
-            frozenAt: now,
-            frozenUntil: null,
+            manualFreezeAt: now,
           },
         });
 
@@ -504,13 +502,13 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
   );
 
   /**
-   * POST /api/admin/therapists/:id/unfreeze — clear the freeze marker on
-   * the therapist booking status row so they accept new requests again.
+   * POST /api/admin/therapists/:id/unfreeze — clear the manual freeze marker
+   * on the therapist booking status row so they accept new requests again.
    *
-   * Doesn't touch confirmed bookings: a therapist with a confirmed booking
-   * stays frozen by virtue of `hasConfirmedBooking=true` regardless of
-   * `frozenAt`. To "unfreeze" a therapist with an active confirmed booking,
-   * cancel the booking via the existing appointments admin instead.
+   * This only clears the deliberate admin freeze (`manualFreezeAt`). A
+   * therapist who is simply busy (has an active appointment) or has reached
+   * their completed-appointment target is still unavailable by the target
+   * rule — unfreezing does not override those.
    */
   fastify.post<{ Params: { id: string } }>(
     '/api/admin/therapists/:id/unfreeze',
@@ -540,7 +538,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         // uuid for post-Notion ingestions).
         const result = await prisma.therapistBookingStatus.updateMany({
           where: { id: therapist.notionId ?? therapist.id },
-          data: { frozenAt: null, frozenUntil: null },
+          data: { manualFreezeAt: null },
         });
 
         // The previous Notion cache invalidation has been retired —
