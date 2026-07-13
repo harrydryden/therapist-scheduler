@@ -35,8 +35,8 @@ export async function adminRoutes(fastify: FastifyInstance) {
   /**
    * POST /api/admin/gmail/setup-push
    * Set up Gmail push notifications. `topicName` is optional — if omitted,
-   * falls back to the `GOOGLE_PUBSUB_TOPIC` env var. Subsumes the
-   * deprecated `POST /api/webhooks/gmail/watch` (which was env-only).
+   * falls back to the `GOOGLE_PUBSUB_TOPIC` env var. Replaces the
+   * removed `POST /api/webhooks/gmail/watch` (which was env-only).
    */
   fastify.post<{ Body: z.infer<typeof setupPushSchema> }>(
     '/api/admin/gmail/setup-push',
