@@ -7,7 +7,7 @@ import { emailOAuthService } from '../services/email-oauth.service';
 import { emailIngestService } from '../services/email-ingest.service';
 import { logger } from '../utils/logger';
 import { RATE_LIMITS } from '../constants';
-import { sendSuccess, Errors } from '../utils/response';
+import { Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
 
 // OAuth2 client for verifying Pub/Sub push tokens
@@ -275,36 +275,6 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       } catch (err) {
         logger.error({ err, requestId }, 'Error processing pending emails');
         return reply.status(500).send({ success: false, error: 'Failed to process pending emails' });
-      }
-    }
-  );
-
-  /**
-   * @deprecated POST /api/webhooks/gmail/watch — use POST /api/admin/gmail/setup-push
-   * (the canonical endpoint accepts an optional `topicName` body field;
-   * if omitted it falls back to GOOGLE_PUBSUB_TOPIC just like this one).
-   */
-  fastify.post(
-    '/api/webhooks/gmail/watch',
-    ADMIN_GMAIL_ROUTE_OPTS,
-    async (request: FastifyRequest, reply: FastifyReply) => {
-      const requestId = request.id;
-      markDeprecated(reply, requestId, '/api/webhooks/gmail/watch', '/api/admin/gmail/setup-push');
-
-      const topicName = config.googlePubsubTopic;
-      if (!topicName) {
-        return Errors.badRequest(reply, 'GOOGLE_PUBSUB_TOPIC environment variable not configured');
-      }
-
-      try {
-        const result = await emailIngestService.setupPushNotifications(topicName);
-        return sendSuccess(reply, {
-          ...result,
-          message: 'Gmail watch set up successfully. Push notifications will be sent to /api/webhooks/gmail/push',
-        });
-      } catch (err) {
-        logger.error({ err, requestId }, 'Error setting up Gmail watch');
-        return Errors.internal(reply, 'Failed to set up Gmail watch');
       }
     }
   );
