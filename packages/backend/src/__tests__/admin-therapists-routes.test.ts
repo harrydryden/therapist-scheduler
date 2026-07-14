@@ -33,6 +33,7 @@ jest.mock('../utils/database', () => ({
       findMany: jest.fn(),
       findUnique: jest.fn(),
       updateMany: jest.fn(),
+      upsert: jest.fn(),
     },
     appointmentRequest: {
       findMany: jest.fn(),
@@ -454,6 +455,54 @@ describe('admin therapist routes', () => {
         payload: { bio: 'X' },
       });
       expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe('POST /api/admin/therapists/:id/freeze', () => {
+    it('sets manualFreezeAt via upsert and returns frozen=true', async () => {
+      (prisma.therapist.findUnique as jest.Mock).mockResolvedValue({
+        id: 'therapist-1',
+        notionId: 'notion-page-1',
+        name: 'Dr. Smith',
+      });
+      (prisma.therapistBookingStatus.upsert as jest.Mock).mockResolvedValue({ id: 'notion-page-1' });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/therapists/therapist-1/freeze',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toEqual({ frozen: true });
+      // Upsert keyed on the public handle (notionId), setting manualFreezeAt in
+      // BOTH create and update branches.
+      const call = (prisma.therapistBookingStatus.upsert as jest.Mock).mock.calls[0][0];
+      expect(call.where).toEqual({ id: 'notion-page-1' });
+      expect(call.create.manualFreezeAt).toBeInstanceOf(Date);
+      expect(call.update.manualFreezeAt).toBeInstanceOf(Date);
+    });
+
+    it('returns 404 for unknown therapist', async () => {
+      (prisma.therapist.findUnique as jest.Mock).mockResolvedValue(null);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/therapists/missing/freeze',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('rejects without webhook secret', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/admin/therapists/therapist-1/freeze',
+        payload: {},
+      });
+      expect(res.statusCode).toBe(401);
     });
   });
 
