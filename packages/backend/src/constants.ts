@@ -174,7 +174,7 @@ export const RESCHEDULE_OVERDUE_GRACE_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Chase follow-up — DEFAULTS ONLY, runtime values come from chase.* settings
 export const CHASE_FOLLOWUP = {
   CHASE_AFTER_STALE_HOURS: 72,
-  CLOSURE_RECOMMENDATION_HOURS: 48,
+  CLOSURE_RECOMMENDATION_HOURS: 72,
   MAX_CHASE_BATCH_SIZE: 10,
   MAX_CLOSURE_BATCH_SIZE: 20,
 } as const;
