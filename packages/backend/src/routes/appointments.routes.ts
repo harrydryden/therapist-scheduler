@@ -9,7 +9,7 @@ import { JustinTimeService } from '../services/justin-time.service';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { supersedeActiveTherapistConversationInTx } from '../domain/scheduling/availability/agent/service';
 import { slackNotificationService } from '../services/slack-notification.service';
-import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
+import { RATE_LIMITS, PRE_BOOKING_STATUSES, ACTIVE_STATUSES } from '../constants';
 import { parseTherapistAvailability } from '../utils/json-parser';
 import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 import { validateEmail } from '../utils/email-validator';
@@ -336,11 +336,16 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
         // OPTIMIZATION: Quick duplicate check outside transaction for fast rejection
         // This catches 99% of duplicates without transaction overhead
         // FIX B2: The definitive check is inside the transaction below
+        // Duplicate guard spans ALL active statuses (not just pre-booking) so a
+        // client who already has a confirmed/held/feedback appointment with this
+        // therapist cannot open a SECOND concurrent thread. Completed/cancelled
+        // are terminal, so genuine re-bookings after a finished session still
+        // pass.
         const quickDuplicateCheck = await prisma.appointmentRequest.findFirst({
           where: {
             userEmail,
             therapistHandle: therapistLookupKey,
-            status: { in: [...PRE_BOOKING_STATUSES] },
+            status: { in: [...ACTIVE_STATUSES] },
           },
           select: { id: true },
         });
@@ -352,7 +357,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           );
           return reply.status(400).send({
             success: false,
-            error: 'You already have an active appointment request with this therapist. Please check your email for updates.',
+            error: 'You already have an appointment with this therapist. Please check your email for updates.',
           });
         }
 
@@ -381,7 +386,7 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
               where: {
                 userEmail,
                 therapistHandle: therapistLookupKey,
-                status: { in: [...PRE_BOOKING_STATUSES] },
+                status: { in: [...ACTIVE_STATUSES] },
               },
               select: { id: true, status: true },
             });
@@ -668,23 +673,37 @@ export async function appointmentsRoutes(fastify: FastifyInstance) {
           });
         }
 
-        // Therapist no longer accepting requests
+        // Therapist became unavailable during the in-transaction recheck.
+        // The thrown message carries the availability reason vocabulary
+        // (target_reached | in_session | frozen | error_fallback); map each to
+        // accurate copy. 'target_reached' is permanent (graduated), so it must
+        // NOT tell the user to try again later.
         if (errorMessage.includes('Therapist no longer accepting requests')) {
-          const reason = errorMessage.includes('confirmed') ? 'confirmed' : 'frozen';
+          const reason = errorMessage.includes('target_reached')
+            ? 'target_reached'
+            : errorMessage.includes('in_session')
+              ? 'in_session'
+              : 'frozen';
           logger.info(
             { requestId, therapistHandle, reason },
             'Therapist became unavailable during request processing'
           );
 
-          if (reason === 'confirmed') {
+          if (reason === 'target_reached') {
             return reply.status(400).send({
               success: false,
               error: 'This therapist is no longer accepting new appointment requests.',
             });
           }
+          if (reason === 'in_session') {
+            return reply.status(400).send({
+              success: false,
+              error: 'This therapist is currently with another client. Please try again later or choose another therapist.',
+            });
+          }
           return reply.status(400).send({
             success: false,
-            error: 'This therapist has reached maximum pending requests. Please try again later or choose another therapist.',
+            error: 'This therapist is not currently accepting new appointment requests. Please choose another therapist.',
           });
         }
 

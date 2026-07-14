@@ -14,6 +14,7 @@ import { randomInt } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { logger } from './logger';
+import { getSettingValue } from '../services/settings.service';
 
 // ID range: 1000000000 to 9999999999 (10 digits)
 const MIN_ID = 1000000000;
@@ -197,6 +198,16 @@ export async function getOrCreateTherapist(
   // Create new therapist with unique ID
   // Catch P2002 (unique constraint violation) to handle concurrent creation race
   const odId = await generateUniqueTherapistId();
+  // Snapshot the configurable default target onto new therapists at creation
+  // time so this path matches the PDF-ingestion path and the documented
+  // contract (see docs/THERAPIST_TARGET_AVAILABILITY.md). Falls back to the
+  // schema default if the setting read fails.
+  let targetAppointments: number | undefined;
+  try {
+    targetAppointments = await getSettingValue<number>('general.defaultTargetAppointments');
+  } catch {
+    targetAppointments = undefined;
+  }
   try {
     const newTherapist = await prisma.therapist.create({
       data: {
@@ -205,6 +216,7 @@ export async function getOrCreateTherapist(
         name,
         odId,
         ingestedAt: new Date(),
+        ...(targetAppointments !== undefined ? { targetAppointments } : {}),
         ...(country ? { country } : {}),
         ...(availability !== undefined && availability !== null ? { availability } : {}),
       },

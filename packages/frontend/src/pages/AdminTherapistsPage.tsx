@@ -128,11 +128,15 @@ function TargetCell({ row }: { row: TherapistListItem }) {
   });
 
   const commit = () => {
-    const next = parseInt(value, 10);
-    if (!Number.isFinite(next) || next < 1) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) {
       setValue(String(row.targetAppointments));
       return;
     }
+    // Clamp to the backend-accepted range [1, 50] so an out-of-range entry is
+    // corrected in place rather than bounced with a generic 400 toast.
+    const next = Math.max(1, Math.min(50, parsed));
+    if (next !== parsed) setValue(String(next));
     if (next !== row.targetAppointments) {
       mutation.mutate(next);
     }
@@ -393,7 +397,16 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
             min={1}
             max={50}
             value={merged.targetAppointments ?? 1}
-            onChange={(e) => setField('targetAppointments', Number(e.target.value))}
+            onChange={(e) => {
+              // Guard against empty/out-of-range input reaching the PATCH as 0
+              // (which the backend rejects with min(1)). Fall back to the
+              // current value and clamp into [1, 50].
+              const n = parseInt(e.target.value, 10);
+              setField(
+                'targetAppointments',
+                Number.isFinite(n) ? Math.max(1, Math.min(50, n)) : data.targetAppointments,
+              );
+            }}
             className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
           />
           <p className="mt-1 text-xs text-slate-400">
@@ -492,30 +505,31 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
           <div className="flex items-start justify-between">
             <div>
               <h4 className="text-sm font-semibold text-slate-900 mb-2">Booking status</h4>
-              {data.bookingStatus ? (
-                <dl className="grid grid-cols-2 gap-2 text-sm">
-                  <div>
-                    <dt className="text-xs text-slate-500">Completed clients</dt>
-                    <dd className="text-slate-700">
-                      {data.completedAppointmentCount} / {data.targetAppointments}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">Live on site</dt>
-                    <dd className="text-slate-700">{data.live ? 'Yes' : 'No'}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">Manually frozen at</dt>
-                    <dd className="text-slate-700">{formatDate(data.bookingStatus.frozenAt)}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">In a session</dt>
-                    <dd className="text-slate-700">{data.hasActiveAppointment ? 'Yes' : 'No'}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <p className="text-xs text-slate-500">No bookings yet — therapist is currently free.</p>
-              )}
+              {/* Derived from the target model — always available, independent
+                  of whether a therapist_booking_status row exists (the new
+                  model only creates one on a manual admin freeze). */}
+              <dl className="grid grid-cols-2 gap-2 text-sm">
+                <div>
+                  <dt className="text-xs text-slate-500">Completed clients</dt>
+                  <dd className="text-slate-700">
+                    {data.completedAppointmentCount} / {data.targetAppointments}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">Live on site</dt>
+                  <dd className="text-slate-700">{data.live ? 'Yes' : 'No'}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">Manually frozen at</dt>
+                  <dd className="text-slate-700">
+                    {data.bookingStatus?.frozenAt ? formatDate(data.bookingStatus.frozenAt) : '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">In a session</dt>
+                  <dd className="text-slate-700">{data.hasActiveAppointment ? 'Yes' : 'No'}</dd>
+                </div>
+              </dl>
             </div>
             {/* Freeze / unfreeze controls. The freeze endpoint upserts
                 the booking-status row, so the button is meaningful even

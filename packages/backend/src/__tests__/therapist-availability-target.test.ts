@@ -19,7 +19,7 @@ const mockStatusFindUnique = jest.fn();
 const mockStatusFindMany = jest.fn();
 const mockApptFindFirst = jest.fn();
 const mockApptFindMany = jest.fn();
-const mockApptGroupBy = jest.fn();
+const mockQueryRaw = jest.fn();
 
 jest.mock('../utils/database', () => ({
   prisma: {
@@ -34,8 +34,9 @@ jest.mock('../utils/database', () => ({
     appointmentRequest: {
       findFirst: (...a: unknown[]) => mockApptFindFirst(...a),
       findMany: (...a: unknown[]) => mockApptFindMany(...a),
-      groupBy: (...a: unknown[]) => mockApptGroupBy(...a),
     },
+    // Distinct completed-client counts run through $queryRaw (case-insensitive).
+    $queryRaw: (...a: unknown[]) => mockQueryRaw(...a),
   },
 }));
 
@@ -81,10 +82,7 @@ describe('canAcceptNewRequest (target model)', () => {
       .mockResolvedValueOnce(null) // continuation
       .mockResolvedValueOnce(null); // serial guard: no active appt
     mockTherapistFindFirst.mockResolvedValueOnce({ targetAppointments: 2 });
-    mockApptGroupBy.mockResolvedValueOnce([
-      { userEmail: 'a@x.com' },
-      { userEmail: 'b@x.com' },
-    ]); // 2 distinct completed clients
+    mockQueryRaw.mockResolvedValueOnce([{ count: 2 }]); // 2 distinct completed clients
 
     const result = await therapistBookingStatusService.canAcceptNewRequest('handle-1', 'user@x.com');
     expect(result).toEqual({ canAcceptNewRequests: false, reason: 'target_reached' });
@@ -96,7 +94,7 @@ describe('canAcceptNewRequest (target model)', () => {
       .mockResolvedValueOnce(null) // continuation
       .mockResolvedValueOnce(null); // serial guard
     mockTherapistFindFirst.mockResolvedValueOnce({ targetAppointments: 2 });
-    mockApptGroupBy.mockResolvedValueOnce([{ userEmail: 'a@x.com' }]); // 1 < 2
+    mockQueryRaw.mockResolvedValueOnce([{ count: 1 }]); // 1 < 2
 
     const result = await therapistBookingStatusService.canAcceptNewRequest('handle-1', 'user@x.com');
     expect(result).toEqual({ canAcceptNewRequests: true, reason: 'available' });
@@ -115,7 +113,7 @@ describe('getUnavailableTherapistIds (target model)', () => {
     ]);
     mockStatusFindMany.mockResolvedValueOnce([{ id: 't1' }]); // frozen
     mockApptFindMany.mockResolvedValueOnce([{ therapistHandle: 't3' }]); // busy
-    mockApptGroupBy.mockResolvedValueOnce([{ therapistHandle: 'n2', userEmail: 'a@x.com' }]); // n2: 1 completed
+    mockQueryRaw.mockResolvedValueOnce([{ therapist_handle: 'n2', count: 1 }]); // n2: 1 completed >= target 1
 
     const unavailable = await therapistBookingStatusService.getUnavailableTherapistIds();
 

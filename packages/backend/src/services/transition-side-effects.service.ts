@@ -91,13 +91,15 @@ class TransitionSideEffectsService {
   }
 
   /**
-   * Side effects after a successful confirmation:
-   * - Mark therapist as confirmed (freeze for other bookings)
+   * Side effects after a successful confirmation.
    *
-   * Routed through `runTrackedSideEffect` so a transient Postgres flap
-   * during therapist-status update doesn't silently drop the freeze —
-   * the side-effect-retry runner picks up failed rows and re-runs them
-   * (idempotent: markConfirmed sets a flag).
+   * NOTE (target-availability model): markConfirmed is now a NO-OP. A
+   * confirmed appointment is an ACTIVE status, so the availability rule
+   * already treats the therapist as unavailable (serial guard) with no
+   * flag to set — see therapist-booking-status.service.ts and
+   * docs/THERAPIST_TARGET_AVAILABILITY.md. The tracked side-effect and its
+   * retry row are retained only so existing call sites/idempotency keys stay
+   * stable; they can be removed in a later cleanup.
    */
   async onConfirmed(params: OnConfirmedParams): Promise<void> {
     const { appointmentId, therapistHandle, therapistName, userEmail } = params;
@@ -184,14 +186,13 @@ class TransitionSideEffectsService {
    * therapist's last appointment must not remove them from the public
    * booking page — visibility is an admin-only toggle.
    *
-   * unmarkConfirmed runs regardless of the previous status. Cancellation is
-   * reachable from any active status, and `hasConfirmedBooking` is set when
-   * the appointment first confirms — gating the unmark on "previous status
-   * was exactly `confirmed`" stranded the flag whenever the cancel happened
-   * from session_held/feedback_requested, silently hiding the therapist from
-   * the public finder with no admin remedy (the unfreeze button is disabled
-   * while the flag is set). unmarkConfirmed is self-guarding: it no-ops when
-   * the flag isn't set or when another confirmed-active appointment exists.
+   * NOTE (target-availability model): unmarkConfirmed and
+   * recalculateUniqueRequestCount are now NO-OPS — availability re-derives
+   * from appointment status + the completed-client target, so terminating a
+   * booking automatically frees the therapist without a flag to clear (see
+   * therapist-booking-status.service.ts). The tracked side-effect rows are
+   * retained only for call-site/idempotency stability and can be removed in a
+   * later cleanup. `active` flag visibility remains an admin-only toggle.
    *
    * Same retry semantics as onCompleted — failed writes are re-driven
    * by the side-effect retry runner.

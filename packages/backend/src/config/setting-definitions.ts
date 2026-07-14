@@ -843,6 +843,14 @@ Justin`,
     valueType: 'boolean',
     defaultValue: true,
   },
+  'chase.autoCancelStalledPreBooking': {
+    category: 'notifications',
+    label: 'Auto-Cancel Unresponsive Pre-Booking Threads',
+    description:
+      'Automatically cancel a pending/contacted/negotiating appointment once it has been chased and a closure recommendation has gone un-actioned past the closure window. This frees the therapist to appear on the finder again (they are hidden while any active appointment exists). Requires chase follow-ups to be enabled.',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
   'chase.maxChaseBatchSize': {
     category: 'notifications',
     label: 'Max Chase Batch Size',

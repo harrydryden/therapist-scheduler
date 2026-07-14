@@ -35,10 +35,16 @@ without ever misrouting a reply between two of their clients.
 
 ### 2.1 Definitions
 
-- **Completed count** — the number of *distinct clients* (`user_email`) with
-  a `completed` appointment for the therapist. Repeat sessions with the same
-  client count once. Only `status = 'completed'` counts; `session_held` /
+- **Completed count** — the number of *distinct clients* with a `completed`
+  appointment for the therapist. Repeat sessions with the same client count
+  once. Distinctness is measured **case-insensitively** on email
+  (`COUNT(DISTINCT lower(user_email))`) because the app stores emails
+  un-normalized — counting raw would let two casings of one address graduate
+  a therapist early. Only `status = 'completed'` counts; `session_held` /
   `feedback_requested` do not (the session may not have actually happened).
+  The count is computed by a single service method
+  (`therapistBookingStatusService.getCompletedClientCount(s)`) shared by the
+  finder, the booking gate, and the admin table so they cannot diverge.
 - **Target** — `Therapist.targetAppointments`, a per-therapist integer. The
   number of distinct completed clients the therapist must reach before they
   are considered "done" and drop off the public finder.
@@ -91,15 +97,39 @@ without maintaining dead state.
 An admin can "ad hoc" send a graduated therapist more clients by bumping
 `targetAppointments` in the admin table.
 
+### 2.3a Serial guard, double-booking, and stall recovery
+
+- **Serial guard** keys on ACTIVE_STATUSES, so a therapist mid-appointment is
+  hidden until it reaches a terminal state. The per-therapist booking-create
+  duplicate guard also spans ACTIVE_STATUSES (not just pre-booking), so a
+  client who already holds a confirmed/held/feedback appointment with a
+  therapist cannot open a second concurrent thread with them; a genuine
+  re-booking after a *completed* (terminal) session is still allowed.
+- **Stall recovery**: because any active pre-booking hides the therapist, a
+  ghosted `pending`/`contacted`/`negotiating` request would otherwise hide
+  them forever (the old auto-unfreeze is retired). Recovery is now via
+  `chaseEmailService.autoCancelStalledPreBooking` (gated by
+  `chase.autoCancelStalledPreBooking`, default on): once a thread has been
+  chased and its closure recommendation goes un-actioned past the closure
+  window, the appointment is auto-cancelled (`source`/`cancelledBy` =
+  `system`, atomic guards), which frees the therapist. Admins can prevent it
+  by actioning/dismissing the closure recommendation or taking human control.
+
 ### 2.4 Rollout: existing vs new therapists
 
 - New column `Therapist.targetAppointments` (`@default(2)`).
-- Migration backfills **all rows present at migration time to 1** — existing
-  counsellors keep the old "one trial" expectation.
+- Migration backfill (cutover decision): **archived therapists
+  (`active = false`) → target 1; active therapists keep the column default of
+  2** (the "new" target). Keying on `active` — not on the column value — is
+  unambiguous and re-run-safe. This deliberately keeps day-one disruption
+  small: an *active* therapist is only removed from the finder if they have
+  already completed **2+** distinct clients (not ≥1), and archived therapists
+  are hidden regardless.
 - New therapists created after the release are seeded from the
-  `general.defaultTargetAppointments` setting (default 2) at creation time,
-  so the value is snapshotted per therapist and later changing the global
-  default does not retroactively move existing therapists.
+  `general.defaultTargetAppointments` setting (default 2) at creation time
+  (both the PDF-ingestion path and `getOrCreateTherapist`/ATS), so the value
+  is snapshotted per therapist and later changing the global default does not
+  retroactively move existing therapists.
 
 ## 3. Email routing hardening (active-vs-active)
 
@@ -130,23 +160,43 @@ review.
 Net effect: a therapist reply is only ever auto-attributed to a client's
 thread when the attribution is unambiguous; otherwise a human decides.
 
+**Accepted tradeoff (active-vs-recent-terminal).** A pre-existing guard also
+drops a markerless reply to manual review when the sender has *any* terminal
+appointment updated within the last 60 days — even when there is exactly one
+active candidate. Serial multi-session makes "recently completed A + active B"
+a common steady state, so this fires more often than before. We deliberately
+**keep** the guard rather than auto-attribute to the single active candidate:
+a markerless reply from a therapist who just finished with A is genuinely
+ambiguous between A and B, and mis-attributing an A-related message into B's
+live negotiation is a worse failure than a manual-review stall. The mitigation
+is to keep replies deterministic (thread id / In-Reply-To / tracking code),
+which bypasses the fallback entirely.
+
 ## 4. Interfaces changed
 
 ### Backend
 - `prisma/schema.prisma` — `Therapist.targetAppointments`,
   `TherapistBookingStatus.manualFreezeAt`.
-- migration `…_add_therapist_target_appointments` — add column + backfill 1.
+- migration `…_add_therapist_target_appointments` — add column + backfill
+  archived→1 (active keep default 2).
 - migration `…_add_manual_freeze_at` — add the admin-freeze column (NULL for
-  all rows; see §5).
-- `config/setting-definitions.ts` — `general.defaultTargetAppointments`.
-- `services/therapist-booking-status.service.ts` — new availability rule;
+  all rows; see §5) + one-time clear of the retired `admin_alert_at` signal.
+- `config/setting-definitions.ts` — `general.defaultTargetAppointments`,
+  `chase.autoCancelStalledPreBooking`.
+- `services/therapist-booking-status.service.ts` — new availability rule
+  (case-insensitive completed count via `getCompletedClientCount(s)`);
   counter methods reduced to no-ops.
+- `services/chase-email.service.ts` + `services/stale-check.service.ts` —
+  `autoCancelStalledPreBooking` stall-recovery sweep.
 - `utils/thread-matcher.ts` — active-vs-active ambiguity guard.
 - `routes/therapists.routes.ts` — public finder uses the new rule.
-- `routes/appointments.routes.ts` — booking creation handles new reasons.
-- `routes/admin-therapists.routes.ts` — list returns
-  `completedAppointmentCount` (distinct) + `targetAppointments` + `live`;
-  PATCH accepts `targetAppointments`.
+- `routes/appointments.routes.ts` + `routes/ats-integration.routes.ts` —
+  booking creation handles new reasons; per-therapist duplicate guard spans
+  ACTIVE_STATUSES.
+- `routes/admin-therapists.routes.ts` — list/detail return
+  `completedAppointmentCount` (distinct, via the shared service method) +
+  `targetAppointments` + `live` + `hasActiveAppointment`; PATCH accepts
+  `targetAppointments`; freeze/unfreeze use `manualFreezeAt`.
 - therapist creation (`pdf-ingestion`, `utils/unique-id`) seeds
   `targetAppointments` from config.
 
@@ -187,16 +237,25 @@ disrupting in-flight therapists and appointments:
   as un-frozen (the new column is empty). Re-freeze via the admin UI. This
   is strictly better than the alternative of mass-hiding live therapists.
 
-- **Intended behaviour change to call out:** existing therapists are
-  backfilled to target **1**, so any existing therapist who has already
-  completed a session with ≥1 distinct client is now at/over target and
-  drops off the public finder. This is the "existing = 1" requirement. To
-  keep a specific therapist taking clients, bump their target in the admin
-  Therapists table.
+- **Ghosted pre-booking no longer strands a therapist.** The old auto-unfreeze
+  is retired, so stall recovery is now `autoCancelStalledPreBooking`: an
+  unresponsive pre-booking that has been chased and had its closure
+  recommendation go un-actioned past the closure window is auto-cancelled,
+  freeing the therapist. Without this, one ghosted request would hide a
+  therapist from the finder indefinitely.
 
-- **No destructive migrations.** Both migrations are additive
-  (`ADD COLUMN IF NOT EXISTS`); the only `UPDATE` is the target backfill to
-  1. `TherapistBookingStatus` rows and legacy columns are left intact.
+- **Intended behaviour change to call out (bounded by the cutover decision):**
+  archived therapists are backfilled to target **1**; active therapists keep
+  the default **2**. So an active therapist is removed from the finder at ship
+  time only if they have already completed **2+** distinct clients — not ≥1.
+  Completed counts are case-insensitive on email, so casing variants of one
+  client don't inflate the total. To keep a specific therapist taking clients,
+  bump their target in the admin Therapists table.
+
+- **No destructive migrations.** Migrations are additive
+  (`ADD COLUMN IF NOT EXISTS`); the `UPDATE`s are the archived-therapist target
+  backfill and a one-time clear of the retired `admin_alert_at` alert signal.
+  `TherapistBookingStatus` rows and other legacy columns are left intact.
 
 ## 6. Testing
 

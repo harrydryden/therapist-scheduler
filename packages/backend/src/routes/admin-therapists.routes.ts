@@ -32,6 +32,7 @@ import {
   MAX_PROFILE_NOTE_LENGTH,
 } from '../services/agent-profile.service';
 import { parseTherapistAvailability } from '../utils/json-parser';
+import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 
 const addTherapistProfileNoteSchema = z.object({
   category: z.enum(['communication', 'scheduling', 'context']),
@@ -139,15 +140,15 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         //  - manual freeze markers (manualFreezeAt)
         //  - distinct completed clients per handle (the "Completed" column)
         //  - handles with any active appointment (drives "live" + is busy)
-        const [statuses, completedRows, activeRows] = await Promise.all([
+        const [statuses, completedByHandle, activeRows] = await Promise.all([
           prisma.therapistBookingStatus.findMany({
             where: { id: { in: lookupKeys } },
             select: { id: true, manualFreezeAt: true },
           }),
-          prisma.appointmentRequest.groupBy({
-            by: ['therapistHandle', 'userEmail'],
-            where: { therapistHandle: { in: lookupKeys }, status: 'completed' },
-          }),
+          // Distinct completed clients per handle — same service method the
+          // finder/availability rule uses, so the column can't diverge from
+          // the graduation decision (and it's case-insensitive on email).
+          therapistBookingStatusService.getCompletedClientCounts(lookupKeys),
           prisma.appointmentRequest.findMany({
             where: { therapistHandle: { in: lookupKeys }, status: { in: [...ACTIVE_STATUSES] } },
             select: { therapistHandle: true },
@@ -156,13 +157,6 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         ]);
 
         const frozenByHandle = new Map(statuses.map((s) => [s.id, !!s.manualFreezeAt]));
-        const completedByHandle = new Map<string, number>();
-        for (const row of completedRows) {
-          completedByHandle.set(
-            row.therapistHandle,
-            (completedByHandle.get(row.therapistHandle) ?? 0) + 1,
-          );
-        }
         const activeSet = new Set(activeRows.map((r) => r.therapistHandle));
 
         const items = therapists.map((t) => {
@@ -265,7 +259,7 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
         // legacy rows, Postgres uuid for post-Notion ingestions). Same
         // resolution as the list endpoint at line ~125.
         const handle = therapist.notionId ?? therapist.id;
-        const [status, completedRows] = await Promise.all([
+        const [status, completedAppointmentCount] = await Promise.all([
           prisma.therapistBookingStatus.findUnique({
             where: { id: handle },
             select: {
@@ -277,13 +271,9 @@ export async function adminTherapistRoutes(fastify: FastifyInstance) {
               adminAlertAcknowledged: true,
             },
           }),
-          prisma.appointmentRequest.groupBy({
-            by: ['userEmail'],
-            where: { therapistHandle: handle, status: 'completed' },
-          }),
+          // Same case-insensitive distinct-client count the finder uses.
+          therapistBookingStatusService.getCompletedClientCount(handle),
         ]);
-
-        const completedAppointmentCount = completedRows.length;
         const hasActiveAppointment = therapist.appointments.some((a) =>
           (ACTIVE_STATUSES as readonly string[]).includes(a.status),
         );

@@ -61,18 +61,54 @@ class TherapistBookingStatusService {
   }
 
   /**
-   * Count DISTINCT clients (user_email) the therapist has a `completed`
-   * appointment with. Repeat sessions with the same client count once.
+   * Count DISTINCT clients the therapist has a `completed` appointment with.
+   * Repeat sessions with the same client count once.
+   *
+   * Distinctness is measured on lower(user_email): the app stores emails
+   * un-normalized (see appointments.routes.ts) and every other lookup uses
+   * case-insensitive matching, so a plain groupBy(['userEmail']) would count
+   * 'Alice@x.com' and 'alice@x.com' as two clients and prematurely (and
+   * permanently) graduate a therapist off the finder. Raw SQL is used because
+   * Prisma groupBy has no case-insensitive mode.
    */
   private async countCompletedClients(
     client: PrismaClient | TransactionClient,
     therapistHandle: string,
   ): Promise<number> {
-    const rows = await client.appointmentRequest.groupBy({
-      by: ['userEmail'],
-      where: { therapistHandle, status: 'completed' },
-    });
-    return rows.length;
+    const rows = await client.$queryRaw<Array<{ count: number }>>`
+      SELECT COUNT(DISTINCT lower(user_email))::int AS count
+      FROM appointment_requests
+      WHERE therapist_handle = ${therapistHandle} AND status = 'completed'
+    `;
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * Public: distinct completed-client count for a single therapist handle.
+   * Case-insensitive on email (see countCompletedClients). Used by the admin
+   * detail route so the "Completed" figure and the availability rule agree.
+   */
+  async getCompletedClientCount(therapistHandle: string): Promise<number> {
+    return this.countCompletedClients(prisma, therapistHandle);
+  }
+
+  /**
+   * Public: distinct completed-client counts for many handles in one query.
+   * Single source of truth for the "Completed" column and the availability
+   * `graduated` check — keeps the admin list, the finder, and the booking
+   * gate from diverging. Case-insensitive on email.
+   */
+  async getCompletedClientCounts(handles: string[]): Promise<Map<string, number>> {
+    const map = new Map<string, number>();
+    if (handles.length === 0) return map;
+    const rows = await prisma.$queryRaw<Array<{ therapist_handle: string; count: number }>>`
+      SELECT therapist_handle, COUNT(DISTINCT lower(user_email))::int AS count
+      FROM appointment_requests
+      WHERE status = 'completed' AND therapist_handle IN (${Prisma.join(handles)})
+      GROUP BY therapist_handle
+    `;
+    for (const r of rows) map.set(r.therapist_handle, Number(r.count));
+    return map;
   }
 
   /**
@@ -183,7 +219,7 @@ class TherapistBookingStatusService {
       }));
       const handles = handleInfo.map((h) => h.handle);
 
-      const [frozenRows, activeRows, completedRows] = await Promise.all([
+      const [frozenRows, activeRows, completedCount] = await Promise.all([
         // Manual admin freezes.
         prisma.therapistBookingStatus.findMany({
           where: { manualFreezeAt: { not: null }, id: { in: handles } },
@@ -195,22 +231,13 @@ class TherapistBookingStatusService {
           select: { therapistHandle: true },
           distinct: ['therapistHandle'],
         }),
-        // Distinct (handle, client) pairs among completed appointments.
-        prisma.appointmentRequest.groupBy({
-          by: ['therapistHandle', 'userEmail'],
-          where: { therapistHandle: { in: handles }, status: 'completed' },
-        }),
+        // Distinct completed clients per handle (case-insensitive), shared with
+        // the admin "Completed" column via the same method.
+        this.getCompletedClientCounts(handles),
       ]);
 
       const frozenSet = new Set(frozenRows.map((r) => r.id));
       const activeSet = new Set(activeRows.map((r) => r.therapistHandle));
-      const completedCount = new Map<string, number>();
-      for (const row of completedRows) {
-        completedCount.set(
-          row.therapistHandle,
-          (completedCount.get(row.therapistHandle) ?? 0) + 1,
-        );
-      }
 
       const unavailable: string[] = [];
       for (const { handle, target } of handleInfo) {

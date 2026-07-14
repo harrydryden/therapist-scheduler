@@ -36,8 +36,16 @@ jest.mock('../utils/database', () => ({
     },
     appointmentRequest: {
       findMany: jest.fn(),
-      groupBy: jest.fn(),
     },
+  },
+}));
+
+// The route delegates distinct completed-client counting to the booking-status
+// service (single source of truth, case-insensitive). Mock those two methods.
+jest.mock('../services/therapist-booking-status.service', () => ({
+  therapistBookingStatusService: {
+    getCompletedClientCounts: jest.fn(),
+    getCompletedClientCount: jest.fn(),
   },
 }));
 
@@ -57,6 +65,10 @@ jest.mock('../utils/redis', () => ({
 import Fastify, { FastifyInstance } from 'fastify';
 import { prisma } from '../utils/database';
 import { adminTherapistRoutes } from '../routes/admin-therapists.routes';
+import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
+
+const mockGetCompletedCounts = therapistBookingStatusService.getCompletedClientCounts as jest.Mock;
+const mockGetCompletedCount = therapistBookingStatusService.getCompletedClientCount as jest.Mock;
 
 // ============================================
 // Helpers
@@ -129,8 +141,9 @@ describe('admin therapist routes', () => {
     // Defaults for the target-model aggregate queries; individual tests
     // override as needed.
     (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([]);
-    (prisma.appointmentRequest.groupBy as jest.Mock).mockResolvedValue([]);
     (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
+    mockGetCompletedCounts.mockResolvedValue(new Map());
+    mockGetCompletedCount.mockResolvedValue(0);
     app = buildApp();
   });
 
@@ -164,10 +177,7 @@ describe('admin therapist routes', () => {
         { id: 'notion-page-1', manualFreezeAt: new Date() },
       ]);
       // Two distinct completed clients.
-      (prisma.appointmentRequest.groupBy as jest.Mock).mockResolvedValue([
-        { therapistHandle: 'notion-page-1', userEmail: 'a@x.com' },
-        { therapistHandle: 'notion-page-1', userEmail: 'b@x.com' },
-      ]);
+      mockGetCompletedCounts.mockResolvedValue(new Map([['notion-page-1', 2]]));
 
       const res = await app.inject({
         method: 'GET',
@@ -193,9 +203,7 @@ describe('admin therapist routes', () => {
       ]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(1);
       // No freeze row, no active appts (defaults), one completed client.
-      (prisma.appointmentRequest.groupBy as jest.Mock).mockResolvedValue([
-        { therapistHandle: 'notion-page-1', userEmail: 'a@x.com' },
-      ]);
+      mockGetCompletedCounts.mockResolvedValue(new Map([['notion-page-1', 1]]));
 
       const res = await app.inject({
         method: 'GET',

@@ -19,3 +19,14 @@
 
 ALTER TABLE "therapist_booking_status"
   ADD COLUMN IF NOT EXISTS "manual_freeze_at" TIMESTAMP(3);
+
+-- One-time cleanup of the retired therapist-level alert signal. The old
+-- inactivity flow wrote admin_alert_at and cleared it when activity resumed;
+-- both writers are now no-ops, so any pre-existing unacknowledged alert would
+-- otherwise linger forever on the admin dashboard with a frozen request count.
+-- Clearing it here removes those phantom flags at cutover. Safe: the flag is
+-- advisory only and no longer gates anything.
+UPDATE "therapist_booking_status"
+  SET "admin_alert_at" = NULL, "admin_alert_acknowledged" = false
+  WHERE "admin_alert_at" IS NOT NULL;
+
