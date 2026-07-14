@@ -34,6 +34,18 @@ jest.mock('../utils/database', () => ({
       findUnique: jest.fn(),
       updateMany: jest.fn(),
     },
+    appointmentRequest: {
+      findMany: jest.fn(),
+    },
+  },
+}));
+
+// The route delegates distinct completed-client counting to the booking-status
+// service (single source of truth, case-insensitive). Mock those two methods.
+jest.mock('../services/therapist-booking-status.service', () => ({
+  therapistBookingStatusService: {
+    getCompletedClientCounts: jest.fn(),
+    getCompletedClientCount: jest.fn(),
   },
 }));
 
@@ -53,6 +65,10 @@ jest.mock('../utils/redis', () => ({
 import Fastify, { FastifyInstance } from 'fastify';
 import { prisma } from '../utils/database';
 import { adminTherapistRoutes } from '../routes/admin-therapists.routes';
+import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
+
+const mockGetCompletedCounts = therapistBookingStatusService.getCompletedClientCounts as jest.Mock;
+const mockGetCompletedCount = therapistBookingStatusService.getCompletedClientCount as jest.Mock;
 
 // ============================================
 // Helpers
@@ -80,6 +96,7 @@ interface TherapistRow {
   profileImage: string | null;
   bookingLink: string | null;
   active: boolean;
+  targetAppointments: number;
   availability: unknown;
   ingestedAt: Date | null;
   createdAt: Date;
@@ -102,6 +119,7 @@ function makeTherapist(overrides: Partial<TherapistRow> = {}): TherapistRow {
     profileImage: null,
     bookingLink: null,
     active: true,
+    targetAppointments: 2,
     availability: { timezone: 'Europe/London', slots: [] },
     ingestedAt: new Date('2026-04-01T00:00:00Z'),
     createdAt: new Date('2026-04-01T00:00:00Z'),
@@ -120,6 +138,12 @@ describe('admin therapist routes', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Defaults for the target-model aggregate queries; individual tests
+    // override as needed.
+    (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([]);
+    mockGetCompletedCounts.mockResolvedValue(new Map());
+    mockGetCompletedCount.mockResolvedValue(0);
     app = buildApp();
   });
 
@@ -144,17 +168,16 @@ describe('admin therapist routes', () => {
   });
 
   describe('GET /api/admin/therapists', () => {
-    it('returns list with frozen state from booking status', async () => {
-      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([makeTherapist()]);
+    it('returns list with completed count, target, and manual-freeze state', async () => {
+      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([
+        makeTherapist({ targetAppointments: 2 }),
+      ]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(1);
       (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
-        {
-          id: 'notion-page-1',
-          frozenAt: new Date(),
-          hasConfirmedBooking: false,
-          uniqueRequestCount: 1,
-        },
+        { id: 'notion-page-1', manualFreezeAt: new Date() },
       ]);
+      // Two distinct completed clients.
+      mockGetCompletedCounts.mockResolvedValue(new Map([['notion-page-1', 2]]));
 
       const res = await app.inject({
         method: 'GET',
@@ -167,21 +190,40 @@ describe('admin therapist routes', () => {
       expect(body.data.items[0]).toMatchObject({
         name: 'Dr. Smith',
         active: true,
-        frozen: true,
-        appointmentCount: 1,
+        frozen: true, // manual freeze (frozenAt set)
+        completedAppointmentCount: 2,
+        targetAppointments: 2,
+        live: false, // manually frozen ⇒ not live
       });
     });
 
-    it('treats hasConfirmedBooking=true as frozen', async () => {
-      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([makeTherapist()]);
+    it('marks live=true when short of target with no active appointment', async () => {
+      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([
+        makeTherapist({ targetAppointments: 2 }),
+      ]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(1);
-      (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
-        {
-          id: 'notion-page-1',
-          frozenAt: null,
-          hasConfirmedBooking: true,
-          uniqueRequestCount: 0,
-        },
+      // No freeze row, no active appts (defaults), one completed client.
+      mockGetCompletedCounts.mockResolvedValue(new Map([['notion-page-1', 1]]));
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/admin/therapists',
+        headers: { 'x-webhook-secret': WEBHOOK_SECRET },
+      });
+
+      const item = res.json().data.items[0];
+      expect(item.completedAppointmentCount).toBe(1);
+      expect(item.frozen).toBe(false);
+      expect(item.live).toBe(true);
+    });
+
+    it('marks live=false (not manually frozen) when the therapist has an active appointment', async () => {
+      (prisma.therapist.findMany as jest.Mock).mockResolvedValue([
+        makeTherapist({ targetAppointments: 2 }),
+      ]);
+      (prisma.therapist.count as jest.Mock).mockResolvedValue(1);
+      (prisma.appointmentRequest.findMany as jest.Mock).mockResolvedValue([
+        { therapistHandle: 'notion-page-1' },
       ]);
 
       const res = await app.inject({
@@ -190,7 +232,10 @@ describe('admin therapist routes', () => {
         headers: { 'x-webhook-secret': WEBHOOK_SECRET },
       });
 
-      expect(res.json().data.items[0].frozen).toBe(true);
+      const item = res.json().data.items[0];
+      expect(item.frozen).toBe(false);
+      expect(item.hasActiveAppointment).toBe(true);
+      expect(item.live).toBe(false);
     });
 
     it('marks frozen=false when no booking-status row exists', async () => {
@@ -224,7 +269,7 @@ describe('admin therapist routes', () => {
       (prisma.therapist.findMany as jest.Mock).mockResolvedValue([legacyTherapist, postNotionTherapist]);
       (prisma.therapist.count as jest.Mock).mockResolvedValue(2);
       (prisma.therapistBookingStatus.findMany as jest.Mock).mockResolvedValue([
-        { id: 'notion-page-1', frozenAt: new Date(), hasConfirmedBooking: false, uniqueRequestCount: 1 },
+        { id: 'notion-page-1', manualFreezeAt: new Date() },
       ]);
 
       const res = await app.inject({
@@ -298,7 +343,7 @@ describe('admin therapist routes', () => {
       delete (therapist as any)._count;
       (prisma.therapist.findUnique as jest.Mock).mockResolvedValue(therapist);
       (prisma.therapistBookingStatus.findUnique as jest.Mock).mockResolvedValue({
-        frozenAt: null,
+        manualFreezeAt: null,
         hasConfirmedBooking: false,
         uniqueRequestCount: 0,
         confirmedAt: null,
@@ -431,7 +476,7 @@ describe('admin therapist routes', () => {
       expect(res.json().data).toEqual({ unfrozen: true });
       expect(prisma.therapistBookingStatus.updateMany).toHaveBeenCalledWith({
         where: { id: 'notion-page-1' },
-        data: { frozenAt: null, frozenUntil: null },
+        data: { manualFreezeAt: null },
       });
     });
 

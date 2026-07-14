@@ -672,6 +672,22 @@ class StaleCheckService extends LockedPeriodicService {
             'Recommended closures for unresponsive threads'
           );
         }
+
+        // Auto-cancel unresponsive PRE-BOOKING threads whose closure
+        // recommendation went un-actioned past the closure window. Under the
+        // target-availability model a therapist is hidden while any active
+        // appointment exists, so a ghosted pre-booking would otherwise hide
+        // them from the finder indefinitely. Cancelling frees the therapist.
+        const autoCancelPreBooking = await getSettingValue<boolean>('chase.autoCancelStalledPreBooking');
+        if (autoCancelPreBooking) {
+          const autoCancelledCount = await chaseEmailService.autoCancelStalledPreBooking(checkId);
+          if (autoCancelledCount > 0) {
+            logger.info(
+              { checkId, autoCancelledCount },
+              'Auto-cancelled unresponsive pre-booking appointments (freed therapists)'
+            );
+          }
+        }
       }
 
       // Auto-complete feedback_requested dead-ends (separate from chase enabled toggle)

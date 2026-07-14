@@ -206,6 +206,16 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     maxValue: 10,
     defaultValue: THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS,
   },
+  'general.defaultTargetAppointments': {
+    category: 'general',
+    label: 'Default Target Appointments (new therapists)',
+    description:
+      'Number of distinct completed clients a NEW therapist must reach before they graduate off the public finder. Snapshotted onto each therapist at creation time; adjust an individual therapist\'s target in the Therapists admin table.',
+    valueType: 'number',
+    minValue: 1,
+    maxValue: 10,
+    defaultValue: THERAPIST_BOOKING.DEFAULT_TARGET_APPOINTMENTS,
+  },
 
   // Agent identity and behaviour
   'agent.fromName': {
@@ -813,7 +823,8 @@ Justin`,
   'chase.closureRecommendationHours': {
     category: 'notifications',
     label: 'Closure Recommendation (hours)',
-    description: 'Recommend admin close the thread if no response after this many hours post-chase',
+    description:
+      'Hours of continued silence AFTER the chase email before a thread is recommended for closure. This same window is then reused as the grace period before an unresponsive pre-booking is auto-cancelled (if enabled). With defaults, a pre-booking auto-cancels after roughly: Chase-After-Stale (72h) + this (72h, to closure) + this again (72h, to cancel) ≈ 9 days of total inactivity.',
     valueType: 'number',
     minValue: 24,
     maxValue: 336,
@@ -830,6 +841,14 @@ Justin`,
     category: 'notifications',
     label: 'Auto-Complete Unanswered Feedback',
     description: 'Automatically mark feedback_requested appointments as completed if no feedback received after the reminder goes unanswered',
+    valueType: 'boolean',
+    defaultValue: true,
+  },
+  'chase.autoCancelStalledPreBooking': {
+    category: 'notifications',
+    label: 'Auto-Cancel Unresponsive Pre-Booking Threads',
+    description:
+      'Automatically cancel a pending/contacted/negotiating appointment once it has been chased and its closure recommendation has gone un-actioned past the closure window (see "Closure Recommendation (hours)" — with defaults, ~9 days of total inactivity). This frees the therapist to appear on the finder again (they are hidden while any active appointment exists). The timer is reset by any inbound/outbound email on the thread; taking human control or dismissing the closure recommendation exempts the appointment. Only affects pre-booking threads — confirmed appointments are never auto-cancelled. Requires chase follow-ups to be enabled.',
     valueType: 'boolean',
     defaultValue: true,
   },

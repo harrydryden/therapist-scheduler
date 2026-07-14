@@ -1,15 +1,8 @@
 import { prisma } from '../utils/database';
 import { Prisma } from '@prisma/client';
 import { logger } from '../utils/logger';
-import { sleep } from '../utils/timeout';
-import {
-  SERIALIZATION_RETRY,
-  getBackoffDelay,
-  isSerializationError,
-} from '../utils/serialization-retry';
-import { PRE_BOOKING_STATUSES, CONFIRMED_ACTIVE_STATUSES, ACTIVE_STATUSES } from '../constants';
+import { ACTIVE_STATUSES } from '../constants';
 import { getSettingValue } from './settings.service';
-import { isTherapistPending } from './stage-groups';
 
 // Type for transaction client
 type TransactionClient = Prisma.TransactionClient;
@@ -17,88 +10,173 @@ type PrismaClient = typeof prisma;
 
 export interface TherapistAvailabilityStatus {
   canAcceptNewRequests: boolean;
-  // FIX L3: Added 'error_fallback' to distinguish error cases from normal availability
-  reason?: 'confirmed' | 'frozen' | 'available' | 'error_fallback';
-  frozenUntil?: Date;
+  // 'available'      → live and bookable
+  // 'frozen'         → manual admin freeze in effect
+  // 'in_session'     → serial guard: therapist already has an active appt
+  // 'target_reached' → completed distinct-client target; graduated off finder
+  // 'error_fallback' → an error occurred; fail open (allow) but flag it
+  reason?: 'available' | 'frozen' | 'in_session' | 'target_reached' | 'error_fallback';
 }
 
+/**
+ * Therapist availability under the target-appointment model.
+ *
+ * See docs/THERAPIST_TARGET_AVAILABILITY.md. Availability is derived
+ * DIRECTLY from appointment state + the per-therapist target, so there is a
+ * single source of truth and no counter to drift:
+ *
+ *   live  ==  active
+ *         &&  not manually frozen (TherapistBookingStatus.manualFreezeAt is null)
+ *         &&  distinct completed clients  <  targetAppointments
+ *         &&  no active appointment currently exists (serial)
+ *
+ * `TherapistBookingStatus` is retained ONLY as the manual-override record:
+ * `manualFreezeAt` is set/cleared by the admin /freeze and /unfreeze
+ * endpoints. We deliberately read `manualFreezeAt` and NOT the legacy
+ * `frozenAt` — the retired auto-freeze set `frozenAt` on every booking
+ * request, so reading it would hide every recently-booked therapist at
+ * cutover (see docs/THERAPIST_TARGET_AVAILABILITY.md, "cutover safety").
+ * The former auto-freeze counter methods (recordNewRequest, markConfirmed,
+ * unmarkConfirmed, recalculateUniqueRequestCount) are now no-ops — their
+ * call sites (booking transaction, transition side-effects) are left in
+ * place so nothing breaks, but they no longer maintain any state the
+ * availability rule reads. A future cleanup can drop the registrations.
+ */
 class TherapistBookingStatusService {
   /**
-   * Check if a therapist can accept new appointment requests
+   * Resolve a therapist's target from the public handle (legacy notionId or
+   * post-Notion Postgres id). Falls back to the config default if the row is
+   * missing (shouldn't happen in practice).
+   */
+  private async resolveTarget(
+    client: PrismaClient | TransactionClient,
+    therapistHandle: string,
+  ): Promise<number> {
+    const therapist = await client.therapist.findFirst({
+      where: { OR: [{ notionId: therapistHandle }, { id: therapistHandle }] },
+      select: { targetAppointments: true },
+    });
+    if (therapist) return therapist.targetAppointments;
+    return getSettingValue<number>('general.defaultTargetAppointments');
+  }
+
+  /**
+   * Count DISTINCT clients the therapist has a `completed` appointment with.
+   * Repeat sessions with the same client count once.
    *
-   * Logic:
-   * - If therapist has confirmed booking: reject
-   * - If user already has an active request: allow (continuation)
-   * - If 2+ unique users: reject (fully frozen)
-   * - If 1 unique user and <36h since last activity: reject (frozen for new users)
-   * - If 1 unique user and >=36h since last activity: allow (opens for second user)
+   * Distinctness is measured on lower(user_email): the app stores emails
+   * un-normalized (see appointments.routes.ts) and every other lookup uses
+   * case-insensitive matching, so a plain groupBy(['userEmail']) would count
+   * 'Alice@x.com' and 'alice@x.com' as two clients and prematurely (and
+   * permanently) graduate a therapist off the finder. Raw SQL is used because
+   * Prisma groupBy has no case-insensitive mode.
+   */
+  private async countCompletedClients(
+    client: PrismaClient | TransactionClient,
+    therapistHandle: string,
+  ): Promise<number> {
+    const rows = await client.$queryRaw<Array<{ count: number }>>`
+      SELECT COUNT(DISTINCT lower(user_email))::int AS count
+      FROM appointment_requests
+      WHERE therapist_handle = ${therapistHandle} AND status = 'completed'
+    `;
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * Public: distinct completed-client count for a single therapist handle.
+   * Case-insensitive on email (see countCompletedClients). Used by the admin
+   * detail route so the "Completed" figure and the availability rule agree.
+   */
+  async getCompletedClientCount(therapistHandle: string): Promise<number> {
+    return this.countCompletedClients(prisma, therapistHandle);
+  }
+
+  /**
+   * Public: distinct completed-client counts for many handles in one query.
+   * Single source of truth for the "Completed" column and the availability
+   * `graduated` check — keeps the admin list, the finder, and the booking
+   * gate from diverging. Case-insensitive on email.
+   */
+  async getCompletedClientCounts(handles: string[]): Promise<Map<string, number>> {
+    const map = new Map<string, number>();
+    if (handles.length === 0) return map;
+    const rows = await prisma.$queryRaw<Array<{ therapist_handle: string; count: number }>>`
+      SELECT therapist_handle, COUNT(DISTINCT lower(user_email))::int AS count
+      FROM appointment_requests
+      WHERE status = 'completed' AND therapist_handle IN (${Prisma.join(handles)})
+      GROUP BY therapist_handle
+    `;
+    for (const r of rows) map.set(r.therapist_handle, Number(r.count));
+    return map;
+  }
+
+  /**
+   * Check if a therapist can accept a new appointment request.
    *
-   * @param tx - Optional transaction client for atomic operations (IMPORTANT for race condition prevention)
+   * Order matters:
+   *   1. Manual admin freeze overrides everything.
+   *   2. Continuation: if THIS client already has an active request, always
+   *      allow (don't reject an in-flight negotiation on its own therapist
+   *      being "busy").
+   *   3. Serial guard: any active appointment (with anyone) blocks new
+   *      clients — a therapist handles one client at a time.
+   *   4. Target: distinct completed clients >= target → graduated.
+   *
+   * @param tx - Optional transaction client for read-your-write consistency
+   *             inside the booking transaction.
    */
   async canAcceptNewRequest(
     therapistHandle: string,
     userEmail: string,
-    tx?: TransactionClient
+    tx?: TransactionClient,
   ): Promise<TherapistAvailabilityStatus> {
     const client: PrismaClient | TransactionClient = tx || prisma;
-    const maxRequests = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
 
     try {
+      // 1. Manual admin freeze.
       const status = await client.therapistBookingStatus.findUnique({
         where: { id: therapistHandle },
+        select: { manualFreezeAt: true },
       });
-
-      // If no status record exists, therapist can accept requests
-      if (!status) {
-        return { canAcceptNewRequests: true, reason: 'available' };
+      if (status?.manualFreezeAt) {
+        return { canAcceptNewRequests: false, reason: 'frozen' };
       }
 
-      // If therapist has a confirmed booking, reject new requests
-      if (status.hasConfirmedBooking) {
-        return { canAcceptNewRequests: false, reason: 'confirmed' };
-      }
-
-      // Check if user already has an active request (always allow continuation)
-      const existingRequest = await client.appointmentRequest.findFirst({
-        where: {
-          therapistHandle,
-          userEmail,
-          status: { in: [...ACTIVE_STATUSES] },
-        },
-        select: { id: true },
-      });
-
-      if (existingRequest) {
-        // User already has an active request, allow them to continue
-        return { canAcceptNewRequests: true, reason: 'available' };
-      }
-
-      // Already at max unique requests - fully frozen
-      if (status.uniqueRequestCount >= maxRequests) {
-        return {
-          canAcceptNewRequests: false,
-          reason: 'frozen',
-        };
-      }
-
-      // Only 1 request so far - check if 36h passed on that thread
-      if (status.uniqueRequestCount === 1) {
-        // Any active request = frozen. Stale conversations are flagged for admin attention
-        // instead of auto-unfreezing. Admin can manually unfreeze via dashboard.
-        const activeRequest = await client.appointmentRequest.findFirst({
+      // 2. Continuation for the same client.
+      if (userEmail) {
+        const existingRequest = await client.appointmentRequest.findFirst({
           where: {
             therapistHandle,
+            userEmail,
             status: { in: [...ACTIVE_STATUSES] },
           },
           select: { id: true },
         });
-
-        if (activeRequest) {
-          return {
-            canAcceptNewRequests: false,
-            reason: 'frozen',
-          };
+        if (existingRequest) {
+          return { canAcceptNewRequests: true, reason: 'available' };
         }
+      }
+
+      // 3. Serial guard — any active appointment blocks new clients.
+      const activeRequest = await client.appointmentRequest.findFirst({
+        where: {
+          therapistHandle,
+          status: { in: [...ACTIVE_STATUSES] },
+        },
+        select: { id: true },
+      });
+      if (activeRequest) {
+        return { canAcceptNewRequests: false, reason: 'in_session' };
+      }
+
+      // 4. Target reached — graduated off the finder.
+      const [target, completedClients] = await Promise.all([
+        this.resolveTarget(client, therapistHandle),
+        this.countCompletedClients(client, therapistHandle),
+      ]);
+      if (completedClients >= target) {
+        return { canAcceptNewRequests: false, reason: 'target_reached' };
       }
 
       return { canAcceptNewRequests: true, reason: 'available' };
@@ -111,476 +189,131 @@ class TherapistBookingStatusService {
           operation: 'canAcceptNewRequest',
           inTransaction: !!tx,
         },
-        'Failed to check therapist availability'
+        'Failed to check therapist availability',
       );
-      // FIX L3: On error, allow the request to proceed (fail open) but use distinct reason
-      // This prevents the error from being masked as a normal "available" state
+      // Fail open (allow) so a transient DB error doesn't block all bookings,
+      // but use a distinct reason so it isn't mistaken for genuine availability.
       return { canAcceptNewRequests: true, reason: 'error_fallback' };
     }
   }
 
   /**
-   * Record a new appointment request and update therapist status
-   * Freezes therapist immediately on first request
+   * Compute the set of therapist handles that are NOT live on the public
+   * site: manually frozen OR currently in a session (active appointment) OR
+   * at/over their completed-client target. `active = false` (archived) is
+   * filtered separately by the public list route.
    *
-   * IMPORTANT: Uses transaction with serializable isolation to prevent race condition
-   * where concurrent requests could result in incorrect uniqueRequestCount.
-   *
-   * TRADEOFF: Serializable isolation can cascade under high concurrency. An alternative
-   * is RepeatableRead + SELECT ... FOR UPDATE (row-level locks), which provides equivalent
-   * guarantees with less contention. Kept as Serializable since current traffic levels
-   * are well within the retry budget (3 retries, 50-500ms backoff).
-   *
-   * @param tx - Optional transaction client for atomic operations
-   */
-  async recordNewRequest(
-    therapistHandle: string,
-    therapistName: string,
-    userEmail: string,
-    tx?: TransactionClient
-  ): Promise<void> {
-    // If already in a transaction, use it directly
-    if (tx) {
-      await this.recordNewRequestInner(tx, therapistHandle, therapistName, userEmail);
-      return;
-    }
-
-    // Otherwise, wrap in a new transaction with serializable isolation
-    // to prevent race conditions when counting unique emails
-    // FIX M9: Use exponential backoff for serialization retry
-    let lastError: unknown = null;
-    for (let attempt = 0; attempt <= SERIALIZATION_RETRY.MAX_RETRIES; attempt++) {
-      try {
-        await prisma.$transaction(
-          async (txClient) => {
-            await this.recordNewRequestInner(txClient, therapistHandle, therapistName, userEmail);
-          },
-          {
-            // Serializable isolation prevents race conditions by ensuring
-            // the count + upsert happens atomically
-            isolationLevel: 'Serializable',
-            maxWait: 5000, // 5 seconds
-            timeout: 10000, // 10 seconds
-          }
-        );
-        return; // Success - exit the retry loop
-      } catch (error) {
-        lastError = error;
-        if (isSerializationError(error) && attempt < SERIALIZATION_RETRY.MAX_RETRIES) {
-          const delay = getBackoffDelay(attempt);
-          logger.warn(
-            { therapistHandle, userEmail, attempt: attempt + 1, delayMs: delay },
-            'Serialization conflict in recordNewRequest - retrying with backoff'
-          );
-          await sleep(delay);
-          continue;
-        }
-        // Non-serialization error or max retries exceeded
-        break;
-      }
-    }
-
-    // FIX N3: Propagate error after retry exhaustion instead of silently failing
-    // Silent failure could lead to:
-    // 1. Therapist not being frozen when they should be
-    // 2. Incorrect uniqueRequestCount
-    // 3. Caller thinking operation succeeded
-    logger.error(
-      { error: lastError, therapistHandle, userEmail, operation: 'recordNewRequest', retries: SERIALIZATION_RETRY.MAX_RETRIES },
-      'Failed to record new request after retries - propagating error'
-    );
-    throw lastError;
-  }
-
-  /**
-   * Inner implementation of recordNewRequest - must be called within a transaction
-   */
-  private async recordNewRequestInner(
-    client: TransactionClient,
-    therapistHandle: string,
-    therapistName: string,
-    userEmail: string
-  ): Promise<void> {
-    // Count unique email addresses with active (non-terminal) requests for this therapist.
-    // Only ACTIVE_STATUSES are counted so that completed appointments don't inflate the
-    // count and incorrectly freeze the therapist for new bookings.
-    const uniqueEmails = await client.appointmentRequest.groupBy({
-      by: ['userEmail'],
-      where: {
-        therapistHandle,
-        status: { in: [...ACTIVE_STATUSES] },
-      },
-    });
-
-    // Include the new request email
-    const emailSet = new Set(uniqueEmails.map((e) => e.userEmail));
-    emailSet.add(userEmail);
-    const uniqueCount = emailSet.size;
-
-    const now = new Date();
-
-    await client.therapistBookingStatus.upsert({
-      where: { id: therapistHandle },
-      create: {
-        id: therapistHandle,
-        therapistName,
-        uniqueRequestCount: uniqueCount,
-        frozenAt: now, // Always freeze on first request
-        frozenUntil: null, // No time-based unfreeze
-      },
-      update: {
-        therapistName,
-        uniqueRequestCount: uniqueCount,
-        frozenAt: now,
-        // Reset admin alert flags on new activity
-        adminAlertAt: null,
-        adminAlertAcknowledged: false,
-      },
-    });
-
-    logger.info(
-      { therapistHandle, therapistName, uniqueCount, userEmail },
-      'Therapist frozen due to new request'
-    );
-  }
-
-  /**
-   * Mark a therapist as having a confirmed booking
-   */
-  async markConfirmed(therapistHandle: string, therapistName: string): Promise<void> {
-    try {
-      await prisma.therapistBookingStatus.upsert({
-        where: { id: therapistHandle },
-        create: {
-          id: therapistHandle,
-          therapistName,
-          hasConfirmedBooking: true,
-          confirmedAt: new Date(),
-        },
-        update: {
-          therapistName,
-          hasConfirmedBooking: true,
-          confirmedAt: new Date(),
-        },
-      });
-
-      logger.info(
-        { therapistHandle, therapistName },
-        'Therapist marked as having confirmed booking'
-      );
-    } catch (error) {
-      logger.error({ error, therapistHandle }, 'Failed to mark therapist as confirmed');
-      // Propagate error so caller knows the freeze failed
-      throw error;
-    }
-  }
-
-  /**
-   * Get all therapists that should be hidden from the frontend.
-   *
-   * Postgres `therapistBookingStatus` is the single source of truth: rows
-   * are written inside the appointment-creation transaction, so freezes
-   * take effect immediately. The previous Notion-Frozen-checkbox check has
-   * been retired with PR 2 of the Notion deprecation.
+   * Returns handles (notionId ?? id) so the caller can match against the
+   * same key the public listing uses.
    */
   async getUnavailableTherapistIds(): Promise<string[]> {
     try {
-      const frozen = await this.getFrozenTherapistIdsFromPostgres();
-      logger.debug({ count: frozen.length }, 'Retrieved frozen therapist IDs from Postgres');
-      return frozen;
-    } catch (error) {
-      logger.error({ error, operation: 'getUnavailableTherapistIds' }, 'Failed to get unavailable therapist IDs');
-      return [];
-    }
-  }
-
-  /**
-   * Get therapist IDs that should be frozen based on Postgres booking status.
-   * This is the authoritative source — updated inside the appointment creation transaction.
-   * Delegates to batchComputeFreezeStatus to avoid duplicating freeze logic.
-   */
-  private async getFrozenTherapistIdsFromPostgres(): Promise<string[]> {
-    try {
-      const statuses = await prisma.therapistBookingStatus.findMany({
-        select: { id: true },
+      const therapists = await prisma.therapist.findMany({
+        select: { id: true, notionId: true, targetAppointments: true },
       });
+      if (therapists.length === 0) return [];
 
-      if (statuses.length === 0) return [];
+      const handleInfo = therapists.map((t) => ({
+        handle: t.notionId ?? t.id,
+        target: t.targetAppointments,
+      }));
+      const handles = handleInfo.map((h) => h.handle);
 
-      const therapistIds = statuses.map(s => s.id);
-      const freezeMap = await this.batchComputeFreezeStatus(therapistIds);
-
-      return therapistIds.filter(id => freezeMap.get(id) === true);
-    } catch (error) {
-      logger.error({ error, operation: 'getFrozenTherapistIdsFromPostgres' }, 'Failed to get frozen IDs from Postgres');
-      return [];
-    }
-  }
-
-  /**
-   * Batch compute freeze status for multiple therapists
-   * Optimized: Uses 2 queries total instead of N+1
-   *
-   * @param therapistIds - Array of therapist handles to check
-   * @returns Map of therapistHandle → shouldBeFrozen
-   */
-  async batchComputeFreezeStatus(therapistIds: string[]): Promise<Map<string, boolean>> {
-    const result = new Map<string, boolean>();
-
-    if (therapistIds.length === 0) {
-      return result;
-    }
-
-    try {
-      // Query 1: Get all booking statuses for these therapists
-      const statuses = await prisma.therapistBookingStatus.findMany({
-        where: { id: { in: therapistIds } },
-        select: {
-          id: true,
-          hasConfirmedBooking: true,
-          frozenAt: true,
-        },
-      });
-
-      // Build map of status by ID
-      const statusMap = new Map(statuses.map(s => [s.id, s]));
-
-      // Find therapist IDs that need confirmed appointment check (hasConfirmedBooking not set)
-      const needsConfirmedCheck = statuses
-        .filter(s => !s.hasConfirmedBooking)
-        .map(s => s.id);
-
-      // Find therapist IDs that have frozenAt but not hasConfirmedBooking
-      // These need the pre-booking active appointment check
-      const needsActiveCheck = statuses
-        .filter(s => s.frozenAt && !s.hasConfirmedBooking)
-        .map(s => s.id);
-
-      // Query 2: Defense-in-depth — find therapists with confirmed+ appointments
-      // even if hasConfirmedBooking flag wasn't set (e.g. markConfirmed failed)
-      const therapistsWithConfirmedAppointments = new Set<string>();
-      if (needsConfirmedCheck.length > 0) {
-        const confirmedAppointments = await prisma.appointmentRequest.findMany({
-          where: {
-            therapistHandle: { in: needsConfirmedCheck },
-            status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
-          },
+      const [frozenRows, activeRows, completedCount] = await Promise.all([
+        // Manual admin freezes.
+        prisma.therapistBookingStatus.findMany({
+          where: { manualFreezeAt: { not: null }, id: { in: handles } },
+          select: { id: true },
+        }),
+        // Handles with any active appointment.
+        prisma.appointmentRequest.findMany({
+          where: { therapistHandle: { in: handles }, status: { in: [...ACTIVE_STATUSES] } },
           select: { therapistHandle: true },
           distinct: ['therapistHandle'],
-        });
-        confirmedAppointments.forEach(a => therapistsWithConfirmedAppointments.add(a.therapistHandle));
-      }
+        }),
+        // Distinct completed clients per handle (case-insensitive), shared with
+        // the admin "Completed" column via the same method.
+        this.getCompletedClientCounts(handles),
+      ]);
 
-      // Query 3: Get therapists with active pre-booking conversations (single query)
-      const therapistsWithActiveConversations = new Set<string>();
-      if (needsActiveCheck.length > 0) {
-        const activeAppointments = await prisma.appointmentRequest.findMany({
-          where: {
-            therapistHandle: { in: needsActiveCheck },
-            status: { in: [...PRE_BOOKING_STATUSES] },
-          },
-          select: { therapistHandle: true },
-          distinct: ['therapistHandle'],
-        });
-        activeAppointments.forEach(a => therapistsWithActiveConversations.add(a.therapistHandle));
-      }
+      const frozenSet = new Set(frozenRows.map((r) => r.id));
+      const activeSet = new Set(activeRows.map((r) => r.therapistHandle));
 
-      // Compute freeze status for each therapist
-      for (const therapistId of therapistIds) {
-        const status = statusMap.get(therapistId);
-
-        if (!status) {
-          result.set(therapistId, false); // No booking activity = not frozen
-          continue;
-        }
-
-        if (status.hasConfirmedBooking) {
-          result.set(therapistId, true); // Confirmed booking = always frozen
-          continue;
-        }
-
-        // Defense-in-depth: confirmed+ appointment exists but flag not set
-        if (therapistsWithConfirmedAppointments.has(therapistId)) {
-          result.set(therapistId, true);
-          continue;
-        }
-
-        if (status.frozenAt && therapistsWithActiveConversations.has(therapistId)) {
-          result.set(therapistId, true); // Frozen with active conversation
-          continue;
-        }
-
-        result.set(therapistId, false);
-      }
-
-      return result;
-    } catch (error) {
-      logger.error({ error, count: therapistIds.length }, 'Failed to batch compute freeze status');
-      // Fail-open: on error, assume not frozen rather than blocking all therapists
-      for (const id of therapistIds) {
-        result.set(id, false);
-      }
-      return result;
-    }
-  }
-
-  /**
-   * Unified handler for inactive therapists:
-   * 1. Flags therapists for admin attention (2+ threads all inactive)
-   * 2. Auto-unfreezes therapists with inactive conversations (clears freeze status)
-   *
-   * This simplified model uses a single inactivity threshold for both actions.
-   * When conversations are inactive beyond the threshold:
-   * - Admin gets notified via flagging
-   * - Therapist is automatically unfrozen so they can accept new requests
-   *
-   * @param inactivityThreshold - Date threshold for considering conversations inactive
-   * @returns Object with flaggedCount and unfrozenCount
-   */
-  async checkAndHandleInactiveTherapists(
-    inactivityThreshold: Date
-  ): Promise<{ flaggedCount: number; unfrozenCount: number }> {
-    const now = new Date();
-    let flaggedCount = 0;
-    let unfrozenCount = 0;
-
-    const maxReqs = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
-
-    try {
-      // 1. Flag therapists with max+ threads where ALL are inactive
-      // These need admin attention (might want to cancel stale conversations)
-      const preBookingStatuses = PRE_BOOKING_STATUSES as readonly string[];
-      const flaggedResult = await prisma.$executeRaw`
-        UPDATE therapist_booking_status tbs
-        SET admin_alert_at = ${now}, updated_at = ${now}
-        WHERE tbs.has_confirmed_booking = false
-          AND tbs.unique_request_count >= ${maxReqs}
-          AND tbs.admin_alert_at IS NULL
-          AND EXISTS (
-            SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_handle = tbs.id
-              AND ar.status IN (${Prisma.join(preBookingStatuses)})
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM appointment_requests ar
-            WHERE ar.therapist_handle = tbs.id
-              AND ar.status IN (${Prisma.join(preBookingStatuses)})
-              AND ar.last_activity_at IS NOT NULL
-              AND ar.last_activity_at >= ${inactivityThreshold}
-          )
-      `;
-      flaggedCount = Number(flaggedResult);
-
-      // 2. Auto-unfreeze therapists where ALL active conversations are inactive
-      // Find therapists to unfreeze (single active thread that's been inactive)
-      const therapistsToUnfreeze = await prisma.therapistBookingStatus.findMany({
-        where: {
-          hasConfirmedBooking: false,
-          frozenAt: { not: null },
-          // Only consider those with active (non-confirmed) conversations
-          uniqueRequestCount: { gte: 1 },
-        },
-        select: { id: true, therapistName: true },
-      });
-
-      if (therapistsToUnfreeze.length > 0) {
-        // PERF: Batch query all active conversations for candidate therapists (avoids N+1)
-        const therapistIds = therapistsToUnfreeze.map(t => t.id);
-        const allActiveConversations = await prisma.appointmentRequest.findMany({
-          where: {
-            therapistHandle: { in: therapistIds },
-            status: { in: [...PRE_BOOKING_STATUSES] },
-          },
-          select: { therapistHandle: true, lastActivityAt: true, checkpointStage: true },
-        });
-
-        // Group conversations by therapist
-        const conversationsByTherapist = new Map<
-          string,
-          Array<{ lastActivityAt: Date | null; checkpointStage: string | null }>
-        >();
-        for (const conv of allActiveConversations) {
-          const existing = conversationsByTherapist.get(conv.therapistHandle) || [];
-          existing.push({
-            lastActivityAt: conv.lastActivityAt,
-            checkpointStage: conv.checkpointStage,
-          });
-          conversationsByTherapist.set(conv.therapistHandle, existing);
-        }
-
-        // Collect IDs to unfreeze in bulk
-        const idsToUnfreeze: string[] = [];
-
-        for (const therapist of therapistsToUnfreeze) {
-          const conversations = conversationsByTherapist.get(therapist.id);
-
-          // If no active conversations, skip (already handled by other flows)
-          if (!conversations || conversations.length === 0) continue;
-
-          // Skip if ANY conversation is awaiting a response from THIS
-          // therapist. The conversation may look stale on lastActivityAt
-          // alone (we sent a chase a week ago and they haven't replied),
-          // but it isn't abandoned — we still expect a reply that has
-          // to land on a frozen therapist or we'll double-book them.
-          // Previous behaviour treated all stale conversations as
-          // abandoned, which prematurely unfroze therapists who were
-          // just slow to respond.
-          const awaitingTherapist = conversations.some((conv) => isTherapistPending(conv.checkpointStage));
-          if (awaitingTherapist) continue;
-
-          // Check if ALL are inactive (no activity after threshold)
-          const allInactive = conversations.every(
-            (conv) => !conv.lastActivityAt || conv.lastActivityAt < inactivityThreshold
-          );
-
-          if (allInactive) {
-            idsToUnfreeze.push(therapist.id);
-
-            logger.info(
-              { therapistId: therapist.id, therapistName: therapist.therapistName },
-              'Auto-unfroze therapist due to conversation inactivity'
-            );
-          }
-        }
-
-        // Batch update all therapists to unfreeze
-        if (idsToUnfreeze.length > 0) {
-          await prisma.therapistBookingStatus.updateMany({
-            where: { id: { in: idsToUnfreeze } },
-            data: {
-              frozenAt: null,
-              updatedAt: now,
-            },
-          });
-          unfrozenCount = idsToUnfreeze.length;
+      const unavailable: string[] = [];
+      for (const { handle, target } of handleInfo) {
+        const busy = activeSet.has(handle);
+        const frozen = frozenSet.has(handle);
+        const graduated = (completedCount.get(handle) ?? 0) >= target;
+        if (busy || frozen || graduated) {
+          unavailable.push(handle);
         }
       }
 
-      if (flaggedCount > 0) {
-        logger.warn(
-          { flaggedCount },
-          'Flagged therapists for admin attention due to inactive threads'
-        );
-      }
-      if (unfrozenCount > 0) {
-        logger.info(
-          { unfrozenCount },
-          'Auto-unfroze therapists due to conversation inactivity'
-        );
-      }
-
-      return { flaggedCount, unfrozenCount };
+      logger.debug(
+        { total: handles.length, unavailable: unavailable.length },
+        'Computed unavailable therapist handles (target model)',
+      );
+      return unavailable;
     } catch (error) {
       logger.error(
-        { error, operation: 'checkAndHandleInactiveTherapists' },
-        'Failed to handle inactive therapists'
+        { error, operation: 'getUnavailableTherapistIds' },
+        'Failed to compute unavailable therapist IDs',
       );
-      throw error;
+      return [];
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // No-op compatibility shims.
+  //
+  // The target model derives availability from appointment state directly,
+  // so these former counter-maintenance methods no longer do anything. They
+  // are kept callable so existing call sites (booking transaction, transition
+  // side-effects, admin appointment create/delete) don't need to change and
+  // their side-effect-retry rows still complete. See the class doc.
+  // ---------------------------------------------------------------------------
+
+  async recordNewRequest(
+    _therapistHandle: string,
+    _therapistName: string,
+    _userEmail: string,
+    _tx?: TransactionClient,
+  ): Promise<void> {
+    // No-op: the freshly-created appointment (an ACTIVE status) is what makes
+    // canAcceptNewRequest reject other clients now.
+  }
+
+  async markConfirmed(_therapistHandle: string, _therapistName: string): Promise<void> {
+    // No-op: a `confirmed` appointment is an ACTIVE status, so the serial
+    // guard already treats the therapist as unavailable.
+  }
+
+  async unmarkConfirmed(_therapistHandle: string): Promise<void> {
+    // No-op: availability re-derives from appointment state once the booking
+    // leaves ACTIVE statuses (completed/cancelled).
+  }
+
+  async recalculateUniqueRequestCount(_therapistHandle: string): Promise<void> {
+    // No-op: no counter to recalculate under the target model.
+  }
+
   /**
-   * Get therapists flagged for admin attention
+   * Previously auto-unfroze therapists whose conversations went inactive.
+   * Retired under the target model: the admin freeze (`manualFreezeAt`) is
+   * deliberate, so auto-clearing it would silently undo admin intent. Stale
+   * conversations are surfaced to admins by the appointment-level stale
+   * check instead.
+   */
+  async checkAndHandleInactiveTherapists(
+    _inactivityThreshold: Date,
+  ): Promise<{ flaggedCount: number; unfrozenCount: number }> {
+    return { flaggedCount: 0, unfrozenCount: 0 };
+  }
+
+  /**
+   * Get therapists flagged for admin attention. Retained for the admin
+   * monitoring route; returns [] in practice now that the target model no
+   * longer sets adminAlertAt.
    */
   async getFlaggedTherapists(): Promise<
     Array<{
@@ -617,7 +350,7 @@ class TherapistBookingStatusService {
   }
 
   /**
-   * Acknowledge a flagged therapist (admin action)
+   * Acknowledge a flagged therapist (admin action).
    */
   async acknowledgeFlaggedTherapist(therapistHandle: string): Promise<void> {
     try {
@@ -631,284 +364,6 @@ class TherapistBookingStatusService {
       logger.error({ error, therapistHandle }, 'Failed to acknowledge flagged therapist');
       throw error;
     }
-  }
-
-  /**
-   * Get status for all therapists (for admin dashboard)
-   *
-   * OPTIMIZED: Uses single query with LEFT JOIN instead of N+1 pattern
-   */
-  async getAllStatuses(): Promise<
-    Array<{
-      id: string;
-      therapistName: string;
-      hasConfirmedBooking: boolean;
-      isFrozen: boolean;
-      frozenUntil: Date | null;
-      uniqueRequestCount: number;
-      adminAlertAt: Date | null;
-      adminAlertAcknowledged: boolean;
-    }>
-  > {
-    try {
-      // Simplified frozen logic: frozen if frozenAt is set (auto-unfreeze clears it)
-      const results = await prisma.$queryRaw<
-        Array<{
-          id: string;
-          therapist_name: string;
-          has_confirmed_booking: boolean;
-          is_frozen: boolean;
-          frozen_until: Date | null;
-          unique_request_count: number;
-          admin_alert_at: Date | null;
-          admin_alert_acknowledged: boolean;
-        }>
-      >`
-        SELECT
-          tbs.id,
-          tbs.therapist_name,
-          tbs.has_confirmed_booking,
-          tbs.frozen_until,
-          tbs.unique_request_count,
-          tbs.admin_alert_at,
-          tbs.admin_alert_acknowledged,
-          CASE
-            WHEN tbs.has_confirmed_booking = true THEN true
-            WHEN EXISTS (
-              SELECT 1 FROM appointment_requests ar
-              WHERE ar.therapist_handle = tbs.id
-                AND ar.status IN ('confirmed', 'session_held', 'feedback_requested')
-            ) THEN true
-            WHEN tbs.frozen_at IS NOT NULL AND EXISTS (
-              SELECT 1 FROM appointment_requests ar
-              WHERE ar.therapist_handle = tbs.id
-                AND ar.status IN ('pending', 'contacted', 'negotiating')
-            ) THEN true
-            ELSE false
-          END as is_frozen
-        FROM therapist_booking_status tbs
-        ORDER BY tbs.updated_at DESC
-      `;
-
-      return results.map((r) => ({
-        id: r.id,
-        therapistName: r.therapist_name,
-        hasConfirmedBooking: r.has_confirmed_booking,
-        isFrozen: r.is_frozen,
-        frozenUntil: r.frozen_until,
-        uniqueRequestCount: r.unique_request_count,
-        adminAlertAt: r.admin_alert_at,
-        adminAlertAcknowledged: r.admin_alert_acknowledged,
-      }));
-    } catch (error) {
-      logger.error({ error }, 'Failed to get all therapist statuses');
-      return [];
-    }
-  }
-
-  /**
-   * Recalculate uniqueRequestCount for a therapist after deletion/cancellation
-   * Should be called whenever an appointment is deleted or cancelled
-   *
-   * IMPORTANT: Uses Serializable transaction to prevent race conditions
-   * when multiple cancellations happen concurrently.
-   */
-  async recalculateUniqueRequestCount(therapistHandle: string): Promise<void> {
-    const MAX_ATTEMPTS = 2;
-    let lastError: unknown = null;
-    const maxReqsThreshold = await getSettingValue<number>('general.maxBookingRequestsPerTherapist');
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      try {
-        await prisma.$transaction(
-          async (tx) => {
-            const now = new Date();
-
-            // Count unique email addresses with active (non-terminal) requests.
-            // Uses ACTIVE_STATUSES so completed/cancelled appointments don't keep
-            // the booking status record alive with a stale frozenAt.
-            const uniqueEmails = await tx.appointmentRequest.groupBy({
-              by: ['userEmail'],
-              where: {
-                therapistHandle,
-                status: { in: [...ACTIVE_STATUSES] },
-              },
-            });
-
-            const uniqueCount = uniqueEmails.length;
-
-            // Check if status record exists
-            const status = await tx.therapistBookingStatus.findUnique({
-              where: { id: therapistHandle },
-            });
-
-            // Case 1: no active requests. Delete the row if it exists; otherwise
-            // nothing to do. Earlier behaviour returned early when !status; the
-            // explicit guard preserves that.
-            if (uniqueCount === 0) {
-              if (status) {
-                await tx.therapistBookingStatus.delete({ where: { id: therapistHandle } });
-                logger.info(
-                  { therapistHandle },
-                  'Removed therapist booking status - no active requests remaining',
-                );
-              }
-              return;
-            }
-
-            // Case 2: row exists, count > 0 — update count and clear the admin
-            // alert if we've dropped below the threshold. frozenAt is NOT
-            // touched here; auto-unfreeze (#213) owns that semantic.
-            if (status) {
-              await tx.therapistBookingStatus.update({
-                where: { id: therapistHandle },
-                data: {
-                  uniqueRequestCount: uniqueCount,
-                  ...(uniqueCount < maxReqsThreshold && {
-                    adminAlertAt: null,
-                    adminAlertAcknowledged: false,
-                  }),
-                },
-              });
-              logger.info(
-                { therapistHandle, uniqueCount },
-                'Recalculated unique request count for therapist',
-              );
-              return;
-            }
-
-            // Case 3: row missing but active requests exist. This happens when
-            // an earlier recalculate deleted the row (count hit zero) and a
-            // new active appointment then arrived via a path that doesn't
-            // call recordNewRequest — e.g. a status flip from cancelled back
-            // to pending. Without this branch the booking layer sees the
-            // therapist as free and can accept a second concurrent active
-            // appointment. Re-creates the row with frozenAt=now to match what
-            // recordNewRequest would have done. Surfaced as a follow-up in
-            // #214; the symptom there was admins seeing no Freeze button on
-            // the therapist detail panel.
-            const sample = await tx.appointmentRequest.findFirst({
-              where: {
-                therapistHandle,
-                status: { in: [...ACTIVE_STATUSES] },
-              },
-              select: { therapistName: true },
-              orderBy: { updatedAt: 'desc' },
-            });
-            await tx.therapistBookingStatus.create({
-              data: {
-                id: therapistHandle,
-                therapistName: sample?.therapistName ?? 'Unknown',
-                uniqueRequestCount: uniqueCount,
-                frozenAt: now,
-              },
-            });
-            logger.info(
-              { therapistHandle, uniqueCount },
-              'Re-created therapist booking status — active requests existed without a status row',
-            );
-          },
-          {
-            isolationLevel: 'Serializable',
-            maxWait: 5000,
-            timeout: 10000,
-          }
-        );
-        return; // Success
-      } catch (error) {
-        lastError = error;
-        if (isSerializationError(error) && attempt < MAX_ATTEMPTS - 1) {
-          const delay = getBackoffDelay(attempt);
-          logger.warn(
-            { therapistHandle, attempt: attempt + 1, delayMs: delay },
-            'Serialization conflict in recalculateUniqueRequestCount - retrying with backoff'
-          );
-          await sleep(delay);
-          continue;
-        }
-        break;
-      }
-    }
-
-    logger.error(
-      { error: lastError, therapistHandle, operation: 'recalculateUniqueRequestCount' },
-      'Failed to recalculate unique request count'
-    );
-  }
-
-  /**
-   * Unmark a therapist as having a confirmed booking
-   * Should be called when a confirmed appointment is cancelled
-   * Uses Serializable transaction to prevent race conditions where another
-   * appointment is confirmed between our check and update
-   */
-  async unmarkConfirmed(therapistHandle: string): Promise<void> {
-    const MAX_ATTEMPTS = 2;
-    let lastError: unknown = null;
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      try {
-        await prisma.$transaction(
-          async (tx) => {
-            const status = await tx.therapistBookingStatus.findUnique({
-              where: { id: therapistHandle },
-            });
-
-            if (!status || !status.hasConfirmedBooking) {
-              return;
-            }
-
-            const otherConfirmed = await tx.appointmentRequest.findFirst({
-              where: {
-                therapistHandle,
-                status: { in: [...CONFIRMED_ACTIVE_STATUSES] },
-              },
-              select: { id: true },
-            });
-
-            if (otherConfirmed) {
-              return;
-            }
-
-            await tx.therapistBookingStatus.update({
-              where: { id: therapistHandle },
-              data: {
-                hasConfirmedBooking: false,
-                confirmedAt: null,
-              },
-            });
-
-            logger.info(
-              { therapistHandle },
-              'Unmarked therapist as having confirmed booking'
-            );
-          },
-          {
-            isolationLevel: 'Serializable',
-            maxWait: 5000,
-            timeout: 10000,
-          }
-        );
-        return; // Success
-      } catch (error) {
-        lastError = error;
-        if (isSerializationError(error) && attempt < MAX_ATTEMPTS - 1) {
-          const delay = getBackoffDelay(attempt);
-          logger.warn(
-            { therapistHandle, attempt: attempt + 1, delayMs: delay },
-            'Serialization conflict in unmarkConfirmed - retrying with backoff'
-          );
-          await sleep(delay);
-          continue;
-        }
-        break;
-      }
-    }
-
-    logger.error(
-      { error: lastError, therapistHandle, operation: 'unmarkConfirmed' },
-      'Failed to unmark therapist confirmed status'
-    );
   }
 }
 

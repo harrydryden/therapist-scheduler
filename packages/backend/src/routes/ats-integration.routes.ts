@@ -19,7 +19,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { sendSuccess, Errors } from '../utils/response';
-import { RATE_LIMITS, PAGINATION, PRE_BOOKING_STATUSES } from '../constants';
+import { RATE_LIMITS, PAGINATION, ACTIVE_STATUSES } from '../constants';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { supersedeActiveTherapistConversationInTx, AvailabilityAgentService } from '../domain/scheduling/availability/agent/service';
 import { getOrCreateUser, getOrCreateTherapist } from '../utils/unique-id';
@@ -466,9 +466,11 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         if (!availabilityStatus.canAcceptNewRequests) {
           return Errors.badRequest(
             reply,
-            availabilityStatus.reason === 'confirmed'
+            availabilityStatus.reason === 'target_reached'
               ? 'Therapist is no longer accepting new appointments'
-              : 'Therapist has reached maximum pending requests'
+              : availabilityStatus.reason === 'in_session'
+                ? 'Therapist is currently with another client'
+                : 'Therapist is not currently accepting new appointments'
           );
         }
 
@@ -484,12 +486,14 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
         // Create appointment in serializable transaction
         const appointmentRequest = await prisma.$transaction(
           async (tx) => {
-            // Duplicate check
+            // Duplicate check spans ALL active statuses so a client with a
+            // confirmed/held/feedback appointment can't open a second thread
+            // with the same therapist (terminal statuses still allow re-booking).
             const existing = await tx.appointmentRequest.findFirst({
               where: {
                 userEmail,
                 therapistHandle,
-                status: { in: [...PRE_BOOKING_STATUSES] },
+                status: { in: [...ACTIVE_STATUSES] },
               },
               select: { id: true },
             });

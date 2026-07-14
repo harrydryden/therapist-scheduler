@@ -697,6 +697,89 @@ class ChaseEmailService {
       return 0;
     }
   }
+
+  /**
+   * Auto-cancel unresponsive PRE-BOOKING appointments.
+   *
+   * Under the target-availability model a therapist is hidden from the finder
+   * while ANY active appointment exists (serial booking — one client at a
+   * time). A ghosted pending/contacted/negotiating request would therefore
+   * hide the therapist indefinitely, because nothing else auto-terminates a
+   * pre-booking row (the lifecycle tick only advances confirmed→session_held).
+   * This closes that gap: once a thread has been chased AND a closure
+   * recommendation has sat un-actioned past the closure window, the
+   * appointment is cancelled (source/cancelledBy 'system'), which frees the
+   * therapist to reappear on the finder and closes the dead thread.
+   *
+   * Building on closureRecommendedAt (rather than raw inactivity) inherits the
+   * chase flow's who-are-we-waiting-on logic and gives admins a window to
+   * intervene: actioning/dismissing the recommendation
+   * (closureRecommendationActioned=true) or taking human control both exclude
+   * the row here. Gated by chase.autoCancelStalledPreBooking; depends on the
+   * chase/closure pipeline (chase.enabled) to produce the signal.
+   */
+  async autoCancelStalledPreBooking(checkId: string): Promise<number> {
+    try {
+      // Reuse the closure window as the post-recommendation grace period, so
+      // the sequence is: chase → closure recommended (admin window) → cancel.
+      const closureHours = await getSettingValue<number>('chase.closureRecommendationHours');
+      const threshold = new Date(Date.now() - closureHours * 60 * 60 * 1000);
+
+      const candidates = await prisma.appointmentRequest.findMany({
+        where: {
+          status: { in: [...PRE_BOOKING_STATUSES] },
+          closureRecommendedAt: { not: null, lt: threshold },
+          closureRecommendationActioned: false,
+          humanControlEnabled: false,
+        },
+        select: { id: true, userName: true, therapistName: true },
+        take: await getSettingValue<number>('chase.maxClosureBatchSize'),
+      });
+
+      if (candidates.length === 0) {
+        return 0;
+      }
+
+      let cancelledCount = 0;
+
+      for (const appointment of candidates) {
+        try {
+          const result = await appointmentLifecycleService.transitionToCancelled({
+            appointmentId: appointment.id,
+            reason: 'Auto-cancelled: unresponsive after chase follow-up and closure recommendation',
+            cancelledBy: 'system',
+            source: 'system',
+            atomic: {
+              // Only cancel if still pre-booking and not under human control.
+              // If the client responded and the row advanced to confirmed+, or
+              // an admin took control, requireStatusNotIn/requireHumanControlDisabled
+              // make this an atomicSkip (no write) rather than a wrong cancel.
+              requireStatusNotIn: ['confirmed', 'session_held', 'feedback_requested', 'completed'],
+              requireHumanControlDisabled: true,
+            },
+          });
+
+          if (result.success && !result.skipped && !result.atomicSkipped) {
+            cancelledCount++;
+            logger.info(
+              { checkId, appointmentId: appointment.id, therapistName: appointment.therapistName },
+              'Auto-cancelled unresponsive pre-booking appointment (freed therapist for the finder)'
+            );
+          }
+        } catch (error) {
+          logger.error(
+            { checkId, appointmentId: appointment.id, error },
+            'Failed to auto-cancel stalled pre-booking appointment'
+          );
+        }
+      }
+
+      return cancelledCount;
+    } catch (error) {
+      logger.error({ checkId, error }, 'Failed to run pre-booking auto-cancel');
+      return 0;
+    }
+  }
 }
 
 export const chaseEmailService = new ChaseEmailService();
