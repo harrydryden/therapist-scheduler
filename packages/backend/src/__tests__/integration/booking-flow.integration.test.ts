@@ -70,14 +70,21 @@ jest.mock('../../services/slack-notification.service', () => ({
   },
 }));
 
-jest.mock('../../services/appointment-notifications.service', () => ({
-  appointmentNotificationsService: {
-    notifyAdminForceUpdate: jest.fn().mockResolvedValue(undefined),
-    notifyConfirmed: jest.fn().mockResolvedValue(undefined),
-    notifyCompleted: jest.fn().mockResolvedValue(undefined),
-    notifyCancelled: jest.fn().mockResolvedValue(undefined),
-  },
-}));
+jest.mock('../../services/appointment-notifications.service', () => {
+  // Pull the real default settings so getNotificationSettings (called by the
+  // transition code to decide which side-effect rows to register) returns a
+  // faithful, in-sync value instead of a hand-maintained literal.
+  const actual = jest.requireActual('../../services/appointment-notifications.service');
+  return {
+    appointmentNotificationsService: {
+      notifyAdminForceUpdate: jest.fn().mockResolvedValue(undefined),
+      notifyConfirmed: jest.fn().mockResolvedValue(undefined),
+      notifyCompleted: jest.fn().mockResolvedValue(undefined),
+      notifyCancelled: jest.fn().mockResolvedValue(undefined),
+      getNotificationSettings: jest.fn().mockResolvedValue(actual.DEFAULT_NOTIFICATION_SETTINGS),
+    },
+  };
+});
 
 jest.mock('../../services/transition-side-effects.service', () => ({
   transitionSideEffectsService: {
