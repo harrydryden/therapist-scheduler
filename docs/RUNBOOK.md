@@ -126,7 +126,7 @@ flowchart TD
 ```
 
 > **In words:** A trigger starts the turn. If per-appointment turn
-> serialization is enabled, the code first tries to grab a Redis lock (polling
+> serialisation is enabled, the code first tries to grab a Redis lock (polling
 > every 500 ms for up to 30 s); failing that, the turn is deferred for later.
 > Otherwise it loads the conversation state (with a version number for
 > optimistic locking) and builds the system prompt. It then loops up to **8**
@@ -172,7 +172,7 @@ appointment’s **entire life** (`constants.ts:447`, enforced in
 > and note that ceiling trips need their Redis counter reset on release, which
 > only the **bulk** release endpoint does automatically.
 
-### 2.4 The tool catalog (14 tools)
+### 2.4 The tool catalogue (14 tools)
 
 Each tool the booking agent can call is defined once as a schema
 (`domain/scheduling/agent/tools-schema.ts`, what Claude sees) and implemented
@@ -283,7 +283,7 @@ It stitches together:
   with a 5-second timeout and **screened for prompt injection** before
   injection (`system-prompt-builder.ts:659`).
 - **Timezones & date anchoring** — today’s date plus each party’s timezone, with
-  pre-computed conversions so the agent doesn’t do timezone math itself.
+  pre-computed conversions so the agent doesn’t do timezone maths itself.
 - **Three memory layers** (below).
 - **The current stage** — a short “here’s what to do next” block from the
   conversation checkpoint.
@@ -566,7 +566,7 @@ the stall threshold) to human control.
 ### 4.1 The client (booking → feedback)
 
 A client **never logs in.** They submit a short public form; everything after
-that reaches them by email with tokenized links.
+that reaches them by email with tokenised links.
 
 ```mermaid
 flowchart TD
@@ -835,7 +835,7 @@ sequenceDiagram
 > thread divergence, fetch full thread history, hand to the agent, mark
 > processed **unless the agent paused or deferred**, and remove the UNREAD label.
 
-Two facts to internalize:
+Two facts to internalise:
 
 - **A webhook 200 means “received,” not “processed.”** The webhook always returns
   200 (even for forged/invalid bodies) so Pub/Sub doesn’t retry forever. Check
@@ -924,7 +924,7 @@ stateDiagram-v2
 > itself. You can `resetAll()`, but if the downstream is still broken it just
 > re-opens. Fix the downstream first.
 
-### 5.6 Tokenized links & key rotation
+### 5.6 Tokenised links & key rotation
 
 All one-click email links (unsubscribe, voucher, feedback) share one crypto core
 (`utils/hmac-token.ts`): an HMAC-SHA256 signature over a versioned, timestamped
@@ -1048,7 +1048,7 @@ A few env vars are load-bearing (the service refuses to start or logs a loud
 - `REQUIRE_PUBSUB_AUTH` — leave **true**; `false` in prod makes the Gmail webhook
   accept forged notifications (drives bounce/cancel/reschedule flows). Configure
   GCP Pub/Sub OIDC auth + `GOOGLE_PUBSUB_AUDIENCE` instead.
-- `JWT_SECRET` (required; signs all tokenized links — see rotation in §5.6),
+- `JWT_SECRET` (required; signs all tokenised links — see rotation in §5.6),
   `WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`, `DATABASE_URL`, non-localhost
   `REDIS_URL`.
 

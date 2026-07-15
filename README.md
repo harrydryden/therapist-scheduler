@@ -119,7 +119,7 @@ pending -> contacted -> negotiating -> confirmed -> session_held -> feedback_req
              cancelled    cancelled      cancelled   (any active state -> cancelled)
 ```
 
-All transitions use optimistic locking (`updateMany` with status preconditions) to prevent race conditions.
+Transitions are atomic and race-safe, but the mechanism varies by tier: **light** transitions (`contacted`, `negotiating`, `session_held`, `feedback_requested`) use `updateMany` with status preconditions (optimistic locking); **`confirmed`** uses an `update` with preconditions inside a Read-Committed transaction; and **terminal** transitions (`completed`, `cancelled`) use a Serializable transaction with `SELECT … FOR UPDATE`.
 
 ## Background Services
 
@@ -129,9 +129,9 @@ Ten background services run on configurable intervals, coordinated via Redis dis
 |---------|---------|----------|
 | EmailQueueService | BullMQ email send queue with retry | Continuous |
 | EmailPollingService | Fallback Gmail polling if Pub/Sub fails | 3 min |
-| GmailWatchService | Renews Gmail push notification watches | 15 min |
+| GmailWatchService | Renews Gmail push notification watches | 6 days (watches expire at 7) |
 | PendingEmailService | Retries failed email sends | 2 min |
-| StaleCheckService | Flags 48h+ inactive conversations | 30 min |
+| StaleCheckService | Flags 48h+ inactive conversations | 1 hour |
 | PostBookingFollowupService | Meeting link checks, feedback forms | 15 min |
 | SideEffectRetryService | Retries failed Slack side effects | 5 min |
 | WeeklyMailingListService | Sends weekly promotional mailing | Hourly |
@@ -220,6 +220,7 @@ should show `pushConfig.oidcToken.serviceAccountEmail` and
 
 ## Documentation
 
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — Accessible runbook: agent harness, appointment lifecycle, user journeys, key logic, and operations
 - [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) — Deployment, monitoring, and operations guide
 - [`docs/MISSED_MESSAGE_RECOVERY.md`](docs/MISSED_MESSAGE_RECOVERY.md) — Recovering messages the agent failed to process
 - [`docs/SCHEMA_MIGRATIONS.md`](docs/SCHEMA_MIGRATIONS.md) — Mandatory workflow for Prisma schema changes
