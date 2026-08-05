@@ -468,9 +468,19 @@ class WeeklyMailingListService extends LockedPeriodicService {
         now.getUTCDate()
       );
 
-      // Calculate days difference using UTC midnight-to-midnight
+      // Calculate days difference using UTC midnight-to-midnight.
+      //
+      // The comparison is `< MIN_INTERVAL_DAYS`, not `< MIN_INTERVAL_DAYS - 1`.
+      // The `- 1` let a send through at 6 calendar days, and because these are
+      // midnight-to-midnight counts rather than elapsed time, 6 calendar days
+      // can be barely over 5 real days: sent 23:59 on day D, resent 00:01 on
+      // day D+6 is a daysDiff of 6 but only ~5d 0h 2m apart. That eroded the
+      // documented 7-day floor and let the cadence drift earlier each week.
+      // Now a daysDiff of 7 is required, so the gap is always at least 6 real
+      // days and normally 7 — the deliberate calendar-day (not elapsed-ms)
+      // basis is retained, since it is what makes this DST-safe.
       const daysDiff = Math.floor((nowUTC - lastSendUTC) / (1000 * 60 * 60 * 24));
-      return daysDiff < WEEKLY_MAILING.MIN_INTERVAL_DAYS - 1;
+      return daysDiff < WEEKLY_MAILING.MIN_INTERVAL_DAYS;
     } catch (error) {
       logger.warn({ error }, 'Failed to check last send date');
       return false;

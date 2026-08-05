@@ -604,15 +604,32 @@ async function start() {
       host: config.host,
     });
 
-    // Cleanup stale locks from previous runs (crash recovery)
-    // Run asynchronously to avoid blocking server startup during deploys
+    // Cleanup stale locks from previous runs (crash recovery).
+    // Run asynchronously to avoid blocking server startup during deploys.
+    //
+    // These patterns must match the REAL key names. Five of the six previous
+    // entries used a `<service>:lock:*` shape that no service ever wrote — the
+    // periodic services all use `<service>:processing-lock` (see constants.ts),
+    // so those patterns matched nothing and the cleanup silently did nothing
+    // for them. Only `gmail:lock:*` was correct (GMAIL.MESSAGE_LOCK_PREFIX =
+    // 'gmail:lock:message:'). The former 'appointment:lock:*' entry is dropped:
+    // no such key exists anywhere in the codebase.
+    //
+    // Note this remains a belt-and-braces path rather than the thing that
+    // recovers a crashed lock: cleanupStaleLocks only deletes keys with NO TTL,
+    // and acquireLock always sets one, so a crashed holder's lock is recovered
+    // by TTL expiry regardless. Correcting the patterns means the sweep now
+    // targets the right keys if a TTL-less lock ever appears.
     const staleLockPatterns = [
       'gmail:lock:*',
-      'appointment:lock:*',
-      'pending-email:lock:*',
-      'weekly-mailing:lock:*',
-      'stale-check:lock:*',
-      'missed-message-scanner:lock:*',
+      'pending-email:processing-lock',
+      'weekly-mailing:processing-lock',
+      'stale-check:processing-lock',
+      'missed-message-scanner:processing-lock',
+      'post-booking-followup:processing-lock',
+      'retention-cleanup:processing-lock',
+      'work-report:processing-lock',
+      'slack-weekly-summary:processing-lock',
     ];
     redis.cleanupStaleLocks(staleLockPatterns, 300).then((cleanedLocks) => {
       if (cleanedLocks > 0) {
