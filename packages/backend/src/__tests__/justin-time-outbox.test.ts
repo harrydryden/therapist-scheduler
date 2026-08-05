@@ -33,7 +33,7 @@ const findManyMock = jest.fn();
 const sideEffectFindUniqueMock = jest.fn();
 const appointmentFindUniqueMock = jest.fn();
 const updateMock = jest.fn();
-const txCreateMock = jest.fn();
+const txUpsertMock = jest.fn();
 // CAS-claim used by tryClaimEffect before execute. Default `count: 1`
 // so existing tests continue to take the execute branch.
 const updateManyMock = jest.fn().mockResolvedValue({ count: 1 });
@@ -83,12 +83,12 @@ import { slackNotificationService as slackNotificationServiceMock } from '../ser
 describe('appointment-creation outbox: registerInTransaction', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    txCreateMock.mockReset();
+    txUpsertMock.mockReset();
   });
 
   it('writes a pending side-effect row using the supplied tx client', async () => {
-    txCreateMock.mockResolvedValue({ id: 'log-1' });
-    const tx = { sideEffectLog: { create: txCreateMock } } as any;
+    txUpsertMock.mockResolvedValue({ id: 'log-1', status: 'pending' });
+    const tx = { sideEffectLog: { upsert: txUpsertMock } } as any;
 
     const registered = await sideEffectTrackerService.registerInTransaction(
       tx,
@@ -97,23 +97,23 @@ describe('appointment-creation outbox: registerInTransaction', () => {
       { effectType: 'justintime_start' },
     );
 
-    expect(txCreateMock).toHaveBeenCalledTimes(1);
-    const callArgs = txCreateMock.mock.calls[0][0];
-    expect(callArgs.data).toMatchObject({
+    expect(txUpsertMock).toHaveBeenCalledTimes(1);
+    const callArgs = txUpsertMock.mock.calls[0][0];
+    expect(callArgs.create).toMatchObject({
       appointmentId: 'apt-1',
       effectType: 'justintime_start',
       transition: 'requested',
       status: 'pending',
     });
-    expect(typeof callArgs.data.idempotencyKey).toBe('string');
-    expect(callArgs.data.idempotencyKey.length).toBeGreaterThan(0);
+    expect(typeof callArgs.create.idempotencyKey).toBe('string');
+    expect(callArgs.create.idempotencyKey.length).toBeGreaterThan(0);
     expect(registered.status).toBe('pending');
     expect(registered.effectType).toBe('justintime_start');
   });
 
   it('derives a deterministic idempotency key from appointment+transition+effect', async () => {
-    txCreateMock.mockResolvedValue({ id: 'log-1' });
-    const tx = { sideEffectLog: { create: txCreateMock } } as any;
+    txUpsertMock.mockResolvedValue({ id: 'log-1', status: 'pending' });
+    const tx = { sideEffectLog: { upsert: txUpsertMock } } as any;
 
     await sideEffectTrackerService.registerInTransaction(
       tx,
@@ -121,18 +121,63 @@ describe('appointment-creation outbox: registerInTransaction', () => {
       'requested',
       { effectType: 'justintime_start' },
     );
-    const key1 = txCreateMock.mock.calls[0][0].data.idempotencyKey;
+    const key1 = txUpsertMock.mock.calls[0][0].create.idempotencyKey;
 
-    txCreateMock.mockResolvedValue({ id: 'log-2' });
+    txUpsertMock.mockResolvedValue({ id: 'log-2', status: 'pending' });
     await sideEffectTrackerService.registerInTransaction(
       tx,
       'apt-1',
       'requested',
       { effectType: 'justintime_start' },
     );
-    const key2 = txCreateMock.mock.calls[1][0].data.idempotencyKey;
+    const key2 = txUpsertMock.mock.calls[1][0].create.idempotencyKey;
 
     expect(key1).toBe(key2);
+  });
+
+  // Regression: this used a bare tx.sideEffectLog.create, so re-registering an
+  // existing key raised a unique-constraint error that aborted the enclosing
+  // transaction and rolled back the status flip with it. Because several
+  // effects are keyed WITHOUT a transitionGeneration, their key is constant for
+  // the appointment's lifetime, so any second occurrence of the transition hit
+  // this. It stranded a feedback_requested appointment in production: every
+  // auto-complete sweep died on `Unique constraint failed on the fields:
+  // (idempotency_key)` and the row could never reach completed.
+  it('upserts on the idempotency key so re-registering an existing row cannot abort the transaction', async () => {
+    txUpsertMock.mockResolvedValue({ id: 'log-1', status: 'pending' });
+    const tx = { sideEffectLog: { upsert: txUpsertMock } } as any;
+
+    await expect(
+      sideEffectTrackerService.registerInTransaction(tx, 'apt-1', 'completed', {
+        effectType: 'therapist_unfreeze_sync',
+      }),
+    ).resolves.toBeDefined();
+
+    const args = txUpsertMock.mock.calls[0][0];
+    // Keyed on the unique column, so Postgres resolves the conflict itself
+    // rather than raising — no create/catch, which cannot work mid-transaction.
+    expect(args.where).toEqual({ idempotencyKey: args.create.idempotencyKey });
+    // An existing row must be left exactly as it is: re-registration means the
+    // intent already exists, not that it should be replaced.
+    expect(args.update).toEqual({});
+  });
+
+  it('returns the existing row status rather than assuming pending', async () => {
+    // The row is already completed from an earlier occurrence of this
+    // transition. Reporting 'pending' would invite the caller to re-dispatch a
+    // side effect that has already run.
+    txUpsertMock.mockResolvedValue({ id: 'log-1', status: 'completed' });
+    const tx = { sideEffectLog: { upsert: txUpsertMock } } as any;
+
+    const registered = await sideEffectTrackerService.registerInTransaction(
+      tx,
+      'apt-1',
+      'completed',
+      { effectType: 'therapist_unfreeze_sync' },
+    );
+
+    expect(registered.status).toBe('completed');
+    expect(registered.id).toBe('log-1');
   });
 });
 

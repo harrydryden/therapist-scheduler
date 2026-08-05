@@ -374,8 +374,9 @@ class SideEffectTrackerService {
    * task fires, the periodic retry runner has a row to recover.
    *
    * Idempotency: caller-supplied or hash-derived key remains unique across
-   * retries. The row is created in 'pending'; the caller flips it to
-   * completed/failed once the task resolves.
+   * retries. A fresh row is created in 'pending'; the caller flips it to
+   * completed/failed once the task resolves. An existing row is reused
+   * untouched and its real status returned — see the upsert note below.
    */
   async registerInTransaction(
     tx: Prisma.TransactionClient,
@@ -388,8 +389,31 @@ class SideEffectTrackerService {
       effect.idempotencyKey ||
       this.generateIdempotencyKey(appointmentId, transition, effect.effectType, transitionGeneration);
 
-    const created = await tx.sideEffectLog.create({
-      data: {
+    // Upsert, not create. A bare create raises a unique-constraint error when
+    // the key already exists, and inside a transaction that error ABORTS the
+    // whole transaction — Postgres offers no catch-and-continue without a
+    // savepoint, so the enclosing status flip rolls back with it. The caller
+    // can't recover: it retries, regenerates the same key, and fails again.
+    //
+    // This is reachable in ordinary operation, not just under a race, because
+    // several effects are deliberately keyed WITHOUT a transitionGeneration
+    // (therapist_unfreeze_sync on cancelled/completed, therapist_freeze_sync on
+    // confirmed, slack_notify_cancelled) so that the post-commit dispatch finds
+    // the same row. Their key is therefore constant for the appointment's
+    // lifetime, and any SECOND occurrence of that transition collides. Observed
+    // in production as a feedback_requested appointment that could never
+    // complete: completed once, an admin re-requested feedback, and every
+    // subsequent auto-complete sweep died on
+    // `Unique constraint failed on the fields: (idempotency_key)`.
+    //
+    // `update: {}` deliberately leaves an existing row untouched — including a
+    // stale payload — because re-registration means "this intent already
+    // exists", not "replace it". This matches the tolerance registerSideEffects
+    // and registerTherapistSideEffects already had; only this in-transaction
+    // path lacked it.
+    const row = await tx.sideEffectLog.upsert({
+      where: { idempotencyKey },
+      create: {
         appointmentId,
         effectType: effect.effectType,
         transition,
@@ -400,13 +424,17 @@ class SideEffectTrackerService {
             ? undefined
             : (effect.payload as Prisma.InputJsonValue),
       },
+      update: {},
     });
 
     return {
-      id: created.id,
+      id: row.id,
       effectType: effect.effectType,
       idempotencyKey,
-      status: 'pending',
+      // The row's REAL status, not a hardcoded 'pending'. When an already
+      // completed row is reused, telling the caller 'pending' would invite it
+      // to dispatch a side effect that has already run.
+      status: row.status as RegisteredSideEffect['status'],
     };
   }
 

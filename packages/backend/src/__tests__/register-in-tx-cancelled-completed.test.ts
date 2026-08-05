@@ -74,10 +74,15 @@ interface CapturedCreate {
 }
 
 let captured: CapturedCreate[] = [];
-const sideEffectCreateMock = jest.fn().mockImplementation(async (args: CapturedCreate) => {
-  captured.push(args);
-  return { id: `row-${captured.length}`, ...args.data, status: 'pending' };
-});
+// registerInTransaction upserts rather than creates, so the intent row lives
+// under `create` on the upsert args. Normalised back to `{ data }` here so the
+// per-effect-type and idempotency-key assertions below read unchanged.
+const sideEffectUpsertMock = jest
+  .fn()
+  .mockImplementation(async (args: { where: unknown; create: CapturedCreate['data'] }) => {
+    captured.push({ data: args.create });
+    return { id: `row-${captured.length}`, ...args.create, status: 'pending' };
+  });
 const sideEffectFindUniqueMock = jest.fn().mockResolvedValue(null);
 
 const CANCELLED_ROW = {
@@ -135,7 +140,8 @@ function makeTx(row: Record<string, unknown>) {
       create: jest.fn().mockResolvedValue(undefined),
     },
     sideEffectLog: {
-      create: (...args: unknown[]) => sideEffectCreateMock(...(args as [CapturedCreate])),
+      upsert: (...args: unknown[]) =>
+        sideEffectUpsertMock(...(args as [{ where: unknown; create: CapturedCreate['data'] }])),
       findUnique: (...args: unknown[]) => sideEffectFindUniqueMock(...args),
     },
   };
