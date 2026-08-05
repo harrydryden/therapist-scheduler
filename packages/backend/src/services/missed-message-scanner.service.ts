@@ -52,6 +52,12 @@ type ScanTrigger = 'startup' | 'scheduled' | 'manual';
  */
 class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
   private consecutiveSkips = 0;
+  /**
+   * Skip count at which the last unhealthy alert was raised, or null if the
+   * scanner is currently considered healthy. Drives both the escalating
+   * alert cadence and the one-shot recovery notice.
+   */
+  private lastAlertedSkipCount: number | null = null;
 
   constructor() {
     super({
@@ -69,7 +75,27 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
     const result = await this.scanActiveThreads(scanId, trigger, ctx.isLockValid);
     // Reached the end without throwing — a real completed scan (possibly a
     // no-op, if there was nothing to scan). Reset the skip counter.
+    const skipsBeforeReset = this.consecutiveSkips;
     this.consecutiveSkips = 0;
+    // Close the loop on an outage we alerted about. Without this the channel
+    // shows a run of "Unhealthy" alerts and no indication they were ever
+    // resolved, so an operator who fixes the OAuth token has to tail logs to
+    // confirm it worked.
+    if (this.lastAlertedSkipCount !== null) {
+      const skips = skipsBeforeReset;
+      this.lastAlertedSkipCount = null;
+      logger.info({ scanId, trigger, recoveredAfterSkips: skips }, 'Missed message scanner recovered');
+      slackNotificationService
+        .sendAlert({
+          title: 'Missed Message Scanner Recovered',
+          severity: 'low',
+          details:
+            `Scanner completed a scan successfully after *${skips}* consecutive failed cycles. ` +
+            'Incoming message detection is working again.',
+          additionalFields: { 'Scan ID': scanId, 'Trigger': trigger },
+        })
+        .catch(() => {});
+    }
     return result;
   }
 
@@ -97,7 +123,8 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
   private trackSkip(scanId: string, trigger: string, reason: string, errorMessage?: string): void {
     this.consecutiveSkips++;
 
-    if (this.consecutiveSkips >= CONSECUTIVE_SKIP_ALERT_THRESHOLD) {
+    if (this.shouldAlertForSkipCount(this.consecutiveSkips)) {
+      this.lastAlertedSkipCount = this.consecutiveSkips;
       logger.error(
         { scanId, trigger, reason, consecutiveSkips: this.consecutiveSkips },
         'Missed message scanner has been skipped multiple times consecutively — messages may be going undetected'
@@ -124,6 +151,31 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
         additionalFields,
       }).catch(() => {});
     }
+  }
+
+  /**
+   * Escalating alert cadence: fire at the threshold, then only when the skip
+   * count doubles it (3, 6, 12, 24, 48 …).
+   *
+   * Previously this alerted on EVERY cycle at or past the threshold. Because
+   * the scan runs hourly and the alert body embeds the changing skip count
+   * and scan ID, the generic 120-second Slack dedup never collapsed them —
+   * so a single unresolved fault (a revoked OAuth refresh token, say)
+   * produced one HIGH alert every hour indefinitely. That is the fastest way
+   * to teach a team to ignore the alert channel, and it buries unrelated
+   * alerts raised in the meantime.
+   *
+   * Doubling keeps the first alert immediate, still re-nags on a genuinely
+   * persistent outage (so it can't be silently forgotten), but turns ~16
+   * overnight alerts into ~3. The counter is in-memory and resets in
+   * start(), so a restart deliberately re-alerts from the threshold.
+   */
+  private shouldAlertForSkipCount(skips: number): boolean {
+    if (skips < CONSECUTIVE_SKIP_ALERT_THRESHOLD) return false;
+    const multiple = skips / CONSECUTIVE_SKIP_ALERT_THRESHOLD;
+    if (!Number.isInteger(multiple)) return false;
+    // Power-of-two multiples only: 1×, 2×, 4×, 8× the threshold.
+    return (multiple & (multiple - 1)) === 0;
   }
 
   /**
