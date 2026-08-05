@@ -1038,6 +1038,53 @@ means the process, OAuth token, or Redis needs attention.
 > (e.g. run a missing migration) — you must explicitly retry them (per-thread
 > “Recover N Messages” in the UI, or the bulk API above).
 
+#### 6.4a Gmail `invalid_grant` — re-authorising the mailbox
+
+`invalid_grant` means the OAuth **refresh token is dead**. This is a total email
+outage in both directions, so treat it as sev-1:
+
+- **Inbound** — the scanner and poller can't read mail. Symptom: repeated
+  *Missed Message Scanner Unhealthy … OAuth token invalid: invalid_grant*.
+- **Outbound** — `sendEmail` calls Gmail **synchronously**
+  (`core/email/outbound/send.ts:28`), so every send throws: agent replies,
+  nudges, and the weekly mailing all stop.
+
+> The alert's skip count dates the **process uptime**, not the fault.
+> `consecutiveSkips` is in-memory and reset in `start()`, so "16 consecutive
+> times" means 16 cycles since the last restart — the token may have died long
+> before. Don't use it to bound the incident.
+
+**Fix**
+
+1. **Check the OAuth consent screen's publishing status first** (Cloud Console →
+   *APIs & Services → OAuth consent screen*). While it is in **Testing**, Google
+   expires refresh tokens after **7 days** — re-authorising buys a week and the
+   outage returns. Publish the app before doing anything else. A repeating
+   pattern of these alerts every ~7 days is that signature.
+2. Mint a new token against the existing OAuth client:
+   ```
+   npm -w therapist-scheduler-backend run reauth:gmail
+   ```
+   It reads `GMAIL_CREDENTIALS_BASE64` (or `--credentials <path>`), prints a
+   consent URL, takes the redirected URL back, **verifies the token against
+   Gmail**, and prints a ready-to-paste `GMAIL_TOKEN_BASE64`. Approve as the
+   agent's own mailbox — the script echoes which account it authenticated as, so
+   check that line. The redirect URI needn't serve anything: a 404 is fine, the
+   code is in the address bar. That avoids registering a new URI.
+3. Set `GMAIL_TOKEN_BASE64` in the backend environment and restart. The token is
+   a live mailbox credential — secret store only, never Slack or a PR.
+4. Verify: `GET /api/admin/gmail/status`. The scanner alerts should stop.
+5. Push notifications should self-heal once the token is valid; if not, re-run
+   `POST /api/admin/gmail/setup-push`.
+
+Other causes worth checking if it recurs despite being published: access revoked
+at [myaccount.google.com/permissions](https://myaccount.google.com/permissions),
+a mailbox password change, a rotated client secret (then
+`GMAIL_CREDENTIALS_BASE64` needs updating too), changed scopes, >50 refresh
+tokens issued for the same client+account (oldest are silently revoked), or —
+for a Workspace domain — third-party app access restricted in the **Admin**
+console (not Cloud Console).
+
 ### 6.5 Production environment safety
 
 A few env vars are load-bearing (the service refuses to start or logs a loud
