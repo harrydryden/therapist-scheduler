@@ -162,4 +162,73 @@ describe('missedMessageScannerService — consecutive-skip tracking after Locked
     const status = await missedMessageScannerService.getHealthStatus();
     expect(status.consecutiveSkips).toBe(0);
   });
+
+  // The scanner used to alert on EVERY cycle at or past the threshold.
+  // Because the scan is hourly and the alert body embeds the changing skip
+  // count and scan ID, the 120s Slack dedup never collapsed them, so one
+  // unresolved fault (e.g. a revoked OAuth refresh token) produced a HIGH
+  // alert every hour indefinitely — 16 overnight in the incident that
+  // prompted this. Alerts now escalate: threshold, then doublings.
+  it('escalates unhealthy alerts at doublings instead of every cycle', async () => {
+    acquireLockMock.mockResolvedValue(true);
+    ensureValidTokenMock.mockResolvedValue({ valid: false, error: 'invalid_grant' });
+
+    const alertCountAfter = async (scans: number) => {
+      for (let i = 0; i < scans; i++) await missedMessageScannerService.triggerManualScan();
+      return sendAlertMock.mock.calls.filter(
+        ([a]) => a.title === 'Missed Message Scanner Unhealthy',
+      ).length;
+    };
+
+    // Skips 1-2: below threshold, silent. Skip 3: first alert.
+    expect(await alertCountAfter(3)).toBe(1);
+    // Skips 4-5: still broken, but no new noise.
+    expect(await alertCountAfter(2)).toBe(1);
+    // Skip 6 (2× threshold): re-nag, so a persistent outage isn't forgotten.
+    expect(await alertCountAfter(1)).toBe(2);
+    // Skips 7-11: silent again.
+    expect(await alertCountAfter(5)).toBe(2);
+    // Skip 12 (4× threshold): third and final alert in 12 hourly cycles,
+    // where the old behaviour would have sent ten.
+    expect(await alertCountAfter(1)).toBe(3);
+  });
+
+  it('sends a one-shot recovery notice after an outage it alerted about', async () => {
+    acquireLockMock.mockResolvedValue(true);
+    ensureValidTokenMock.mockResolvedValue({ valid: false, error: 'invalid_grant' });
+    for (let i = 0; i < 3; i++) await missedMessageScannerService.triggerManualScan();
+    expect(sendAlertMock).toHaveBeenCalledTimes(1);
+
+    // Token fixed — the next scan completes.
+    ensureValidTokenMock.mockResolvedValue({ valid: true });
+    findManyMock.mockResolvedValue([]);
+    await missedMessageScannerService.triggerManualScan();
+
+    const recovery = sendAlertMock.mock.calls
+      .map(([a]) => a)
+      .filter((a) => a.title === 'Missed Message Scanner Recovered');
+    expect(recovery).toHaveLength(1);
+    expect(recovery[0].details).toContain('3');
+
+    // Recovery is one-shot: further healthy scans stay quiet.
+    await missedMessageScannerService.triggerManualScan();
+    expect(
+      sendAlertMock.mock.calls.filter(([a]) => a.title === 'Missed Message Scanner Recovered'),
+    ).toHaveLength(1);
+  });
+
+  it('does not send a recovery notice when the outage never reached the alert threshold', async () => {
+    acquireLockMock.mockResolvedValue(false);
+    await missedMessageScannerService.triggerManualScan();
+    await missedMessageScannerService.triggerManualScan();
+    expect(sendAlertMock).not.toHaveBeenCalled();
+
+    acquireLockMock.mockResolvedValue(true);
+    ensureValidTokenMock.mockResolvedValue({ valid: true });
+    findManyMock.mockResolvedValue([]);
+    await missedMessageScannerService.triggerManualScan();
+
+    // Nobody was told it broke, so nobody needs telling it recovered.
+    expect(sendAlertMock).not.toHaveBeenCalled();
+  });
 });
