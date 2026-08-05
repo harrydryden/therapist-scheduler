@@ -214,6 +214,16 @@ class SSEService {
         }
       }
     }, HEARTBEAT_INTERVAL_MS);
+
+    // The heartbeat is a process-lifetime timer, and this module exports an
+    // eager singleton — so merely importing it (which several suites do
+    // transitively) pinned Node's event loop open forever, and jest reported
+    // "a worker process has failed to exit gracefully". unref lets the loop
+    // drain when nothing else is pending while the timer still fires for as
+    // long as the process is alive, so production behaviour is unchanged and
+    // graceful shutdown is no longer held up by this interval. `stop()` still
+    // clears it explicitly.
+    this.heartbeatTimer.unref();
   }
 
   stop(): void {

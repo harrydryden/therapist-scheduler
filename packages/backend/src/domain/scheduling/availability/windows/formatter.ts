@@ -120,11 +120,22 @@ function generateSlots(
   intervalMinutes: number = DEFAULT_SLOT_INTERVAL_MINUTES,
 ): Date[] {
   const slots: Date[] = [];
-  const now = new Date();
   const timezone = availability.timezone || 'Europe/London';
 
-  // Buffer: don't show slots starting within the minimum booking lead time
-  const minStartTime = new Date(now.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
+  // Buffer: don't show slots starting within the minimum booking lead time.
+  //
+  // Measured from `referenceDate`, NOT from a fresh `new Date()`. The only
+  // production caller passes `new Date()` (system-prompt-builder.ts:166) and
+  // already treats that one value as the turn's clock "so the two agree", so
+  // this is behaviour-identical there — but it makes the function a pure
+  // function of its arguments. Reading the real clock here while the week
+  // iteration below anchored on `referenceDate` meant that passing a fixed
+  // reference date produced output that changed as wall-clock time advanced:
+  // once real time moved more than `weeksAhead` past the reference date, every
+  // generated slot was filtered out as "in the past" and the function returned
+  // nothing. That silently rotted the timezone-conventions test, whose fixed
+  // 2026-07-01 reference date started yielding zero slots in late July 2026.
+  const minStartTime = new Date(referenceDate.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
 
   // Anchor week iteration on the reference date as it appears in the
   // therapist's timezone — otherwise a referenceDate near UTC midnight could

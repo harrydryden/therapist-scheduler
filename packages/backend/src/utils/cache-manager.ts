@@ -631,15 +631,26 @@ export class CacheManager {
   }
 
   /**
-   * Cleanup stale locks that may have been orphaned
+   * Cleanup stale locks that may have been orphaned.
    *
-   * This runs on startup to recover from crashes where locks weren't released.
-   * Scans for keys matching lock patterns and checks their age.
-   * Locks older than maxAgeSeconds are considered stale and deleted.
+   * Runs on startup as crash recovery. Scans for keys matching the given
+   * patterns and deletes ONLY those with no TTL (`TTL == -1`).
    *
-   * @param patterns - Array of glob patterns to scan (e.g., ['gmail:lock:*', 'appointment:lock:*'])
-   * @param maxAgeSeconds - Maximum age in seconds before a lock is considered stale
-   * @returns Number of stale locks cleaned up
+   * What this does NOT do, despite the parameter name: it does not delete
+   * locks by age. `maxAgeSeconds` is accepted but deliberately unused — a
+   * lock with a valid TTL may still be actively held (the periodic services
+   * renew long-running locks), so deleting one on age alone would break
+   * mutual exclusion and let two workers run the same task. Locks left by a
+   * crashed holder are recovered by TTL expiry instead, which is why this
+   * sweep is belt-and-braces rather than the primary recovery path.
+   *
+   * Patterns must match the real key names. The periodic services use
+   * `<service>:processing-lock` (see constants.ts); per-message locks use the
+   * `gmail:lock:message:` prefix. A pattern matching nothing fails silently.
+   *
+   * @param patterns - Redis MATCH patterns, e.g. ['gmail:lock:*', 'stale-check:processing-lock']
+   * @param maxAgeSeconds - Accepted for call-site compatibility; not used (see above)
+   * @returns Number of TTL-less locks deleted
    */
   async cleanupStaleLocks(patterns: string[], maxAgeSeconds: number): Promise<number> {
     if (!this.redis) {
