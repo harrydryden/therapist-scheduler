@@ -16,6 +16,15 @@
  * Both branches respect a once-per-7-days ceiling so back-to-back
  * therapist ingestions never produce back-to-back emails to the same user.
  *
+ * The ceiling is only consumed by a run that actually delivered something:
+ * if every send fails (broken Gmail credentials, open circuit breaker) the
+ * last-send marker is left alone so the next hourly tick retries, and a
+ * Slack alert fires. Marking unconditionally used to turn a transient
+ * transport outage into an indefinite mailing outage, because the marker
+ * also anchors the new-therapist event trigger. A mailing that goes
+ * WEEKLY_MAILING.STALL_ALERT_AFTER_DAYS without sending alerts too — the
+ * skip paths are otherwise invisible at production log level.
+ *
  * Admins can also trigger a manual send from Admin Settings → Weekly
  * Mailing. The button shows a preview (recipient count + rendered body)
  * before confirming. forceSend() respects the 7-day ceiling by default;
@@ -38,6 +47,7 @@ import { redis } from '../utils/redis';
 import { prisma } from '../utils/database';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { therapistBookingStatusService } from './therapist-booking-status.service';
+import { slackNotificationService } from './slack-notification.service';
 import { sendEmail } from '../core/email';
 import { getSettingValue, getSettingValues } from './settings.service';
 import { renderTemplate, TemplateVariables } from '../utils/email-templates';
@@ -185,7 +195,19 @@ class WeeklyMailingListService extends LockedPeriodicService {
       }
     }
 
-    await this.markAsSent();
+    // Same rule as the periodic tick: a run where nothing got out must not
+    // consume the 7-day window or the new-therapist trigger. Without this an
+    // admin pressing "Send now" during a Gmail outage would lock the mailing
+    // out for a week while appearing to have sent.
+    if (sent > 0) {
+      await this.markAsSent();
+    } else {
+      logger.error(
+        { checkId, failed, total: users.length },
+        'Force weekly mailing sent nothing — every send failed. Not marking as sent',
+      );
+      await this.alertSendFailure(checkId, users.length);
+    }
 
     logger.info({ checkId, sent, failed, total: users.length }, 'Force weekly mailing complete');
     return { sent, failed, total: users.length };
@@ -260,16 +282,26 @@ class WeeklyMailingListService extends LockedPeriodicService {
       return;
     }
 
+    // Every path below this point is a reason the promo email did NOT go
+    // out. They were previously logged at debug, so at production log level
+    // a mailing that silently stopped emitted nothing at all — the failure
+    // mode this service actually hit. They are info now, and an overdue
+    // mailing additionally raises a Slack alert (throttled to once a day).
     const decision = await this.evaluateSendDecision();
     if (!decision.shouldSend) {
-      logger.debug({ checkId, reason: decision.reason }, 'Not sending — trigger conditions not met');
+      logger.info({ checkId, reason: decision.reason }, 'Not sending — trigger conditions not met');
+      await this.alertIfSendOverdue(checkId, `trigger conditions not met (${decision.reason})`);
       return;
     }
 
     const users = await this.getEligibleUsers();
     if (users.length === 0) {
+      // Genuinely nobody to email (getEligibleUsers throws on failure, so
+      // this is not masking an error). Marking as sent is safe here and
+      // stops the check re-running every hour for the next week.
       logger.info({ checkId, trigger: decision.reason }, 'No eligible users — marking as sent to avoid rechecking every hour');
       await this.markAsSent();
+      await this.alertIfSendOverdue(checkId, 'no eligible users on the mailing list');
       return;
     }
 
@@ -294,7 +326,28 @@ class WeeklyMailingListService extends LockedPeriodicService {
       }
     }
 
-    await this.markAsSent();
+    // Only record a send when at least one email actually got out.
+    //
+    // This marker drives BOTH the 7-day ceiling and the "new therapists
+    // since last send" event trigger (countNewTherapistsSince keys on
+    // `ingestedAt > lastSentAt`). Marking unconditionally meant a total
+    // send failure — Gmail credentials broken, circuit breaker open —
+    // silently bought a week of quiet AND consumed the fast lane for every
+    // therapist ingested beforehand, then repeated the next week. A
+    // transient outage became a permanent one.
+    //
+    // Leaving the marker untouched lets the next hourly tick retry. A
+    // partial success still marks: the alternative is re-emailing the
+    // recipients who already received it.
+    if (sent > 0) {
+      await this.markAsSent();
+    } else {
+      logger.error(
+        { checkId, failed, total: users.length, trigger: decision.reason },
+        'Weekly mailing sent nothing — every send failed. Not marking as sent; will retry on the next tick',
+      );
+      await this.alertSendFailure(checkId, users.length);
+    }
 
     logger.info({ checkId, sent, failed, total: users.length, trigger: decision.reason }, 'Weekly mailing complete');
   }
@@ -441,6 +494,91 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
+   * Once-per-day gate for the mailing-health alerts. The generic Slack
+   * dedup window is only ~2 minutes, and these checks run hourly, so
+   * without this an ongoing problem would alert 24 times a day.
+   *
+   * Fails CLOSED (returns false, no alert) when Redis is unavailable —
+   * a broken cache must not turn into an alert storm.
+   */
+  private async shouldAlertNow(key: string, ttlSeconds: number): Promise<boolean> {
+    try {
+      return await redis.acquireLock(key, new Date().toISOString(), ttlSeconds);
+    } catch (error) {
+      logger.warn({ error, key }, 'Could not check mailing alert throttle — suppressing alert');
+      return false;
+    }
+  }
+
+  /**
+   * Alert when the promo email is overdue: a skip on its own is normal
+   * (the 7-day window, a quiet week), but going STALL_ALERT_AFTER_DAYS
+   * without a send means the mailing has stopped and nobody was told.
+   * This is the gap that let a 10-day outage pass unnoticed.
+   *
+   * lastSentAt of null is not treated as overdue: it means "never sent"
+   * or an expired key, both of which make the next tick send rather than
+   * stall, so alerting would be noise on a fresh environment.
+   */
+  private async alertIfSendOverdue(checkId: string, reason: string): Promise<void> {
+    try {
+      const lastSentAt = await this.getLastSentAt();
+      if (!lastSentAt) return;
+
+      const daysSince = Math.floor((Date.now() - lastSentAt.getTime()) / (24 * 60 * 60 * 1000));
+      if (daysSince < WEEKLY_MAILING.STALL_ALERT_AFTER_DAYS) return;
+
+      if (!(await this.shouldAlertNow(WEEKLY_MAILING.STALL_ALERT_KEY, WEEKLY_MAILING.STALL_ALERT_TTL_SECONDS))) {
+        return;
+      }
+
+      logger.warn({ checkId, daysSince, reason }, 'Weekly mailing overdue — alerting');
+      await slackNotificationService.sendAlert({
+        title: 'Weekly Mailing Overdue',
+        severity: 'medium',
+        details:
+          `The promotional weekly email has not gone out for ${daysSince} days ` +
+          `(expected every ${WEEKLY_MAILING.MIN_INTERVAL_DAYS}). Latest check skipped: ${reason}.`,
+        additionalFields: {
+          'Days since last send': String(daysSince),
+          'Skip reason': reason,
+          'Check ID': checkId,
+        },
+      });
+    } catch (error) {
+      logger.warn({ error, checkId }, 'Failed to raise weekly-mailing overdue alert');
+    }
+  }
+
+  /**
+   * Alert when a send ran but every single email failed — the signature of
+   * a broken transport (Gmail credentials, open circuit breaker) rather
+   * than a gating decision. Distinct from the overdue alert because this
+   * one is actionable immediately and does not wait for the day threshold.
+   */
+  private async alertSendFailure(checkId: string, attempted: number): Promise<void> {
+    try {
+      if (!(await this.shouldAlertNow(WEEKLY_MAILING.STALL_ALERT_KEY + ':failure', WEEKLY_MAILING.STALL_ALERT_TTL_SECONDS))) {
+        return;
+      }
+      await slackNotificationService.sendAlert({
+        title: 'Weekly Mailing Send Failed',
+        severity: 'high',
+        details:
+          `All ${attempted} weekly promo emails failed to send. Nothing was delivered and the ` +
+          `send window was NOT consumed, so the next hourly tick will retry. Check Gmail ` +
+          `credentials and the Gmail circuit breaker (GET /api/admin/gmail/status).`,
+        additionalFields: {
+          'Recipients attempted': String(attempted),
+          'Check ID': checkId,
+        },
+      });
+    } catch (error) {
+      logger.warn({ error, checkId }, 'Failed to raise weekly-mailing send-failure alert');
+    }
+  }
+
+  /**
    * Get all currently available therapists (active and not frozen/booked).
    * Reads from Postgres now that Notion is no longer authoritative.
    */
@@ -467,6 +605,12 @@ class WeeklyMailingListService extends LockedPeriodicService {
    * Get users eligible for the weekly mailing: subscribed and with no
    * confirmed upcoming appointment. Reads from Postgres now that the
    * Notion users database has been retired.
+   *
+   * THROWS on query failure — deliberately. This used to swallow the error
+   * and return [], which the caller could not distinguish from "nobody is
+   * eligible": it logged "No eligible users", called markAsSent(), and
+   * burned a week of the cadence on a transient database blip. Callers must
+   * see the failure, so an empty array now means genuinely zero recipients.
    */
   private async getEligibleUsers(): Promise<MailingListUser[]> {
     try {
@@ -502,7 +646,9 @@ class WeeklyMailingListService extends LockedPeriodicService {
       }));
     } catch (error) {
       logger.error({ error }, 'Failed to get eligible mailing list users');
-      return [];
+      throw error instanceof Error
+        ? error
+        : new Error('Failed to get eligible mailing list users');
     }
   }
 

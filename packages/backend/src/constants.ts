@@ -325,6 +325,15 @@ export const WEEKLY_MAILING = {
   // sends honour this — pass `skipAlreadySentCheck` to forceSend() only
   // when an internal caller explicitly needs to override it.
   MIN_INTERVAL_DAYS: 7,
+  // Throttle key for the "mailing hasn't gone out in a while" Slack alert.
+  // The generic Slack dedup is only 120s, so an hourly tick would alert
+  // every hour without this; 24h keeps it to one nag per day.
+  STALL_ALERT_KEY: 'weekly-mailing:stall-alert-sent',
+  STALL_ALERT_TTL_SECONDS: 24 * 60 * 60,
+  // How far past MIN_INTERVAL_DAYS the mailing may drift before we alert.
+  // 7-day cadence + 3 days grace: a send is genuinely overdue, not just
+  // waiting for its window to open or riding out a one-off skip.
+  STALL_ALERT_AFTER_DAYS: 10,
 } as const;
 
 // Daily work report settings
