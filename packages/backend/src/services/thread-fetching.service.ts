@@ -2,12 +2,12 @@ import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { logger } from '../utils/logger';
 import { EMAIL, THREAD_LIMITS } from '../constants';
+import { truncateText } from '../utils/email-encoding';
 import {
-  decodeHtmlEntities,
-  stripHtml,
-  truncateText,
-} from '../utils/email-encoding';
-import { extractEmail, decodeEmailBody } from '../utils/email-mime-parser';
+  extractEmail,
+  extractBodyFromPayload,
+  resolveMessageDate,
+} from '../utils/email-mime-parser';
 import {
   loadGmailCredentials,
   createOAuth2Client,
@@ -349,53 +349,17 @@ export class ThreadFetchingService {
     const to = extractEmail(getHeader('to'));
     const subject = getHeader('subject');
 
-    // Parse date
-    let date: Date;
-    try {
-      const dateHeader = getHeader('date');
-      const dateValue = dateHeader || message.internalDate;
-      date = dateValue ? new Date(dateValue) : new Date();
-      if (isNaN(date.getTime())) {
-        date = new Date();
-      }
-    } catch {
-      date = new Date();
-    }
+    // Date header, falling back to Gmail's internalDate (epoch-ms string —
+    // `new Date(internalDate)` on the raw string is always Invalid Date).
+    const date = resolveMessageDate(getHeader('date'), message.internalDate);
 
-    // Extract body with charset-aware decoding
+    // Extract body — shared with parseEmailMessage so the thread context
+    // and the inbound message agree. Walks the full MIME tree (replies with
+    // attachments / inline signature images nest the text parts) and
+    // decodes each part with the charset from its Content-Type header.
     let body = '';
     try {
-      if (message.payload?.body?.data) {
-        // Decode with charset detection and clean up HTML entities
-        const contentType = message.payload.mimeType || 'text/plain; charset=utf-8';
-        const rawBody = decodeEmailBody(message.payload.body.data, contentType);
-        if (contentType.includes('text/html')) {
-          body = stripHtml(rawBody);
-        } else {
-          body = decodeHtmlEntities(rawBody);
-        }
-      } else if (message.payload?.parts) {
-        // Try to find plain text part first
-        const textPart = message.payload.parts.find(
-          (p) => p.mimeType === 'text/plain'
-        );
-        if (textPart?.body?.data) {
-          // Decode with charset detection and clean up HTML entities
-          const contentType = textPart.mimeType || 'text/plain; charset=utf-8';
-          const rawBody = decodeEmailBody(textPart.body.data, contentType);
-          body = decodeHtmlEntities(rawBody);
-        } else {
-          // Fall back to HTML if no plain text
-          const htmlPart = message.payload.parts.find(
-            (p) => p.mimeType === 'text/html'
-          );
-          if (htmlPart?.body?.data) {
-            const contentType = htmlPart.mimeType || 'text/html; charset=utf-8';
-            const rawBody = decodeEmailBody(htmlPart.body.data, contentType);
-            body = stripHtml(rawBody);
-          }
-        }
-      }
+      body = extractBodyFromPayload(message.payload).body;
     } catch (err) {
       logger.warn({ messageId: message.id, err }, 'Failed to decode message body');
       body = '[Unable to decode message body]';

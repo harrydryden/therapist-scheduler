@@ -253,10 +253,23 @@ export const DATA_RETENTION = {
   CANCELLED_RETENTION_DAYS: 90,
   // How long to keep confirmed/completed appointments before archiving (days)
   COMPLETED_RETENTION_DAYS: 365,
-  // How long to keep processed Gmail messages in dedup table (days)
-  // Reduced from 30 to 7 — messages older than 7 days won't be reprocessed,
-  // and this table can grow significantly during Redis outages (database fallback)
-  PROCESSED_MESSAGE_RETENTION_DAYS: 7,
+  // How long to keep processed Gmail messages in the DB dedup table (days).
+  //
+  // This table is the AUTHORITATIVE dedup record: the missed-message
+  // scanner, release-replay and chase pre-send paths decide what is
+  // "unprocessed" from it alone. It must therefore outlive both:
+  //   - the Redis processed-ZSET window (EMAIL_PROCESSING.PROCESSED_MESSAGE_TTL_DAYS,
+  //     30d), so a Redis flush or ZSET trim can't expose a message the DB
+  //     has already forgotten; and
+  //   - the scanner age guard (EMAIL_PROCESSING.SCANNER_MAX_MESSAGE_AGE_DAYS,
+  //     30d): the scanner never re-delivers a message older than that, and
+  //     any younger message that was processed still has its row here
+  //     (processedAt >= the message's Gmail internalDate).
+  // It used to be 7 days with a comment claiming "messages older than 7
+  // days won't be reprocessed" — nothing enforced that, and old replies
+  // were replayed to the agent as new once the rows expired (E1).
+  // The margin over 30d covers messages processed some time after arrival.
+  PROCESSED_MESSAGE_RETENTION_DAYS: 45,
   // How long to keep abandoned pending emails (days)
   ABANDONED_EMAIL_RETENTION_DAYS: 30,
   // Batch size for cleanup operations (to avoid long transactions)
@@ -375,8 +388,17 @@ export const EMAIL_PROCESSING = {
   UNMATCHED_ATTEMPT_PREFIX: 'gmail:unmatched:',
   /** Redis key prefix for first-failure Slack alert dedup */
   PROCESSING_ALERT_DEDUP_PREFIX: 'gmail:processingAlertDedup:',
-  /** Days to keep processed message IDs */
+  /** Days to keep processed message IDs in the Redis ZSET (fast-path cache; DB is authoritative) */
   PROCESSED_MESSAGE_TTL_DAYS: 30,
+  /**
+   * Thread-recovery age guard: checkThreadForUnprocessedReplies (hourly
+   * missed-message scanner, human-control release replay, chase pre-send)
+   * never re-delivers a message whose Gmail internalDate is older than
+   * this. Must stay below DATA_RETENTION.PROCESSED_MESSAGE_RETENTION_DAYS
+   * so every message inside the window still has its DB dedup row. Admin
+   * force-reprocess of explicitly selected messages bypasses it.
+   */
+  SCANNER_MAX_MESSAGE_AGE_DAYS: 30,
   /** Max attempts to match a message before giving up */
   MAX_UNMATCHED_ATTEMPTS: 3,
   /** Max attempts to process a message (post-match) before giving up to prevent infinite scanner loops */

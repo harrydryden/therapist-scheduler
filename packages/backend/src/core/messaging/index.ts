@@ -5,9 +5,11 @@ export {
   releaseDbLock,
   isMessageProcessed,
   filterUnprocessed,
+  clearMessageDedupState,
   recordUnmatchedAttempt,
   shouldEmitProcessingAlert,
   DEDUP_CONSTANTS,
   type LockResult,
   type ProcessedContext,
+  type DedupClearResult,
 } from './message-dedup';

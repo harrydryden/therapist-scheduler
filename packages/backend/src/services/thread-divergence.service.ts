@@ -79,6 +79,14 @@ export interface AppointmentContext {
   initialMessageId: string | null;
   status: string;
   createdAt: Date;
+  /**
+   * Therapist identity keys, when known. Used to recognise that two
+   * appointments are with the SAME therapist (e.g. a rebooking while the
+   * earlier row is still feedback_requested) so the name-mismatch check
+   * doesn't treat the therapist's own name as "another therapist".
+   */
+  therapistId?: string | null;
+  therapistHandle?: string | null;
 }
 
 /**
@@ -365,8 +373,95 @@ function detectTherapistDirectReply(
 }
 
 /**
+ * Honorifics / titles ignored when building name tokens. "Dr. Jones" used
+ * to yield the "first name" `dr.`, which matched every email containing
+ * "Dr." — so every client with two Dr-titled therapists was flagged.
+ */
+const NAME_HONORIFICS = new Set([
+  'dr', 'doctor', 'mr', 'mrs', 'ms', 'miss', 'mx', 'prof', 'professor', 'rev', 'sir', 'dame',
+]);
+
+/**
+ * Shortest name token we will match on its own. Two-letter first names
+ * ("Al", "Jo") are too ambiguous as bare words to drive a blocking
+ * decision; for those only the full name is matched.
+ */
+const MIN_NAME_TOKEN_LENGTH = 3;
+
+/** Lowercased name tokens with honorifics and surrounding punctuation removed. */
+function therapistNameTokens(name: string | null | undefined): string[] {
+  if (!name) return [];
+  return name
+    .normalize('NFKC')
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter((token) => token.length > 0 && !NAME_HONORIFICS.has(token));
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Whole-word patterns for a therapist name: the full name (tokens separated
+ * by whitespace) and, when long enough, the first name on its own.
+ * Boundaries are Unicode-aware, so "Ann" no longer matches "planning" and
+ * "Al" no longer matches "also".
+ */
+function therapistNamePatterns(
+  name: string | null | undefined,
+  options: { skipFirstName?: boolean } = {},
+): RegExp[] {
+  const tokens = therapistNameTokens(name);
+  if (tokens.length === 0) return [];
+  const wholeWord = (body: string) => new RegExp(`(?<![\\p{L}\\p{N}])${body}(?![\\p{L}\\p{N}])`, 'iu');
+  const patterns: RegExp[] = [];
+  const full = tokens.map(escapeRegExp).join('\\s+');
+  if (tokens.length > 1 || tokens[0].length >= MIN_NAME_TOKEN_LENGTH) {
+    patterns.push(wholeWord(full));
+  }
+  if (!options.skipFirstName && tokens.length > 1 && tokens[0].length >= MIN_NAME_TOKEN_LENGTH) {
+    patterns.push(wholeWord(escapeRegExp(tokens[0])));
+  }
+  return patterns;
+}
+
+function mentionsName(content: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(content));
+}
+
+/**
+ * True when two appointments are with the same therapist: same therapist
+ * id, handle or email (Therapist.email is unique), or an identical name
+ * (the name heuristic cannot tell identically-named rows apart anyway).
+ */
+function isSameTherapist(a: AppointmentContext, b: AppointmentContext): boolean {
+  if (a.therapistId && b.therapistId && a.therapistId === b.therapistId) return true;
+  if (a.therapistHandle && b.therapistHandle && a.therapistHandle === b.therapistHandle) return true;
+  if (
+    a.therapistEmail &&
+    b.therapistEmail &&
+    a.therapistEmail.trim().toLowerCase() === b.therapistEmail.trim().toLowerCase()
+  ) {
+    return true;
+  }
+  const aName = therapistNameTokens(a.therapistName).join(' ');
+  const bName = therapistNameTokens(b.therapistName).join(' ');
+  return aName.length > 0 && aName === bName;
+}
+
+/**
  * Detect when email body/subject mentions a different therapist than the matched appointment
  * This catches cases where emails get matched to the wrong appointment due to fallback logic
+ *
+ * E4: candidates are the sender's OTHER active appointments with a
+ * DIFFERENT therapist. Previously the same therapist appearing on two
+ * active rows (a client rebooking while the earlier appointment is still
+ * feedback_requested, admin-created parallel bookings) made "mentions
+ * other" identical to "mentions matched", so every signed reply scored
+ * severity high / manual_review, was blocked, and was abandoned after
+ * three attempts. Names are matched as whole words, ignoring honorifics.
  */
 function detectTherapistNameMismatch(
   email: EmailContext,
@@ -378,35 +473,44 @@ function detectTherapistNameMismatch(
     return createNoDetection();
   }
 
-  // Get all unique therapist names from user's active appointments (excluding current)
-  const otherTherapistNames = allActiveAppointments
-    .filter(apt => apt.id !== matchedAppointment.id && apt.therapistName)
-    .map(apt => ({
-      name: apt.therapistName.toLowerCase(),
-      firstName: apt.therapistName.split(' ')[0].toLowerCase(),
-      appointmentId: apt.id,
-    }));
+  // Unique OTHER therapists from the sender's active appointments.
+  const matchedFirstName = therapistNameTokens(matchedAppointment.therapistName)[0];
+  const seenNames = new Set<string>();
+  const otherTherapists: Array<{ name: string; patterns: RegExp[]; appointmentId: string }> = [];
+  let firstNameShared = false;
+  for (const apt of allActiveAppointments) {
+    if (apt.id === matchedAppointment.id || !apt.therapistName) continue;
+    if (isSameTherapist(apt, matchedAppointment)) continue;
+    const tokens = therapistNameTokens(apt.therapistName);
+    const key = tokens.join(' ');
+    if (!key || seenNames.has(key)) continue;
+    // A first name shared with the matched therapist ("Thanks Sarah")
+    // says nothing about which Sarah — match full names only, both ways.
+    const sharesFirstName = tokens[0] === matchedFirstName;
+    firstNameShared = firstNameShared || sharesFirstName;
+    const patterns = therapistNamePatterns(apt.therapistName, { skipFirstName: sharesFirstName });
+    if (patterns.length === 0) continue;
+    seenNames.add(key);
+    otherTherapists.push({ name: apt.therapistName, patterns, appointmentId: apt.id });
+  }
 
-  if (otherTherapistNames.length === 0) {
-    // User doesn't have other appointments, no risk of cross-contamination
+  if (otherTherapists.length === 0) {
+    // No different therapist among the sender's active appointments —
+    // no risk of cross-contamination.
     return createNoDetection();
   }
 
-  // Check if email mentions any OTHER therapist's name
-  const contentToSearch = `${email.subject} ${email.body}`.toLowerCase();
-  const matchedTherapistFirstName = matchedAppointment.therapistName.split(' ')[0].toLowerCase();
-  const matchedTherapistFullName = matchedAppointment.therapistName.toLowerCase();
+  const contentToSearch = `${email.subject} ${email.body}`;
 
   // Check if email mentions the matched therapist (expected behavior)
-  const mentionsMatchedTherapist =
-    contentToSearch.includes(matchedTherapistFullName) ||
-    contentToSearch.includes(matchedTherapistFirstName);
+  const mentionsMatchedTherapist = mentionsName(
+    contentToSearch,
+    therapistNamePatterns(matchedAppointment.therapistName, { skipFirstName: firstNameShared }),
+  );
 
   // Check if email mentions a DIFFERENT therapist from user's other appointments
-  for (const otherTherapist of otherTherapistNames) {
-    const mentionsOther =
-      contentToSearch.includes(otherTherapist.name) ||
-      contentToSearch.includes(otherTherapist.firstName);
+  for (const otherTherapist of otherTherapists) {
+    const mentionsOther = mentionsName(contentToSearch, otherTherapist.patterns);
 
     if (mentionsOther && !mentionsMatchedTherapist) {
       // Email mentions another therapist but NOT the matched therapist - critical mismatch
@@ -513,7 +617,8 @@ export function parseEmailAddresses(headerValue: string): string[] {
   if (!headerValue) return [];
 
   const emails: string[] = [];
-  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  // Bounded quantifiers keep this linear on long '@'-free input.
+  const regex = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]{1,253}\.[a-zA-Z]{2,63}/g;
   const matches = headerValue.match(regex);
 
   if (matches) {

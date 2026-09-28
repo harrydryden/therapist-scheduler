@@ -7,8 +7,9 @@
  *   2. Belt-and-braces DB re-check (catches Redis flushes)
  *   3. Periodic ZSET cleanup
  *   4. Gmail fetch + parse
- *   5. Bounce detection
- *   6. Own-outbound skip
+ *   5. Own-outbound skip (before bounce detection: our own SENT copies
+ *      must never be subject-tested as bounces)
+ *   6. Bounce detection (DSNs never reach the agent)
  *   7. Availability-agent routing (TherapistConversation match)
  *   8. Legacy nudge-reply detection (threadId match)
  *   9. Weekly mailing reply
@@ -54,6 +55,7 @@ import { threadFetchingService } from '../../../services/thread-fetching.service
 import {
   findMatchingAppointmentRequest,
   findMatchingTherapistConversation,
+  senderIsPartyWhere,
 } from '../../../utils/thread-matcher';
 import { tryHandleInvitationReply } from '../../../services/invitation-reply.service';
 import { CLEANUP_CHECK_AND_RESET_SCRIPT } from '../../../utils/redis-scripts';
@@ -231,26 +233,10 @@ export async function processMessage(messageId: string, traceId: string): Promis
         'Processing email',
       );
 
-      // STEP 5: bounce detection. Unfreezes therapists when their
-      // emails fail to deliver.
-      const bounceHandled = await emailBounceService.processPotentialBounce({
-        from: email.from,
-        subject: email.subject,
-        body: email.body,
-        threadId: email.threadId,
-        messageId,
-      });
-      if (bounceHandled) {
-        logger.info(
-          { traceId, messageId, from: email.from },
-          'Email bounce detected and handled - therapist unfrozen',
-        );
-        await markMessageProcessed(messageId, 'bounce');
-        return true;
-      }
-
-      // STEP 6: skip our own outbound emails (these come back in via
-      // Gmail webhooks but were sent BY us, not TO us).
+      // STEP 5: skip our own outbound emails (these come back in via
+      // Gmail webhooks but were sent BY us, not TO us). Runs BEFORE
+      // bounce detection so our own SENT copies — whose subjects we
+      // wrote — are never tested against the bounce patterns.
       if (email.from.toLowerCase() === EMAIL.FROM_ADDRESS.toLowerCase()) {
         logger.info(
           { traceId, messageId, from: email.from },
@@ -260,11 +246,48 @@ export async function processMessage(messageId: string, traceId: string): Promis
         return false;
       }
 
+      // STEP 6: bounce detection. A hard bounce on a thread we own
+      // cancels the (pre-booking) appointment and unfreezes the
+      // therapist. Every other DSN — delay notices, soft / unknown
+      // failures, bounces we declined to action (admins are alerted
+      // inside processPotentialBounce) — is recorded and stops here: a
+      // delivery-status notification is not a reply from the client or
+      // therapist and must never be handed to the agent.
+      const bounce = await emailBounceService.processPotentialBounce({
+        from: email.from,
+        subject: email.subject,
+        body: email.body,
+        autoSubmitted: email.autoSubmitted,
+        isDeliveryStatusReport: email.isDeliveryStatusReport,
+        deliveryStatus: email.deliveryStatus,
+        threadId: email.threadId,
+        messageId,
+      });
+      if (bounce.isBounce) {
+        await markMessageProcessed(messageId, 'bounce');
+        if (bounce.cancelled) {
+          logger.info(
+            { traceId, messageId, from: email.from },
+            'Email bounce detected and handled - therapist unfrozen',
+          );
+          return true;
+        }
+        logger.info(
+          { traceId, messageId, from: email.from, bounceType: bounce.bounceType },
+          'Delivery-status notification recorded without auto-cancel - not routing to agent',
+        );
+        return false;
+      }
+
       // STEP 7: availability-agent routing (Phase 5). Runs BEFORE the
       // legacy lastNudgeThreadId Slack-alert path so post-phase-5
       // nudge replies — which have a TherapistConversation row —
       // route to the agent rather than triggering an admin alert.
       // Pre-phase-5 nudges (no row) fall through.
+      // A processReply failure THROWS out of routeToAvailabilityAgent to
+      // the outer catch (failure tracking + retry budget + alerts) rather
+      // than falling through to the nudge / appointment branches below,
+      // which would misroute or silently abandon the reply (E9).
       const earlyConvoMatch = await findMatchingTherapistConversation(email);
       if (earlyConvoMatch) {
         const handled = await routeToAvailabilityAgent(email, earlyConvoMatch, messageId, traceId);
@@ -409,12 +432,12 @@ export async function processMessage(messageId: string, traceId: string): Promis
       // STEP 13: thread-divergence detection. Fetch all active
       // appointments for this user/therapist so the detector can
       // check for cross-thread issues.
+      // Case-insensitive (E14): stored emails keep the case the user
+      // typed; an exact match came back empty and silently disabled the
+      // cross-appointment divergence checks.
       const allActiveAppointments = await prisma.appointmentRequest.findMany({
         where: {
-          OR: [
-            { userEmail: email.from },
-            { therapistEmail: email.from },
-          ],
+          OR: senderIsPartyWhere(email.from),
           status: { in: [...PRE_BOOKING_STATUSES, 'confirmed'] },
         },
         select: {
@@ -422,6 +445,8 @@ export async function processMessage(messageId: string, traceId: string): Promis
           userEmail: true,
           therapistEmail: true,
           therapistName: true,
+          therapistId: true,
+          therapistHandle: true,
           gmailThreadId: true,
           therapistGmailThreadId: true,
           initialMessageId: true,
@@ -456,6 +481,8 @@ export async function processMessage(messageId: string, traceId: string): Promis
         initialMessageId: matchedAppointment?.initialMessageId || null,
         status: matchedAppointment?.status || 'pending',
         createdAt: matchedAppointment?.createdAt || new Date(),
+        therapistId: matchedAppointment?.therapistId ?? null,
+        therapistHandle: matchedAppointment?.therapistHandle ?? null,
       };
 
       const divergenceOutcome = await checkAndHandleDivergence({

@@ -10,14 +10,12 @@ import {
 } from '../utils/gmail-auth';
 import { EMAIL_PROCESSING } from '../constants';
 import { isGmail404 } from '../utils/gmail-errors';
+import { parseGmailInternalDate } from '../utils/email-mime-parser';
+import { clearMessageDedupState } from '../core/messaging/message-dedup';
 
 // Redis keys
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
-const {
-  PROCESSED_MESSAGES_KEY,
-  MESSAGE_LOCK_PREFIX,
-  UNMATCHED_ATTEMPT_PREFIX,
-} = EMAIL_PROCESSING;
+const { SCANNER_MAX_MESSAGE_AGE_DAYS } = EMAIL_PROCESSING;
 
 // DB key for Gmail history ID persistence (SystemSetting id)
 const HISTORY_ID_SETTING_KEY = 'gmail.lastHistoryId';
@@ -519,12 +517,26 @@ export class EmailIngestService {
 
   /**
    * Check a specific Gmail thread for unprocessed replies.
-   * Used by the stale check service to recover missed therapist replies
-   * that fell outside the normal polling window.
+   * Used by the missed-message scanner, the human-control release replay
+   * and the chase pre-send check to recover replies that fell outside the
+   * normal polling window.
+   *
+   * AGE GUARD (E1): messages whose Gmail `internalDate` is older than
+   * EMAIL_PROCESSING.SCANNER_MAX_MESSAGE_AGE_DAYS are never re-delivered.
+   * "Unprocessed" is decided from the DB dedup table alone, and its rows
+   * expire (DATA_RETENTION.PROCESSED_MESSAGE_RETENTION_DAYS) — without the
+   * guard a long-running appointment's first replies were replayed to the
+   * agent as NEW emails once their rows aged out (or after a Redis flush).
+   * `options.forceMessageIds` (admin force-reprocess) bypasses the guard
+   * for exactly those ids.
    *
    * Returns the number of messages successfully processed.
    */
-  async checkThreadForUnprocessedReplies(threadId: string, traceId: string): Promise<number> {
+  async checkThreadForUnprocessedReplies(
+    threadId: string,
+    traceId: string,
+    options: { forceMessageIds?: string[] } = {},
+  ): Promise<number> {
     const gmail = await emailOAuthService.ensureGmailClient();
 
     try {
@@ -536,6 +548,9 @@ export class EmailIngestService {
 
       const messages = threadResponse.data.messages || [];
       let processed = 0;
+      const forced = new Set(options.forceMessageIds ?? []);
+      const cutoffMs = Date.now() - SCANNER_MAX_MESSAGE_AGE_DAYS * 24 * 60 * 60 * 1000;
+      let skippedTooOld = 0;
 
       // FIX: Collect all non-SENT message IDs from the thread, then cross-reference
       // against the processedGmailMessage table to find truly unprocessed messages.
@@ -552,7 +567,23 @@ export class EmailIngestService {
         // Skip messages in SENT (our outgoing emails)
         if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
 
+        // Age guard. Gmail's internalDate is an epoch-ms STRING — parse
+        // with Number(), not new Date(). Missing/unparseable → no guard
+        // (Gmail always sends it; recovery errs on processing).
+        const internalMs = parseGmailInternalDate(message.internalDate);
+        if (internalMs !== null && internalMs < cutoffMs && !forced.has(message.id)) {
+          skippedTooOld++;
+          continue;
+        }
+
         candidateMessages.push({ id: message.id, labels });
+      }
+
+      if (skippedTooOld > 0) {
+        logger.debug(
+          { traceId, threadId, skippedTooOld, maxAgeDays: SCANNER_MAX_MESSAGE_AGE_DAYS },
+          'Skipped messages older than the recovery age guard',
+        );
       }
 
       if (candidateMessages.length === 0) {
@@ -815,32 +846,11 @@ export class EmailIngestService {
         'Force-clearing processed records for specific messages'
       );
 
-      // Clear from database
-      const { count: dbCleared } = await prisma.processedGmailMessage.deleteMany({
-        where: { id: { in: forceMessageIds } },
-      });
+      // Clear every dedup layer (DB row, Redis ZSET/lock/unmatched keys)
+      // and reset the DB retry budgets so a previously abandoned message
+      // gets a fresh attempt budget — shared with the bulk admin retry.
+      const { processedDeleted: dbCleared } = await clearMessageDedupState(forceMessageIds, traceId);
       cleared = dbCleared;
-
-      // Clear from Redis (best effort): dedup set and locks. All concurrent.
-      await Promise.all(
-        forceMessageIds.flatMap((messageId) => [
-          redis.zrem(PROCESSED_MESSAGES_KEY, messageId).catch(() => {}),
-          redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`).catch(() => {}),
-          redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`).catch(() => {}),
-        ])
-      );
-
-      // Reset DB-tracked retry counters so users get a fresh attempt budget
-      // when they explicitly recover messages — otherwise a previously
-      // abandoned message would re-abandon on its first failed retry.
-      try {
-        await Promise.all([
-          prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: forceMessageIds } } }),
-          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: forceMessageIds } } }),
-        ]);
-      } catch (err) {
-        logger.warn({ traceId, err }, 'Failed to clear attempt tracking records during force reprocess');
-      }
 
       logger.info(
         { traceId, threadId, dbCleared, forceCount: forceMessageIds.length },
@@ -848,8 +858,12 @@ export class EmailIngestService {
       );
     }
 
-    // Now run standard thread recovery — processes only messages NOT in processedGmailMessage
-    const reprocessed = await this.checkThreadForUnprocessedReplies(threadId, traceId);
+    // Now run standard thread recovery — processes only messages NOT in
+    // processedGmailMessage. Explicitly force-selected ids bypass the
+    // recovery age guard (the admin chose them); nothing else does.
+    const reprocessed = await this.checkThreadForUnprocessedReplies(threadId, traceId, {
+      forceMessageIds,
+    });
 
     logger.info(
       { traceId, threadId, cleared, reprocessed },

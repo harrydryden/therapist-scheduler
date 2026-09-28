@@ -274,6 +274,75 @@ export async function filterUnprocessed(messageIds: string[]): Promise<string[]>
   return messageIds.filter((id) => !seen.has(id));
 }
 
+export interface DedupClearResult {
+  /** ProcessedGmailMessage rows deleted. */
+  processedDeleted: number;
+  /** MessageProcessingFailure rows deleted (0 if the delete failed). */
+  failuresDeleted: number;
+  /** UnmatchedEmailAttempt rows deleted (0 if the delete failed). */
+  unmatchedDeleted: number;
+}
+
+/**
+ * Forget that a set of messages was ever processed, so the next
+ * processMessage call re-runs them from scratch. Used by the admin
+ * recovery paths (per-thread force-reprocess and the bulk
+ * `/api/admin/processing-failures/retry`).
+ *
+ * Clears EVERY dedup layer:
+ *   - the DB `ProcessedGmailMessage` row (awaited — errors propagate),
+ *   - the Redis processed-ZSET member, the per-message lock and the
+ *     unmatched-attempt counter (best effort). Clearing only the DB row
+ *     is a silent no-op: ATOMIC_LOCK_CHECK_SCRIPT still finds the ZSET
+ *     member and reports `already_processed` for up to 30 days (E8).
+ *   - the DB retry budgets (`MessageProcessingFailure`,
+ *     `UnmatchedEmailAttempt`), so a previously abandoned message gets a
+ *     fresh attempt budget instead of re-abandoning on its first failure
+ *     (best effort — logged, reported as 0).
+ */
+export async function clearMessageDedupState(
+  messageIds: string[],
+  traceId?: string,
+): Promise<DedupClearResult> {
+  const result: DedupClearResult = { processedDeleted: 0, failuresDeleted: 0, unmatchedDeleted: 0 };
+  if (messageIds.length === 0) return result;
+
+  const { count } = await prisma.processedGmailMessage.deleteMany({
+    where: { id: { in: messageIds } },
+  });
+  result.processedDeleted = count;
+
+  // Best effort: a Redis outage must not block recovery (the DB is
+  // authoritative and the lock path falls back to it when Redis is down).
+  const bestEffort = async (op: () => Promise<unknown>): Promise<void> => {
+    try {
+      await op();
+    } catch (err) {
+      logger.debug({ traceId, err }, 'Redis dedup clear failed (non-fatal)');
+    }
+  };
+  await Promise.all(
+    messageIds.flatMap((messageId) => [
+      bestEffort(() => redis.zrem(PROCESSED_MESSAGES_KEY, messageId)),
+      bestEffort(() => redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`)),
+      bestEffort(() => redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`)),
+    ]),
+  );
+
+  try {
+    const [failures, unmatched] = await Promise.all([
+      prisma.messageProcessingFailure.deleteMany({ where: { id: { in: messageIds } } }),
+      prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: messageIds } } }),
+    ]);
+    result.failuresDeleted = failures.count;
+    result.unmatchedDeleted = unmatched.count;
+  } catch (err) {
+    logger.warn({ traceId, err }, 'Failed to clear attempt tracking records while clearing dedup state');
+  }
+
+  return result;
+}
+
 /**
  * Record a failure to MATCH a message to an appointment (no recipient
  * found, no thread matched). Returns the new attempt count and a

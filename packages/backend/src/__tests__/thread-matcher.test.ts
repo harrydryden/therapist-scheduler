@@ -323,6 +323,60 @@ describe('findMatchingAppointmentRequest', () => {
   });
 });
 
+describe('legacy fallback — case-insensitive sender lookups (E14)', () => {
+  it('queries userEmail/therapistEmail case-insensitively in both legacy queries', async () => {
+    mockFindMany.mockResolvedValueOnce([]); // deterministic: no match
+    mockFindMany.mockResolvedValueOnce([
+      {
+        id: 'apt-1',
+        // Stored with the case the client typed at booking time.
+        userEmail: 'Jane.Doe@Example.com',
+        therapistEmail: 'therapist@example.com',
+        therapistName: 'Dr Smith',
+        updatedAt: new Date(),
+      },
+    ]);
+
+    const result = await findMatchingAppointmentRequest(
+      makeEmail({ from: 'jane.doe@example.com', subject: 'Re: my booking' }),
+    );
+    expect(result?.id).toBe('apt-1');
+
+    const expectedOr = [
+      { userEmail: { equals: 'jane.doe@example.com', mode: 'insensitive' } },
+      { therapistEmail: { equals: 'jane.doe@example.com', mode: 'insensitive' } },
+    ];
+    expect(mockFindMany.mock.calls[1][0].where.OR).toEqual(expectedOr);
+    expect(mockFindFirst.mock.calls[0][0].where.OR).toEqual(expectedOr);
+  });
+
+  it('matches the therapist-email fallback when the stored therapistEmail differs in case', async () => {
+    mockFindMany.mockResolvedValueOnce([]); // deterministic: no match
+    mockFindMany.mockResolvedValueOnce([
+      {
+        id: 'apt-therapist',
+        userEmail: 'client@example.com',
+        therapistEmail: 'Sarah.Jones@Clinic.example',
+        therapistName: 'Sarah Jones',
+        updatedAt: new Date('2026-07-12T10:00:00Z'),
+      },
+      {
+        // Sender is the CLIENT on this one (a therapist who also booked).
+        id: 'apt-as-client',
+        userEmail: 'sarah.jones@clinic.example',
+        therapistEmail: 'other@example.com',
+        therapistName: 'Other Person',
+        updatedAt: new Date('2026-07-10T10:00:00Z'),
+      },
+    ]);
+
+    const result = await findMatchingAppointmentRequest(
+      makeEmail({ from: 'sarah.jones@clinic.example', subject: 'Quick question' }),
+    );
+    expect(result?.id).toBe('apt-therapist');
+  });
+});
+
 describe('findMatchingTherapistConversation', () => {
   beforeEach(() => {
     mockConvoFindMany.mockReset();
