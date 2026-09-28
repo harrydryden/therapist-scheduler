@@ -271,7 +271,7 @@ cat backup.sql | docker-compose exec -T postgres psql -U postgres therapist_sche
 The system automatically cleans up old data:
 - Cancelled appointments: removed after 90 days
 - Completed appointments: removed after 365 days
-- Processed Gmail message records: removed after 7 days
+- Processed Gmail message records: removed after 45 days
 - Completed weekly mailing inquiries: removed after 30 days
 
 ## Graceful Shutdown
