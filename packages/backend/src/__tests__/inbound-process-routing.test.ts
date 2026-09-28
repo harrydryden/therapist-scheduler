@@ -143,6 +143,13 @@ jest.mock('../domain/scheduling/inbound/unmatched-attempts', () => ({
   abandonUnmatched: jest.fn(),
 }));
 
+// Paused-deferral bookkeeping is covered in inbound-pipeline-terminal-paths.test.ts.
+jest.mock('../domain/scheduling/inbound/paused-deferral', () => ({
+  skipIfDeferredWhilePaused: jest.fn().mockResolvedValue(false),
+  isUnderHumanControl: jest.fn().mockResolvedValue(false),
+  recordPausedDeferral: jest.fn(),
+}));
+
 const mockProcessEmailReply = jest.fn();
 jest.mock('../domain/scheduling/inbound/agent-processor', () => ({
   getAgentProcessor: () => ({ processEmailReply: (...a: unknown[]) => mockProcessEmailReply(...a) }),

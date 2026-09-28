@@ -13,6 +13,7 @@
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { slackNotificationService } from '../services/slack-notification.service';
+import { EMAIL } from '../constants';
 
 /**
  * Divergence types we can detect
@@ -165,7 +166,10 @@ function detectCCDivergence(
   }
 
   const ccEmails = email.cc.map(e => e.toLowerCase());
-  const schedulerEmail = process.env.GMAIL_USER?.toLowerCase() || '';
+  // Our address: EMAIL.FROM_ADDRESS is the single source of truth. This
+  // read an undocumented GMAIL_USER env var that was never set, so the
+  // scheduler-CC check below was dead code.
+  const schedulerEmail = EMAIL.FROM_ADDRESS.toLowerCase();
 
   // Check if our scheduler email was CC'd on a parallel conversation
   const schedulerCCd = ccEmails.includes(schedulerEmail);
@@ -350,7 +354,7 @@ function detectTherapistDirectReply(
   email: EmailContext,
   matchedAppointment: AppointmentContext
 ): DivergenceDetection {
-  const schedulerEmail = process.env.GMAIL_USER?.toLowerCase() || '';
+  const schedulerEmail = EMAIL.FROM_ADDRESS.toLowerCase();
 
   // Check if email is from therapist to user, not going through scheduler
   const isFromTherapist = email.from.toLowerCase() === matchedAppointment.therapistEmail.toLowerCase();

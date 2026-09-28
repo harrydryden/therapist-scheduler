@@ -1,6 +1,7 @@
 import { emailOAuthService } from './email-oauth.service';
 import { emailIngestService } from './email-ingest.service';
 import { logger } from '../utils/logger';
+import { withTimeout, TimeoutError } from '../utils/timeout';
 
 /**
  * Backup Email Polling Service
@@ -25,6 +26,16 @@ const MIN_POLL_INTERVAL_MS = 60 * 1000;
 
 // Maximum polling interval: 15 minutes
 const MAX_POLL_INTERVAL_MS = 15 * 60 * 1000;
+
+/**
+ * Hard deadline for one poll (O13). `isPolling` guards against overlap, so
+ * a single request that never settles (no timeout on a Gmail or OAuth
+ * call) used to stop the backup poller until the process restarted. On
+ * timeout the guard is released and the next interval polls again; the
+ * hung call is abandoned (it cannot be cancelled), and per-message locks
+ * keep a late finisher from double-processing anything.
+ */
+export const POLL_HARD_TIMEOUT_MS = 10 * 60 * 1000;
 
 class EmailPollingService {
   private intervalId: NodeJS.Timeout | null = null;
@@ -102,35 +113,46 @@ class EmailPollingService {
     const pollId = Date.now().toString(36);
 
     try {
-      // Proactively refresh OAuth token before polling to prevent mid-operation expiry
-      const tokenStatus = await emailOAuthService.ensureValidToken(10);
-      if (!tokenStatus.valid) {
-        logger.warn(
-          { pollId, trigger, error: tokenStatus.error },
-          'OAuth token invalid before poll - skipping this cycle'
-        );
-        return;
-      }
-
-      logger.info({ pollId, trigger }, 'Running backup email poll');
-
-      const result = await emailIngestService.pollForNewEmails(pollId);
-
-      if (result.processed > 0) {
-        logger.info(
-          { pollId, trigger, processed: result.processed },
-          'Backup poll processed emails that may have been missed by push notifications'
+      await withTimeout(this.pollOnce(pollId, trigger), POLL_HARD_TIMEOUT_MS, 'backup-email-poll');
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        logger.error(
+          { pollId, trigger, timeoutMs: POLL_HARD_TIMEOUT_MS },
+          'Backup email poll exceeded its hard timeout - releasing the poll guard so the next interval can run'
         );
       } else {
-        logger.debug({ pollId, trigger }, 'Backup poll complete - no new emails');
+        logger.error(
+          { pollId, trigger, error },
+          'Error in backup email poll - will retry next interval'
+        );
       }
-    } catch (error) {
-      logger.error(
-        { pollId, trigger, error },
-        'Error in backup email poll - will retry next interval'
-      );
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  private async pollOnce(pollId: string, trigger: 'startup' | 'scheduled' | 'manual'): Promise<void> {
+    // Proactively refresh OAuth token before polling to prevent mid-operation expiry
+    const tokenStatus = await emailOAuthService.ensureValidToken(10);
+    if (!tokenStatus.valid) {
+      logger.warn(
+        { pollId, trigger, error: tokenStatus.error },
+        'OAuth token invalid before poll - skipping this cycle'
+      );
+      return;
+    }
+
+    logger.info({ pollId, trigger }, 'Running backup email poll');
+
+    const result = await emailIngestService.pollForNewEmails(pollId);
+
+    if (result.processed > 0) {
+      logger.info(
+        { pollId, trigger, processed: result.processed },
+        'Backup poll processed emails that may have been missed by push notifications'
+      );
+    } else {
+      logger.debug({ pollId, trigger }, 'Backup poll complete - no new emails');
     }
   }
 
@@ -149,7 +171,11 @@ class EmailPollingService {
 
     try {
       logger.info({ pollId }, 'Manual email poll triggered');
-      const result = await emailIngestService.pollForNewEmails(pollId);
+      const result = await withTimeout(
+        emailIngestService.pollForNewEmails(pollId),
+        POLL_HARD_TIMEOUT_MS,
+        'manual-email-poll',
+      );
       logger.info({ pollId, processed: result.processed }, 'Manual poll complete');
       return result;
     } catch (error) {

@@ -3,6 +3,8 @@ export {
   markMessageProcessed,
   releaseMessageLock,
   releaseDbLock,
+  renewDbLock,
+  DB_LEASE_TTL_SECONDS,
   isMessageProcessed,
   filterUnprocessed,
   clearMessageDedupState,

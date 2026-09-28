@@ -13,7 +13,8 @@
  *     (separate threads for client and therapist)
  *   - Audit event emission on success
  *   - Fallback to the BullMQ pending-email queue on direct-send
- *     failure
+ *     failure (with the final, tracking-coded subject; the queue worker
+ *     repeats the human-control re-check and the thread-ID storage)
  *
  * This is distinct from `core/email/outbound/send.ts`. The outbound
  * module is the low-level Gmail API wrapper. This module is the
@@ -37,11 +38,20 @@ import { normalizeAgentOutboundEmail } from '../../../core/agent/tools/email-nor
  * defences applied. Falls through to the BullMQ pending-email
  * queue on direct-send failure.
  *
- * Returns void — failures are logged and queued, never thrown,
- * because the tool dispatcher uses the absence of a return to
- * mean "no follow-up state to record" rather than treating it
- * as a tool failure.
+ * Never throws: failures are logged (and queued where possible) and
+ * reported in the returned outcome, so the send_email handler can tell
+ * the agent honestly whether the email went out.
  */
+export type AppointmentEmailOutcome =
+  /** Delivered to Gmail. */
+  | { status: 'sent' }
+  /** Direct send failed; queued for the retry worker (which re-checks human control). */
+  | { status: 'queued' }
+  /** Deliberately not sent: human control, a terminal status, or no such appointment. */
+  | { status: 'not_sent'; reason: 'human_control' | 'terminal_status' | 'appointment_not_found' }
+  /** Neither sent nor queued. */
+  | { status: 'failed'; error: string };
+
 export async function sendAppointmentEmail(
   params: {
     to: string;
@@ -50,7 +60,7 @@ export async function sendAppointmentEmail(
   },
   appointmentRequestId: string | undefined,
   traceId: string,
-): Promise<void> {
+): Promise<AppointmentEmailOutcome> {
   const agentName = await getSettingValue<string>('agent.fromName');
   const agentFirstName = firstName(agentName);
   const { subject: normalizedSubject, body: normalizedBody } = normalizeAgentOutboundEmail(
@@ -77,6 +87,13 @@ export async function sendAppointmentEmail(
   );
 
   const emailParams = { ...params, subject: normalizedSubject, body: normalizedBody };
+  // The subject actually sent — with the appointment's tracking code once
+  // it is known. The queue fallback below must use this, not the bare
+  // subject: a queued first email without the code started an untracked
+  // thread whose reply matched nothing (E11). The code also marks the
+  // email as an agent email for the queue worker's human-control /
+  // terminal-status re-check (core/email/outbound/queue.ts).
+  let finalSubject = emailParams.subject;
 
   try {
     let existingThreadId: string | null = null;
@@ -138,21 +155,21 @@ export async function sendAppointmentEmail(
             { traceId, appointmentRequestId, to: params.to },
             'Human control enabled - aborting email send (atomic check)',
           );
-          return;
+          return { status: 'not_sent', reason: 'human_control' };
         }
         if (current && (TERMINAL_STATUSES as readonly string[]).includes(current.status)) {
           logger.warn(
             { traceId, appointmentRequestId, to: params.to, status: current.status },
             'Appointment reached a terminal status mid-turn - aborting email send (atomic check)',
           );
-          return;
+          return { status: 'not_sent', reason: 'terminal_status' };
         }
         if (!current) {
           logger.warn(
             { traceId, appointmentRequestId },
             'Appointment not found - aborting email send',
           );
-          return;
+          return { status: 'not_sent', reason: 'appointment_not_found' };
         }
       }
     }
@@ -163,6 +180,7 @@ export async function sendAppointmentEmail(
     const subjectWithTracking = trackingCode
       ? prependTrackingCodeToSubject(emailParams.subject, trackingCode)
       : emailParams.subject;
+    finalSubject = subjectWithTracking;
 
     const result = await sendEmail({
       ...emailParams,
@@ -259,6 +277,7 @@ export async function sendAppointmentEmail(
         );
       }
     }
+    return { status: 'sent' };
   } catch (sendError) {
     logger.warn(
       { traceId, error: sendError },
@@ -266,10 +285,13 @@ export async function sendAppointmentEmail(
     );
 
     // Fallback: queue via BullMQ for later processing (with DB audit trail).
+    // The queue worker re-checks human control / terminal status
+    // atomically before sending and stores the Gmail thread id on the
+    // appointment, exactly like the direct path above.
     try {
       await emailQueueService.enqueue({
         to: emailParams.to,
-        subject: emailParams.subject,
+        subject: finalSubject,
         body: emailParams.body,
         appointmentId: appointmentRequestId,
       });
@@ -277,16 +299,15 @@ export async function sendAppointmentEmail(
         { traceId, to: params.to },
         'Email queued successfully via BullMQ',
       );
+      return { status: 'queued' };
     } catch (dbError) {
       logger.error(
         { traceId, error: dbError },
         'Failed to queue email',
       );
+      const sendMsg = sendError instanceof Error ? sendError.message : String(sendError);
+      const queueMsg = dbError instanceof Error ? dbError.message : String(dbError);
+      return { status: 'failed', error: `send failed (${sendMsg}); queueing failed (${queueMsg})` };
     }
-
-    logger.info(
-      { traceId, to: params.to, subject: params.subject },
-      'Email queued for sending',
-    );
   }
 }

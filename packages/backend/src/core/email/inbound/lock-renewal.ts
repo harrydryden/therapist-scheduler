@@ -1,10 +1,14 @@
 /**
- * Periodic Redis-lock renewal for long-running message processing.
+ * Periodic lock renewal for long-running message processing.
  *
  * Thread fetches and Claude API calls can each take 30+ seconds, so
  * the message-lock TTL (5 minutes) would expire mid-processing if not
  * renewed. The renewal manager extends the TTL every 60 seconds and
  * stops when processing completes.
+ *
+ * Two lock kinds share the same manager: the Redis message lock
+ * (`createLockRenewal`) and the DB-fallback lease used while Redis is
+ * down (`createLeaseRenewal` with `renewDbLock`).
  *
  * If renewal ever fails (another worker took the lock), `onLockLost`
  * fires and `isLockValid` flips false — the caller checks this in its
@@ -23,9 +27,13 @@ export interface LockRenewal {
   isLockValid: () => boolean;
 }
 
-export function createLockRenewal(
-  lockKey: string,
-  lockValue: string,
+/**
+ * Renew any lock via `renew` (true = still ours, false = lost) every
+ * `LOCK_RENEWAL_INTERVAL_MS` until `stop()`.
+ */
+export function createLeaseRenewal(
+  renew: () => Promise<boolean>,
+  describe: string,
   onLockLost?: () => void,
 ): LockRenewal {
   let isActive = true;
@@ -34,10 +42,10 @@ export function createLockRenewal(
   const renewalInterval = setInterval(async () => {
     if (!isActive) return;
 
-    const renewed = await renewLock(lockKey, lockValue, LOCK_TTL_SECONDS);
+    const renewed = await renew();
     if (!renewed) {
       lockValid = false;
-      logger.error({ lockKey }, 'Lock renewal failed - lock was taken by another process');
+      logger.error({ lock: describe }, 'Lock renewal failed - lock was taken by another process');
       if (onLockLost) {
         onLockLost();
       }
@@ -52,4 +60,13 @@ export function createLockRenewal(
     },
     isLockValid: () => lockValid,
   };
+}
+
+/** Renewal for the Redis message lock (`SET key value EX ttl`). */
+export function createLockRenewal(
+  lockKey: string,
+  lockValue: string,
+  onLockLost?: () => void,
+): LockRenewal {
+  return createLeaseRenewal(() => renewLock(lockKey, lockValue, LOCK_TTL_SECONDS), lockKey, onLockLost);
 }

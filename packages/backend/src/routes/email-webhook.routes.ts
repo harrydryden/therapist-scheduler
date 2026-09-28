@@ -6,12 +6,95 @@ import { sendEmail, processPendingEmails } from '../core/email';
 import { emailOAuthService } from '../services/email-oauth.service';
 import { emailIngestService } from '../services/email-ingest.service';
 import { logger } from '../utils/logger';
-import { RATE_LIMITS } from '../constants';
+import { RATE_LIMITS, TIMEOUTS } from '../constants';
 import { Errors } from '../utils/response';
 import { verifyWebhookSecret } from '../middleware/auth';
+import { isPubsubAudienceRequiredButMissing } from '../config/pubsub-warnings';
+import { slackNotificationService } from '../services/slack-notification.service';
+import { withTimeout } from '../utils/timeout';
 
-// OAuth2 client for verifying Pub/Sub push tokens
-const oauth2Client = new OAuth2Client();
+// OAuth2 client for verifying Pub/Sub push tokens. Verification fetches
+// Google's signing certs, so the transport gets a timeout (gaxios has none
+// by default) and the call itself is bounded below.
+const oauth2Client = new OAuth2Client({ transporterOptions: { timeout: TIMEOUTS.PUBSUB_TOKEN_VERIFY_MS } });
+
+/**
+ * Small in-process concurrency limit for the fire-and-forget push
+ * processing. Each notification runs a history sync that can start agent
+ * turns, and a Pub/Sub burst (e.g. the post-deploy backlog) used to start
+ * all of them at once. Notifications are also redundant with each other —
+ * every run syncs everything after the stored checkpoint — so when the
+ * wait queue is full a new one can be dropped safely: a queued run starts
+ * later and covers its history (the backup poll is the second net).
+ */
+export const PUSH_PROCESSING_CONCURRENCY = 2;
+export const PUSH_PROCESSING_MAX_QUEUED = 100;
+
+export interface TaskLimiter {
+  /** Run now or queue; false when the queue is full and the task was dropped. */
+  run(task: () => Promise<unknown>): boolean;
+  stats(): { active: number; queued: number };
+}
+
+export function createTaskLimiter(maxConcurrent: number, maxQueued: number): TaskLimiter {
+  let active = 0;
+  const queue: Array<() => Promise<unknown>> = [];
+
+  const start = (task: () => Promise<unknown>): void => {
+    active++;
+    Promise.resolve()
+      .then(task)
+      .catch((err) => logger.error({ err }, 'Limited task failed'))
+      .finally(() => {
+        active--;
+        const next = queue.shift();
+        if (next) start(next);
+      });
+  };
+
+  return {
+    run(task) {
+      if (active < maxConcurrent) {
+        start(task);
+        return true;
+      }
+      if (queue.length >= maxQueued) return false;
+      queue.push(task);
+      return true;
+    },
+    stats: () => ({ active, queued: queue.length }),
+  };
+}
+
+const pushProcessingLimiter = createTaskLimiter(PUSH_PROCESSING_CONCURRENCY, PUSH_PROCESSING_MAX_QUEUED);
+
+// One alert per process per hour while pushes are being refused for a
+// missing audience (every push would otherwise re-alert).
+const AUDIENCE_ALERT_INTERVAL_MS = 60 * 60 * 1000;
+let lastAudienceAlertAt = 0;
+
+function alertPushRejectedForMissingAudience(requestId: string): void {
+  const now = Date.now();
+  if (now - lastAudienceAlertAt < AUDIENCE_ALERT_INTERVAL_MS) return;
+  lastAudienceAlertAt = now;
+  slackNotificationService
+    .sendAlert({
+      title: 'Gmail push rejected: GOOGLE_PUBSUB_AUDIENCE unset',
+      severity: 'high',
+      details:
+        'Production has GOOGLE_PUBSUB_TOPIC set but no GOOGLE_PUBSUB_AUDIENCE, so Pub/Sub push tokens ' +
+        'cannot be audience-checked and every Gmail push is being refused (401). Inbound mail is still ' +
+        'picked up by the backup poll (every few minutes). Set GOOGLE_PUBSUB_AUDIENCE to the push ' +
+        "subscription's audience (usually https://<host>/api/webhooks/gmail/push).",
+      additionalFields: { 'Request ID': requestId },
+    })
+    .catch((err) => logger.warn({ err }, 'Failed to send missing-audience Slack alert'));
+}
+
+/** Test-only: reset the alert throttle. */
+export function _resetPushAudienceAlertForTesting(): void {
+  lastAudienceAlertAt = 0;
+}
 
 // Google Pub/Sub push notification schema
 const pubSubMessageSchema = z.object({
@@ -101,6 +184,20 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
       logger.info({ requestId }, 'Received Gmail push notification');
 
       try {
+        // Production push without an audience: token verification would
+        // accept a token minted for ANY audience (any GCP push subscription
+        // pointing here), so refuse the push outright. Not a boot failure —
+        // the backup poll keeps mail flowing and the boot banner +
+        // Slack alert tell ops what to set.
+        if (isPubsubAudienceRequiredButMissing(config)) {
+          logger.error(
+            { requestId },
+            'Rejecting Gmail push: GOOGLE_PUBSUB_AUDIENCE is unset in production (GOOGLE_PUBSUB_TOPIC is set)',
+          );
+          alertPushRejectedForMissingAudience(requestId);
+          return reply.status(401).send({ success: false, error: 'Unauthorized' });
+        }
+
         // Verify the request is from Google Pub/Sub
         // Google sends a bearer token in the Authorization header
         const authHeader = request.headers.authorization;
@@ -108,10 +205,14 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
           const token = authHeader.substring(7);
           try {
             // Verify the token is from Google
-            const ticket = await oauth2Client.verifyIdToken({
-              idToken: token,
-              audience: config.googlePubsubAudience || undefined,
-            });
+            const ticket = await withTimeout(
+              oauth2Client.verifyIdToken({
+                idToken: token,
+                audience: config.googlePubsubAudience || undefined,
+              }),
+              TIMEOUTS.PUBSUB_TOKEN_VERIFY_MS,
+              'pubsub-verify-id-token',
+            );
             const payload = ticket.getPayload();
 
             // Verify the email is from Google's Pub/Sub service account
@@ -172,9 +273,10 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
 
         const { emailAddress, historyId } = notificationValidation.data;
 
-        // Process the notification asynchronously
+        // Process the notification asynchronously, through the in-process
+        // concurrency limit.
         // FIX H12: Added retry tracking for failed notifications
-        emailIngestService
+        const accepted = pushProcessingLimiter.run(() => emailIngestService
           .processGmailNotification(emailAddress, historyId, requestId)
           .then(() => {
             logger.info({ requestId, historyId }, 'Gmail notification processed successfully');
@@ -208,7 +310,13 @@ export async function emailWebhookRoutes(fastify: FastifyInstance) {
               // Log but don't fail - notification will be caught by next poll
               logger.warn({ storeErr, historyId }, 'Failed to store notification for retry');
             }
-          });
+          }));
+        if (!accepted) {
+          logger.warn(
+            { requestId, historyId, ...pushProcessingLimiter.stats() },
+            'Gmail push processing queue full — dropping this notification; the queued syncs (and the backup poll) cover its history',
+          );
+        }
 
         // Acknowledge receipt immediately (Pub/Sub requirement)
         return reply.status(200).send({ success: true });

@@ -78,6 +78,14 @@ jest.mock('../utils/database', () => ({
 }));
 
 jest.mock('../core/email', () => ({ sendEmail: jest.fn(), processPendingEmails: jest.fn() }));
+// email-queue.service also imports the shared claim/send module and the
+// Slack service (email-abandoned alert); neither is exercised by WAL recovery.
+jest.mock('../core/email/outbound/queue', () => ({
+  attemptPendingEmailSend: jest.fn(),
+  registerEmailAbandonedNotifier: jest.fn(),
+  retryDelayMs: jest.fn(() => 60_000),
+}));
+jest.mock('../services/slack-notification.service', () => ({ slackNotificationService: { sendAlert: jest.fn() } }));
 jest.mock('bullmq', () => ({ Queue: jest.fn(), Worker: jest.fn(), QueueEvents: jest.fn() }));
 
 import { emailQueueService } from '../services/email-queue.service';

@@ -94,6 +94,8 @@ export const TIMEOUTS = {
   EXTERNAL_API_MS: 15000, // 15 seconds for external API calls (Slack, etc.)
   AI_MODEL_MS: 120000, // 120 seconds for AI model calls (Claude)
   FILE_IO_MS: 30000, // 30 seconds for file operations
+  OAUTH_TOKEN_REFRESH_MS: 15000, // 15 seconds for an OAuth access-token refresh (gaxios has no default)
+  PUBSUB_TOKEN_VERIFY_MS: 10000, // 10 seconds to verify a Pub/Sub push token (fetches Google certs)
 } as const;
 
 // Email settings
@@ -376,6 +378,23 @@ export const REDIS_BACKPRESSURE = {
   BACKOFF_MULTIPLIER: 2,
   /** Default cache TTL in seconds */
   DEFAULT_CACHE_TTL_SECONDS: 3600, // 1 hour
+} as const;
+
+// Gmail sync (push history + backup poll)
+export const GMAIL_SYNC = {
+  /** history.list page size (Gmail max 500) */
+  HISTORY_PAGE_SIZE: 500,
+  /** Pages followed per notification before advancing only to the last record listed */
+  MAX_HISTORY_PAGES: 20,
+  /** 404 gap recovery: look back to when the checkpoint was last written, within these bounds */
+  GAP_RECOVERY_MIN_LOOKBACK_DAYS: 1,
+  GAP_RECOVERY_MAX_LOOKBACK_DAYS: 7,
+  /** Extra lookback before the checkpoint's last write, for clock skew / in-flight mail */
+  GAP_RECOVERY_MARGIN_MS: 60 * 60 * 1000,
+  GAP_RECOVERY_PAGE_SIZE: 100,
+  GAP_RECOVERY_MAX_MESSAGES: 1000,
+  /** Messages per backup-poll query (was 20; terminal messages now also lose UNREAD) */
+  POLL_MAX_RESULTS: 50,
 } as const;
 
 // Email message processing

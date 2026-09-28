@@ -17,10 +17,20 @@
  *      a. Sender-based nudge-reply fallback
  *      b. Invitation-reply handler
  *      c. Unmatched-attempt tracking + abandon-on-max
- *  11. Closure auto-dismiss
- *  12. Thread divergence detection + retry/abandon
- *  13. Thread-history fetch + agent invocation
- *  14. Mark processed + clear failure record + unread label removal
+ *  11. Human-control pre-check: a paused appointment skips 12-13 and
+ *      goes straight to the agent, which logs the reply for the admin;
+ *      the message is then recorded as deferred (paused-deferral.ts) so
+ *      later polls skip it until control is released
+ *  12. Closure auto-dismiss
+ *  13. Thread divergence detection + retry/abandon
+ *  14. Thread-history fetch
+ *  15. Agent invocation
+ *  16. Mark processed (or record the paused deferral) + clear failure record
+ *
+ * Auto-submitted / out-of-office replies are recorded and never reach an
+ * agent (auto-reply.ts). Every TERMINAL outcome (marked processed) also
+ * clears the message's UNREAD label so the backup poll's unread window is
+ * not filled with messages that will never be processed again.
  *
  * Failure handling: ConcurrentModificationError is treated as benign
  * retry; everything else is tracked via processing-failures with the
@@ -31,8 +41,9 @@
  *
  * Locking: Redis lock with 5-minute TTL, renewed every 60 seconds for
  * long-running threads / Claude calls. On Redis outage, falls through
- * to a serializable-transaction DB lock. The DB lock is released on
- * failure so the scanner can retry.
+ * to a DB lease (message-dedup.ts) that is renewed the same way and
+ * released on EVERY return — it is not the dedup record, so a paused,
+ * deferred, unmatched or retried message stays eligible for retry.
  */
 
 import { logger } from '../../../utils/logger';
@@ -53,6 +64,7 @@ import { emailBounceService } from '../../../services/email-bounce.service';
 import { slackNotificationService } from '../../../services/slack-notification.service';
 import { emailOAuthService, executeGmailWithProtection } from '../../../services/email-oauth.service';
 import { threadFetchingService } from '../../../services/thread-fetching.service';
+import { stripQuotedReply } from '../../../core/email/inbound/quoted-text';
 import {
   findMatchingAppointmentRequest,
   findMatchingTherapistConversation,
@@ -67,10 +79,12 @@ import {
   isMessageProcessed,
   markMessageProcessed,
   releaseDbLock,
+  renewDbLock,
   shouldEmitProcessingAlert,
+  type ProcessedContext,
 } from '../../../core/messaging/message-dedup';
 
-import { createLockRenewal } from '../../../core/email/inbound/lock-renewal';
+import { createLeaseRenewal, createLockRenewal } from '../../../core/email/inbound/lock-renewal';
 import { getAgentProcessor } from './agent-processor';
 import { routeToAvailabilityAgent } from './availability-routing';
 import {
@@ -80,7 +94,13 @@ import {
 } from './nudge-reply';
 import { isWeeklyMailingReply, processWeeklyMailingReply } from './weekly-mailing';
 import { maybeDismissClosureRecommendation } from './closure-auto-dismiss';
-import { checkAndHandleDivergence } from './divergence-handling';
+import { checkAndHandleDivergence, type DivergenceOutcome } from './divergence-handling';
+import { detectAutoReply } from './auto-reply';
+import {
+  isUnderHumanControl,
+  recordPausedDeferral,
+  skipIfDeferredWhilePaused,
+} from './paused-deferral';
 import {
   abandonUnmatched,
   trackUnmatchedAttempt,
@@ -127,19 +147,31 @@ export async function processMessage(messageId: string, traceId: string): Promis
       return false;
     }
 
-    const usingDatabaseFallback = lockResult.outcome === 'acquired_db_fallback';
+    const dbLeaseToken = lockResult.outcome === 'acquired_db_fallback' ? lockResult.leaseToken : null;
+    const usingDatabaseFallback = dbLeaseToken !== null;
 
-    // STEP 2: lock renewal (Redis path only — DB-fallback lock is a
-    // single inserted row that doesn't expire).
+    // STEP 2: lock renewal — the Redis lock, or the DB lease while Redis
+    // is down (both expire after 5 minutes unless renewed).
     const lockKey = `${MESSAGE_LOCK_PREFIX}${messageId}`;
-    const lockRenewal = usingDatabaseFallback
-      ? null
-      : createLockRenewal(lockKey, traceId, () => {
-          logger.error(
-            { traceId, messageId },
-            'Lock lost during processing - another worker may have started processing',
-          );
-        });
+    const onLockLost = () => {
+      logger.error(
+        { traceId, messageId },
+        'Lock lost during processing - another worker may have started processing',
+      );
+    };
+    const lockRenewal = dbLeaseToken !== null
+      ? createLeaseRenewal(() => renewDbLock(messageId, dbLeaseToken), `db-lease:${messageId}`, onLockLost)
+      : createLockRenewal(lockKey, traceId, onLockLost);
+
+    // Terminal outcomes clear the message's UNREAD label (in `finally`).
+    // `hadUnreadLabel` comes from the Gmail fetch, so the modify call is
+    // only made for messages that are actually unread.
+    let clearUnread = false;
+    let hadUnreadLabel = false;
+    const markTerminal = async (context: ProcessedContext): Promise<void> => {
+      await markMessageProcessed(messageId, context);
+      clearUnread = true;
+    };
 
     try {
       // STEP 3: belt-and-braces DB re-check. If Redis was just cleared
@@ -184,6 +216,14 @@ export async function processMessage(messageId: string, traceId: string): Promis
         }
       }
 
+      // STEP 3b: a message deferred while its appointment is under human
+      // control is skipped — before any Gmail work — until control is
+      // released (E10). The poll used to re-run the whole pipeline for it
+      // every 3 minutes.
+      if (await skipIfDeferredWhilePaused(messageId, traceId)) {
+        return false;
+      }
+
       // STEP 4: Gmail fetch + MIME parse.
       //
       // Gmail returns 404 ("Requested entity was not found") when the
@@ -214,18 +254,16 @@ export async function processMessage(messageId: string, traceId: string): Promis
             'Message no longer exists in Gmail (404) — marking as abandoned without retry',
           );
           await markMessageProcessed(messageId, 'message-not-found-in-gmail');
-          if (usingDatabaseFallback) {
-            await releaseDbLock(messageId, traceId);
-          }
           return false;
         }
         throw err;
       }
+      hadUnreadLabel = (messageResponse.data.labelIds ?? []).includes('UNREAD');
 
       const email = parseEmailMessage(messageResponse.data);
       if (!email) {
         logger.warn({ traceId, messageId }, 'Failed to parse email - marking as processed to avoid retry loop');
-        await markMessageProcessed(messageId, 'unparseable');
+        await markTerminal('unparseable');
         return false;
       }
 
@@ -243,7 +281,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
           { traceId, messageId, from: email.from },
           'Skipping own outgoing email - not processing as incoming',
         );
-        await markMessageProcessed(messageId, 'own-email');
+        await markTerminal('own-email');
         return false;
       }
 
@@ -265,7 +303,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
         messageId,
       });
       if (bounce.isBounce) {
-        await markMessageProcessed(messageId, 'bounce');
+        await markTerminal('bounce');
         if (bounce.cancelled) {
           logger.info(
             { traceId, messageId, from: email.from },
@@ -280,6 +318,18 @@ export async function processMessage(messageId: string, traceId: string): Promis
         return false;
       }
 
+      // STEP 6b: auto-reply gate (§4.3). RFC 3834 auto-submitted mail and
+      // out-of-office replies never get an agent turn — the same rule the
+      // invitation-reply path applies. Admins still see appointment OOOs
+      // via a low-severity alert (the agent's special-handling alert used
+      // to cover this).
+      const autoReplySignal = detectAutoReply(email);
+      if (autoReplySignal) {
+        await handleAutoReply(email, messageId, traceId, autoReplySignal);
+        await markTerminal('auto-reply');
+        return true;
+      }
+
       // STEP 7: availability-agent routing (Phase 5). Runs BEFORE the
       // legacy lastNudgeThreadId Slack-alert path so post-phase-5
       // nudge replies — which have a TherapistConversation row —
@@ -292,7 +342,11 @@ export async function processMessage(messageId: string, traceId: string): Promis
       const earlyConvoMatch = await findMatchingTherapistConversation(email);
       if (earlyConvoMatch) {
         const handled = await routeToAvailabilityAgent(email, earlyConvoMatch, messageId, traceId);
-        if (handled) return true;
+        if (handled) {
+          // Every handled branch of the routing marked the message processed.
+          clearUnread = true;
+          return true;
+        }
       }
 
       // STEP 8: legacy nudge-reply detection (threadId match).
@@ -313,7 +367,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
             reason: 'thread-id-match',
             traceId,
           });
-          await markMessageProcessed(messageId, 'therapist-nudge-reply');
+          await markTerminal('therapist-nudge-reply');
           return true;
         }
       }
@@ -322,7 +376,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
       if (await isWeeklyMailingReply(email)) {
         const handled = await processWeeklyMailingReply(email, messageId, traceId);
         if (handled) {
-          await markMessageProcessed(messageId, 'weekly-mailing-reply');
+          await markTerminal('weekly-mailing-reply');
           return true;
         }
         // Fall through to normal appointment matching if not handled.
@@ -349,7 +403,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
             reason: 'sender-fallback',
             traceId,
           });
-          await markMessageProcessed(messageId, 'therapist-nudge-reply');
+          await markTerminal('therapist-nudge-reply');
           return true;
         }
 
@@ -359,7 +413,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
         // directs them to the web app.
         const handledAsInvitationReply = await tryHandleInvitationReply(email, traceId);
         if (handledAsInvitationReply) {
-          await markMessageProcessed(messageId, 'invitation-reply');
+          await markTerminal('invitation-reply');
           return true;
         }
 
@@ -375,7 +429,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
           );
 
           await Promise.all([
-            markMessageProcessed(messageId, 'unmatched-abandoned'),
+            markTerminal('unmatched-abandoned'),
             abandonUnmatched(messageId),
           ]);
 
@@ -410,92 +464,39 @@ export async function processMessage(messageId: string, traceId: string): Promis
         'Found matching appointment request',
       );
 
-      // STEP 11: classify the inbound (used by both the closure
-      // auto-dismiss gate and the agent path below — pass via
-      // precomputedClassification so the agent doesn't redo the work).
+      // STEP 11: human-control pre-check. A paused appointment's reply goes
+      // straight to the agent (which logs it for the admin without a turn);
+      // closure auto-dismiss and divergence tracking run when it is
+      // replayed after release, not while paused.
+      const paused = await isUnderHumanControl(appointmentRequest.id);
+
+      // Classify the inbound (used by both the closure auto-dismiss gate
+      // and the agent path below — pass via precomputedClassification so
+      // the agent doesn't redo the work). Quoted history is stripped first:
+      // the classifier must react to what the sender wrote, not to our own
+      // earlier wording quoted underneath it.
       const earlyClassification = classifyEmail(
-        email.body,
+        stripQuotedReply(email.body),
         email.from,
         appointmentRequest.therapistEmail,
         appointmentRequest.userEmail,
         email.autoSubmitted,
       );
 
-      // STEP 12: closure auto-dismiss (gated on not-auto-reply).
-      await maybeDismissClosureRecommendation({
-        appointmentId: appointmentRequest.id,
-        email,
-        classification: earlyClassification,
-        messageId,
-        traceId,
-      });
-
-      // STEP 13: thread-divergence detection. Fetch all active
-      // appointments for this user/therapist so the detector can
-      // check for cross-thread issues.
-      // Case-insensitive (E14): stored emails keep the case the user
-      // typed; an exact match came back empty and silently disabled the
-      // cross-appointment divergence checks.
-      const allActiveAppointments = await prisma.appointmentRequest.findMany({
-        where: {
-          OR: senderIsPartyWhere(email.from),
-          status: { in: [...PRE_BOOKING_STATUSES, 'confirmed'] },
-        },
-        select: {
-          id: true,
-          userEmail: true,
-          therapistEmail: true,
-          therapistName: true,
-          therapistId: true,
-          therapistHandle: true,
-          gmailThreadId: true,
-          therapistGmailThreadId: true,
-          initialMessageId: true,
-          status: true,
-          createdAt: true,
-        },
-      });
-
-      const emailContext: EmailContext = {
-        threadId: email.threadId,
-        messageId: email.id,
-        from: email.from,
-        to: email.to,
-        cc: email.cc,
-        subject: email.subject,
-        body: email.body,
-        inReplyTo: email.inReplyTo,
-        references: email.references,
-        date: email.date,
-      };
-
-      // Single lookup instead of repeated .find() calls.
-      const matchedAppointment = allActiveAppointments.find((a) => a.id === appointmentRequest.id);
-
-      const appointmentContext: AppointmentContext = {
-        id: appointmentRequest.id,
-        userEmail: appointmentRequest.userEmail,
-        therapistEmail: appointmentRequest.therapistEmail,
-        therapistName: matchedAppointment?.therapistName || '',
-        gmailThreadId: matchedAppointment?.gmailThreadId || null,
-        therapistGmailThreadId: matchedAppointment?.therapistGmailThreadId || null,
-        initialMessageId: matchedAppointment?.initialMessageId || null,
-        status: matchedAppointment?.status || 'pending',
-        createdAt: matchedAppointment?.createdAt || new Date(),
-        therapistId: matchedAppointment?.therapistId ?? null,
-        therapistHandle: matchedAppointment?.therapistHandle ?? null,
-      };
-
-      const divergenceOutcome = await checkAndHandleDivergence({
-        appointmentId: appointmentRequest.id,
-        email: emailContext,
-        appointmentContext,
-        allActiveAppointments: allActiveAppointments as AppointmentContext[],
-        messageId,
-        traceId,
-      });
-      if (divergenceOutcome !== 'proceed') {
-        return false;
+      if (!paused) {
+        const divergenceOutcome = await runPreAgentChecks({
+          email,
+          appointmentRequest,
+          classification: earlyClassification,
+          messageId,
+          traceId,
+        });
+        if (divergenceOutcome === 'abandoned') {
+          clearUnread = true; // marked processed by the divergence module
+        }
+        if (divergenceOutcome !== 'proceed') {
+          return false;
+        }
       }
 
       // STEP 14: fetch thread history for full agent context.
@@ -532,8 +533,8 @@ export async function processMessage(messageId: string, traceId: string): Promis
         earlyClassification,
       );
 
-      // STEP 16: success path — mark processed, clear failure record,
-      // remove UNREAD label.
+      // STEP 16: success path — mark processed, clear failure record
+      // (the UNREAD label is removed in `finally`).
       //
       // EXCEPTION: when the agent paused itself because human control
       // is on (`loggedWhilePaused: true`), we deliberately DON'T mark
@@ -558,37 +559,16 @@ export async function processMessage(messageId: string, traceId: string): Promis
           { traceId, messageId, appointmentId: appointmentRequest.id },
           'Skipping markMessageProcessed — message logged while paused, will be re-delivered after human-control release',
         );
+        // Remember it so later polls skip it (no Gmail fetch, no repeated
+        // audit event / Slack alert) until control is released.
+        await recordPausedDeferral(messageId, appointmentRequest.id);
       }
       await clearProcessingFailure(messageId);
 
-      // Removing the UNREAD label is a cosmetic post-success step.
-      // The agent has already finished its work and the dedup row is
-      // committed (`markMessageProcessed` above) — letting an error
-      // here propagate would trigger the outer catch's failure
-      // tracking + Slack alert for a message that processed fine.
-      // Specifically: 404 here means the user deleted the message
-      // between processing and label removal; any other error means
-      // a transient Gmail glitch. Either way, swallow.
-      const gmailClient = await emailOAuthService.ensureGmailClient();
-      try {
-        await gmailClient.users.messages.modify({
-          userId: 'me',
-          id: messageId,
-          requestBody: { removeLabelIds: ['UNREAD'] },
-        });
-      } catch (err) {
-        if (isGmail404(err)) {
-          logger.info(
-            { traceId, messageId },
-            'Message deleted between processing and UNREAD-label removal — agent work already committed, skipping label modify',
-          );
-        } else {
-          logger.warn(
-            { traceId, messageId, err },
-            'Failed to remove UNREAD label after successful processing (non-fatal — agent work already committed)',
-          );
-        }
-      }
+      // The agent path has always cleared UNREAD, including for paused and
+      // deferred messages (the release replay and the scanner work from the
+      // DB dedup table, not the label).
+      clearUnread = true;
 
       return true;
     } catch (error) {
@@ -617,9 +597,6 @@ export async function processMessage(messageId: string, traceId: string): Promis
           { traceId, messageId, errorMessage, errorName: error instanceof Error ? error.name : typeof error },
           'Transient infrastructure failure during processMessage — deferring without counting against the abandon budget',
         );
-        if (usingDatabaseFallback) {
-          await releaseDbLock(messageId, traceId);
-        }
         if (await shouldEmitProcessingAlert(messageId)) {
           slackNotificationService.sendAlert({
             title: 'Message Processing Deferred (infrastructure)',
@@ -655,11 +632,6 @@ export async function processMessage(messageId: string, traceId: string): Promis
         `Failed to process message (attempt ${attempts}/${MAX_PROCESSING_FAILURES})`,
       );
 
-      // Release the DB-fallback lock so the scanner can retry.
-      if (usingDatabaseFallback) {
-        await releaseDbLock(messageId, traceId);
-      }
-
       // First-failure visibility: send one Slack alert per (messageId,
       // dedup window) with the actual error text so admins see the
       // real cause immediately instead of waiting for 3 silent hours.
@@ -688,7 +660,7 @@ export async function processMessage(messageId: string, traceId: string): Promis
         );
 
         try {
-          await markMessageProcessed(messageId, 'processing-failed-abandoned');
+          await markTerminal('processing-failed-abandoned');
           await markFailureAbandoned(messageId);
         } catch (markErr) {
           logger.error({ traceId, messageId, markErr }, 'Failed to mark abandoned message as processed');
@@ -712,26 +684,174 @@ export async function processMessage(messageId: string, traceId: string): Promis
 
       return false;
     } finally {
-      // Only manage Redis lock if not using DB fallback.
-      if (!usingDatabaseFallback && lockRenewal) {
-        lockRenewal.stop();
+      lockRenewal.stop();
 
-        // Only attempt release if we still own the lock — prevents
-        // race condition where renewal detects lock loss but finally
-        // block still tries to release.
-        if (!lockRenewal.isLockValid()) {
-          logger.info(
-            { traceId, messageId },
-            'Lock no longer owned (detected by renewal) - skipping release',
-          );
-        } else {
-          await releaseLock(lockKey, traceId, `email-processing:${messageId}`);
-        }
+      if (clearUnread && hadUnreadLabel) {
+        await removeUnreadLabel(messageId, traceId);
       }
-      // Note: DB-fallback lock (processedGmailMessage row) is NOT
-      // deleted on success — it serves as the permanent deduplication
-      // record. Only deleted in the failure path above via releaseDbLock.
+
+      // Only attempt release if we still own the lock — prevents
+      // race condition where renewal detects lock loss but finally
+      // block still tries to release.
+      if (!lockRenewal.isLockValid()) {
+        logger.info(
+          { traceId, messageId },
+          'Lock no longer owned (detected by renewal) - skipping release',
+        );
+      } else if (dbLeaseToken !== null) {
+        // The DB lease is released on EVERY return (success included): it
+        // is not the dedup record — markMessageProcessed wrote that for
+        // terminal outcomes, and non-terminal ones must stay retryable.
+        await releaseDbLock(messageId, dbLeaseToken, traceId);
+      } else {
+        await releaseLock(lockKey, traceId, `email-processing:${messageId}`);
+      }
     }
   });
 }
 
+/**
+ * Clear the UNREAD label of a message that reached a terminal state. The
+ * backup poll's first pass lists only unread inbox mail (a fixed number
+ * of slots); a message that will never be processed again must not keep
+ * occupying one. Cosmetic and best effort — the dedup record is already
+ * committed, so a failure here must not reach the failure-tracking path.
+ * 404 means the message was deleted in the meantime.
+ */
+async function removeUnreadLabel(messageId: string, traceId: string): Promise<void> {
+  try {
+    const gmailClient = await emailOAuthService.ensureGmailClient();
+    await gmailClient.users.messages.modify({
+      userId: 'me',
+      id: messageId,
+      requestBody: { removeLabelIds: ['UNREAD'] },
+    });
+  } catch (err) {
+    if (isGmail404(err)) {
+      logger.info({ traceId, messageId }, 'Message deleted before UNREAD-label removal — skipping label modify');
+    } else {
+      logger.warn({ traceId, messageId, err }, 'Failed to remove UNREAD label (non-fatal — outcome already recorded)');
+    }
+  }
+}
+
+/**
+ * Record an auto-reply without an agent turn. When it belongs to an
+ * appointment, raise a low-severity, per-appointment-deduped alert so an
+ * admin still learns that (say) the therapist is away.
+ */
+async function handleAutoReply(
+  email: EmailMessage,
+  messageId: string,
+  traceId: string,
+  signal: string,
+): Promise<void> {
+  logger.info(
+    { traceId, messageId, from: email.from, subject: email.subject, signal, autoSubmitted: email.autoSubmitted },
+    'Auto-submitted / out-of-office reply — recorded without an agent turn',
+  );
+  try {
+    const appointment = await findMatchingAppointmentRequest(email);
+    if (!appointment) return;
+    slackNotificationService.sendAlert({
+      title: 'Out-of-office reply received',
+      severity: 'low',
+      appointmentId: appointment.id,
+      dedupGroup: 'auto-reply',
+      details:
+        `An automatic reply arrived from the ${email.from.toLowerCase() === appointment.therapistEmail.toLowerCase() ? 'therapist' : 'client'}. ` +
+        'It was not passed to the agent (no reply is sent to autoresponders).',
+    }).catch((err) => logger.warn({ traceId, err }, 'Failed to send auto-reply Slack alert'));
+  } catch (err) {
+    logger.warn({ traceId, messageId, err }, 'Could not look up the appointment for an auto-reply (non-fatal)');
+  }
+}
+
+/**
+ * STEPS 12-13 for an appointment that is NOT under human control:
+ * closure auto-dismiss, then thread-divergence detection. Returns the
+ * divergence outcome ('proceed' to continue to the agent).
+ */
+async function runPreAgentChecks(args: {
+  email: EmailMessage;
+  appointmentRequest: { id: string; userEmail: string; therapistEmail: string };
+  classification: ReturnType<typeof classifyEmail>;
+  messageId: string;
+  traceId: string;
+}): Promise<DivergenceOutcome> {
+  const { email, appointmentRequest, classification: earlyClassification, messageId, traceId } = args;
+
+  // STEP 12: closure auto-dismiss (gated on not-auto-reply).
+  await maybeDismissClosureRecommendation({
+    appointmentId: appointmentRequest.id,
+    email,
+    classification: earlyClassification,
+    messageId,
+    traceId,
+  });
+
+  // STEP 13: thread-divergence detection. Fetch all active
+  // appointments for this user/therapist so the detector can
+  // check for cross-thread issues.
+  // Case-insensitive (E14): stored emails keep the case the user
+  // typed; an exact match came back empty and silently disabled the
+  // cross-appointment divergence checks.
+  const allActiveAppointments = await prisma.appointmentRequest.findMany({
+    where: {
+      OR: senderIsPartyWhere(email.from),
+      status: { in: [...PRE_BOOKING_STATUSES, 'confirmed'] },
+    },
+    select: {
+      id: true,
+      userEmail: true,
+      therapistEmail: true,
+      therapistName: true,
+      therapistId: true,
+      therapistHandle: true,
+      gmailThreadId: true,
+      therapistGmailThreadId: true,
+      initialMessageId: true,
+      status: true,
+      createdAt: true,
+    },
+  });
+
+  const emailContext: EmailContext = {
+    threadId: email.threadId,
+    messageId: email.id,
+    from: email.from,
+    to: email.to,
+    cc: email.cc,
+    subject: email.subject,
+    body: email.body,
+    inReplyTo: email.inReplyTo,
+    references: email.references,
+    date: email.date,
+  };
+
+  // Single lookup instead of repeated .find() calls.
+  const matchedAppointment = allActiveAppointments.find((a) => a.id === appointmentRequest.id);
+
+  const appointmentContext: AppointmentContext = {
+    id: appointmentRequest.id,
+    userEmail: appointmentRequest.userEmail,
+    therapistEmail: appointmentRequest.therapistEmail,
+    therapistName: matchedAppointment?.therapistName || '',
+    gmailThreadId: matchedAppointment?.gmailThreadId || null,
+    therapistGmailThreadId: matchedAppointment?.therapistGmailThreadId || null,
+    initialMessageId: matchedAppointment?.initialMessageId || null,
+    status: matchedAppointment?.status || 'pending',
+    createdAt: matchedAppointment?.createdAt || new Date(),
+    therapistId: matchedAppointment?.therapistId ?? null,
+    therapistHandle: matchedAppointment?.therapistHandle ?? null,
+  };
+
+  return checkAndHandleDivergence({
+    appointmentId: appointmentRequest.id,
+    email: emailContext,
+    appointmentContext,
+    allActiveAppointments: allActiveAppointments as AppointmentContext[],
+    messageId,
+    traceId,
+  });
+}

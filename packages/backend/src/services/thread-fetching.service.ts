@@ -1,7 +1,7 @@
 import { google, gmail_v1 } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { logger } from '../utils/logger';
-import { EMAIL, THREAD_LIMITS } from '../constants';
+import { EMAIL, THREAD_LIMITS, TIMEOUTS } from '../constants';
 import { truncateText } from '../utils/email-encoding';
 import {
   extractEmail,
@@ -13,8 +13,10 @@ import {
   createOAuth2Client,
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
+  refreshAccessToken,
 } from '../utils/gmail-auth';
 import { isGmail404 } from '../utils/gmail-errors';
+import { stripQuotedReply } from '../core/email/inbound/quoted-text';
 
 /**
  * Escape context markers in email content to prevent AI confusion
@@ -74,7 +76,12 @@ export interface EmailThread {
 export class ThreadFetchingService {
   private gmail: gmail_v1.Gmail | null = null;
   private oauth2Client: OAuth2Client | null = null;
-  private schedulerEmail: string = EMAIL.FROM_ADDRESS;
+  // Single source of truth for "our address" (EMAIL_FROM_ADDRESS). The
+  // Gmail profile used to override it here, so the thread labels, the
+  // own-mail skip and divergence detection could each disagree about who
+  // "we" are; a profile mismatch is now a boot-time warning instead
+  // (emailOAuthService.verifySchedulerAddress).
+  private readonly schedulerEmail: string = EMAIL.FROM_ADDRESS;
 
   constructor() {
     this.initializeGmailClient();
@@ -89,17 +96,10 @@ export class ThreadFetchingService {
       if (!creds) return;
 
       this.oauth2Client = createOAuth2Client(creds.credentials, creds.token);
-      this.gmail = google.gmail({ version: 'v1', auth: this.oauth2Client });
-
-      // Get the actual scheduler email address
-      try {
-        const profile = await this.gmail.users.getProfile({ userId: 'me' });
-        if (profile.data.emailAddress) {
-          this.schedulerEmail = profile.data.emailAddress;
-        }
-      } catch {
-        // Use default if profile fetch fails
-      }
+      // Explicit timeout: gaxios has none by default, and a hung thread
+      // fetch inside inbound processing held the message lock (renewed
+      // forever) and stalled the backup poller until restart.
+      this.gmail = google.gmail({ version: 'v1', auth: this.oauth2Client, timeout: TIMEOUTS.GMAIL_API_MS });
 
       logger.info({ schedulerEmail: this.schedulerEmail }, 'ThreadFetchingService: Gmail client initialized');
     } catch (error) {
@@ -154,7 +154,7 @@ export class ThreadFetchingService {
           if (this.oauth2Client) {
             if (lockValue) {
               try {
-                await this.oauth2Client.getAccessToken();
+                await refreshAccessToken(this.oauth2Client, 'thread-fetch-token-refresh');
               } finally {
                 await releaseTokenRefreshLock(lockValue);
               }
@@ -209,7 +209,8 @@ export class ThreadFetchingService {
       return null;
     }
 
-    // Large thread memory protection: cap message count
+    // Large thread memory protection: cap message count (Gmail returns a
+    // thread's messages oldest first, so the tail is the newest).
     let gmailMessages = rawMessages;
     const originalCount = gmailMessages.length;
 
@@ -221,32 +222,41 @@ export class ThreadFetchingService {
       gmailMessages = gmailMessages.slice(-THREAD_LIMITS.KEEP_RECENT_MESSAGES);
     }
 
-    const messages: ThreadMessage[] = [];
-    const participantEmails = new Set<string>();
-    let totalBodySize = 0;
-
+    const parsedMessages: ThreadMessage[] = [];
     for (const gmailMessage of gmailMessages) {
       const parsed = this.parseGmailMessage(gmailMessage);
-      if (parsed) {
-        // Track total body size to prevent memory exhaustion
-        const bodySize = Buffer.byteLength(parsed.body, 'utf-8');
-        if (totalBodySize + bodySize > THREAD_LIMITS.MAX_THREAD_BODY_SIZE) {
-          logger.warn(
-            { traceId, threadId, totalBodySize, limit: THREAD_LIMITS.MAX_THREAD_BODY_SIZE },
-            'Thread body size limit reached - truncating older messages'
-          );
-          break;
-        }
-        totalBodySize += bodySize;
-
-        messages.push(parsed);
-        if (parsed.from) participantEmails.add(parsed.from.toLowerCase());
-        if (parsed.to) participantEmails.add(parsed.to.toLowerCase());
-      }
+      if (parsed) parsedMessages.push(parsed);
     }
 
     // Sort messages chronologically (oldest first)
-    messages.sort((a, b) => a.date.getTime() - b.date.getTime());
+    parsedMessages.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    // Body-size budget, spent NEWEST first: when a thread is too big it is
+    // the oldest messages that are dropped, never the latest replies the
+    // agent is answering. (This loop used to walk oldest-first and stop at
+    // the limit, silently discarding the newest messages.) The newest
+    // message is always kept.
+    const kept: ThreadMessage[] = [];
+    let totalBodySize = 0;
+    for (let i = parsedMessages.length - 1; i >= 0; i--) {
+      const bodySize = Buffer.byteLength(parsedMessages[i].body, 'utf-8');
+      if (kept.length > 0 && totalBodySize + bodySize > THREAD_LIMITS.MAX_THREAD_BODY_SIZE) {
+        logger.warn(
+          { traceId, threadId, totalBodySize, limit: THREAD_LIMITS.MAX_THREAD_BODY_SIZE, dropped: i + 1 },
+          'Thread body size limit reached - dropping older messages'
+        );
+        break;
+      }
+      totalBodySize += bodySize;
+      kept.push(parsedMessages[i]);
+    }
+    const messages = kept.reverse();
+
+    const participantEmails = new Set<string>();
+    for (const message of messages) {
+      if (message.from) participantEmails.add(message.from.toLowerCase());
+      if (message.to) participantEmails.add(message.to.toLowerCase());
+    }
 
     const thread: EmailThread = {
       threadId,
@@ -357,9 +367,11 @@ export class ThreadFetchingService {
     // and the inbound message agree. Walks the full MIME tree (replies with
     // attachments / inline signature images nest the text parts) and
     // decodes each part with the charset from its Content-Type header.
+    // Quoted history is stripped: every quoted message is already its own
+    // entry in the thread context.
     let body = '';
     try {
-      body = extractBodyFromPayload(message.payload).body;
+      body = stripQuotedReply(extractBodyFromPayload(message.payload).body);
     } catch (err) {
       logger.warn({ messageId: message.id, err }, 'Failed to decode message body');
       body = '[Unable to decode message body]';
