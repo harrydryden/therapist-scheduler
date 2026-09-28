@@ -125,17 +125,16 @@ beforeEach(() => {
 
 function recordForStage(stage: string | null) {
   // Returns the shape `findUnique` produces with the new select:
-  // `{ conversationState, checkpointStage, updatedAt }`. The helper
-  // reads `checkpointStage` (denormalised column) directly to
-  // detect stage changes — the parsed state's `checkpoint` field
-  // is stripped by Zod, so we can't use it for this comparison.
+  // `{ conversationState, checkpointStage, conversationVersion }`. The
+  // helper reads `checkpointStage` (denormalised column) directly to
+  // detect stage changes, and CASes on `conversationVersion`.
   return {
     conversationState: {
       systemPrompt: '',
       messages: [],
     },
     checkpointStage: stage,
-    updatedAt: new Date(),
+    conversationVersion: 3,
   };
 }
 
@@ -252,7 +251,7 @@ describe('applyCheckpointUpdate — one chase per stage', () => {
         // cast loosely — we don't care about the deeper validation
         // here, just the column-write behaviour.
         } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
-        new Date(), // expectedUpdatedAt — exercises the optimistic-locked branch
+        3, // expectedVersion — exercises the optimistic-locked branch
       );
 
       expect(capturedUpdates).toHaveLength(1);
@@ -279,7 +278,7 @@ describe('applyCheckpointUpdate — one chase per stage', () => {
             lastSuccessfulAction: null,
           },
         } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
-        new Date(),
+        3,
       );
 
       expect(capturedUpdates).toHaveLength(1);
@@ -289,8 +288,8 @@ describe('applyCheckpointUpdate — one chase per stage', () => {
     });
 
     it('clears chase fields on the legacy (no-version-check) branch too', async () => {
-      // startScheduling calls storeConversationState WITHOUT an
-      // expectedUpdatedAt — the "legacy / initial create" path
+      // A first write calls storeConversationState WITHOUT an
+      // expectedVersion — the "legacy / initial create" path
       // that uses `update` instead of `updateMany`. Reset still
       // applies (defensive — usually no chase to reset at this
       // stage, but the invariant should hold uniformly).
@@ -308,7 +307,7 @@ describe('applyCheckpointUpdate — one chase per stage', () => {
             lastSuccessfulAction: null,
           },
         } as unknown as Parameters<typeof aiConversationService.storeConversationState>[1],
-        // No expectedUpdatedAt — legacy branch.
+        // No expectedVersion — legacy branch.
       );
 
       expect(capturedUpdates).toHaveLength(1);

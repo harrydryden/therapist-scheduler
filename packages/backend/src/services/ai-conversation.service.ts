@@ -41,6 +41,36 @@ import type { ConversationMessage } from './scheduling-context.service';
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
+/**
+ * What a conversation-state writer persists: the message log plus the
+ * optional checkpoint / facts / responseTracking carried by
+ * ConversationState. `systemPrompt` is optional because FIX #20 stores it
+ * as '' (it's rebuilt every turn).
+ */
+export type StorableConversationState = Omit<ConversationState, 'systemPrompt' | 'messages'> & {
+  systemPrompt?: string;
+  messages: ConversationMessage[];
+};
+
+/**
+ * Serialise a conversation state for the `conversationState` Json columns.
+ *
+ * Returns both the JSON text (for size checks / extractConversationMeta)
+ * and a plain JSON OBJECT for the column. The object — never the string —
+ * must be what's written: handing Prisma `JSON.stringify(state)` for a
+ * Json column stores a jsonb string scalar (`jsonb_typeof = 'string'`),
+ * which breaks every SQL-level jsonb path writer (lifecycle/audit.ts's
+ * `jsonb_set` fails with `22023 cannot set path in scalar`, silently
+ * dropping audit notes) and forces readers into `#>> '{}'` unwrap hacks.
+ * Round-tripping through JSON also guarantees the value is plain JSON
+ * (no Date instances / undefined) and matches the text the denormalised
+ * columns are derived from.
+ */
+function serialiseConversationState(state: object): { json: string; value: Prisma.InputJsonObject } {
+  const json = JSON.stringify(state);
+  return { json, value: JSON.parse(json) as Prisma.InputJsonObject };
+}
+
 /** Truncate message content to prevent state size bombs */
 export function truncateMessageContent(content: string): string {
   const MAX_LENGTH = CONVERSATION_LIMITS.MAX_MESSAGE_LENGTH;
@@ -57,23 +87,37 @@ export class AIConversationService {
   }
 
   /**
-   * Store conversation state in database with optimistic locking
-   * Uses updatedAt as version check to prevent concurrent overwrites
-   * Automatically trims state if it exceeds size limits
+   * Store conversation state in database with optimistic locking.
+   *
+   * The version is the dedicated `conversationVersion` counter, NOT
+   * `updatedAt`: every other write to the row (the dispatch human-control
+   * gate, send.ts's outbound stamps, lifecycle transitions) bumps
+   * `@updatedAt`, so an updatedAt CAS made the agent's end-of-turn save
+   * conflict with its own tool calls. Only conversation-state writers
+   * touch `conversationVersion`, and each one increments it.
+   *
+   * Automatically trims state if it exceeds size limits.
    *
    * FIX ST2: Atomic state storage with activity recording
    * Previously, recordActivity was called separately which could succeed
    * while storeConversationState failed, creating inconsistent data.
    * Now includes activity update in the same atomic operation.
+   *
+   * @param expectedVersion - the `conversationVersion` the caller read.
+   *   When supplied the write only lands if the row still carries it
+   *   (ConcurrentModificationError otherwise). Omit only for a first
+   *   write where no version has been read.
+   * @returns the row's new `conversationVersion`, so a caller that saves
+   *   more than once in a turn can chain its CAS without a re-read.
    */
   async storeConversationState(
     appointmentRequestId: string,
-    state: { systemPrompt?: string; messages: ConversationMessage[] },
-    expectedUpdatedAt?: Date
-  ): Promise<void> {
+    state: StorableConversationState,
+    expectedVersion?: number
+  ): Promise<number> {
     // Trim state if needed to prevent unbounded growth
     const trimmedState = this.trimConversationState(state);
-    const stateJson = JSON.stringify(trimmedState);
+    const { json: stateJson, value: stateValue } = serialiseConversationState(trimmedState);
     const now = new Date();
     // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries.
     // checkpointAt was added to drop the chase candidate query's conversationState fetch.
@@ -107,7 +151,9 @@ export class AIConversationService {
       checkpointStage,
     );
 
-    if (expectedUpdatedAt) {
+    // `!== undefined`, not truthiness: version 0 is a real version (every
+    // row starts there).
+    if (expectedVersion !== undefined) {
       // Use optimistic locking - only update if version matches.
       // FIX ST2: Include activity recording in same atomic operation.
       //
@@ -127,10 +173,11 @@ export class AIConversationService {
           const result = await tx.appointmentRequest.updateMany({
             where: {
               id: appointmentRequestId,
-              updatedAt: expectedUpdatedAt,
+              conversationVersion: expectedVersion,
             },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
+              conversationVersion: { increment: 1 },
               updatedAt: now,
               // FIX ST2: Atomic activity recording - no separate call needed
               lastActivityAt: now,
@@ -145,31 +192,38 @@ export class AIConversationService {
           });
 
           if (result.count === 0) {
-            // Version mismatch - another process modified the state.
-            // Use the typed error so callers can `instanceof`-check rather
-            // than string-matching the message (fragile across rephrasings).
+            // Version mismatch - another conversation-state writer got
+            // there first. Use the typed error so callers can
+            // `instanceof`-check rather than string-matching the message
+            // (fragile across rephrasings).
             throw new ConcurrentModificationError(appointmentRequestId);
           }
 
           await tx.appointmentConversation.upsert({
             where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-            update: { conversationState: stateJson },
+            create: { appointmentId: appointmentRequestId, conversationState: stateValue },
+            update: { conversationState: stateValue },
           });
         }),
         { appointmentRequestId, op: 'storeConversationState' },
         (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
       );
+      // The CAS matched `expectedVersion` and incremented it under the
+      // row lock, so the new version is exactly one higher.
+      return expectedVersion + 1;
     } else {
-      // Legacy call without version check (for initial state creation).
+      // Call without a version check (a first write where the caller has
+      // no version to compare against). Still increments the version so
+      // any reader holding the old one detects this write.
       // FIX ST2: Include activity recording in same atomic operation.
       // Phase 3a dual-write applied as in the optimistic-locked branch.
-      await withSerializationRetry(
+      return withSerializationRetry(
         () => prisma.$transaction(async (tx) => {
-          await tx.appointmentRequest.update({
+          const updated = await tx.appointmentRequest.update({
             where: { id: appointmentRequestId },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
+              conversationVersion: { increment: 1 },
               updatedAt: now,
               // FIX ST2: Atomic activity recording
               lastActivityAt: now,
@@ -181,14 +235,15 @@ export class AIConversationService {
               // of this method for the rationale.
               ...chaseResetFields,
             },
-            select: { id: true },
+            select: { id: true, conversationVersion: true },
           });
 
           await tx.appointmentConversation.upsert({
             where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-            update: { conversationState: stateJson },
+            create: { appointmentId: appointmentRequestId, conversationState: stateValue },
+            update: { conversationState: stateValue },
           });
+          return updated?.conversationVersion;
         }),
         { appointmentRequestId, op: 'storeConversationState:init' },
         (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
@@ -235,12 +290,11 @@ export class AIConversationService {
         where: { id: appointmentRequestId },
         // checkpointStage is the denormalised column kept in sync
         // with `conversationState.checkpoint.stage` (see this very
-        // function's docstring for the invariant). We use it
-        // instead of re-parsing the conversation state because the
-        // Zod schema in `parseConversationState` doesn't include
-        // the `checkpoint` field — it strips it on the way out.
-        // Reading the column directly avoids that hazard.
-        select: { conversationState: true, checkpointStage: true, updatedAt: true },
+        // function's docstring for the invariant). The chase-reset
+        // rule compares against the column because that's what the
+        // chase scheduler reads. conversationVersion is the CAS token
+        // (see storeConversationState).
+        select: { conversationState: true, checkpointStage: true, conversationVersion: true },
       });
       if (!record) {
         return { applied: false, stage: null };
@@ -264,7 +318,7 @@ export class AIConversationService {
       const oldStage = record.checkpointStage;
 
       state.checkpoint = mutate(state.checkpoint ?? null);
-      const stateJson = JSON.stringify(state);
+      const { json: stateJson, value: stateValue } = serialiseConversationState(state);
       const { messageCount, checkpointStage, checkpointAt } = extractConversationMeta(stateJson);
 
       const now = new Date();
@@ -292,25 +346,28 @@ export class AIConversationService {
           const result = await tx.appointmentRequest.updateMany({
             where: {
               id: appointmentRequestId,
-              updatedAt: record.updatedAt,
+              conversationVersion: record.conversationVersion,
               ...options?.extraWhere,
             },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
               messageCount,
               checkpointStage,
               checkpointAt,
               updatedAt: now,
               ...chaseResetFields,
               ...options?.extraUpdates,
+              // After extraUpdates so a caller can't accidentally clobber
+              // the version bump.
+              conversationVersion: { increment: 1 },
             },
           });
 
           if (result.count === 1) {
             await tx.appointmentConversation.upsert({
               where: { appointmentId: appointmentRequestId },
-              create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-              update: { conversationState: stateJson },
+              create: { appointmentId: appointmentRequestId, conversationState: stateValue },
+              update: { conversationState: stateValue },
             });
           }
 
@@ -403,7 +460,7 @@ export class AIConversationService {
     for (let attempt = 0; attempt < 2; attempt++) {
       const row = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
-        select: { conversationState: true, updatedAt: true },
+        select: { conversationState: true, conversationVersion: true },
       });
       if (!row?.conversationState) return false;
       const state = parseConversationState(row.conversationState);
@@ -411,7 +468,7 @@ export class AIConversationService {
 
       state.messages.push(message);
       try {
-        await this.storeConversationState(appointmentRequestId, state, row.updatedAt);
+        await this.storeConversationState(appointmentRequestId, state, row.conversationVersion);
         return true;
       } catch (err) {
         if (err instanceof ConcurrentModificationError && attempt === 0) {
@@ -434,8 +491,8 @@ export class AIConversationService {
    */
   async storeConversationStateWithRetry(
     appointmentRequestId: string,
-    state: { systemPrompt: string; messages: ConversationMessage[] },
-    expectedUpdatedAt: Date | undefined,
+    state: StorableConversationState,
+    expectedVersion: number | undefined,
     executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>
   ): Promise<{ success: boolean; retriesUsed: number }> {
     const MAX_RETRIES = 3;
@@ -443,10 +500,13 @@ export class AIConversationService {
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        await this.storeConversationState(appointmentRequestId, state, expectedUpdatedAt);
+        await this.storeConversationState(appointmentRequestId, state, expectedVersion);
         return { success: true, retriesUsed: attempt };
       } catch (error) {
-        // Don't retry optimistic locking conflicts - they indicate a real conflict
+        // Don't retry optimistic locking conflicts - they indicate a real
+        // conflict: with the dedicated conversationVersion counter, only
+        // another conversation-state writer can cause one (the turn's own
+        // tool writes no longer do).
         if (error instanceof ConcurrentModificationError) {
           logger.warn(
             { traceId: this.traceId, appointmentRequestId, attempt },
@@ -518,14 +578,16 @@ export class AIConversationService {
   }
 
   /**
-   * Get conversation state from database with version info for optimistic locking
+   * Get conversation state from database with version info for optimistic
+   * locking. `_version` is the row's `conversationVersion` — pass it back
+   * to storeConversationState as `expectedVersion`.
    */
   async getConversationState(
     appointmentRequestId: string
-  ): Promise<ConversationState & { _version: Date } | null> {
+  ): Promise<ConversationState & { _version: number } | null> {
     const request = await prisma.appointmentRequest.findUnique({
       where: { id: appointmentRequestId },
-      select: { conversationState: true, updatedAt: true },
+      select: { conversationState: true, conversationVersion: true },
     });
 
     if (!request?.conversationState) {
@@ -539,7 +601,7 @@ export class AIConversationService {
 
     return {
       ...parsed,
-      _version: request.updatedAt,
+      _version: request.conversationVersion,
     };
   }
 
@@ -558,10 +620,14 @@ export class AIConversationService {
    * what slots were considered, what the original ask was). At ~100 appts/day
    * this didn't bite often but it produced confusing agent behaviour on the
    * rare long thread.
+   *
+   * Only `messages` is rewritten: every other field (checkpoint, facts,
+   * responseTracking, systemPrompt, anything added later) is carried over
+   * unchanged. Returning a hand-picked `{ systemPrompt, messages }` here
+   * used to wipe the agent's checkpoint and facts on exactly the long
+   * conversations that most need them.
    */
-  trimConversationState(
-    state: { systemPrompt?: string; messages: ConversationMessage[] }
-  ): { systemPrompt?: string; messages: ConversationMessage[] } {
+  trimConversationState<T extends { messages: ConversationMessage[] }>(state: T): T {
     const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
 
     // Fast path: well below limits, return as-is. Skipping the JSON.stringify
@@ -611,7 +677,7 @@ export class AIConversationService {
     );
 
     return {
-      systemPrompt: state.systemPrompt,
+      ...state,
       messages: trimmedMessages,
     };
   }
@@ -875,11 +941,12 @@ Please answer their question helpfully and direct them to the booking URL to sch
         }
       }
 
-      // Save conversation state
+      // Save conversation state — as a JSON object, not a JSON string
+      // (see serialiseConversationState).
       await prisma.weeklyMailingInquiry.update({
         where: { id: inquiryId },
         data: {
-          conversationState: JSON.stringify(conversationState),
+          conversationState: serialiseConversationState(conversationState).value,
           updatedAt: new Date(),
         },
       });

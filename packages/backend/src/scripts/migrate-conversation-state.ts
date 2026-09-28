@@ -95,8 +95,8 @@ async function migrateConversationStates() {
       userEmail: true,
       therapistAvailability: true,
       conversationState: true,
+      conversationVersion: true,
       createdAt: true,
-      updatedAt: true,
     },
   });
 
@@ -116,9 +116,12 @@ async function migrateConversationStates() {
         continue;
       }
 
-      // Check if already fully migrated (has both checkpoint and facts)
-      const hasCheckpoint = !!(state as any).checkpoint?.stage;
-      const hasFacts = !!(state as any).facts?.updatedAt;
+      // Check if already fully migrated (has both checkpoint and facts).
+      // parseConversationState now preserves both fields (it used to
+      // strip them, so every run re-"migrated" every row and overwrote
+      // the agent's real checkpoint with an inferred one).
+      const hasCheckpoint = !!state.checkpoint?.stage;
+      const hasFacts = !!state.facts?.updatedAt;
       if (hasCheckpoint && hasFacts) {
         logger.debug({ appointmentId: appointment.id }, 'Already migrated - skipping');
         skipped++;
@@ -131,8 +134,10 @@ async function migrateConversationStates() {
       const messageCount = state.messages?.length || 0;
       const stage = inferStageFromStatus(appointment.status, hasAvailability, messageCount);
 
-      // Create checkpoint
-      const checkpoint: ConversationCheckpoint = createCheckpoint(
+      // Keep a checkpoint / facts the row already has — only fill in
+      // what's missing. Inferring over a real checkpoint would regress
+      // the stage the agent recorded.
+      const checkpoint: ConversationCheckpoint = state.checkpoint ?? createCheckpoint(
         stage,
         null, // We don't know the last action
         inferPendingAction(stage)
@@ -140,7 +145,7 @@ async function migrateConversationStates() {
 
       // Extract facts from existing messages
       const messages = state.messages || [];
-      const facts: ConversationFacts = extractFacts(
+      const facts: ConversationFacts = state.facts ?? extractFacts(
         messages,
         appointment.therapistEmail,
         appointment.userEmail
@@ -156,37 +161,54 @@ async function migrateConversationStates() {
       // Store updated state and sync denormalized columns.
       // Phase 3a dual-write: mirror conversationState to
       // appointment_conversations so a re-run of this script doesn't
-      // diverge from the new sibling table.
-      const stateJson = updatedState as object;
+      // diverge from the new sibling table. Written as a JSON object
+      // (never a JSON string — see serialiseConversationState).
+      const stateJson = JSON.parse(JSON.stringify(updatedState)) as Prisma.InputJsonObject;
       // Denormalise the checkpoint timestamp alongside stage — both
       // columns are kept in lock-step by storeConversationState /
       // applyCheckpointUpdate in normal operation; the one-shot
       // migration writes the column directly so this script's output
       // matches what the runtime writers would produce.
-      const checkpointAt = new Date(checkpoint.checkpoint_at);
+      const parsedCheckpointAt = Date.parse(checkpoint.checkpoint_at);
+      const checkpointAt = Number.isFinite(parsedCheckpointAt) ? new Date(parsedCheckpointAt) : null;
 
-      await prisma.$transaction([
-        prisma.appointmentRequest.update({
-          where: { id: appointment.id },
+      // CAS on conversationVersion like every other conversation-state
+      // writer, so running this against a live database can't clobber a
+      // concurrent agent / admin write. A lost race skips the row; a
+      // re-run picks it up.
+      const applied = await prisma.$transaction(async (tx) => {
+        const result = await tx.appointmentRequest.updateMany({
+          where: { id: appointment.id, conversationVersion: appointment.conversationVersion },
           data: {
             conversationState: stateJson,
+            conversationVersion: { increment: 1 },
             messageCount: messageCount,
-            checkpointStage: stage,
+            checkpointStage: checkpoint.stage,
             checkpointAt,
           },
-          select: { id: true },
-        }),
-        prisma.appointmentConversation.upsert({
+        });
+        if (result.count === 0) return false;
+        await tx.appointmentConversation.upsert({
           where: { appointmentId: appointment.id },
           create: { appointmentId: appointment.id, conversationState: stateJson },
           update: { conversationState: stateJson },
-        }),
-      ]);
+        });
+        return true;
+      });
+
+      if (!applied) {
+        logger.warn(
+          { appointmentId: appointment.id },
+          'Conversation state changed concurrently - skipping (re-run to migrate)'
+        );
+        skipped++;
+        continue;
+      }
 
       logger.info(
         {
           appointmentId: appointment.id,
-          stage,
+          stage: checkpoint.stage,
           factsCount: {
             proposedTimes: facts.proposedTimes.length,
             selectedTime: !!facts.selectedTime,

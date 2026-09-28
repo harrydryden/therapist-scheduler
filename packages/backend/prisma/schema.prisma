@@ -225,6 +225,20 @@ model AppointmentRequest {
   // JSON just to read one timestamp — read this column directly,
   // dropping the per-tick blob fetch entirely.
   checkpointAt      DateTime?  @map("checkpoint_at")
+
+  // Optimistic-lock version for `conversationState`. Every conversation-
+  // state writer (storeConversationState, applyCheckpointUpdate,
+  // appendConversationMessage, the one-shot migration script) CASes on
+  // this counter (`where: { id, conversationVersion: expected }`) and
+  // increments it in the same write. It deliberately replaces
+  // `updatedAt` as the CAS token: `@updatedAt` is bumped by EVERY write
+  // to the row — including the agent's own mid-turn tool writes (the
+  // dispatch human-control gate's `lastToolExecutedAt`, send.ts's
+  // outbound stamps, lifecycle transitions) — so an updatedAt-versioned
+  // end-of-turn save lost its own race on nearly every tool-using turn.
+  // Only writes that change `conversationState` touch this column.
+  conversationVersion Int @default(0) @map("conversation_version")
+
   // Agent-curated thread memory (Layer B in the agent memory design).
   // Free-form observations the agent retains via the `remember` tool —
   // preferences, constraints, prior decisions, situational context the
@@ -492,6 +506,14 @@ model TherapistConversation {
   conversationState Json? @map("conversation_state")
   memory            Json?
   messageCount      Int   @default(0) @map("message_count")
+
+  // Optimistic-lock version for `conversationState` — same contract as
+  // AppointmentRequest.conversationVersion. The availability agent's
+  // persistStateWithLock CASes on this counter; `updatedAt` can't be
+  // the token because the tool executor's human-control gate
+  // (`lastToolExecutedAt`), the Gmail thread-id stamp and the
+  // memory / mark_complete / flag writes all bump it mid-turn.
+  conversationVersion Int @default(0) @map("conversation_version")
 
   lastActivityAt DateTime @default(now()) @map("last_activity_at")
   isStale        Boolean  @default(false) @map("is_stale")

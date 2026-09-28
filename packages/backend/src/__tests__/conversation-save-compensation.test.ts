@@ -56,7 +56,7 @@ describe('storeConversationStateWithRetry: compensation on exhausted retries', (
     const result = await aiConversationService.storeConversationStateWithRetry(
       'apt-1',
       state,
-      new Date(),
+      0, // expectedVersion
       executedTools,
     );
 
@@ -79,7 +79,7 @@ describe('storeConversationStateWithRetry: compensation on exhausted retries', (
     const result = await aiConversationService.storeConversationStateWithRetry(
       'apt-1',
       state,
-      new Date(),
+      0, // expectedVersion
       executedTools,
     );
 

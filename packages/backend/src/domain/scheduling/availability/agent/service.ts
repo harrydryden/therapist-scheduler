@@ -16,12 +16,18 @@
  *     row is still active, append the inbound, run the loop, persist.
  *
  * Concurrency: processReply uses optimistic locking on
- * TherapistConversation.updatedAt. The row's updatedAt is captured
- * after the initial read and any state write checks it via updateMany
- * predicate; a lost race throws ConcurrentModificationError, which
- * the caller handles (paused-branch logs and accepts the loss; the
- * main path logs and returns success because tools have already
- * fired). startCollection wraps its writes in $transaction so the
+ * TherapistConversation.conversationVersion. The row's version is
+ * captured after the initial read and any state write checks it via
+ * updateMany predicate (and increments it); a lost race throws
+ * ConcurrentModificationError, which the caller handles (paused-branch
+ * logs and accepts the loss; the main path logs and returns success
+ * because tools have already fired). The version is deliberately NOT
+ * `updatedAt`: the tool executor's human-control gate
+ * (`lastToolExecutedAt`), the Gmail thread-id stamp, memory notes and
+ * the mark_complete / flag writes all bump `@updatedAt` mid-turn, so an
+ * updatedAt CAS made any turn with side-effecting tools in two
+ * iterations throw on its second checkpoint save and be retried
+ * forever. startCollection wraps its writes in $transaction so the
  * "abandon prior active + create new" invariant holds even under
  * concurrent ingestion retries.
  */
@@ -341,12 +347,12 @@ export class AvailabilityAgentService {
       throw new Error(`Conversation ${params.conversationId} not found`);
     }
 
-    // Capture the row's updatedAt as the optimistic-lock version. Any
-    // concurrent writer (admin manually editing the row, another inbound
-    // racing this one, supersession trigger) bumps updatedAt; our writes
-    // below use updateMany predicates on this captured value so we
-    // detect and surface the conflict rather than clobber.
-    let currentVersion: Date = conversation.updatedAt;
+    // Capture the row's conversationVersion as the optimistic-lock
+    // version. Any concurrent conversation-state writer (another inbound
+    // racing this one) bumps it; our writes below use updateMany
+    // predicates on this captured value so we detect and surface the
+    // conflict rather than clobber. Our own tool writes don't touch it.
+    let currentVersion: number = conversation.conversationVersion;
 
     // Terminal states short-circuit. Superseded specifically is the
     // one-shot-ack case: the dispatcher (phase 4) is responsible for
@@ -465,8 +471,8 @@ ${safeContent}`;
         executeToolCall: (tc, ctx) => this.executor.executeToolCall(tc, ctx),
         flagForHumanReview: (reason) => this.executor.flagForHumanReviewFromLoop(context, reason),
         // Checkpoint state before each side-effecting tool, with
-        // optimistic locking on updatedAt. If the lock fails we log
-        // and re-throw — the loop will surface the error in the
+        // optimistic locking on conversationVersion. If the lock fails
+        // we log and re-throw — the loop will surface the error in the
         // outer catch and the caller can decide what to do.
         checkpointBeforeSideEffects: async () => {
           try {
@@ -538,41 +544,47 @@ ${safeContent}`;
         conversationState: state as unknown as object,
         messageCount: state.messages.length,
         lastActivityAt: new Date(),
+        // Still a conversation-state write: bump the version so any
+        // reader holding the previous one detects it.
+        conversationVersion: { increment: 1 },
       },
       select: { id: true },
     });
   }
 
   /**
-   * Persist conversation state with optimistic locking on updatedAt.
-   * Returns the row's NEW updatedAt so the caller can chain subsequent
-   * locked writes within the same processReply call.
+   * Persist conversation state with optimistic locking on
+   * conversationVersion. Returns the row's NEW version so the caller can
+   * chain subsequent locked writes within the same processReply call.
    *
-   * Throws ConcurrentModificationError when the row's updatedAt has
-   * moved since the caller captured it — meaning another writer
-   * (admin edit, supersession trigger, or another inbound race)
-   * has touched the row in between. Callers decide whether to retry,
+   * Throws ConcurrentModificationError when the row's conversationVersion
+   * has moved since the caller captured it — meaning another
+   * conversation-state writer (another inbound race) wrote in between.
+   * Unrelated column writes (the tool executor's gate, thread-id stamp,
+   * memory, status flips) don't move it. Callers decide whether to retry,
    * surface the conflict, or accept the loss.
    */
   private async persistStateWithLock(
     conversationId: string,
     state: AvailabilityConversationStateJson,
-    expectedUpdatedAt: Date,
-  ): Promise<Date> {
+    expectedVersion: number,
+  ): Promise<number> {
     const now = new Date();
     const result = await prisma.therapistConversation.updateMany({
-      where: { id: conversationId, updatedAt: expectedUpdatedAt },
+      where: { id: conversationId, conversationVersion: expectedVersion },
       data: {
         conversationState: state as unknown as object,
         messageCount: state.messages.length,
         lastActivityAt: now,
         updatedAt: now,
+        conversationVersion: { increment: 1 },
       },
     });
     if (result.count === 0) {
       throw new ConcurrentModificationError(conversationId);
     }
-    return now;
+    // CAS matched expectedVersion and incremented it under the row lock.
+    return expectedVersion + 1;
   }
 }
 

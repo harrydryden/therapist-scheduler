@@ -81,6 +81,8 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
     // If a schema field didn't exist in the DB, the findUnique above would
     // have thrown before reaching this assertion.
     expect(found?.bookingMethod).toBeDefined();
+    // Optimistic-lock counter for conversationState (20260928 migration).
+    expect(found?.conversationVersion).toBe(0);
   });
 
   it('findMany with no select reads every column without error', async () => {
@@ -246,6 +248,19 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
         run: async () => {
           await prisma.voucherTracking.create({ data: { id: 'v@x' } });
           return prisma.voucherTracking.findMany();
+        },
+      },
+      {
+        name: 'TherapistConversation',
+        run: async () => {
+          const therapist = await prisma.therapist.create({
+            data: { odId: 'ther-od-tc', notionId: 'n-tc', email: 'tc@example.com', name: 'TC' },
+          });
+          const convo = await prisma.therapistConversation.create({
+            data: { therapistId: therapist.id, kind: 'onboarding' },
+          });
+          expect(convo.conversationVersion).toBe(0);
+          return prisma.therapistConversation.findMany();
         },
       },
       {

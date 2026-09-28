@@ -192,6 +192,126 @@ integrationDescribe('Phase 3a dual-write — appointment_conversations', () => {
     expect(mirror?.memory).toBeTruthy();
   });
 
+  // conversationState used to be written as JSON.stringify(state), which
+  // Postgres stores as a jsonb STRING scalar. That broke every jsonb path
+  // writer — addAuditMessage's jsonb_set raised `22023 cannot set path in
+  // scalar` and the lifecycle audit note was silently dropped.
+  it('stores conversationState as a jsonb object on both tables (every writer)', async () => {
+    const { aiConversationService } = await import('../../services/ai-conversation.service');
+
+    const typeofBoth = async () => {
+      const [legacy] = await prisma.$queryRaw<Array<{ t: string }>>`
+        SELECT jsonb_typeof(conversation_state) AS t FROM appointment_requests WHERE id = ${appointmentId}`;
+      const [mirror] = await prisma.$queryRaw<Array<{ t: string }>>`
+        SELECT jsonb_typeof(conversation_state) AS t FROM appointment_conversations WHERE appointment_id = ${appointmentId}`;
+      return [legacy?.t, mirror?.t];
+    };
+
+    const version = await aiConversationService.storeConversationState(appointmentId, {
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hello' }],
+      checkpoint: {
+        stage: 'awaiting_user_slot_selection',
+        lastSuccessfulAction: 'sent_availability_to_user',
+        pendingAction: null,
+        checkpoint_at: new Date().toISOString(),
+      },
+    });
+    expect(await typeofBoth()).toEqual(['object', 'object']);
+
+    await aiConversationService.storeConversationState(
+      appointmentId,
+      { systemPrompt: '', messages: [{ role: 'user', content: 'hello again' }] },
+      version,
+    );
+    expect(await typeofBoth()).toEqual(['object', 'object']);
+
+    await aiConversationService.applyCheckpointAction(appointmentId, 'sent_chase_followup');
+    expect(await typeofBoth()).toEqual(['object', 'object']);
+
+    await aiConversationService.appendConversationMessage(appointmentId, { role: 'admin', content: 'note' });
+    expect(await typeofBoth()).toEqual(['object', 'object']);
+  });
+
+  it('addAuditMessage appends after an agent state save (no 22023 on a scalar)', async () => {
+    const { aiConversationService } = await import('../../services/ai-conversation.service');
+    const { addAuditMessage } = await import('../../domain/scheduling/lifecycle/audit');
+
+    await aiConversationService.storeConversationState(appointmentId, {
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'agent turn' }],
+    });
+    await addAuditMessage(appointmentId, 'agent', 'Appointment confirmed');
+
+    const legacy = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { conversationState: true },
+    });
+    const messages = (legacy?.conversationState as { messages: Array<{ content: string }> }).messages;
+    expect(messages.map((m) => m.content)).toEqual(['agent turn', '[System: agent] Appointment confirmed']);
+  });
+
+  // L1, at the database level: the turn's own tool writes (dispatch's
+  // human-control gate, send.ts's stamps) bump @updatedAt. With updatedAt
+  // as the CAS token the end-of-turn save matched 0 rows; with
+  // conversationVersion it lands, while a real conversation writer still
+  // conflicts.
+  it('an end-of-turn save survives the turn\'s own tool writes but not a concurrent conversation write', async () => {
+    const { AIConversationService } = await import('../../services/ai-conversation.service');
+    const { ConcurrentModificationError } = await import('../../errors');
+    const svc = new AIConversationService('it-cas');
+
+    const v1 = await svc.storeConversationState(appointmentId, {
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'inbound' }],
+    });
+    const read = await svc.getConversationState(appointmentId);
+    expect(read!._version).toBe(v1);
+    const before = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { updatedAt: true },
+    });
+
+    // Pre-tool checkpoint save.
+    const { _version, ...state } = read!;
+    const v2 = await svc.storeConversationState(appointmentId, state, _version);
+    // dispatch.ts gate + send.ts stamp — real Prisma bumps updatedAt.
+    await prisma.appointmentRequest.updateMany({
+      where: { id: appointmentId, humanControlEnabled: false },
+      data: { lastToolExecutedAt: new Date() },
+    });
+    await prisma.appointmentRequest.update({
+      where: { id: appointmentId },
+      data: { lastActivityAt: new Date() },
+      select: { id: true },
+    });
+    const after = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { updatedAt: true, conversationVersion: true },
+    });
+    expect(after!.updatedAt.getTime()).toBeGreaterThan(before!.updatedAt.getTime());
+    expect(after!.conversationVersion).toBe(v2);
+
+    state.messages.push({ role: 'assistant', content: 'reply' });
+    const saved = await svc.storeConversationStateWithRetry(appointmentId, state, v2, [
+      { toolName: 'send_email', emailSentTo: 'user', timestamp: new Date().toISOString() },
+    ]);
+    expect(saved.success).toBe(true);
+
+    const row = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { notes: true, conversationVersion: true },
+    });
+    expect(row!.notes).toBeNull(); // no COMPENSATION note
+    expect(row!.conversationVersion).toBe(v2 + 1);
+
+    // A genuine concurrent conversation writer still conflicts.
+    await svc.appendConversationMessage(appointmentId, { role: 'admin', content: 'admin' });
+    await expect(svc.storeConversationState(appointmentId, state, v2 + 1)).rejects.toBeInstanceOf(
+      ConcurrentModificationError,
+    );
+  });
+
   it('cascade delete removes the mirror row when the appointment is deleted', async () => {
     const { aiConversationService } = await import('../../services/ai-conversation.service');
 

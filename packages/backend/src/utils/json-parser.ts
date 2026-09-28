@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { logger } from './logger';
-import type { ConversationState, TherapistAvailability } from '../types';
+import type { ConversationState, ResponseTracking, TherapistAvailability } from '../types';
+import type { ConversationCheckpoint, ConversationStage } from '../services/conversation-checkpoint.service';
+import type { ConversationFacts } from './conversation-facts';
 
 /**
  * PERFORMANCE FIX: Maximum JSON input sizes to prevent memory exhaustion
@@ -22,7 +24,123 @@ const conversationMessageSchema = z.object({
   timestamp: z.string().optional(),
 });
 
-const conversationStateSchema = z.object({
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Every ConversationStage, as a runtime set. Typed as a Record so the
+ * compiler rejects a missing or misspelt stage when the union changes.
+ */
+const KNOWN_CONVERSATION_STAGES: Record<ConversationStage, true> = {
+  initial_contact: true,
+  awaiting_therapist_availability: true,
+  awaiting_user_slot_selection: true,
+  awaiting_therapist_confirmation: true,
+  awaiting_meeting_link: true,
+  confirmed: true,
+  rescheduling: true,
+  cancelled: true,
+  stalled: true,
+  chased: true,
+  closure_recommended: true,
+};
+
+export function isConversationStage(value: unknown): value is ConversationStage {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(KNOWN_CONVERSATION_STAGES, value);
+}
+
+/**
+ * Checkpoint coercion. `stage` is the only load-bearing field (it drives
+ * the prompt, the stage-gated tool surface, the regression guard and the
+ * denormalised `checkpointStage` column), so it must be a known stage.
+ * Everything else — `context.lastEmailSentTo`, `stalled_since`,
+ * `recovery_attempts`, future keys — is carried through untouched.
+ */
+function coerceCheckpoint(value: Record<string, unknown>): ConversationCheckpoint | undefined {
+  if (!isConversationStage(value.stage)) return undefined;
+  return {
+    ...value,
+    stage: value.stage,
+    lastSuccessfulAction: typeof value.lastSuccessfulAction === 'string'
+      ? (value.lastSuccessfulAction as ConversationCheckpoint['lastSuccessfulAction'])
+      : null,
+    pendingAction: typeof value.pendingAction === 'string' ? value.pendingAction : null,
+    checkpoint_at: typeof value.checkpoint_at === 'string' ? value.checkpoint_at : '',
+  } as ConversationCheckpoint;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+/**
+ * Facts coercion. The array fields are spread/merged by
+ * `updateFacts`/`mergeFacts`, which throw on a missing array, so they're
+ * normalised to `[]`; scalar fields are kept when they're strings.
+ */
+function coerceFacts(value: Record<string, unknown>): ConversationFacts {
+  return {
+    ...value,
+    proposedTimes: stringArray(value.proposedTimes),
+    therapistPreferences: stringArray(value.therapistPreferences),
+    userPreferences: stringArray(value.userPreferences),
+    blockers: stringArray(value.blockers),
+    specialNotes: stringArray(value.specialNotes),
+    selectedTime: typeof value.selectedTime === 'string' ? value.selectedTime : undefined,
+    confirmedTime: typeof value.confirmedTime === 'string' ? value.confirmedTime : undefined,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
+  } as ConversationFacts;
+}
+
+/**
+ * Response-tracking coercion. The type is an open record, so any object
+ * is kept; only `events` is normalised because trackTherapistResponseTime
+ * pushes onto it.
+ */
+function coerceResponseTracking(value: Record<string, unknown>): ResponseTracking {
+  const tracking: ResponseTracking = { ...value };
+  if (tracking.events !== undefined && !Array.isArray(tracking.events)) {
+    delete tracking.events;
+  }
+  return tracking;
+}
+
+/**
+ * An optional, permissively-validated top-level field of the stored
+ * conversation state. Absent / null → undefined. A malformed value drops
+ * only that field (and is logged) — it never fails the whole state, which
+ * would otherwise throw away the message log with it.
+ */
+function lenientStateField<T>(field: string, coerce: (value: Record<string, unknown>) => T | undefined) {
+  return z.unknown().transform((value): T | undefined => {
+    if (value === undefined || value === null) return undefined;
+    const coerced = isPlainObject(value) ? coerce(value) : undefined;
+    if (coerced === undefined) {
+      logger.warn(
+        { field, valueType: Array.isArray(value) ? 'array' : typeof value },
+        'Dropping malformed conversation-state field',
+      );
+    }
+    return coerced;
+  });
+}
+
+/**
+ * The non-message fields of ConversationState. These MUST be declared:
+ * zod objects strip unknown keys by default, and before they were listed
+ * here every read silently discarded the agent's checkpoint, extracted
+ * facts and therapist response-time tracking — so each turn restarted at
+ * `initial_contact` with empty facts, and the next save wrote that back
+ * to the denormalised `checkpointStage` column.
+ */
+const conversationStateExtrasSchema = z.object({
+  checkpoint: lenientStateField('checkpoint', coerceCheckpoint),
+  facts: lenientStateField('facts', coerceFacts),
+  responseTracking: lenientStateField('responseTracking', coerceResponseTracking),
+});
+
+const conversationStateSchema = conversationStateExtrasSchema.extend({
   // FIX: systemPrompt is optional — FIX #20 stores it as '' and
   // storeConversationState allows omitting it, so stored JSON may lack the field.
   // Default to '' when missing so downstream code always sees a string.
@@ -165,10 +283,12 @@ export function parseConversationState(
     }
   }
 
-  // Validate with Zod schema
+  // Validate with Zod schema. The schema's output type IS ConversationState
+  // (checked by the annotation) — no cast needed.
   const result = conversationStateSchema.safeParse(parsed);
   if (result.success) {
-    return result.data as ConversationState;
+    const state: ConversationState = result.data;
+    return state;
   }
 
   // Log validation errors for debugging
@@ -181,13 +301,18 @@ export function parseConversationState(
   // FIX: Accept missing/null systemPrompt since FIX #20 stores it as '' and
   // the storeConversationState signature allows systemPrompt?: string, meaning
   // it can be omitted from the stored JSON. Only messages array is required.
-  if (typeof parsed === 'object' && parsed !== null) {
-    const state = parsed as Record<string, unknown>;
+  // The checkpoint / facts / responseTracking fields are salvaged with the
+  // same lenient coercion as the strict path — a single malformed message
+  // must not also cost the agent its stage and facts.
+  if (isPlainObject(parsed)) {
+    const state = parsed;
     if (Array.isArray(state.messages)) {
+      const extras = conversationStateExtrasSchema.parse(state);
       return {
+        ...extras,
         systemPrompt: typeof state.systemPrompt === 'string' ? state.systemPrompt : '',
         messages: state.messages.map((m: unknown) => {
-          const msg = m as Record<string, unknown>;
+          const msg = isPlainObject(m) ? m : {};
           return {
             role: (msg.role as 'user' | 'assistant' | 'admin') || 'user',
             content: String(msg.content || ''),

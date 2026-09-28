@@ -276,6 +276,12 @@ export async function runToolLoop(
   // and re-surfaces the "Awaiting next message" fallback on the
   // dashboard. Setting the floor here keeps the column non-null even
   // if no tool fires this turn.
+  //
+  // This is only a floor. processEmailReply seeds a checkpoint-less
+  // state from the row's checkpointStage column before calling in, and
+  // parseConversationState preserves the stored checkpoint (it used to
+  // strip it, which made this bootstrap reset EVERY reply turn to
+  // initial_contact).
   if (!conversationState.checkpoint) {
     conversationState.checkpoint = createCheckpoint('initial_contact', null);
   }
