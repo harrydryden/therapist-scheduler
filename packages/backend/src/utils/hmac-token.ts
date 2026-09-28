@@ -63,10 +63,21 @@ export function getHmacKeys(context: string): string[] {
  * if the padded buffers happen to compare equal.
  */
 export function safeCompare(a: string, b: string): boolean {
-  const maxLen = Math.max(a.length, b.length);
-  const aBuf = Buffer.from(a.padEnd(maxLen, '\0'));
-  const bBuf = Buffer.from(b.padEnd(maxLen, '\0'));
-  return crypto.timingSafeEqual(aBuf, bBuf) && a.length === b.length;
+  // Pad at the BYTE level. Padding the strings and then encoding meant a
+  // non-ASCII input produced buffers of different byte lengths, and
+  // timingSafeEqual threw a RangeError (an unauthenticated 500).
+  const aBytes = Buffer.from(a, 'utf8');
+  const bBytes = Buffer.from(b, 'utf8');
+  const maxLen = Math.max(aBytes.length, bBytes.length);
+  const aBuf = Buffer.alloc(maxLen);
+  const bBuf = Buffer.alloc(maxLen);
+  aBytes.copy(aBuf);
+  bBytes.copy(bBuf);
+  // Evaluate both terms unconditionally so `&&` short-circuiting can't
+  // leak the length comparison through timing.
+  const contentOk = crypto.timingSafeEqual(aBuf, bBuf) ? 1 : 0;
+  const lengthOk = aBytes.length === bBytes.length ? 1 : 0;
+  return (contentOk & lengthOk) === 1;
 }
 
 export interface SignTimestampedTokenOptions {

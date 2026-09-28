@@ -79,6 +79,7 @@ const mockRedisExpire = jest.fn();
 jest.mock('../utils/redis', () => ({
   redis: {
     get: (...a: unknown[]) => mockRedisGet(...(a as [unknown])),
+    getStrict: (...a: unknown[]) => mockRedisGet(...(a as [unknown])),
     set: (...a: unknown[]) => mockRedisSet(...(a as [unknown])),
     incr: (...a: unknown[]) => mockRedisIncr(...(a as [unknown])),
     expire: (...a: unknown[]) => mockRedisExpire(...(a as [unknown])),
@@ -671,11 +672,37 @@ describe('record_availability_window — dispatch by source', () => {
 // =============================================================================
 
 describe('record_booking_link — persists to Therapist.bookingLink', () => {
+  it('rejects the call when the inbound email was not from the therapist (security gate)', async () => {
+    // A client (or a forged sender) must not be able to plant a link
+    // behind the public "Book now" button.
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'https://evil.example/phish' }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'user' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/only allowed when the inbound email was from the therapist/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
+  it('rejects javascript: URLs even from the therapist', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'javascript:alert(1)' }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Invalid record_booking_link input/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
   it('writes the URL via the shared recordTherapistBookingLink helper', async () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'https://calendly.com/dr-jones/50min' }),
-      { ...baseContext, therapistId: 'tx-1' },
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);
@@ -696,7 +723,7 @@ describe('record_booking_link — persists to Therapist.bookingLink', () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'calendly.com/no-scheme' }),
-      { ...baseContext, therapistId: 'tx-1' },
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(false);
@@ -708,7 +735,7 @@ describe('record_booking_link — persists to Therapist.bookingLink', () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'https://calendly.com/x' }),
-      { ...baseContext, therapistId: undefined },
+      { ...baseContext, therapistId: undefined, inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);

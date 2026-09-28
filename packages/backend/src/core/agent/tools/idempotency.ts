@@ -63,7 +63,10 @@ export async function wasToolExecuted(
   keyPrefix: string = TOOL_EXECUTION_PREFIX,
 ): Promise<boolean> {
   try {
-    const result = await redis.get(`${keyPrefix}${hash}`);
+    // getStrict (not get): the plain wrapper swallows Redis errors and
+    // returns null, which this guard would read as "not executed" — the
+    // exact fail-open behaviour the catch below is meant to prevent.
+    const result = await redis.getStrict(`${keyPrefix}${hash}`);
     return result !== null;
   } catch (err) {
     logger.error(

@@ -315,6 +315,28 @@ export class CacheManager {
     }
   }
 
+  /**
+   * Strict GET for correctness guards (tool idempotency, auth brute-force
+   * limiting, send-once markers). Unlike `getString`, a Redis failure
+   * THROWS instead of returning null, so callers can tell "key absent"
+   * apart from "Redis unavailable" and fail closed. `getString` swallowing
+   * errors meant every guard written as `try { get } catch { fail closed }`
+   * silently failed OPEN during an outage.
+   */
+  async getStrict(key: string): Promise<string | null> {
+    if (!this.redis) {
+      throw new Error('Redis client not available');
+    }
+    try {
+      const result = await this.redis.get(key);
+      this.redisManager.recordSuccess();
+      return result;
+    } catch (err) {
+      this.redisManager.recordFailure();
+      throw err;
+    }
+  }
+
   async setString(key: string, value: string, ttlSeconds: number = 86400): Promise<void> {
     if (!this.redis) return;
     try {

@@ -417,15 +417,14 @@ class WeeklyMailingListService extends LockedPeriodicService {
    * or if the key has expired (90-day TTL).
    */
   private async getLastSentAt(): Promise<Date | null> {
-    try {
-      const str = await redis.get(WEEKLY_MAILING.LAST_SEND_KEY);
-      if (!str) return null;
-      const dt = new Date(str);
-      return isNaN(dt.getTime()) ? null : dt;
-    } catch (error) {
-      logger.warn({ error }, 'Failed to read last-sent timestamp');
-      return null;
-    }
+    // getStrict: a Redis failure must surface as an error, not as "never
+    // sent". The lenient wrapper returned null on failure, which made
+    // countNewTherapistsSince treat every therapist as new and re-blast
+    // the entire list on every hourly tick for as long as Redis was down.
+    const str = await redis.getStrict(WEEKLY_MAILING.LAST_SEND_KEY);
+    if (!str) return null;
+    const dt = new Date(str);
+    return isNaN(dt.getTime()) ? null : dt;
   }
 
   /**
@@ -439,7 +438,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
    */
   private async hasAlreadySentThisWeek(): Promise<boolean> {
     try {
-      const lastSendStr = await redis.get(WEEKLY_MAILING.LAST_SEND_KEY);
+      const lastSendStr = await redis.getStrict(WEEKLY_MAILING.LAST_SEND_KEY);
       if (!lastSendStr) return false;
 
       // Extract UTC date components (ignore time to avoid DST issues)
@@ -472,8 +471,14 @@ class WeeklyMailingListService extends LockedPeriodicService {
       const daysDiff = Math.floor((nowUTC - lastSendUTC) / (1000 * 60 * 60 * 24));
       return daysDiff < WEEKLY_MAILING.MIN_INTERVAL_DAYS - 1;
     } catch (error) {
-      logger.warn({ error }, 'Failed to check last send date');
-      return false;
+      // FAIL SAFE: if the only send-once guard can't be read, assume we
+      // already sent. Skipping a week is recoverable; mailing every
+      // subscriber again every hour is not.
+      logger.error(
+        { error },
+        'Weekly mailing: last-send guard unreadable (Redis) — treating as already sent this week',
+      );
+      return true;
     }
   }
 

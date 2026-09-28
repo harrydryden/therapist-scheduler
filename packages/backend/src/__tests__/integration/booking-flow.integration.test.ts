@@ -127,11 +127,13 @@ jest.mock('../../utils/redis-client', () => ({
 jest.mock('../../utils/redis', () => ({
   redis: {
     get: jest.fn().mockResolvedValue(null),
+    getStrict: jest.fn().mockResolvedValue(null),
     set: jest.fn().mockResolvedValue('OK'),
     del: jest.fn().mockResolvedValue(1),
   },
   cacheManager: {
     getString: jest.fn().mockResolvedValue(null),
+    getStrict: jest.fn().mockResolvedValue(null),
     setString: jest.fn().mockResolvedValue(undefined),
     getJson: jest.fn().mockResolvedValue(null),
     setJson: jest.fn().mockResolvedValue(undefined),

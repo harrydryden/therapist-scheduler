@@ -1,35 +1,17 @@
 import { FastifyRequest, FastifyReply } from 'fastify';
-import { timingSafeEqual } from 'crypto';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { HEADERS } from '../constants';
 import { Errors } from '../utils/response';
 import { cacheManager } from '../utils/redis';
+import { safeCompare } from '../utils/hmac-token';
 
 /**
- * FIX R3: Constant-time string comparison to prevent timing attacks
- * Timing attacks can reveal the correct secret by measuring response time differences.
- * This function ensures comparison takes the same time regardless of where mismatch occurs.
+ * FIX R3: Constant-time string comparison to prevent timing attacks.
+ * One implementation lives in utils/hmac-token (byte-safe); re-exported
+ * here so existing importers keep working.
  */
-export function safeCompare(a: string, b: string): boolean {
-  // If lengths differ, we still need constant-time comparison
-  // Pad shorter string to match length (comparison will fail, but timing is consistent)
-  const aBuffer = Buffer.from(a);
-  const bBuffer = Buffer.from(b);
-
-  // Make buffers same length by padding shorter one
-  const maxLen = Math.max(aBuffer.length, bBuffer.length);
-  const aPadded = Buffer.alloc(maxLen);
-  const bPadded = Buffer.alloc(maxLen);
-  aBuffer.copy(aPadded);
-  bBuffer.copy(bPadded);
-
-  // Evaluate both conditions unconditionally to avoid timing leak from && short-circuit
-  const lengthOk = aBuffer.length === bBuffer.length ? 1 : 0;
-  const contentOk = timingSafeEqual(aPadded, bPadded) ? 1 : 0;
-
-  return (lengthOk & contentOk) === 1;
-}
+export { safeCompare };
 
 // FIX H11: Brute force protection configuration
 // Threshold raised from 5 to 10: a single admin dashboard page load fires
@@ -119,12 +101,23 @@ function getClientIP(request: FastifyRequest): string {
  * FIX H11: Prevents brute force attacks on webhook secret
  */
 async function checkAuthRateLimit(ip: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+  // The in-memory limiter is consulted UNCONDITIONALLY. It is only ever
+  // populated while Redis is failing (recordFailedAttempt falls back to it),
+  // so when Redis is healthy this is a no-op; when Redis is down it is the
+  // only thing standing between an attacker and unlimited guesses.
+  const inMemory = checkInMemoryRateLimit(ip);
+  if (!inMemory.allowed) {
+    return { allowed: false, retryAfter: AUTH_RATE_LIMIT.LOCKOUT_SECONDS };
+  }
+
   try {
     const lockoutKey = `auth:lockout:${ip}`;
     const attemptsKey = `auth:attempts:${ip}`;
 
-    // Check if currently locked out
-    const lockoutUntil = await cacheManager.getString(lockoutKey);
+    // getStrict, not getString: the lenient wrapper returns null on a Redis
+    // error, which used to make the catch below unreachable and the
+    // limiter silently fail open during an outage.
+    const lockoutUntil = await cacheManager.getStrict(lockoutKey);
     if (lockoutUntil) {
       const remaining = parseInt(lockoutUntil, 10) - Date.now();
       if (remaining > 0) {
@@ -133,7 +126,7 @@ async function checkAuthRateLimit(ip: string): Promise<{ allowed: boolean; retry
     }
 
     // Check attempt count
-    const attemptsStr = await cacheManager.getString(attemptsKey);
+    const attemptsStr = await cacheManager.getStrict(attemptsKey);
     const attempts = attemptsStr ? parseInt(attemptsStr, 10) : 0;
 
     if (attempts >= AUTH_RATE_LIMIT.MAX_FAILED_ATTEMPTS) {
@@ -142,9 +135,9 @@ async function checkAuthRateLimit(ip: string): Promise<{ allowed: boolean; retry
 
     return { allowed: true };
   } catch (err) {
-    // Redis unavailable — fall back to in-memory rate limiting
+    // Redis unavailable — the in-memory check above already ran.
     logger.error({ err, ip }, 'Redis unavailable for auth rate limiting - using in-memory fallback');
-    return checkInMemoryRateLimit(ip);
+    return { allowed: true };
   }
 }
 
@@ -176,6 +169,42 @@ async function recordFailedAttempt(ip: string): Promise<void> {
   }
 }
 
+export type AdminSecretCheck =
+  | { ok: true }
+  | { ok: false; status: 401 }
+  | { ok: false; status: 429; retryAfter: number };
+
+/**
+ * Validate a candidate admin secret from ANY transport (header, query
+ * string) under the brute-force limiter. Shared by the header-based
+ * preHandler below and the SSE route, which can only pass the secret as
+ * a query parameter and previously skipped the limiter entirely.
+ */
+export async function checkAdminSecret(
+  request: FastifyRequest,
+  candidate: unknown,
+): Promise<AdminSecretCheck> {
+  const ip = getClientIP(request);
+
+  const rateCheck = await checkAuthRateLimit(ip);
+  if (!rateCheck.allowed) {
+    logger.warn({ requestId: request.id, ip }, 'Auth attempt blocked - rate limited');
+    return { ok: false, status: 429, retryAfter: rateCheck.retryAfter ?? AUTH_RATE_LIMIT.LOCKOUT_SECONDS };
+  }
+
+  // FIX R3: Use constant-time comparison to prevent timing attacks
+  const secretValid =
+    typeof candidate === 'string' &&
+    !!config.webhookSecret &&
+    safeCompare(candidate, config.webhookSecret);
+
+  if (!secretValid) {
+    await recordFailedAttempt(ip);
+    return { ok: false, status: 401 };
+  }
+  return { ok: true };
+}
+
 /**
  * Verify webhook secret for admin/internal endpoints
  * FIX H11: Added brute force protection
@@ -184,33 +213,17 @@ export async function verifyWebhookSecret(
   request: FastifyRequest,
   reply: FastifyReply
 ): Promise<void> {
-  const ip = getClientIP(request);
+  const check = await checkAdminSecret(request, request.headers[HEADERS.WEBHOOK_SECRET]);
+  if (check.ok) return;
 
-  // Check rate limit before validating
-  const rateCheck = await checkAuthRateLimit(ip);
-  if (!rateCheck.allowed) {
-    logger.warn({ requestId: request.id, ip }, 'Auth attempt blocked - rate limited');
-    reply.header('Retry-After', rateCheck.retryAfter?.toString() || '900');
+  if (check.status === 429) {
+    reply.header('Retry-After', check.retryAfter.toString());
     return reply.status(429).send({
       success: false,
       error: 'Too many failed authentication attempts. Please try again later.',
     });
   }
 
-  const webhookSecret = request.headers[HEADERS.WEBHOOK_SECRET];
-
-  // FIX R3: Use constant-time comparison to prevent timing attacks
-  // This ensures attackers can't determine secret by measuring response times
-  const secretValid =
-    typeof webhookSecret === 'string' &&
-    config.webhookSecret &&
-    safeCompare(webhookSecret, config.webhookSecret);
-
-  if (!secretValid) {
-    // Record failed attempt
-    await recordFailedAttempt(ip);
-    logger.warn({ requestId: request.id, ip }, 'Unauthorized request - invalid webhook secret');
-    Errors.unauthorized(reply);
-    return;
-  }
+  logger.warn({ requestId: request.id }, 'Unauthorized request - invalid webhook secret');
+  Errors.unauthorized(reply);
 }

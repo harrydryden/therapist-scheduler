@@ -19,6 +19,20 @@ export async function handleRecordBookingLink(
   rawInput: unknown,
   context: SchedulingContext,
 ): Promise<ToolExecutionResult> {
+  // Inbound-sender gate (security): the booking link is the therapist's
+  // permanent public record, so only an email from the therapist may set
+  // it. Without this a client (or a forged sender) could plant a phishing
+  // link behind the public "Book now" button.
+  if (context.inboundSender !== 'therapist') {
+    return {
+      success: false,
+      toolName: 'record_booking_link',
+      error:
+        'record_booking_link is only allowed when the inbound email was from the therapist. ' +
+        `Current inbound sender: ${context.inboundSender ?? 'none'}. ` +
+        'If the link was relayed by someone else, ask the therapist to confirm it directly.',
+    };
+  }
   const parsed = recordBookingLinkInputSchema.safeParse(rawInput);
   if (!parsed.success) {
     return {

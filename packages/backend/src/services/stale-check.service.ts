@@ -129,10 +129,21 @@ class StaleCheckService extends LockedPeriodicService {
     let processedMessagesDeleted = 0;
     let abandonedEmailsDeleted = 0;
 
+    // Retention windows are admin settings (retention.*). They were
+    // defined and editable in the dashboard but never read here, so edits
+    // silently did nothing while rows were hard-deleted on the constants.
+    const [cancelledRetentionDays, completedRetentionDays] = await Promise.all([
+      getSettingValue<number>('retention.cancelledDays').catch(() => DATA_RETENTION.CANCELLED_RETENTION_DAYS),
+      getSettingValue<number>('retention.completedDays').catch(() => DATA_RETENTION.COMPLETED_RETENTION_DAYS),
+    ]).then(([c, d]) => [
+      Number.isFinite(c) && c > 0 ? c : DATA_RETENTION.CANCELLED_RETENTION_DAYS,
+      Number.isFinite(d) && d > 0 ? d : DATA_RETENTION.COMPLETED_RETENTION_DAYS,
+    ]);
+
     try {
       // 1. Archive old cancelled appointments
       const cancelledThreshold = new Date(
-        now.getTime() - DATA_RETENTION.CANCELLED_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        now.getTime() - cancelledRetentionDays * 24 * 60 * 60 * 1000
       );
 
       // FIX B7: Properly handle cascade delete to prevent orphaned records
@@ -175,7 +186,7 @@ class StaleCheckService extends LockedPeriodicService {
           {
             cleanupId,
             deletedCount: cancelledCount,
-            thresholdDays: DATA_RETENTION.CANCELLED_RETENTION_DAYS,
+            thresholdDays: cancelledRetentionDays,
           },
           'Deleted old cancelled appointments with cascade cleanup'
         );
@@ -184,7 +195,7 @@ class StaleCheckService extends LockedPeriodicService {
 
       // 2. Delete old confirmed/completed/session_held/feedback_requested appointments
       const completedThreshold = new Date(
-        now.getTime() - DATA_RETENTION.COMPLETED_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        now.getTime() - completedRetentionDays * 24 * 60 * 60 * 1000
       );
 
       const completedCount = await prisma.$transaction(async (tx) => {
@@ -218,7 +229,7 @@ class StaleCheckService extends LockedPeriodicService {
           {
             cleanupId,
             deletedCount: completedCount,
-            thresholdDays: DATA_RETENTION.COMPLETED_RETENTION_DAYS,
+            thresholdDays: completedRetentionDays,
           },
           'Deleted old completed/confirmed appointments with cascade cleanup'
         );
@@ -337,9 +348,13 @@ class StaleCheckService extends LockedPeriodicService {
       const inquiryThreshold = new Date(
         now.getTime() - 30 * 24 * 60 * 60 * 1000
       );
+      // The inquiry handler only ever writes 'active' and 'resolved'
+      // (see domain/scheduling/inbound/weekly-mailing.ts); the previous
+      // filter matched statuses that never existed, so these rows — which
+      // hold users' email content — were kept forever.
       const deletedInquiries = await prisma.weeklyMailingInquiry.deleteMany({
         where: {
-          status: { in: ['completed', 'closed'] },
+          status: { in: ['resolved', 'completed', 'closed'] },
           updatedAt: { lt: inquiryThreshold },
         },
       });

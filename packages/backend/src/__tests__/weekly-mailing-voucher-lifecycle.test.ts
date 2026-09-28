@@ -58,11 +58,13 @@ jest.mock('../utils/redis', () => {
   return {
     redis: {
       get: jest.fn((key: string) => Promise.resolve(store.get(key) || null)),
+      getStrict: jest.fn((key: string) => Promise.resolve(store.get(key) || null)),
       set: jest.fn((_key: string, value: string) => { store.set(_key, value); return Promise.resolve('OK'); }),
       __store: store,
     },
     cacheManager: {
       getString: jest.fn().mockResolvedValue(null),
+      getStrict: jest.fn().mockResolvedValue(null),
       set: jest.fn(),
     },
   };

@@ -31,12 +31,13 @@ services:
       redis:
         condition: service_healthy
     deploy:
-      limits:
-        cpus: '1.0'
-        memory: 1G
-      reservations:
-        cpus: '0.5'
-        memory: 512M
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "packages/backend/dist/health-check.js"]
@@ -56,12 +57,13 @@ services:
     ports:
       - "5432:5432"
     deploy:
-      limits:
-        cpus: '0.5'
-        memory: 512M
-      reservations:
-        cpus: '0.25'
-        memory: 256M
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
@@ -76,12 +78,13 @@ services:
     volumes:
       - redis_data:/data
     deploy:
-      limits:
-        cpus: '0.25'
-        memory: 256M
-      reservations:
-        cpus: '0.1'
-        memory: 128M
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

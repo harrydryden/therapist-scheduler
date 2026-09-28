@@ -26,6 +26,7 @@ const redisSetMock = jest.fn();
 jest.mock('../utils/redis', () => ({
   redis: {
     get: (...a: unknown[]) => redisGetMock(...a),
+    getStrict: (...a: unknown[]) => redisGetMock(...a),
     set: (...a: unknown[]) => redisSetMock(...a),
   },
 }));

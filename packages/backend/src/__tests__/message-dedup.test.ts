@@ -17,6 +17,7 @@ jest.mock('../utils/redis', () => ({
     zadd: jest.fn(),
     zscore: jest.fn(),
     get: jest.fn(),
+    getStrict: jest.fn(),
     del: jest.fn(),
     set: jest.fn(),
     incr: jest.fn(),

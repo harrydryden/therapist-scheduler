@@ -36,7 +36,7 @@ jest.mock('bullmq', () => ({
   QueueEvents: jest.fn().mockImplementation(() => ({ on: jest.fn() })),
 }));
 jest.mock('../utils/database', () => ({ prisma: {} }));
-jest.mock('../utils/redis', () => ({ redis: { get: jest.fn(), set: jest.fn() } }));
+jest.mock('../utils/redis', () => ({ redis: { get: jest.fn(), getStrict: jest.fn(), set: jest.fn() } }));
 jest.mock('../config', () => ({
   config: {
     redisUrl: 'redis://localhost:6379',

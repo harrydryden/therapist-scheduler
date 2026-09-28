@@ -22,7 +22,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { sendSuccess, Errors } from '../utils/response';
-import { verifyWebhookSecret, safeCompare } from '../middleware/auth';
+import { verifyWebhookSecret, checkAdminSecret } from '../middleware/auth';
 import { RATE_LIMITS } from '../constants';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { sseService } from '../services/sse.service';
@@ -56,12 +56,18 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest<{ Querystring: { secret?: string } }>, reply: FastifyReply) => {
       const { secret } = request.query as { secret?: string };
 
-      const secretValid =
-        typeof secret === 'string' &&
-        config.webhookSecret &&
-        safeCompare(secret, config.webhookSecret);
-
-      if (!secretValid) {
+      // Same brute-force limiter as the header-based admin routes. This
+      // route used to compare the secret directly, so the query-string
+      // transport was an unlimited guessing oracle.
+      const check = await checkAdminSecret(request, secret);
+      if (!check.ok) {
+        if (check.status === 429) {
+          reply.header('Retry-After', check.retryAfter.toString());
+          return reply.status(429).send({
+            success: false,
+            error: 'Too many failed authentication attempts. Please try again later.',
+          });
+        }
         logger.warn({ requestId: request.id }, 'SSE connection rejected - invalid secret');
         return Errors.unauthorized(reply);
       }

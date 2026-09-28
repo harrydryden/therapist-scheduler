@@ -24,7 +24,7 @@ jest.mock('../config', () => ({
   config: { jwtSecret: 'test', frontendUrl: 'https://test', backendUrl: 'https://test' },
 }));
 jest.mock('../utils/redis', () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redis: { get: jest.fn(), getStrict: jest.fn(), set: jest.fn(), del: jest.fn() },
 }));
 
 // Capture every `data` payload the helper sends to the row update

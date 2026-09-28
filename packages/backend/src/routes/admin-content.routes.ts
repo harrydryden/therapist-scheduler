@@ -592,8 +592,15 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
 
       const escapeCsv = (val: string | number | null | undefined): string => {
         if (val === null || val === undefined) return '';
-        const str = String(val);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        let str = String(val);
+        // Formula-injection guard: responses are anonymous free text and
+        // spreadsheets evaluate cells beginning with = + - @ (and tab/CR)
+        // as formulas when the export is opened. Neutralise with a leading
+        // apostrophe, the convention Excel/Sheets/LibreOffice all honour.
+        if (/^[=+\-@\t\r]/.test(str)) {
+          str = `'${str}`;
+        }
+        if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
           return `"${str.replace(/"/g, '""')}"`;
         }
         return str;

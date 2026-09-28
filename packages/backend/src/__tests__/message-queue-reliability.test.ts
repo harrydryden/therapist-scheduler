@@ -57,6 +57,7 @@ jest.mock('../utils/redis', () => {
   return {
     redis: {
       get: jest.fn((key: string) => Promise.resolve(store.get(key) || null)),
+      getStrict: jest.fn((key: string) => Promise.resolve(store.get(key) || null)),
       set: jest.fn((...args: unknown[]) => {
         const key = args[0] as string;
         const value = args[1] as string;

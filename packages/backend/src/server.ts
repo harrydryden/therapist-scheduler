@@ -63,12 +63,16 @@ import { missedMessageScannerService } from './services/missed-message-scanner.s
 import { verifyWebhookSecret } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 import { withTimeout, TimeoutError } from './utils/timeout';
+import { sanitizeUrlForLog } from './utils/log-sanitize';
 
 // Liveness probes must answer quickly even if the underlying connection
 // is wedged — the orchestrator can't tell "probe hung" apart from "pod
 // hung", so we set a tight ceiling and report a degraded-but-fast check
 // instead of letting the request hang forever.
 const HEALTH_PROBE_TIMEOUT_MS = 2000;
+
+// Upper bound on graceful shutdown before the process force-exits.
+const SHUTDOWN_FORCE_EXIT_MS = 30_000;
 
 // Process-wide tally of `unhandledRejection` events. The handler logs
 // each one but deliberately doesn't crash; the count is surfaced in
@@ -95,6 +99,18 @@ function getUnhandledRejectionStats(): { count: number; recent: Array<{ at: stri
 
 const logger = pino({
   level: config.logLevel,
+  serializers: {
+    req(req: { method?: string; url?: string; headers?: Record<string, unknown>; hostname?: string; ip?: string; socket?: { remotePort?: number } }) {
+      return {
+        method: req.method,
+        url: sanitizeUrlForLog(req.url),
+        version: req.headers?.['accept-version'],
+        hostname: req.hostname,
+        remoteAddress: req.ip,
+        remotePort: req.socket?.remotePort,
+      };
+    },
+  },
   transport:
     config.env === 'development'
       ? {
@@ -105,6 +121,13 @@ const logger = pino({
         }
       : undefined,
 });
+
+// Number of reverse-proxy hops in front of the app (Railway adds one).
+// Shared with the auth middleware's client-IP extraction so the
+// per-IP rate limiter and the brute-force limiter agree on who the
+// client is. Without `trustProxy`, `request.ip` is the proxy's own
+// address and every per-IP limit collapses into one global bucket.
+const TRUSTED_PROXY_DEPTH = Math.max(0, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10) || 1);
 
 async function buildServer() {
   // Pino's `Logger` type is structurally compatible with Fastify's
@@ -117,6 +140,7 @@ async function buildServer() {
     logger: logger as unknown as import('fastify').FastifyBaseLogger,
     requestIdHeader: 'x-request-id',
     requestIdLogLabel: 'requestId',
+    trustProxy: TRUSTED_PROXY_DEPTH,
   });
 
   // Register plugins
@@ -203,10 +227,12 @@ async function buildServer() {
         HEALTH_PROBE_TIMEOUT_MS,
         'health.database',
       );
+      // Public probe: report state, not the raw driver error text
+      // (connection strings / hostnames leak through those messages).
       checks.database = {
         ok: dbHealth.connected,
         latencyMs: dbHealth.latencyMs,
-        error: dbHealth.error,
+        error: dbHealth.connected ? undefined : 'unavailable',
       };
       if (!dbHealth.connected) allHealthy = false;
     } catch (err) {
@@ -224,7 +250,7 @@ async function buildServer() {
       checks.redis = {
         ok: redisHealth.connected,
         latencyMs: redisHealth.latencyMs,
-        error: redisHealth.error,
+        error: redisHealth.connected ? undefined : 'unavailable',
       };
       if (!redisHealth.connected) {
         logger.warn('Redis unavailable - distributed locking disabled');
@@ -435,13 +461,22 @@ async function buildServer() {
 
   // In production, serve the frontend SPA build
   if (config.env === 'production') {
-    // Frontend dist is at /app/dist relative to the Docker WORKDIR
-    // In local builds, it's at ../../frontend/dist relative to the backend
-    const frontendDistDir = fs.existsSync(path.resolve(process.cwd(), 'dist'))
-      ? path.resolve(process.cwd(), 'dist')
-      : path.resolve(__dirname, '../../frontend/dist');
+    // Resolve the SPA build from candidate locations and REQUIRE an
+    // index.html. The previous `process.cwd()/dist` probe matched the
+    // backend's own compiled output when the entrypoint cd'd into
+    // packages/backend, which registered every compiled server file
+    // (including tests and prompt templates) as a public static route.
+    //   - FRONTEND_DIST_DIR: explicit override
+    //   - /app/dist in the Docker image (dist/server.js → ../../../dist)
+    //   - packages/frontend/dist for a local monorepo build
+    const candidates = [
+      process.env.FRONTEND_DIST_DIR,
+      path.resolve(__dirname, '../../../dist'),
+      path.resolve(__dirname, '../../frontend/dist'),
+    ].filter((p): p is string => !!p);
+    const frontendDistDir = candidates.find((dir) => fs.existsSync(path.join(dir, 'index.html')));
 
-    if (fs.existsSync(frontendDistDir)) {
+    if (frontendDistDir) {
       await fastify.register(fastifyStatic, {
         root: frontendDistDir,
         prefix: '/',
@@ -456,6 +491,8 @@ async function buildServer() {
           reply.sendFile('index.html');
         }
       });
+    } else {
+      logger.info({ candidates }, 'No frontend build with index.html found — not serving static assets');
     }
   }
 
@@ -501,7 +538,23 @@ async function start() {
 
     logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown...');
 
+    // Hard deadline. Documented for a long time but never implemented:
+    // without it a shutdown that stalls (e.g. an SSE client holding a
+    // connection open) waits until the orchestrator SIGKILLs us, with
+    // every periodic service still firing alongside the new instance.
+    const forceExitTimer = setTimeout(() => {
+      logger.error({ signal, timeoutMs: SHUTDOWN_FORCE_EXIT_MS }, 'Graceful shutdown timed out — forcing exit');
+      process.exit(1);
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    forceExitTimer.unref();
+
     try {
+      // End long-lived SSE streams FIRST. Fastify's close() only closes
+      // idle keep-alive sockets; an active event stream with a heartbeat
+      // is never idle, so closing the server before the streams hung
+      // shutdown for as long as an admin dashboard stayed open.
+      sseService.stop();
+
       // Close Fastify server (stops accepting new requests and waits for in-flight to complete)
       if (server) {
         await server.close();
@@ -515,7 +568,6 @@ async function start() {
       // 4. Consumers (email queue) — drain remaining jobs
       logger.info('Stopping background services...');
       if (slackQueueInterval) clearInterval(slackQueueInterval);
-      sseService.stop();
 
       // Stop producers
       emailPollingService.stop();
@@ -599,6 +651,12 @@ async function start() {
   try {
     server = await buildServer();
 
+    // Register the agent processor BEFORE the port opens. Pub/Sub delivers
+    // its post-deploy backlog the moment we listen, and a push that raced
+    // ahead of registration failed with "AgentProcessor not registered",
+    // burning one of the message's three processing attempts.
+    registerAgentProcessor((traceId) => new JustinTimeService(traceId));
+
     await server.listen({
       port: config.port,
       host: config.host,
@@ -636,10 +694,6 @@ async function start() {
         logger.error({ err }, 'Error processing Slack notification queue');
       }
     }, 30000);
-
-    // Register agent processor to break circular dependency
-    // email-message-processor needs to call JustinTimeService but can't import it directly
-    registerAgentProcessor((traceId) => new JustinTimeService(traceId));
 
     // Start background services with error isolation.
     // Each service is started independently so a failure in one doesn't prevent

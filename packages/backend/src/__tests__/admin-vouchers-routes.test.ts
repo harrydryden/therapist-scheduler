@@ -52,6 +52,7 @@ jest.mock('../utils/unsubscribe-token', () => ({
 jest.mock('../utils/redis', () => ({
   cacheManager: {
     getString: jest.fn().mockResolvedValue(null),
+    getStrict: jest.fn().mockResolvedValue(null),
     incr: jest.fn().mockResolvedValue(1),
     expire: jest.fn(),
     set: jest.fn(),
