@@ -7,12 +7,16 @@
  * Why db push rather than migrate deploy:
  * The migrations folder has historical baselining: the earliest migration
  * assumes tables already exist from a pre-tracked `db push` setup. Fresh
- * databases therefore can't replay the migration history from empty. In
- * production this is handled by `prisma/baseline.sh` which marks old
- * migrations as already applied. In tests we don't need the migration
- * history — we need to verify that the Prisma client and the schema agree,
- * which is exactly what `db push` provides (schema.prisma is the source of
- * truth and the DB is reset to match).
+ * databases therefore can't replay the migration history from empty —
+ * production is already baselined, and a new dev/staging/CI database is
+ * created with scripts/bootstrap-dev-db.sh (db push + record every
+ * migration as applied; see docs/SCHEMA_MIGRATIONS.md). In tests we don't
+ * need the migration history — we need to verify that the Prisma client and
+ * the schema agree, which is exactly what `db push` provides (schema.prisma
+ * is the source of truth and the DB is reset to match).
+ *
+ * The services under test use the app's Prisma singleton, which reads
+ * DATABASE_URL — set it to the same database as TEST_DATABASE_URL.
  *
  * Integration tests gated behind TEST_DATABASE_URL. When the env var is
  * unset, any test importing this helper will skip via `describe.skip`.

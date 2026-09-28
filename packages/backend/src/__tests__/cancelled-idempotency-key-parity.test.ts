@@ -166,7 +166,8 @@ describe('transitionToCancelled — in-tx and post-commit idempotency keys match
 
   it('the Slack notification is sent exactly once, via the in-tx row', () => {
     expect(slackNotificationService.notifyAppointmentCancelled).toHaveBeenCalledTimes(1);
-    const completedKeys = (prisma.sideEffectLog.update as jest.Mock).mock.calls
+    // markCompleted is a lease-checked updateMany.
+    const completedKeys = (prisma.sideEffectLog.updateMany as jest.Mock).mock.calls
       .filter(([args]) => args.data.status === 'completed')
       .map(([args]) => args.where.idempotencyKey);
     // The in-tx row is the one marked completed, so the retry runner has

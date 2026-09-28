@@ -60,4 +60,47 @@ describe('computeBackwardSentinelResets', () => {
       reset: false,
     });
   });
+
+  describe('reviving a cancelled appointment (review §4.4 / L7)', () => {
+    // `cancelled` has no position in the forward order, so these used to
+    // reset nothing: a revived booking kept its first pass's sentinels and
+    // never got a reminder or feedback form again.
+    it('cancelled → confirmed resets all four follow-up sentinels', () => {
+      expect(computeBackwardSentinelResets('cancelled', 'confirmed')).toEqual({
+        updates: {
+          meetingLinkCheckSentAt: null,
+          reminderSentAt: null,
+          feedbackFormSentAt: null,
+          feedbackReminderSentAt: null,
+        },
+        reset: true,
+      });
+    });
+
+    it('cancelled → pending resets all four too', () => {
+      expect(computeBackwardSentinelResets('cancelled', 'pending').updates).toEqual({
+        meetingLinkCheckSentAt: null,
+        reminderSentAt: null,
+        feedbackFormSentAt: null,
+        feedbackReminderSentAt: null,
+      });
+    });
+
+    it('cancelled → session_held re-arms the feedback form and reminder', () => {
+      expect(computeBackwardSentinelResets('cancelled', 'session_held').updates).toEqual({
+        feedbackFormSentAt: null,
+        feedbackReminderSentAt: null,
+      });
+    });
+
+    it('cancelled → feedback_requested restarts the reminder cycle only', () => {
+      expect(computeBackwardSentinelResets('cancelled', 'feedback_requested').updates).toEqual({
+        feedbackReminderSentAt: null,
+      });
+    });
+
+    it('cancelled → completed resets nothing (nothing after completed to re-send)', () => {
+      expect(computeBackwardSentinelResets('cancelled', 'completed')).toEqual({ updates: {}, reset: false });
+    });
+  });
 });

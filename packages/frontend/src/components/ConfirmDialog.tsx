@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useId, useRef, type ReactNode } from 'react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface ConfirmDialogProps {
   title: string;
@@ -28,47 +29,32 @@ export default function ConfirmDialog({
     : 'bg-slate-900 text-white hover:bg-slate-800';
 
   const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
 
-  // Move focus into the dialog once on mount so Escape-to-close works from
-  // the keyboard. Must run only on mount (not on every render): an inline
-  // `ref={(el) => el.focus()}` re-fires each render and steals focus back
-  // from any input the user is typing in — dropping every keystroke after
-  // the first. Skip if focus is already inside the dialog (e.g. a child
-  // with `autoFocus`) so we don't override an intentionally-focused field.
-  useEffect(() => {
-    const el = dialogRef.current;
-    if (el && !el.contains(document.activeElement)) {
-      el.focus();
-    }
-  }, []);
+  // Focus moves in on open (once — never stealing it back from a field the
+  // user is typing in), Tab stays inside, Esc cancels without also closing
+  // a drawer behind the dialog, and focus returns to the trigger on close.
+  useDialogA11y(dialogRef, { onEscape: isPending ? undefined : onCancel });
 
   return (
     <div
       className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
       onClick={onCancel}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          // Stop here so a surrounding drawer's document-level Esc handler
-          // doesn't also close (e.g. the appointment drawer behind a
-          // "Cancel appointment?" confirmation).
-          e.stopPropagation();
-          onCancel();
-        }
-      }}
     >
       <div
         role="dialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
+        aria-labelledby={titleId}
         className="bg-white rounded-xl shadow-lg max-w-md w-full mx-4 p-6"
         onClick={(e) => e.stopPropagation()}
         ref={dialogRef}
         tabIndex={-1}
       >
-        <h3 id="confirm-dialog-title" className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
+        <h3 id={titleId} className="text-lg font-semibold text-slate-900 mb-2">{title}</h3>
         <div className="mb-6">{children}</div>
         <div className="flex gap-3 justify-end">
           <button
+            type="button"
             onClick={onCancel}
             disabled={isPending}
             className="px-4 py-2 border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium"
@@ -76,6 +62,7 @@ export default function ConfirmDialog({
             {cancelLabel}
           </button>
           <button
+            type="button"
             onClick={onConfirm}
             disabled={isPending || disabled}
             aria-busy={isPending}

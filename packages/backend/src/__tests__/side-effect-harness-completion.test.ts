@@ -46,11 +46,23 @@ import {
 
 type UpdateArgs = { where: { idempotencyKey: string }; data: Record<string, unknown> };
 
-/** update() calls that wrote the given status. */
+/**
+ * Outcome writes (markCompleted / markFailed / …) are lease-checked
+ * updateMany calls; the claim is also an updateMany (data.status =
+ * 'running'). Claims always win; `outcomeImpl` decides outcome writes.
+ */
+let outcomeImpl: (args: UpdateArgs) => Promise<unknown> = async () => ({ count: 1 });
+
+/** updateMany() calls that wrote the given status. */
 function statusWrites(status: string): UpdateArgs[] {
-  return updateMock.mock.calls
+  return updateManyMock.mock.calls
     .map((c) => c[0] as UpdateArgs)
     .filter((a) => a.data.status === status);
+}
+
+/** Execute-lease claims (tryClaimEffect). */
+function claims(): UpdateArgs[] {
+  return statusWrites('running');
 }
 
 /** Let setImmediate + every retry/back-off timer (inline AND deferred) run out. */
@@ -70,8 +82,12 @@ beforeEach(() => {
   // Row pre-registered in the transition transaction (register-in-tx).
   findUniqueMock.mockResolvedValue({ id: 'row-1', status: 'pending' });
   createMock.mockResolvedValue({ id: 'row-1', status: 'pending' });
-  // tryClaimEffect CAS always wins.
-  updateManyMock.mockResolvedValue({ count: 1 });
+  // tryClaimEffect CAS always wins; outcome writes succeed unless a test
+  // overrides outcomeImpl.
+  outcomeImpl = async () => ({ count: 1 });
+  updateManyMock.mockImplementation(async (args: UpdateArgs) =>
+    args.data.status === 'running' ? { count: 1 } : outcomeImpl(args),
+  );
   updateMock.mockResolvedValue({});
 });
 
@@ -83,10 +99,10 @@ describe('L3 — execute succeeded, markCompleted failed', () => {
   it('runTrackedSideEffect: executes exactly once, never marks failed, never re-throws into a retry', async () => {
     // markCompleted keeps failing (DB blip that outlasts every retry);
     // every other update (none expected) succeeds.
-    updateMock.mockImplementation(async (args: UpdateArgs) => {
+    outcomeImpl = async (args: UpdateArgs) => {
       if (args.data.status === 'completed') throw new Error('pool timeout');
-      return {};
-    });
+      return { count: 1 };
+    };
     const execute = jest.fn().mockResolvedValue(undefined);
 
     runTrackedSideEffect('apt-1', 'cancelled', 'slack_notify_cancelled', execute, RETRY_OPTS, 3);
@@ -99,7 +115,7 @@ describe('L3 — execute succeeded, markCompleted failed', () => {
     expect(statusWrites('completed').length).toBeGreaterThan(1);
     // Registration ran once: runBackgroundTask did not re-run the closure.
     expect(findUniqueMock).toHaveBeenCalledTimes(1);
-    expect(updateManyMock).toHaveBeenCalledTimes(1);
+    expect(claims()).toHaveLength(1);
     // Logged at error level WITH the effect key so the row can be reconciled.
     const errorCalls = (logger.error as jest.Mock).mock.calls;
     expect(errorCalls.some(([ctx]) => typeof ctx?.idempotencyKey === 'string')).toBe(true);
@@ -108,10 +124,10 @@ describe('L3 — execute succeeded, markCompleted failed', () => {
   });
 
   it('runReplayableTrackedSideEffect: the email is sent exactly once when markCompleted throws', async () => {
-    updateMock.mockImplementation(async (args: UpdateArgs) => {
+    outcomeImpl = async (args: UpdateArgs) => {
       if (args.data.status === 'completed') throw new Error('connection reset');
-      return {};
-    });
+      return { count: 1 };
+    };
     const send = jest.fn().mockResolvedValue(undefined);
 
     runReplayableTrackedSideEffect(
@@ -133,12 +149,12 @@ describe('L3 — execute succeeded, markCompleted failed', () => {
 
   it('a transient markCompleted failure is retried inline and the row ends up completed', async () => {
     let completedAttempts = 0;
-    updateMock.mockImplementation(async (args: UpdateArgs) => {
+    outcomeImpl = async (args: UpdateArgs) => {
       if (args.data.status === 'completed' && ++completedAttempts === 1) {
         throw new Error('pool timeout');
       }
-      return {};
-    });
+      return { count: 1 };
+    };
     const execute = jest.fn().mockResolvedValue(undefined);
 
     runTrackedSideEffect('apt-1', 'confirmed', 'slack_notify_confirmed', execute, RETRY_OPTS, 2);
@@ -151,10 +167,10 @@ describe('L3 — execute succeeded, markCompleted failed', () => {
   });
 
   it('periodic wrapper: same guarantee — one execute, no markFailed', async () => {
-    updateMock.mockImplementation(async (args: UpdateArgs) => {
+    outcomeImpl = async (args: UpdateArgs) => {
       if (args.data.status === 'completed') throw new Error('pool timeout');
-      return {};
-    });
+      return { count: 1 };
+    };
     const execute = jest.fn().mockResolvedValue(undefined);
 
     runPeriodicTrackedSideEffect(
@@ -229,7 +245,7 @@ describe('L3 — registration failure for pre-registered (status-transition) eff
     await drainAllTimers();
 
     expect(execute).toHaveBeenCalledTimes(1);
-    expect(updateManyMock).toHaveBeenCalledTimes(1); // claimed the pre-registered row
+    expect(claims()).toHaveLength(1); // claimed the pre-registered row
     expect(statusWrites('completed')).toHaveLength(1);
   });
 
@@ -246,5 +262,79 @@ describe('L3 — registration failure for pre-registered (status-transition) eff
     await drainAllTimers();
 
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('outcome writes carry the execute lease (review §4.4)', () => {
+  it('markFailed / markCompleted are scoped to the lease this worker claimed', async () => {
+    const execute = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Slack 503'))
+      .mockResolvedValueOnce(undefined);
+
+    runTrackedSideEffect('apt-1', 'cancelled', 'slack_notify_cancelled', execute, RETRY_OPTS, 3);
+    await drainAllTimers();
+
+    const [firstClaim, secondClaim] = claims();
+    const [failed] = statusWrites('failed');
+    const [completed] = statusWrites('completed');
+    // Each outcome write matches only the row state its own claim left.
+    expect(failed.where).toEqual({
+      idempotencyKey: firstClaim.where.idempotencyKey,
+      status: 'running',
+      lastAttempt: firstClaim.data.lastAttempt,
+    });
+    expect(completed.where).toEqual({
+      idempotencyKey: secondClaim.where.idempotencyKey,
+      status: 'running',
+      lastAttempt: secondClaim.data.lastAttempt,
+    });
+  });
+
+  it('a lost lease is not retried as if it were a DB blip', async () => {
+    // Another worker re-claimed the row while we executed: our completion
+    // write matches nothing. It must not be retried (inline or deferred) —
+    // the new owner records its own outcome.
+    outcomeImpl = async () => ({ count: 0 });
+    const execute = jest.fn().mockResolvedValue(undefined);
+
+    runTrackedSideEffect('apt-1', 'confirmed', 'slack_notify_confirmed', execute, RETRY_OPTS, 2);
+    await drainAllTimers();
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(statusWrites('completed')).toHaveLength(1);
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('terminal rows are not executed', () => {
+  it('a superseded row is skipped without claiming it', async () => {
+    findUniqueMock.mockResolvedValue({ id: 'row-1', status: 'superseded' });
+    const execute = jest.fn().mockResolvedValue(undefined);
+
+    runTrackedSideEffect('apt-1', 'confirmed', 'slack_notify_confirmed', execute, RETRY_OPTS, 2);
+    await drainAllTimers();
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(claims()).toHaveLength(0);
+  });
+
+  it('periodic: an already-completed row calls onAlreadyCompleted (sentinel reconcile) instead of executing', async () => {
+    findUniqueMock.mockResolvedValue({ id: 'row-1', status: 'completed' });
+    const execute = jest.fn().mockResolvedValue(undefined);
+    const onAlreadyCompleted = jest.fn().mockResolvedValue(undefined);
+
+    runPeriodicTrackedSideEffect(
+      { kind: 'appointment', appointmentId: 'apt-1' },
+      'email_chase_user',
+      { renderPayload: async () => ({ to: 'u@x', subject: 's', body: 'b' }), execute, onAlreadyCompleted },
+      RETRY_OPTS,
+      1234,
+    );
+    await drainAllTimers();
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(onAlreadyCompleted).toHaveBeenCalledTimes(1);
+    expect(claims()).toHaveLength(0);
   });
 });

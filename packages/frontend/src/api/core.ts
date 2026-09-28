@@ -20,16 +20,37 @@ interface ValidationErrorDetails {
 
 export type ApiErrorDetails = ThreadLimitDetails | ValidationErrorDetails | Record<string, unknown>;
 
+/** Extra fields some error responses carry. */
+export interface ApiErrorExtras {
+  /** HTTP status of the response (undefined for network/format errors). */
+  status?: number;
+  /** Seconds until a rate limit lifts (Retry-After header or body `retryAfter`). */
+  retryAfter?: number;
+  /** Corrected address for a likely typo, e.g. "jamie@gmail.com". */
+  suggestedEmail?: string | null;
+}
+
 // Custom error class to carry API error details
 export class ApiError extends Error {
   code?: string;
   details?: ApiErrorDetails;
+  status?: number;
+  retryAfter?: number;
+  suggestedEmail?: string | null;
 
-  constructor(message: string, code?: string, details?: ApiErrorDetails) {
+  constructor(message: string, code?: string, details?: ApiErrorDetails, extras: ApiErrorExtras = {}) {
     super(message);
     this.name = 'ApiError';
     this.code = code;
     this.details = details;
+    this.status = extras.status;
+    this.retryAfter = extras.retryAfter;
+    this.suggestedEmail = extras.suggestedEmail;
+  }
+
+  /** A rate-limit rejection (HTTP 429). */
+  isRateLimited(): boolean {
+    return this.status === 429;
   }
 
   /** Type guard: check if this is a thread limit error with known detail shape */
@@ -72,11 +93,49 @@ function notifyAdminAuthFailed(detail: AdminAuthFailureDetail): void {
   window.dispatchEvent(new CustomEvent<AdminAuthFailureDetail>(ADMIN_AUTH_FAILED_EVENT, { detail }));
 }
 
-function parseRetryAfter(response: Response): number | undefined {
+function parseRetryAfter(response: Response, body?: Record<string, unknown>): number | undefined {
   const header = response.headers.get('Retry-After');
-  if (!header) return undefined;
-  const seconds = parseInt(header, 10);
+  const raw = header ?? (body && (typeof body.retryAfter === 'number' || typeof body.retryAfter === 'string') ? String(body.retryAfter) : null);
+  if (!raw) return undefined;
+  const seconds = parseInt(raw, 10);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+/** "45 seconds", "3 minutes", "2 hours" — for "please wait …" copy. */
+export function formatWait(seconds: number): string {
+  const s = Math.max(1, Math.ceil(seconds));
+  if (s < 90) return `${s} second${s === 1 ? '' : 's'}`;
+  const minutes = Math.ceil(s / 60);
+  if (minutes < 90) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.ceil(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+/**
+ * Build the ApiError for a failed public/admin response, keeping the
+ * status, Retry-After and typo suggestion the backend sends.
+ */
+function toApiError(response: Response, data: unknown): ApiError {
+  const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
+  const retryAfter = response.status === 429 ? parseRetryAfter(response, errorData) : undefined;
+  let message = (errorData.error as string) || 'An error occurred';
+  if (response.status === 429 && !errorData.error) {
+    message = retryAfter
+      ? `Too many requests. Please wait ${formatWait(retryAfter)} and try again.`
+      : 'Too many requests. Please wait a moment and try again.';
+  } else if (response.status === 429 && retryAfter && !/wait/i.test(message)) {
+    message = `${message.replace(/\.?$/, '.')} Please wait ${formatWait(retryAfter)} and try again.`;
+  }
+  return new ApiError(
+    message,
+    errorData.code as string | undefined,
+    errorData.details as ApiError['details'],
+    {
+      status: response.status,
+      retryAfter,
+      suggestedEmail: typeof errorData.suggestedEmail === 'string' ? errorData.suggestedEmail : null,
+    }
+  );
 }
 
 /**
@@ -295,21 +354,20 @@ export function buildJsonRequestInit(
 export async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T>> {
   // FIX M3: Use request deduplication for GET requests
   return fetchWithDedup<ApiResponse<T>>(endpoint, options, async () => {
-    const response = await fetchWithRetry(
-      `${API_BASE}${endpoint}`,
-      buildJsonRequestInit(options, { 'Content-Type': 'application/json' }),
-      TIMEOUTS.DEFAULT_MS
-    );
+    const method = (options?.method || 'GET').toUpperCase();
+    // Only GETs are retried (and sleep through a 429). A public POST
+    // (booking, signup, feedback) used to wait out Retry-After — up to a
+    // minute of "Submitting…" — and resend; now it fails fast so the form
+    // can say "please wait N seconds".
+    const init = buildJsonRequestInit(options, { 'Content-Type': 'application/json' });
+    const response = method === 'GET'
+      ? await fetchWithRetry(`${API_BASE}${endpoint}`, init, TIMEOUTS.DEFAULT_MS)
+      : await fetchWithTimeout(`${API_BASE}${endpoint}`, init, TIMEOUTS.DEFAULT_MS);
 
     const data = await safeParseJson(response);
 
     if (!response.ok) {
-      const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
-      throw new ApiError(
-        (errorData.error as string) || 'An error occurred',
-        errorData.code as string | undefined,
-        errorData.details as ApiError['details']
-      );
+      throw toApiError(response, data);
     }
 
     // Validate response is an object with expected structure
@@ -377,11 +435,7 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
         // Throw ApiError (not plain Error) so callers can inspect code/details
         // consistently with fetchApi. Previously only fetchApi threw ApiError,
         // which meant admin pages lost access to structured error metadata.
-        throw new ApiError(
-          (errorData.error as string) || 'An error occurred',
-          errorData.code as string | undefined,
-          errorData.details as ApiError['details']
-        );
+        throw toApiError(response, data);
       }
 
       if (!data || typeof data !== 'object' || Array.isArray(data)) {

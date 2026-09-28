@@ -11,6 +11,8 @@ export interface SignupRequest {
   invitationToken?: string;
   /** Country code — drives recipient timezone for every email this user receives. */
   country: CountryCode;
+  /** Explicit opt-in to the weekly availability email (unticked by default). */
+  weeklyEmails: boolean;
 }
 
 export interface SignupResponse {
@@ -18,6 +20,8 @@ export interface SignupResponse {
   odId: string;
   email: string;
   name: string | null;
+  /** Whether the address is subscribed to the weekly email after this signup. */
+  weeklyEmails?: boolean;
 }
 
 export async function submitSignup(request: SignupRequest): Promise<SignupResponse> {

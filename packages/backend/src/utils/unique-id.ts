@@ -14,6 +14,7 @@ import { randomInt } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { logger } from './logger';
+import { normalizeEmail } from './email-equals';
 import { getSettingValue } from '../services/settings.service';
 
 // ID range: 1000000000 to 9999999999 (10 digits)
@@ -85,6 +86,40 @@ export async function generateUniqueTherapistId(): Promise<string> {
 }
 
 /**
+ * Rows written before emails were normalised on write can still be stored
+ * mixed-case, and the exact (index-backed) lookup misses them — creating
+ * a second User for the same person. When the exact lookup misses, find
+ * such a row by its lowercased address and normalise it in place, so the
+ * next lookup is exact. Only reached on the "new user" path, so the
+ * unindexed lower(email) scan is off the hot path. Returns null when no
+ * legacy row exists (the caller then creates one).
+ */
+async function adoptLegacyMixedCaseUser(normalizedEmail: string) {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM users
+    WHERE lower(trim(email)) = ${normalizedEmail}
+    ORDER BY created_at ASC
+    LIMIT 1
+  `;
+  const legacyId = rows[0]?.id;
+  if (!legacyId) return null;
+  try {
+    const adopted = await prisma.user.update({
+      where: { id: legacyId },
+      data: { email: normalizedEmail },
+    });
+    logger.info({ userId: legacyId }, 'Normalised legacy mixed-case user email on lookup');
+    return adopted;
+  } catch (err: any) {
+    // P2002: a normalised row appeared concurrently — use it.
+    if (err?.code === 'P2002') {
+      return prisma.user.findUnique({ where: { email: normalizedEmail } });
+    }
+    throw err;
+  }
+}
+
+/**
  * Get or create a User record by email
  * Returns the user with their unique odId. Return type is inferred from
  * Prisma so that new columns added to the User model are automatically
@@ -102,12 +137,17 @@ export async function getOrCreateUser(
   name?: string | null,
   country?: string,
 ) {
-  const normalizedEmail = email.toLowerCase().trim();
+  // Emails are stored normalised (lowercased + trimmed) — utils/email-equals
+  // is the one normaliser. `users.email` is a case-sensitive unique, so a
+  // raw write would let 'Alice@x.com' and 'alice@x.com' become two users.
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) {
+    throw new Error('getOrCreateUser requires a non-empty email');
+  }
 
-  // Check if user already exists
-  const existing = await prisma.user.findUnique({
-    where: { email: normalizedEmail },
-  });
+  const existing =
+    (await prisma.user.findUnique({ where: { email: normalizedEmail } })) ??
+    (await adoptLegacyMixedCaseUser(normalizedEmail));
 
   if (existing) {
     const updates: { name?: string; country?: string } = {};
@@ -170,7 +210,8 @@ export async function getOrCreateTherapist(
   country?: string,
   availability?: Prisma.InputJsonValue | null,
 ) {
-  const normalizedEmail = email.toLowerCase().trim();
+  // Stored normalised, like users (see getOrCreateUser).
+  const normalizedEmail = normalizeEmail(email);
 
   // Check if therapist already exists by Notion ID
   const existing = await prisma.therapist.findUnique({
@@ -265,7 +306,7 @@ export async function backfillUsers(): Promise<{
   for (const { userEmail, userName } of uniqueUsers) {
     try {
       const existing = await prisma.user.findUnique({
-        where: { email: userEmail.toLowerCase().trim() },
+        where: { email: normalizeEmail(userEmail) },
       });
 
       if (existing) {
@@ -371,7 +412,7 @@ export async function linkAppointmentsToEntities(): Promise<{
     try {
       // Find the user
       const user = await prisma.user.findUnique({
-        where: { email: appointment.userEmail.toLowerCase().trim() },
+        where: { email: normalizeEmail(appointment.userEmail) },
         select: { id: true },
       });
 

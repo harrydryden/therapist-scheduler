@@ -17,9 +17,22 @@
  *
  * Usage:
  * 1. Before executing side effects, register them with registerSideEffects()
- * 2. Execute each side effect and call markCompleted() or markFailed()
- * 3. A background job retries pending/failed effects via the
+ * 2. Claim the execute lease with tryClaimEffect() — it returns the lease
+ *    token (the `lastAttempt` it stamped) or null if another worker holds it
+ * 3. Execute, then call markCompleted()/markFailed() WITH that lease. The
+ *    write only lands while this worker still owns the row, so a worker
+ *    whose lease expired (and whose row another worker re-claimed) cannot
+ *    overwrite the new owner's outcome — e.g. flip a completed row back to
+ *    `failed` and trigger a duplicate send.
+ * 4. A background job retries pending/failed effects via the
  *    sideEffectRetryService.
+ *
+ * Row statuses: pending → running → completed | failed | abandoned |
+ * superseded. `superseded` (terminal, never sent) is set by the retry runner
+ * for a transition effect whose transition has been overtaken — its
+ * appointment's transitionGeneration has moved past the generation stamped
+ * on the row at registration (e.g. a "confirmed for Tue 3pm" email still
+ * failing after the booking was rescheduled or cancelled).
  */
 
 import { Prisma } from '@prisma/client';
@@ -97,11 +110,51 @@ export interface SideEffectDefinition {
   payload?: unknown;
 }
 
+export type SideEffectStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'abandoned'
+  | 'superseded';
+
+/** Statuses a row never leaves (the effect will not run again). */
+export const TERMINAL_SIDE_EFFECT_STATUSES: readonly SideEffectStatus[] = [
+  'completed',
+  'abandoned',
+  'superseded',
+];
+
 export interface RegisteredSideEffect {
   id: string;
   effectType: SideEffectType;
   idempotencyKey: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'abandoned';
+  status: SideEffectStatus;
+}
+
+/**
+ * Proof that this worker holds a row's execute lease: the `lastAttempt`
+ * value tryClaimEffect stamped. Passed back to markCompleted / markFailed /
+ * markAbandoned / markSuperseded, whose writes only land while the row is
+ * still `running` with exactly this `lastAttempt`.
+ */
+export type ClaimLease = Date;
+
+/** How long finished (completed/superseded) outbox rows are kept. */
+export const SIDE_EFFECT_LOG_RETENTION_DAYS = 30;
+
+/**
+ * `transition_generation` is stamped only for status-transition effects —
+ * the thing the retry runner compares against the appointment's current
+ * generation. For periodic effects the generation argument is a scope
+ * generation (a lifecycle pass, a cadence cycle) that only partitions the
+ * idempotency key; superseding those is the job of their sentinels.
+ */
+function stampedGeneration(
+  transition: TransitionType,
+  transitionGeneration: number | undefined,
+): number | null {
+  return transition !== 'periodic' && transitionGeneration !== undefined ? transitionGeneration : null;
 }
 
 /**
@@ -343,6 +396,7 @@ class SideEffectTrackerService {
             transition,
             status: 'pending',
             idempotencyKey,
+            transitionGeneration: stampedGeneration(transition, transitionGeneration),
             payload: effect.payload === undefined
               ? undefined
               : (effect.payload as Prisma.InputJsonValue),
@@ -439,6 +493,7 @@ class SideEffectTrackerService {
         transition,
         status: 'pending',
         idempotencyKey,
+        transitionGeneration: stampedGeneration(transition, transitionGeneration),
         payload:
           effect.payload === undefined
             ? undefined
@@ -460,54 +515,99 @@ class SideEffectTrackerService {
 
   /**
    * Atomically claim a side-effect row for execution. Transitions the row
-   * to `status='running'` and sets `lastAttempt` to now, but only if the
-   * current state is either:
+   * to `status='running'` and stamps `lastAttempt`, but only if the current
+   * state is either:
    *   - pending (the row was freshly registered — first execute attempt)
    *   - failed (the row failed previously and is eligible for retry)
    *   - running with an expired lease (a previous worker died mid-execute)
    *
-   * Returns true if this worker won the claim; false if another worker
-   * has the lease, or the row has moved to completed/abandoned.
+   * Returns the lease token (the stamped `lastAttempt`) if this worker won
+   * the claim, or null if another worker holds the lease or the row has
+   * moved to a terminal status. Callers pass the lease to the mark* methods.
    *
-   * Race-safety: a single Postgres `updateMany` with the eligible-state
-   * filter is atomic. If two workers call this concurrently, only one
-   * sees `count === 1`. This is the gate that prevents the retry runner
-   * from firing a duplicate execute while the original is still in-flight
-   * — the long-standing concurrency hole called out by the audit and
-   * acknowledged in the harness comments (#side-effect-harness.ts:233).
+   * Re-claiming an expired `running` row counts the previous, unfinished
+   * attempt (`attempts + 1`). Its worker died without recording an outcome
+   * — markFailed never ran — so without this an effect that crashes the
+   * process retried every lease period forever and was never abandoned or
+   * alerted on. The retry runner abandons such a row once the count reaches
+   * its cap.
+   *
+   * Race-safety: each branch is a single Postgres `updateMany` with the
+   * eligible-state filter, which is atomic. If two workers call this
+   * concurrently, only one sees `count === 1`. This is the gate that
+   * prevents the retry runner from firing a duplicate execute while the
+   * original is still in-flight.
    */
-  async tryClaimEffect(idempotencyKey: string): Promise<boolean> {
-    const leaseExpiry = new Date(Date.now() - CLAIM_LEASE_MS);
-    const result = await prisma.sideEffectLog.updateMany({
+  async tryClaimEffect(idempotencyKey: string): Promise<ClaimLease | null> {
+    const lease = new Date();
+    const fresh = await prisma.sideEffectLog.updateMany({
       where: {
         idempotencyKey,
-        OR: [
-          { status: 'pending' },
-          { status: 'failed' },
-          { status: 'running', lastAttempt: { lt: leaseExpiry } },
-        ],
+        status: { in: ['pending', 'failed'] },
       },
       data: {
         status: 'running',
-        lastAttempt: new Date(),
+        lastAttempt: lease,
       },
     });
-    return result.count === 1;
+    if (fresh.count === 1) return lease;
+
+    const leaseExpiry = new Date(lease.getTime() - CLAIM_LEASE_MS);
+    const orphaned = await prisma.sideEffectLog.updateMany({
+      where: {
+        idempotencyKey,
+        status: 'running',
+        lastAttempt: { lt: leaseExpiry },
+      },
+      data: {
+        status: 'running',
+        lastAttempt: lease,
+        attempts: { increment: 1 },
+      },
+    });
+    return orphaned.count === 1 ? lease : null;
   }
 
   /**
-   * Mark a side effect as completed
+   * WHERE clause for an outcome write. With a lease: only while this worker
+   * still owns the row. Without one (legacy callers that never claimed, e.g.
+   * the appointment-creation route's justintime_start row): only while the
+   * row is not already in a terminal status, so a late write can never
+   * resurrect a completed/abandoned/superseded row.
    */
-  async markCompleted(idempotencyKey: string): Promise<void> {
-    await prisma.sideEffectLog.update({
-      where: { idempotencyKey },
+  private ownedBy(idempotencyKey: string, lease: ClaimLease | undefined): Prisma.SideEffectLogWhereInput {
+    return lease
+      ? { idempotencyKey, status: 'running', lastAttempt: lease }
+      : { idempotencyKey, status: { in: ['pending', 'running', 'failed'] } };
+  }
+
+  private logLostLease(idempotencyKey: string, outcome: string, lease: ClaimLease | undefined): void {
+    logger.warn(
+      { idempotencyKey, outcome, lease: lease?.toISOString() },
+      'Side effect outcome not recorded — this worker no longer owns the row (lease expired and re-claimed, or already finished)',
+    );
+  }
+
+  /**
+   * Mark a side effect as completed. Returns false (and writes nothing)
+   * when this worker no longer owns the row — see `ownedBy`. Throws only on
+   * a database error.
+   */
+  async markCompleted(idempotencyKey: string, lease?: ClaimLease): Promise<boolean> {
+    const result = await prisma.sideEffectLog.updateMany({
+      where: this.ownedBy(idempotencyKey, lease),
       data: {
         status: 'completed',
         completedAt: new Date(),
       },
     });
+    if (result.count === 0) {
+      this.logLostLease(idempotencyKey, 'completed', lease);
+      return false;
+    }
 
     logger.debug({ idempotencyKey }, 'Side effect marked completed');
+    return true;
   }
 
   /**
@@ -534,18 +634,23 @@ class SideEffectTrackerService {
    *      a process death during it) and is logged loudly so an operator
    *      can reconcile the row by key.
    *
+   * A lost lease (markCompleted returns false) is NOT retried: another
+   * worker owns the row now and will record its own outcome.
+   *
    * Returns true iff `completed` was persisted inline.
    */
   async markCompletedAfterExecute(
     idempotencyKey: string,
     logContext: Record<string, unknown> = {},
     options: {
+      lease?: ClaimLease;
       inlineRetryDelaysMs?: readonly number[];
       deferredRetryDelaysMs?: readonly number[];
     } = {},
   ): Promise<boolean> {
     const inlineDelays = options.inlineRetryDelaysMs ?? MARK_COMPLETED_INLINE_RETRY_DELAYS_MS;
     const deferredDelays = options.deferredRetryDelaysMs ?? MARK_COMPLETED_DEFERRED_RETRY_DELAYS_MS;
+    const { lease } = options;
 
     let lastErr: unknown;
     for (let attempt = 0; attempt <= inlineDelays.length; attempt++) {
@@ -553,7 +658,8 @@ class SideEffectTrackerService {
         await sleep(inlineDelays[attempt - 1]);
       }
       try {
-        await this.markCompleted(idempotencyKey);
+        const recorded = await this.markCompleted(idempotencyKey, lease);
+        if (!recorded) return false;
         if (attempt > 0) {
           logger.info(
             { ...logContext, idempotencyKey, attempts: attempt + 1 },
@@ -576,7 +682,7 @@ class SideEffectTrackerService {
       'Side effect EXECUTED but markCompleted failed — NOT marking failed (would re-send); ' +
         'row left running, deferred reconciliation scheduled inside the execute lease',
     );
-    this.scheduleDeferredCompletion(idempotencyKey, logContext, deferredDelays, 0);
+    this.scheduleDeferredCompletion(idempotencyKey, logContext, deferredDelays, 0, lease);
     return false;
   }
 
@@ -585,6 +691,7 @@ class SideEffectTrackerService {
     logContext: Record<string, unknown>,
     delaysMs: readonly number[],
     index: number,
+    lease: ClaimLease | undefined,
   ): void {
     if (index >= delaysMs.length) {
       logger.error(
@@ -596,15 +703,17 @@ class SideEffectTrackerService {
       return;
     }
     const timer = setTimeout(() => {
-      this.markCompleted(idempotencyKey).then(
-        () => {
-          logger.warn(
-            { ...logContext, idempotencyKey, deferredAttempt: index + 1 },
-            'Deferred reconciliation: executed side effect marked completed',
-          );
+      this.markCompleted(idempotencyKey, lease).then(
+        (recorded) => {
+          if (recorded) {
+            logger.warn(
+              { ...logContext, idempotencyKey, deferredAttempt: index + 1 },
+              'Deferred reconciliation: executed side effect marked completed',
+            );
+          }
         },
         () => {
-          this.scheduleDeferredCompletion(idempotencyKey, logContext, delaysMs, index + 1);
+          this.scheduleDeferredCompletion(idempotencyKey, logContext, delaysMs, index + 1, lease);
         },
       );
     }, delaysMs[index]);
@@ -613,11 +722,14 @@ class SideEffectTrackerService {
   }
 
   /**
-   * Mark a side effect as failed (can be retried)
+   * Mark a side effect as failed (can be retried). Increments `attempts`.
+   * Returns false (and writes nothing) when this worker no longer owns the
+   * row — a stale worker must not flip a row another worker has since
+   * completed back to `failed`, which would trigger another execution.
    */
-  async markFailed(idempotencyKey: string, errorMessage: string): Promise<void> {
-    await prisma.sideEffectLog.update({
-      where: { idempotencyKey },
+  async markFailed(idempotencyKey: string, errorMessage: string, lease?: ClaimLease): Promise<boolean> {
+    const result = await prisma.sideEffectLog.updateMany({
+      where: this.ownedBy(idempotencyKey, lease),
       data: {
         status: 'failed',
         attempts: { increment: 1 },
@@ -625,8 +737,13 @@ class SideEffectTrackerService {
         errorLog: errorMessage,
       },
     });
+    if (result.count === 0) {
+      this.logLostLease(idempotencyKey, 'failed', lease);
+      return false;
+    }
 
     logger.warn({ idempotencyKey, errorMessage }, 'Side effect marked failed');
+    return true;
   }
 
   /**
@@ -649,18 +766,48 @@ class SideEffectTrackerService {
   }
 
   /**
-   * Mark a side effect as abandoned (won't be retried)
+   * Mark a side effect as abandoned (won't be retried). Ownership-checked
+   * like markFailed.
    */
-  async markAbandoned(idempotencyKey: string, reason: string): Promise<void> {
-    await prisma.sideEffectLog.update({
-      where: { idempotencyKey },
+  async markAbandoned(idempotencyKey: string, reason: string, lease?: ClaimLease): Promise<boolean> {
+    const result = await prisma.sideEffectLog.updateMany({
+      where: this.ownedBy(idempotencyKey, lease),
       data: {
         status: 'abandoned',
         errorLog: reason,
       },
     });
+    if (result.count === 0) {
+      this.logLostLease(idempotencyKey, 'abandoned', lease);
+      return false;
+    }
 
     logger.warn({ idempotencyKey, reason }, 'Side effect marked abandoned');
+    return true;
+  }
+
+  /**
+   * Mark a side effect as superseded: terminal, and it was NOT executed.
+   * Used by the retry runner for a transition effect whose transition has
+   * since been overtaken. `completedAt` is stamped so retention ages the
+   * row out like a completed one. Ownership-checked like markFailed.
+   */
+  async markSuperseded(idempotencyKey: string, reason: string, lease?: ClaimLease): Promise<boolean> {
+    const result = await prisma.sideEffectLog.updateMany({
+      where: this.ownedBy(idempotencyKey, lease),
+      data: {
+        status: 'superseded',
+        completedAt: new Date(),
+        errorLog: reason,
+      },
+    });
+    if (result.count === 0) {
+      this.logLostLease(idempotencyKey, 'superseded', lease);
+      return false;
+    }
+
+    logger.info({ idempotencyKey, reason }, 'Side effect superseded (not sent)');
+    return true;
   }
 
   /**
@@ -677,8 +824,8 @@ class SideEffectTrackerService {
       return false;
     }
 
-    // Already completed or abandoned
-    if (effect.status === 'completed' || effect.status === 'abandoned') {
+    // Already finished (completed / abandoned / superseded)
+    if ((TERMINAL_SIDE_EFFECT_STATUSES as readonly string[]).includes(effect.status)) {
       return false;
     }
 
@@ -737,8 +884,15 @@ class SideEffectTrackerService {
     therapistId: string | null;
     effectType: SideEffectType;
     idempotencyKey: string;
+    // Status at read time. A `running` row is a crash orphan: claiming it
+    // counts the unfinished attempt (see tryClaimEffect), and the runner
+    // abandons it at the cap instead of executing it again.
+    status: SideEffectStatus;
     attempts: number;
     payload: unknown;
+    // The appointment's transitionGeneration when this (transition) effect
+    // was registered; null for periodic / therapist-scoped / legacy rows.
+    transitionGeneration: number | null;
     // Surface createdAt so post-abandon cleanup hooks can guard
     // against clobbering a newer cycle's claim (see the
     // email_therapist_nudge release path in side-effect-retry).
@@ -769,16 +923,20 @@ class SideEffectTrackerService {
           },
           {
             // Stuck-running recovery: original worker died mid-execute.
-            // Bounded by maxAttempts so we don't loop forever on a row
-            // whose execute is genuinely hung in a way that finishes
-            // just-after the lease expires (rare but possible).
+            // Deliberately NOT bounded by maxAttempts: an effect that keeps
+            // crashing the process must still surface here so the runner
+            // can abandon it (and alert) once the re-claims — each of which
+            // counts the crashed attempt — reach the cap. Filtering these
+            // out left them `running` forever, invisible and unalerted.
             status: 'running',
-            attempts: { lt: maxAttempts },
             lastAttempt: { lt: stuckRunningCutoff },
           },
         ],
       },
-      orderBy: [{ lastAttempt: 'asc' }, { createdAt: 'asc' }],
+      // NULLS FIRST: never-attempted `pending` rows have a null lastAttempt,
+      // and Postgres sorts NULLs LAST by default for ASC — so up to `limit`
+      // failed/running rows could starve them every cycle.
+      orderBy: [{ lastAttempt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
       take: limit,
     });
 
@@ -788,23 +946,36 @@ class SideEffectTrackerService {
       therapistId: e.therapistId,
       effectType: e.effectType as SideEffectType,
       idempotencyKey: e.idempotencyKey,
+      status: e.status as SideEffectStatus,
       attempts: e.attempts,
       payload: e.payload as unknown,
+      transitionGeneration: e.transitionGeneration,
       createdAt: e.createdAt,
     }));
   }
 
   /**
-   * Clean up old completed effects (housekeeping)
+   * Delete finished outbox rows (housekeeping). Called by the daily
+   * retention sweep (stale-check.service.ts).
    *
-   * @param olderThanDays - Delete completed effects older than this
+   * Only `completed` and `superseded` rows whose `completedAt` is older
+   * than the window. Everything else is kept: pending/running/failed rows
+   * are live work, and abandoned rows are the record an operator
+   * reconciles from. The unique idempotency key on a finished row is the
+   * guard against running the effect twice, so the window has to outlast
+   * any re-registration of the same key — transition effects re-register
+   * within seconds (the post-commit dispatch finding the in-transaction
+   * row) and periodic effects are keyed per generation/cycle, so nothing
+   * looks up a 30-day-old finished key again.
+   *
+   * @param olderThanDays - Delete finished effects older than this
    */
-  async cleanupOldEffects(olderThanDays: number = 30): Promise<number> {
+  async cleanupOldEffects(olderThanDays: number = SIDE_EFFECT_LOG_RETENTION_DAYS): Promise<number> {
     const cutoffDate = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
 
     const result = await prisma.sideEffectLog.deleteMany({
       where: {
-        status: 'completed',
+        status: { in: ['completed', 'superseded'] },
         completedAt: { lt: cutoffDate },
       },
     });
@@ -824,9 +995,11 @@ class SideEffectTrackerService {
    */
   async getStats(): Promise<{
     pending: number;
+    running: number;
     completed: number;
     failed: number;
     abandoned: number;
+    superseded: number;
     byType: Record<string, { pending: number; failed: number }>;
   }> {
     const counts = await prisma.sideEffectLog.groupBy({
@@ -842,9 +1015,11 @@ class SideEffectTrackerService {
 
     const stats = {
       pending: 0,
+      running: 0,
       completed: 0,
       failed: 0,
       abandoned: 0,
+      superseded: 0,
       byType: {} as Record<string, { pending: number; failed: number }>,
     };
 

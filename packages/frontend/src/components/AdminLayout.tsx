@@ -3,6 +3,9 @@ import { Link, useLocation, Outlet } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import AdminLogin from './AdminLogin';
+import AdminIdentityPrompt from './AdminIdentityPrompt';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { getAdminDisplayName, setAdminDisplayName } from '../utils/admin-id';
 
 interface NavItem {
   name: string;
@@ -78,6 +81,17 @@ export default function AdminLayout() {
   const { isAuthenticated, logout } = useAuth();
   const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [displayName, setDisplayName] = useState<string | null>(getAdminDisplayName);
+  const [editingName, setEditingName] = useState(false);
+
+  // Per-page title, and never index any admin page.
+  const currentPage = navItems.find((item) => item.path === location.pathname);
+  useDocumentTitle(currentPage ? `${currentPage.name} · Admin` : 'Admin', { noindex: true });
+
+  const saveDisplayName = (name: string) => {
+    setDisplayName(setAdminDisplayName(name) ?? name);
+    setEditingName(false);
+  };
 
   const handleLogout = () => {
     setSidebarOpen(false);
@@ -95,6 +109,7 @@ export default function AdminLayout() {
       {/* Mobile overlay backdrop */}
       {sidebarOpen && (
         <div
+          aria-hidden="true"
           className="fixed inset-0 bg-black/30 z-40 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -140,6 +155,7 @@ export default function AdminLayout() {
                 key={item.path}
                 to={item.path}
                 onClick={() => setSidebarOpen(false)}
+                aria-current={isActive ? 'page' : undefined}
                 className={`
                   flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all
                   ${isActive
@@ -169,6 +185,20 @@ export default function AdminLayout() {
 
         {/* Footer */}
         <div className="px-3 py-3 border-t border-slate-200/60 space-y-0.5">
+          {displayName && (
+            <div className="px-3 py-2 text-xs text-slate-500 flex items-center justify-between gap-2">
+              <span className="truncate">
+                Signed in as <strong className="text-slate-700">{displayName}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setEditingName(true)}
+                className="text-spill-blue-800 hover:underline flex-shrink-0"
+              >
+                Change
+              </button>
+            </div>
+          )}
           <Link
             to="/"
             className="flex items-center gap-3 px-3 py-2 text-sm text-slate-500 hover:text-slate-700 hover:bg-white/60 rounded-lg transition-colors"
@@ -211,6 +241,14 @@ export default function AdminLayout() {
         </div>
         <Outlet />
       </main>
+
+      {(!displayName || editingName) && (
+        <AdminIdentityPrompt
+          initialName={displayName}
+          onSave={saveDisplayName}
+          onCancel={displayName ? () => setEditingName(false) : undefined}
+        />
+      )}
     </div>
   );
 }

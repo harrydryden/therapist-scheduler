@@ -1,0 +1,8 @@
+{
+  // Emit config for `npm run build` (and the Docker image). Same compiler
+  // options as tsconfig.json, minus the tests: src/__tests__ used to be
+  // compiled into dist/ and shipped in the production image. tsconfig.json
+  // keeps the tests so `tsc --noEmit` / editors still typecheck them.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/__tests__", "src/**/*.test.ts"]
+}

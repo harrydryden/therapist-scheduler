@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { submitAppointmentRequest } from '../api/client';
-import type { AppointmentRequest, BookingMethod } from '../types';
+import { submitAppointmentRequest, ApiError } from '../api/client';
+import type {
+  AppointmentRequest,
+  AppointmentRequestResponse,
+  BookingMethod,
+  BookingVerificationPendingResponse,
+} from '../types';
+import { useRetryCountdown } from './useRetryCountdown';
 
 // FIX #38: Shared booking form hook extracted from BookingForm.tsx and TherapistCard.tsx
 // to eliminate duplicated firstName, email, mutation, and handleSubmit logic.
@@ -11,6 +17,31 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isValidEmail(email: string): boolean {
   return EMAIL_REGEX.test(email);
+}
+
+/**
+ * "You can have up to N active requests" copy, from the
+ * `general.maxActiveThreadsPerUser` setting. Null when there is no limit
+ * (0) or the setting isn't known yet — better no line than a wrong number.
+ */
+export function activeRequestLimitCopy(maxActive: number | undefined | null): string | null {
+  if (!maxActive || maxActive < 1) return null;
+  return `You can have up to ${maxActive} active appointment request${maxActive === 1 ? '' : 's'} at a time.`;
+}
+
+/** The typo suggestion from a response or a validation error, if any. */
+export function suggestedEmailFrom(
+  data: AppointmentRequestResponse | undefined,
+  error: unknown,
+  currentEmail: string,
+): string | null {
+  const suggestion = data?.verificationRequired
+    ? data.suggestedEmail
+    : error instanceof ApiError
+      ? error.suggestedEmail ?? null
+      : null;
+  if (!suggestion || suggestion.toLowerCase() === currentEmail.trim().toLowerCase()) return null;
+  return suggestion;
 }
 
 interface UseBookingFormOptions {
@@ -29,14 +60,16 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
     onSuccess,
   });
 
+  const retryInSeconds = useRetryCountdown(mutation.error);
   const emailValid = isValidEmail(email.trim());
 
-  const submitWithMethod = (bookingMethod: BookingMethod = 'agent_negotiated') => {
-    if (!firstName.trim() || !emailValid) return;
+  const submitWithMethod = (bookingMethod: BookingMethod = 'agent_negotiated', emailOverride?: string) => {
+    const address = (emailOverride ?? email).trim();
+    if (!firstName.trim() || !isValidEmail(address)) return;
 
     mutation.mutate({
       userName: firstName.trim(),
-      userEmail: email.trim(),
+      userEmail: address,
       therapistHandle,
       ...(voucherToken ? { voucherToken } : {}),
       bookingMethod,
@@ -52,7 +85,7 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
     submitWithMethod('direct_link');
   };
 
-  const canSubmit = firstName.trim().length > 0 && emailValid && !mutation.isPending;
+  const canSubmit = firstName.trim().length > 0 && emailValid && !mutation.isPending && retryInSeconds === 0;
 
   // Method of the request that actually SUCCEEDED (undefined until then).
   // Read from the mutation itself rather than set on click, so a failed
@@ -61,6 +94,22 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
   const succeededBookingMethod: BookingMethod | undefined = mutation.isSuccess
     ? mutation.variables?.bookingMethod ?? 'agent_negotiated'
     : undefined;
+
+  /** Set while we wait for the requester to confirm by email. */
+  const pendingVerification: BookingVerificationPendingResponse | null =
+    mutation.isSuccess && mutation.data?.verificationRequired ? mutation.data : null;
+
+  const suggestedEmail = suggestedEmailFrom(mutation.data, mutation.error, email);
+
+  /** Re-submit with the suggested (typo-corrected) address. */
+  const applySuggestedEmail = () => {
+    if (!suggestedEmail) return;
+    setEmail(suggestedEmail);
+    submitWithMethod(mutation.variables?.bookingMethod ?? 'agent_negotiated', suggestedEmail);
+  };
+
+  /** Back to the form (e.g. to type a different address). */
+  const editDetails = () => mutation.reset();
 
   // Show validation hint only after user has typed something
   const showEmailError = email.trim().length > 0 && !emailValid;
@@ -76,5 +125,10 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
     canSubmit,
     showEmailError,
     succeededBookingMethod,
+    pendingVerification,
+    suggestedEmail,
+    applySuggestedEmail,
+    editDetails,
+    retryInSeconds,
   };
 }

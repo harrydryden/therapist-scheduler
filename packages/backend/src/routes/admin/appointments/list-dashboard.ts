@@ -23,8 +23,56 @@ import {
   getHealthThresholds,
 } from '../../../services/conversation-health.service';
 import { sendSuccess, Errors } from '../../../utils/response';
-import { buildLastMessagePreview, listAppointmentsSchema } from './schemas';
+import {
+  buildDashboardWhere,
+  buildLastMessagePreview,
+  findIdsWithHealth,
+  InvalidQueryError,
+  listAppointmentsSchema,
+} from './schemas';
 import { deriveNextAction } from '../../../utils/next-action';
+
+export const AWAITING_VERIFICATION_ACTION = 'Waiting for the client to confirm their email address';
+
+const DASHBOARD_SELECT = {
+  id: true,
+  trackingCode: true,
+  userName: true,
+  userEmail: true,
+  therapistName: true,
+  therapistEmail: true,
+  therapistHandle: true,
+  status: true,
+  confirmedAt: true,
+  confirmedDateTime: true,
+  confirmedDateTimeParsed: true,
+  notes: true,
+  messageCount: true,
+  checkpointStage: true,
+  createdAt: true,
+  updatedAt: true,
+  humanControlEnabled: true,
+  humanControlTakenBy: true,
+  lastActivityAt: true,
+  isStale: true,
+  lastToolExecutedAt: true,
+  lastToolExecutionFailed: true,
+  lastToolFailureReason: true,
+  threadDivergedAt: true,
+  threadDivergenceDetails: true,
+  threadDivergenceAcknowledged: true,
+  conversationStallAlertAt: true,
+  conversationStallAcknowledged: true,
+  chaseSentAt: true,
+  chaseSentTo: true,
+  closureRecommendedAt: true,
+  closureRecommendedReason: true,
+  closureRecommendationActioned: true,
+  reschedulingInProgress: true,
+  emailVerifiedAt: true,
+} as const satisfies Prisma.AppointmentRequestSelect;
+
+type DashboardRow = Prisma.AppointmentRequestGetPayload<{ select: typeof DASHBOARD_SELECT }>;
 
 export async function dashboardListRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get(
@@ -38,76 +86,45 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
         return Errors.badRequest(reply, 'Invalid query params', validation.error.errors);
       }
 
-      const { status, therapistId, dateFrom, dateTo, page, limit, sortBy, sortOrder } =
-        validation.data;
+      const query = validation.data;
+      const { page, limit, sortBy, sortOrder } = query;
 
-      const where: Record<string, unknown> = {};
-      if (status && status !== 'all') {
-        where.status = status;
+      let where: Prisma.AppointmentRequestWhereInput;
+      try {
+        where = buildDashboardWhere(query);
+      } catch (err) {
+        if (err instanceof InvalidQueryError) return Errors.badRequest(reply, err.message);
+        throw err;
       }
-      if (therapistId) {
-        where.therapistHandle = therapistId;
-      }
-      if (dateFrom || dateTo) {
-        where.createdAt = {};
-        if (dateFrom) {
-          const d = new Date(dateFrom);
-          if (isNaN(d.getTime())) return Errors.badRequest(reply, 'Invalid dateFrom format');
-          (where.createdAt as Record<string, Date>).gte = d;
-        }
-        if (dateTo) {
-          const d = new Date(dateTo);
-          if (isNaN(d.getTime())) return Errors.badRequest(reply, 'Invalid dateTo format');
-          (where.createdAt as Record<string, Date>).lte = d;
-        }
-      }
+      const orderBy = { [sortBy]: sortOrder } as Prisma.AppointmentRequestOrderByWithRelationInput;
 
       try {
-        const [appointments, total] = await Promise.all([
-          prisma.appointmentRequest.findMany({
-            where,
-            orderBy: { [sortBy]: sortOrder },
-            skip: (page - 1) * limit,
-            take: limit,
-            select: {
-              id: true,
-              trackingCode: true,
-              userName: true,
-              userEmail: true,
-              therapistName: true,
-              therapistEmail: true,
-              therapistHandle: true,
-              status: true,
-              confirmedAt: true,
-              confirmedDateTime: true,
-              confirmedDateTimeParsed: true,
-              notes: true,
-              messageCount: true,
-              checkpointStage: true,
-              createdAt: true,
-              updatedAt: true,
-              humanControlEnabled: true,
-              humanControlTakenBy: true,
-              lastActivityAt: true,
-              isStale: true,
-              lastToolExecutedAt: true,
-              lastToolExecutionFailed: true,
-              lastToolFailureReason: true,
-              threadDivergedAt: true,
-              threadDivergenceDetails: true,
-              threadDivergenceAcknowledged: true,
-              conversationStallAlertAt: true,
-              conversationStallAcknowledged: true,
-              chaseSentAt: true,
-              chaseSentTo: true,
-              closureRecommendedAt: true,
-              closureRecommendedReason: true,
-              closureRecommendationActioned: true,
-              reschedulingInProgress: true,
-            },
-          }),
-          prisma.appointmentRequest.count({ where }),
-        ]);
+        let pageRows: DashboardRow[];
+        let total: number;
+        if (query.health) {
+          // Health is computed per row (it depends on now + admin
+          // thresholds), so filter the matching ids first and page those.
+          const ids = await findIdsWithHealth(where, query.health, orderBy);
+          total = ids.length;
+          const pageIds = ids.slice((page - 1) * limit, page * limit);
+          const rows = pageIds.length > 0
+            ? await prisma.appointmentRequest.findMany({ where: { id: { in: pageIds } }, select: DASHBOARD_SELECT })
+            : [];
+          const byId = new Map(rows.map((r) => [r.id, r]));
+          pageRows = pageIds.map((id) => byId.get(id)).filter((r): r is DashboardRow => !!r);
+        } else {
+          [pageRows, total] = await Promise.all([
+            prisma.appointmentRequest.findMany({
+              where,
+              orderBy,
+              skip: (page - 1) * limit,
+              take: limit,
+              select: DASHBOARD_SELECT,
+            }),
+            prisma.appointmentRequest.count({ where }),
+          ]);
+        }
+        const appointments = pageRows;
 
         // Last-message preview + last-email-recipient + pendingAction
         // per appointment via JSONB path expressions — capped at 240
@@ -194,6 +211,7 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
 
           return {
             id: apt.id,
+            trackingCode: apt.trackingCode,
             userName: apt.userName,
             userEmail: apt.userEmail,
             therapistName: apt.therapistName,
@@ -220,8 +238,11 @@ export async function dashboardListRoute(fastify: FastifyInstance): Promise<void
             closureRecommendedReason: apt.closureRecommendedReason,
             closureRecommendationActioned: apt.closureRecommendationActioned,
             reschedulingInProgress: apt.reschedulingInProgress,
+            emailVerified: apt.emailVerifiedAt !== null,
             lastMessagePreview,
-            nextAction: deriveNextAction({
+            // Nothing happens for an unconfirmed public booking until the
+            // requester follows the emailed link (booking-verification).
+            nextAction: apt.emailVerifiedAt === null ? AWAITING_VERIFICATION_ACTION : deriveNextAction({
               status: apt.status,
               humanControlEnabled: apt.humanControlEnabled,
               chaseSentAt: apt.chaseSentAt,

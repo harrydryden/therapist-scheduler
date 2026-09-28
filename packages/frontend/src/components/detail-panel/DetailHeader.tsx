@@ -6,6 +6,11 @@ interface DetailHeaderProps {
   appointment: AppointmentDetail;
 }
 
+/** Open a Gmail thread (works for whoever is signed in to the scheduling mailbox). */
+function gmailThreadUrl(threadId: string): string {
+  return `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(threadId)}`;
+}
+
 export default function DetailHeader({ appointment }: DetailHeaderProps) {
   return (
     <div className="p-4 border-b border-slate-100">
@@ -15,9 +20,18 @@ export default function DetailHeader({ appointment }: DetailHeaderProps) {
             {appointment.userName || 'Unknown User'}
           </h2>
           <p className="text-sm text-slate-500">{appointment.userEmail}</p>
+          {appointment.trackingCode && (
+            <p className="text-xs text-slate-400 font-mono mt-0.5">{appointment.trackingCode}</p>
+          )}
         </div>
         <StatusBadge status={appointment.status} />
       </div>
+      {appointment.emailVerified === false && (
+        <div className="mt-3 p-2.5 bg-spill-yellow-100 border border-spill-yellow-200 rounded-lg text-xs text-slate-700">
+          Waiting for the client to confirm their email address. Nothing has been sent to the therapist yet; the
+          request is deleted if it isn't confirmed within 24 hours.
+        </div>
+      )}
       <div className="mt-3 text-sm text-slate-600">
         <p>
           <span className="font-medium">Therapist:</span> {appointment.therapistName}
@@ -44,17 +58,26 @@ export default function DetailHeader({ appointment }: DetailHeaderProps) {
         </div>
       )}
       {(appointment.gmailThreadId || appointment.therapistGmailThreadId) && (
-        <div className="mt-3 p-2 bg-slate-50 rounded-lg border border-slate-200">
-          <p className="text-xs font-medium text-slate-500 mb-1">Email Thread IDs</p>
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
           {appointment.gmailThreadId && (
-            <p className="text-xs text-slate-400 font-mono">
-              Client: {appointment.gmailThreadId}
-            </p>
+            <a
+              href={gmailThreadUrl(appointment.gmailThreadId)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-spill-blue-800 hover:underline"
+            >
+              Client thread in Gmail
+            </a>
           )}
           {appointment.therapistGmailThreadId && (
-            <p className="text-xs text-slate-400 font-mono">
-              Therapist: {appointment.therapistGmailThreadId}
-            </p>
+            <a
+              href={gmailThreadUrl(appointment.therapistGmailThreadId)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-spill-blue-800 hover:underline"
+            >
+              Therapist thread in Gmail
+            </a>
           )}
         </div>
       )}

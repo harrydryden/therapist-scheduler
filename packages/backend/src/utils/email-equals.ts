@@ -1,5 +1,13 @@
 /**
- * Email comparison helpers.
+ * Email identity helpers — THE canonical email normaliser.
+ *
+ * `normalizeEmail` below is the single normaliser every write and lookup
+ * path should import (docs/SYSTEM_REVIEW_2026-09.md §5.1). Stored
+ * addresses are lowercased and trimmed on write (utils/unique-id.ts), so a
+ * lookup must normalise its input the same way or it will miss rows.
+ * (utils/email-validator.ts has a different, Gmail-dot-folding helper for
+ * duplicate detection; it is not an identity normaliser and must not be
+ * used for storage.)
  *
  * Address comparison MUST be case-insensitive (RFC 5321 §2.4 — the local
  * part is technically case-sensitive but in practice every mail provider
@@ -12,9 +20,9 @@
  */
 
 /**
- * Normalise an email for comparison or storage. Returns an empty string
- * for falsy input so callers can compare consistently without nullish
- * checks.
+ * Normalise an email for comparison or storage: trim surrounding
+ * whitespace and lowercase. Returns an empty string for falsy input so
+ * callers can compare consistently without nullish checks.
  */
 export function normalizeEmail(email: string | null | undefined): string {
   return (email || '').toLowerCase().trim();

@@ -1,0 +1,12 @@
+{
+  // Typecheck-only config for the operational scripts in scripts/ (backfills,
+  // remediation, e2e). They import from src/ but are not part of the build,
+  // so they are never shipped in dist/. Run via `npm run typecheck`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

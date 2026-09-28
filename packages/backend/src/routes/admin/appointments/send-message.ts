@@ -23,6 +23,7 @@ import { sendEmail } from '../../../core/email';
 import { aiConversationService } from '../../../services/ai-conversation.service';
 import { RATE_LIMITS } from '../../../constants';
 import { sendSuccess, Errors } from '../../../utils/response';
+import { notifyAppointmentActivity } from '../../../services/appointment-event.service';
 import { sendMessageSchema } from './schemas';
 
 export async function sendMessageRoute(fastify: FastifyInstance): Promise<void> {
@@ -97,6 +98,8 @@ export async function sendMessageRoute(fastify: FastifyInstance): Promise<void> 
           { requestId, appointmentId: id, to, adminId, messageId: result.messageId },
           'Admin email sent successfully',
         );
+        // Other admins with this appointment open see the new message.
+        notifyAppointmentActivity(id, 'admin_message');
 
         return sendSuccess(reply, {
           messageId: result.messageId,

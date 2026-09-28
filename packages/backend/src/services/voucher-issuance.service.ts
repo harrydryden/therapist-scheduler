@@ -50,6 +50,14 @@ interface IssueWelcomeVoucherParams {
   /** Used to personalise the welcome email. Falls back to the email's local-part if absent. */
   name?: string | null;
   traceId?: string;
+  /**
+   * Whether the recipient explicitly opted in to the weekly email. Only
+   * then may issuance clear a previous opt-out (`unsubscribedAt`) and the
+   * expired-voucher strike count: the public signup form is unverified, so
+   * without an opt-in it must not undo someone's unsubscribe. Defaults to
+   * true for callers that act on an explicit request.
+   */
+  optedIn?: boolean;
 }
 
 interface IssueWelcomeVoucherResult {
@@ -113,10 +121,10 @@ export async function issueWelcomeVoucher(
         lastVoucherSentAt: now,
         lastVoucherToken: voucherResult.token,
         reminderSentAt: null,
-        // Re-subscribe in case the user previously unsubscribed and
-        // is now signing up again — admin-issued vouchers do the same.
-        unsubscribedAt: null,
-        strikeCount: 0,
+        // Re-subscribe in case the user previously unsubscribed and is now
+        // signing up again with the weekly-email box ticked — admin-issued
+        // vouchers do the same. Without the opt-in the previous state stays.
+        ...(params.optedIn === false ? {} : { unsubscribedAt: null, strikeCount: 0 }),
       },
     });
   } catch (err) {

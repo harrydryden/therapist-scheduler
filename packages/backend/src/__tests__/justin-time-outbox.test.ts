@@ -211,7 +211,10 @@ describe('appointment-creation outbox: getEffectsToRetry stale-pending pickup', 
     expect(pendingClause.attempts).toBe(0);
     expect(pendingClause.createdAt).toHaveProperty('lt');
     expect(runningClause.lastAttempt).toHaveProperty('lt');
-    expect(runningClause.attempts).toHaveProperty('lt');
+    // Deliberately not capped by attempts: crash orphans at the cap must
+    // still surface so the retry runner abandons + alerts on them
+    // (side-effect-claim-lease.test.ts).
+    expect(runningClause.attempts).toBeUndefined();
   });
 
   it('returns mapped rows from the combined query', async () => {

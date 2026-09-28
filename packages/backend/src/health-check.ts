@@ -12,8 +12,11 @@ const http = require('http');
 
 const PORT = process.env.PORT || 3000;
 
+// 127.0.0.1, not 'localhost': the server binds 0.0.0.0 (IPv4 only), and
+// 'localhost' can resolve to ::1 first — a healthy container then fails its
+// own health check.
 const options = {
-  hostname: 'localhost',
+  hostname: '127.0.0.1',
   port: PORT,
   path: '/health',
   method: 'GET',

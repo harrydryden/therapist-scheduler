@@ -20,13 +20,15 @@ interface ToastProps {
 /**
  * Shared toast notification component.
  * Used by admin pages for transient success/error messages.
+ *
+ * Render it inside a live region that is ALREADY in the DOM (see
+ * ToastLiveRegions): a region that mounts together with its message is
+ * often not announced by screen readers.
  */
 export function Toast({ message, type = 'error', onClose }: ToastProps) {
   const colorClass = type === 'success' ? 'bg-green-600' : 'bg-red-600';
   return (
     <div
-      role="status"
-      aria-live="polite"
       className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white motion-safe:animate-fade-in ${colorClass}`}
     >
       {type === 'error' && (
@@ -57,6 +59,24 @@ export function Toast({ message, type = 'error', onClose }: ToastProps) {
 interface ToastState {
   message: string;
   type: ToastType;
+}
+
+/**
+ * Two permanently mounted live regions — polite for success, assertive
+ * (`role="alert"`) for errors — so a toast's text is announced when it
+ * appears.
+ */
+export function ToastLiveRegions({ toast, onClose }: { toast: ToastState | null; onClose: () => void }) {
+  return (
+    <>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {toast?.type === 'success' && <Toast message={toast.message} type="success" onClose={onClose} />}
+      </div>
+      <div role="alert" aria-live="assertive" aria-atomic="true">
+        {toast?.type === 'error' && <Toast message={toast.message} type="error" onClose={onClose} />}
+      </div>
+    </>
+  );
 }
 
 const DEFAULT_AUTO_DISMISS_MS = 4000;
@@ -141,7 +161,7 @@ export function ToastProvider({ children, autoDismissMs = DEFAULT_AUTO_DISMISS_M
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {toast && <Toast message={toast.message} type={toast.type} onClose={dismiss} />}
+      <ToastLiveRegions toast={toast} onClose={dismiss} />
     </ToastContext.Provider>
   );
 }

@@ -11,6 +11,7 @@
  * Usage:
  *   node scripts/check-schema-migration.js              # diff vs origin/main
  *   node scripts/check-schema-migration.js HEAD~3       # diff vs a custom ref
+ *   BASE_REF=origin/<pr-base> node scripts/check-schema-migration.js   # CI
  *
  * Exit codes:
  *   0 - schema unchanged, OR schema changed AND a new migration was added
@@ -30,17 +31,19 @@ function fail(msg, code = 1) {
   process.exit(code);
 }
 
+// Read-only: the guard never fetches (a fetch mutates refs, and in CI the
+// checkout step owns that). If the base ref is missing, fetch it first —
+// e.g. `git fetch origin main` locally, or `fetch-depth: 0` in CI.
 let changedFiles;
 try {
   changedFiles = git(`diff --name-only ${baseRef}...HEAD`).split('\n').filter(Boolean);
 } catch (err) {
-  // base ref might not exist locally — try fetching
-  try {
-    git(`fetch origin main --quiet`);
-    changedFiles = git(`diff --name-only ${baseRef}...HEAD`).split('\n').filter(Boolean);
-  } catch (err2) {
-    fail(`could not compute git diff vs ${baseRef}: ${err2.message}`, 2);
-  }
+  fail(
+    `could not compute git diff vs ${baseRef}: ${err.message}\n` +
+      `   Make sure the base ref exists locally (git fetch origin <branch>) or pass it: ` +
+      `node scripts/check-schema-migration.js <ref> / BASE_REF=<ref>.`,
+    2,
+  );
 }
 
 const schemaChanged = changedFiles.some((f) => f.endsWith('prisma/schema.prisma'));
@@ -73,7 +76,8 @@ if (addedMigrations.length === 0) {
   fail(
     `prisma/schema.prisma was modified without adding a new migration file.\n\n` +
       `   Changed schema, no new migration → production schema drift.\n` +
-      `   Add a migration with: npx prisma migrate dev --name <description>\n\n` +
+      `   Add a migration (hand-written, idempotent SQL — see docs/SCHEMA_MIGRATIONS.md)\n` +
+      `   under prisma/migrations/<timestamp>_<description>/migration.sql.\n\n` +
       `   This guard exists because commit 47509cd shipped a schema change\n` +
       `   without a migration, breaking every appointment.findUnique() call\n` +
       `   in production for over a week.`

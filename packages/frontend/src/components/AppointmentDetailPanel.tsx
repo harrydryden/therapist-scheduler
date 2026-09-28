@@ -9,7 +9,7 @@ import DetailHeader from './detail-panel/DetailHeader';
 import ClosureRecommendationSection from './detail-panel/ClosureRecommendationSection';
 import AppointmentSummarySection from './detail-panel/AppointmentSummarySection';
 import WhyAttentionBanner from './detail-panel/WhyAttentionBanner';
-import LastActionSection from './detail-panel/LastActionSection';
+import ConversationSection from './detail-panel/ConversationSection';
 import CompactControlPanel from './detail-panel/CompactControlPanel';
 import AppointmentDetailSkeleton from './skeletons/AppointmentDetailSkeleton';
 
@@ -118,7 +118,7 @@ export default function AppointmentDetailPanel({
               rather than "Last message" because the entry is
               often the agent's narration of a tool call rather
               than a literal message body. */}
-          <LastActionSection preview={appointmentDetail.lastMessagePreview} />
+          <ConversationSection appointment={appointmentDetail} />
 
           <ClosureRecommendationSection
             appointment={appointmentDetail}

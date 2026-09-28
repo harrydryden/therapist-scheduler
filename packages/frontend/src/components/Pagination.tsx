@@ -10,7 +10,7 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
   if (totalPages <= 1) return null;
 
   return (
-    <div className="px-4 py-2 border-t border-slate-100 flex items-center justify-between">
+    <nav aria-label="Pagination" className="px-4 py-2 border-t border-slate-100 flex items-center justify-between">
       <span className="text-xs text-slate-400">
         {total != null && limit != null
           ? `Showing ${(page - 1) * limit + 1}–${Math.min(page * limit, total)} of ${total}`
@@ -18,6 +18,7 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
       </span>
       <div className="flex items-center gap-1">
         <button
+          type="button"
           onClick={() => onPageChange(Math.max(1, page - 1))}
           disabled={page <= 1}
           aria-label="Previous page"
@@ -29,7 +30,10 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
           Array.from({ length: totalPages }, (_, i) => i + 1).map((pageNum) => (
             <button
               key={pageNum}
+              type="button"
               onClick={() => onPageChange(pageNum)}
+              aria-current={pageNum === page ? 'page' : undefined}
+              aria-label={`Page ${pageNum}`}
               className={`px-2.5 py-1 text-xs border rounded ${
                 pageNum === page
                   ? 'bg-spill-blue-800 text-white border-spill-blue-800'
@@ -47,7 +51,10 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
             return (
               <button
                 key={pageNum}
+                type="button"
                 onClick={() => onPageChange(pageNum)}
+                aria-current={pageNum === page ? 'page' : undefined}
+                aria-label={`Page ${pageNum}`}
                 className={`px-2.5 py-1 text-xs border rounded ${
                   pageNum === page
                     ? 'bg-spill-blue-800 text-white border-spill-blue-800'
@@ -60,6 +67,7 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
           })
         )}
         <button
+          type="button"
           onClick={() => onPageChange(Math.min(totalPages, page + 1))}
           disabled={page >= totalPages}
           aria-label="Next page"
@@ -68,6 +76,6 @@ export default function Pagination({ page, totalPages, total, limit, onPageChang
           Next
         </button>
       </div>
-    </div>
+    </nav>
   );
 }

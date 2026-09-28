@@ -109,6 +109,12 @@ export interface EmailValidationResult {
   errors: string[];
   warnings: string[];
   suggestions: string[];
+  /**
+   * The corrected address when the domain looks like a common typo
+   * (e.g. "jamie@gmial.com" → "jamie@gmail.com"), else null. Structured
+   * twin of `suggestions` so the UI can offer a one-click fix.
+   */
+  suggestedEmail: string | null;
   isDisposable: boolean;
   hasMxRecord: boolean | null; // null if check was skipped/failed
 }
@@ -245,6 +251,7 @@ export async function validateEmail(
     errors: [],
     warnings: [],
     suggestions: [],
+    suggestedEmail: null,
     isDisposable: false,
     hasMxRecord: null,
   };
@@ -263,6 +270,7 @@ export async function validateEmail(
     if (typoSuggestion) {
       result.warnings.push(`Possible typo detected`);
       result.suggestions.push(`Did you mean ${typoSuggestion}?`);
+      result.suggestedEmail = typoSuggestion;
     }
   }
 

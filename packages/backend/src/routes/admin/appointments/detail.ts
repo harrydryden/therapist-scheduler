@@ -19,7 +19,7 @@ import {
   toAppointmentForHealth,
 } from '../../../services/conversation-health.service';
 import { deriveAttentionReasons } from '../../../utils/attention-reasons';
-import { buildLastMessagePreview } from './schemas';
+import { buildLastMessagePreview, buildRecentMessages } from './schemas';
 
 export async function detailRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Params: { id: string } }>(
@@ -75,6 +75,7 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
             threadDivergenceAcknowledged: true,
             conversationStallAlertAt: true,
             conversationStallAcknowledged: true,
+            emailVerifiedAt: true,
           },
         });
 
@@ -177,7 +178,13 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           closureRecommendedAt: appointment.closureRecommendedAt,
           closureRecommendedReason: appointment.closureRecommendedReason,
           closureRecommendationActioned: appointment.closureRecommendationActioned,
+          reschedulingInProgress: appointment.reschedulingInProgress,
+          emailVerified: appointment.emailVerifiedAt !== null,
           lastMessagePreview,
+          // The conversation itself, so an admin taking over can read it
+          // in the drawer instead of a snippet plus raw thread ids.
+          recentMessages: buildRecentMessages(messages),
+          totalMessages: messages.length,
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to fetch appointment detail');

@@ -1,10 +1,10 @@
-import { useState } from 'react';
 import { ApiError } from '../api/client';
 import { sanitizeExternalUrl } from '../utils/sanitize';
 import type { TherapistDetail } from '../types';
 import { APP } from '../config/constants';
-import { useBookingForm } from '../hooks/useBookingForm';
+import { activeRequestLimitCopy, useBookingForm } from '../hooks/useBookingForm';
 import type { VoucherState } from '../hooks/useVoucher';
+import BookingVerificationNotice from './BookingVerificationNotice';
 
 // Helper to check if error is the thread limit error
 function isThreadLimitError(error: unknown): error is ApiError {
@@ -18,22 +18,24 @@ interface BookingFormProps {
   voucher?: VoucherState;
   /** When true, users without a valid voucher are blocked from booking */
   voucherRequired?: boolean;
+  /** `general.maxActiveThreadsPerUser` from the public settings (0 = no limit). */
+  maxActiveRequests?: number;
 }
 
 const INPUT_CLASSES =
   'w-full px-3 py-2.5 text-sm bg-white border rounded-lg focus:ring-2 focus:ring-spill-blue-400 focus:border-transparent outline-none transition-shadow duration-150';
 
-export default function BookingForm({ therapist, voucher, voucherRequired = false }: BookingFormProps) {
-  const [submitted, setSubmitted] = useState(false);
-
+export default function BookingForm({ therapist, voucher, voucherRequired = false, maxActiveRequests }: BookingFormProps) {
   const {
     firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking,
-    canSubmit, showEmailError, succeededBookingMethod,
+    canSubmit, showEmailError, succeededBookingMethod, pendingVerification, suggestedEmail,
+    applySuggestedEmail, editDetails, retryInSeconds,
   } = useBookingForm({
     therapistHandle: therapist.id,
-    onSuccess: () => setSubmitted(true),
     voucherToken: voucher?.voucherToken,
   });
+  const submitted = mutation.isSuccess;
+  const limitCopy = activeRequestLimitCopy(maxActiveRequests);
 
   // Only an absolute http(s) link is ever rendered or opened.
   const bookingLink = sanitizeExternalUrl(therapist.bookingLink);
@@ -75,7 +77,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         <h4 className="text-lg font-semibold tracking-[-0.36px] text-black mb-2">Session code expired</h4>
         <p className="text-sm text-spill-grey-600">
           Your session code has expired. Check your email for a new one, or contact{' '}
-          <a href="mailto:scheduling@spill.chat" className="text-spill-blue-800 underline font-medium">scheduling@spill.chat</a> to request a fresh code.
+          <a href={`mailto:${APP.SUPPORT_EMAIL}`} className="text-spill-blue-800 underline font-medium">{APP.SUPPORT_EMAIL}</a> to request a fresh code.
         </p>
       </div>
     );
@@ -91,9 +93,23 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         <h4 className="text-lg font-semibold tracking-[-0.36px] text-black mb-2">Session code required</h4>
         <p className="text-sm text-spill-grey-600">
           A session code is required to book. Check your email from Spill for your personal code. If you don't have one, email{' '}
-          <a href="mailto:scheduling@spill.chat" className="text-spill-blue-800 underline font-medium">scheduling@spill.chat</a> to request a code.
+          <a href={`mailto:${APP.SUPPORT_EMAIL}`} className="text-spill-blue-800 underline font-medium">{APP.SUPPORT_EMAIL}</a> to request a code.
         </p>
       </div>
+    );
+  }
+
+  if (pendingVerification) {
+    return (
+      <BookingVerificationNotice
+        email={pendingVerification.email}
+        therapistName={therapist.name}
+        expiresInHours={pendingVerification.expiresInHours}
+        bookingMethod={succeededBookingMethod}
+        suggestedEmail={suggestedEmail}
+        onUseSuggestedEmail={applySuggestedEmail}
+        onChangeEmail={editDetails}
+      />
     );
   }
 
@@ -199,7 +215,9 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
             <div>
               <h4 className="text-sm font-semibold text-black">Active request limit reached</h4>
               <p className="text-sm text-spill-grey-600 mt-1">
-                You currently have {(mutation.error.details as Record<string, unknown>)?.activeCount as number || 2} active appointment requests.
+                {mutation.error.isThreadLimit()
+                  ? `You currently have ${mutation.error.details.activeCount} of ${mutation.error.details.maxAllowed} allowed active appointment requests.`
+                  : 'You have reached the maximum number of active appointment requests.'}
               </p>
               <p className="text-sm text-spill-grey-600 mt-2">
                 Please wait for one of your current requests to be confirmed or cancelled before requesting another therapist. Check your email for updates from {APP.COORDINATOR_NAME}.
@@ -210,12 +228,28 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
       )}
 
       {mutation.isError && !isThreadLimitError(mutation.error) && (
-        <div className="mb-4 p-3 bg-spill-red-100 border border-spill-red-200 rounded-lg">
+        <div role="alert" className="mb-4 p-3 bg-spill-red-100 border border-spill-red-200 rounded-lg">
           <p className="text-sm text-spill-red-600">
             {mutation.error instanceof Error
               ? mutation.error.message
               : 'Failed to submit request. Please try again.'}
           </p>
+          {retryInSeconds > 0 && (
+            <p className="text-sm text-spill-red-600 mt-1">You can try again in {retryInSeconds}s.</p>
+          )}
+          {suggestedEmail && (
+            <p className="text-sm text-black mt-2">
+              Did you mean{' '}
+              <button
+                type="button"
+                onClick={() => setEmail(suggestedEmail)}
+                className="font-semibold text-spill-blue-800 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
+              >
+                {suggestedEmail}
+              </button>
+              ?
+            </p>
+          )}
         </div>
       )}
 
@@ -265,9 +299,14 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         </>
       )}
 
-      <p className="mt-1.5 text-xs text-spill-grey-400 text-center">
-        You can have up to 2 active appointment requests at a time.
-      </p>
+      {(limitCopy || !voucher?.voucherToken) && (
+        <p className="mt-3 text-xs text-spill-grey-400 text-center">
+          {/* With a session code the request goes straight through (the code
+              was emailed to this address); otherwise we confirm by email. */}
+          {!voucher?.voucherToken && "We'll email you a link to confirm your request first. "}
+          {limitCopy}
+        </p>
+      )}
     </form>
   );
 }

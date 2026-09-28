@@ -21,6 +21,7 @@ import {
   notifyTransition,
 } from '../dispatch-helpers';
 import { runTerminalTransitionTx } from '../terminal-tx';
+import { recordCompletedClient } from '../completed-clients';
 import type { TransitionResult, TransitionToCompletedParams } from '../types';
 
 export async function transitionToCompleted(
@@ -48,6 +49,7 @@ export async function transitionToCompleted(
     user_email: string;
     therapist_name: string;
     therapist_handle: string;
+    therapist_id: string | null;
     notes: string | null;
     transition_generation: number;
   };
@@ -58,7 +60,7 @@ export async function transitionToCompleted(
     adminId,
     fetchAndLock: async (tx) => {
       const rows = await tx.$queryRaw<CompletedRow[]>`
-        SELECT id, status, user_name, user_email, therapist_name, therapist_handle, notes, transition_generation
+        SELECT id, status, user_name, user_email, therapist_name, therapist_handle, therapist_id, notes, transition_generation
         FROM "appointment_requests"
         WHERE id = ${appointmentId}
         FOR UPDATE
@@ -101,6 +103,16 @@ export async function transitionToCompleted(
     // .onCompleted's call). slack_notify_completed IS keyed with the
     // post-update generation (matches notifyCompleted's call).
     registerEffects: async (tx, row, postUpdateGeneration) => {
+      // Durable graduation record, committed atomically with the status
+      // flip. The availability rule counts these rows — never the
+      // appointment rows, which retention and admin delete remove (see
+      // completed-clients.ts).
+      await recordCompletedClient(tx, {
+        appointmentId,
+        therapistId: row.therapist_id,
+        therapistHandle: row.therapist_handle,
+        userEmail: row.user_email,
+      });
       if (row.therapist_handle) {
         await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'completed', {
           effectType: 'therapist_unfreeze_sync',

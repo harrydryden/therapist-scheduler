@@ -11,6 +11,7 @@
 
 import { auditEventService, type AuditActor, type AppointmentEventPayload } from './audit-event.service';
 import { slackNotificationService } from './slack-notification.service';
+import { sseService } from './sse.service';
 import { logger } from '../utils/logger';
 import type { AlertSeverity } from './slack-notification.service';
 
@@ -44,6 +45,20 @@ export interface AppointmentEvent {
 }
 
 /**
+ * Tell connected admin dashboards that something happened on an
+ * appointment that isn't a status change (a new message, a chase, an admin
+ * email), so an open detail drawer refetches instead of going stale.
+ * Emits `appointment:activity` on the SSE bus; never throws.
+ */
+export function notifyAppointmentActivity(appointmentId: string, activityType: string): void {
+  try {
+    sseService.emitActivity(appointmentId, activityType);
+  } catch (err) {
+    logger.warn({ err, appointmentId, activityType }, 'Failed to emit appointment activity event');
+  }
+}
+
+/**
  * Record an appointment lifecycle event. Always writes an audit log entry;
  * optionally fires a Slack alert (fire-and-forget — the caller never blocks
  * on Slack delivery).
@@ -67,6 +82,9 @@ export async function recordAppointmentEvent(event: AppointmentEvent): Promise<v
     event.actor,
     payload,
   );
+
+  // Live dashboards: the event changed what the detail drawer shows.
+  notifyAppointmentActivity(event.appointmentId, event.type);
 
   // Slack is fire-and-forget. We never block the caller on Slack delivery
   // and we never propagate Slack failures back as an exception.

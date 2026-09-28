@@ -135,6 +135,10 @@ beforeEach(() => {
 function makeTx(row: Record<string, unknown>) {
   return {
     $queryRaw: jest.fn().mockResolvedValue([row]),
+    // transitionToCompleted records the durable completed-client row in
+    // the same transaction (completed-clients.ts).
+    $executeRaw: jest.fn().mockResolvedValue(1),
+    therapist: { findFirst: jest.fn().mockResolvedValue({ id: 'ther-1' }) },
     appointmentRequest: {
       update: jest.fn().mockResolvedValue({ id: 'apt-1' }),
     },

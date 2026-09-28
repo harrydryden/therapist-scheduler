@@ -44,6 +44,8 @@ export interface FrontendSettings {
   'voucher.enabled': boolean;
   'voucher.required': boolean;
   'voucher.expiryDays': number;
+  /** "Up to N active requests" on the booking form; 0 = no limit. Absent on older backends. */
+  'general.maxActiveThreadsPerUser'?: number;
 }
 
 export async function getFrontendSettings(): Promise<FrontendSettings> {

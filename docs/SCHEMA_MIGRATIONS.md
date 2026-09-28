@@ -8,11 +8,62 @@ this workflow is **mandatory** for any change that touches `schema.prisma`.
 ## TL;DR
 
 1. Edit `packages/backend/prisma/schema.prisma`
-2. Generate a migration: `cd packages/backend && npx prisma migrate dev --name describe_your_change`
-3. Verify the migration SQL in `prisma/migrations/<timestamp>_<name>/migration.sql`
+2. Write the migration by hand in
+   `prisma/migrations/<YYYYMMDD>_<description>/migration.sql` —
+   idempotent SQL (`ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`,
+   `DO $$ … IF NOT EXISTS … $$` for constraints). `prisma migrate dev`
+   does **not** work here (see "Why migrations can't be replayed from
+   empty"); `prisma migrate diff` can draft the SQL for you:
+   `npx prisma migrate diff --from-schema-datasource prisma/schema.prisma --to-schema-datamodel prisma/schema.prisma --script`
+   against a bootstrapped dev database.
+3. Apply it to your dev database: `npx prisma migrate deploy`
 4. Run integration tests: `npm run test:integration` (requires `TEST_DATABASE_URL`)
 5. Run the schema drift guard: `npm run check:schema-migration`
 6. Commit BOTH `schema.prisma` AND the new migration directory in the same commit
+
+## How each kind of database gets its schema
+
+| Database | How it is created / migrated |
+|---|---|
+| **Production** | Already baselined — every migration is recorded in `_prisma_migrations`. Every container start runs plain `prisma migrate deploy` (`scripts/docker-entrypoint.sh`); if it fails for any reason the container exits and the previous release keeps serving. There is no fallback. |
+| **Fresh dev / staging / CI** | `npm -w therapist-scheduler-backend run db:bootstrap-dev` (`scripts/bootstrap-dev-db.sh`), once. Then `prisma migrate deploy` as usual. |
+| **Integration tests** | The test helper resets `TEST_DATABASE_URL` with `prisma db push --force-reset` at the start of the run. |
+
+### `scripts/bootstrap-dev-db.sh`
+
+For a brand-new, empty database:
+
+1. `prisma db push` builds the schema from `schema.prisma`;
+2. every folder in `prisma/migrations/` is recorded as applied
+   (`prisma migrate resolve --applied`), so later `prisma migrate deploy`
+   runs only apply migrations added afterwards;
+3. the handful of objects Prisma's schema language cannot express — the
+   partial unique indexes `appointment_requests_user_therapist_active_unique`,
+   `idx_unique_booking_slot`, `feedback_submissions_appointment_request_id_key`
+   and the `side_effect_logs_scope_check` CHECK — are created idempotently,
+   so the database enforces the same booking-race protections as production.
+   (If a migration changes one of these, update the script too.)
+
+It is re-runnable (already-recorded migrations are skipped) and it
+**refuses to run when `DATABASE_URL` contains `railway` or `prod`**: step 2
+tells Prisma that migrations ran when they did not, which must never happen
+to production.
+
+```bash
+cd packages/backend
+DATABASE_URL="postgresql://postgres@localhost:5432/therapist_dev" npm run db:bootstrap-dev
+```
+
+### What happened to `baseline.sh`
+
+`prisma/baseline.sh` used to wrap `migrate deploy` with a "recovery" that,
+on **any** failure (including a transient connection error or its own
+120-second timeout), marked failed migrations as rolled back and every
+migration up to a cutoff date as applied — without running them. A fresh
+database and a `db push` database both crash-looped through it, and it once
+silently skipped a real migration in production. It was removed in
+September 2026: production is baselined, so it only ever needs
+`migrate deploy`, and new databases use the bootstrap script above.
 
 ## What can go wrong if you skip this
 
@@ -33,51 +84,62 @@ was because messages weren't being processed and a user complained.
 
 ## CI guards
 
-Two checks run in CI to catch this class of bug:
+`.github/workflows/ci.yml` runs on every push and pull request. The schema
+checks in it:
 
-### 1. Schema drift guard (`scripts/check-schema-migration.js`)
+### 1. `prisma validate`
 
-Diffs the current branch against `origin/main`. Fails if `schema.prisma`
-was modified without a new migration file in the same diff.
+Fails on a schema that doesn't parse or is internally inconsistent.
+
+### 2. Schema drift guard (`scripts/check-schema-migration.js`)
+
+Diffs the branch against its base (the PR base in CI, `origin/main`
+locally). Fails if `schema.prisma` was modified without a new migration
+file in the same diff. It is read-only — it never fetches; make sure the
+base ref exists locally (`git fetch origin main`) or pass it:
 
 ```bash
 cd packages/backend && npm run check:schema-migration
+BASE_REF=origin/my-base node scripts/check-schema-migration.js
 ```
 
-This is fast (no DB needed) and should run on every PR.
+This is fast (no DB needed). It only checks that a migration was added,
+not what it contains — review the SQL.
 
-### 2. Integration test (`src/__tests__/integration/`)
+### 3. Integration tests (`src/__tests__/integration/`)
 
-Spins up a real Postgres test database, applies `schema.prisma` via
-`prisma db push`, and issues `findUnique`/`findMany` with no-select
-clauses against every model. Catches Prisma-client↔schema drift even if
-both `schema.prisma` and the migration are technically present but the
-migration doesn't fully cover the schema.
+The CI integration job starts a `postgres:16` service, bootstraps it with
+`scripts/bootstrap-dev-db.sh` (which also proves the bootstrap works on an
+empty database), and runs `npm -w therapist-scheduler-backend run
+test:integration`. The tests reset the database with `prisma db push` and
+issue `findUnique`/`findMany` with no-select clauses against every model,
+catching Prisma-client↔schema drift even when a migration exists but
+doesn't fully cover the schema.
 
 ```bash
+cd packages/backend
 TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/test_db" \
-  cd packages/backend && npm run test:integration
+DATABASE_URL="$TEST_DATABASE_URL" \
+  npm run test:integration
 ```
 
-In CI, the test database can be a service container or Postgres on
-localhost — the test resets it via `--force-reset` so any expendable
-DB works.
+Both variables must point at the same, expendable database: the helper
+connects with `TEST_DATABASE_URL`, the services under test use the app's
+Prisma client (`DATABASE_URL`). The run wipes it (`--force-reset`).
 
 ## Why migrations can't be replayed from empty
 
 The `prisma/migrations/` directory has a historical baselining issue:
 the earliest migration assumes tables already exist (because the schema
 was originally created via `prisma db push` before migration tracking
-was added). Production handles this via `prisma/baseline.sh` which marks
-old migrations as already applied on first deploy.
+was added), and `20260218_status_enum_migration` can never apply in
+sequence. So `prisma migrate dev` (which replays the history into a shadow
+database) and `prisma migrate reset` don't work, and nothing replays the
+history from empty — new databases are bootstrapped instead (above).
 
-For tests, we sidestep the issue entirely by using `prisma db push` (which
-treats `schema.prisma` as the source of truth and doesn't replay history).
-This is sufficient to catch the Prisma-client↔schema drift class of bug.
-
-If you want to run migrations from empty for some reason (e.g., to verify
-a new migration is syntactically valid), you'll hit this baselining issue
-and need to seed the `_prisma_migrations` table manually.
+A replayable `0_init` baseline (`prisma migrate diff --from-empty
+--to-schema-datamodel`) resolved once in production would fix this for
+good; it has not been done yet.
 
 ## Example: adding a column
 
@@ -85,15 +147,19 @@ and need to seed the `_prisma_migrations` table manually.
 # 1. Edit the model in schema.prisma
 vim packages/backend/prisma/schema.prisma
 
-# 2. Generate the migration (this also applies it to your local dev DB)
+# 2. Write the migration (idempotent)
+mkdir -p prisma/migrations/20261001_add_my_field
+cat > prisma/migrations/20261001_add_my_field/migration.sql <<'SQL'
+ALTER TABLE "foo" ADD COLUMN IF NOT EXISTS "my_field" TEXT;
+SQL
+
+# 3. Apply it to your (bootstrapped) dev database
 cd packages/backend
-npx prisma migrate dev --name add_my_field
+npx prisma migrate deploy
 
-# 3. Inspect the generated SQL
-cat prisma/migrations/*_add_my_field/migration.sql
-
-# 4. Run the integration test against a clean test DB
-TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/test" npm run test:integration
+# 4. Run the integration tests against a clean test DB
+TEST_DATABASE_URL="postgresql://user:pass@localhost:5432/test" \
+DATABASE_URL="postgresql://user:pass@localhost:5432/test" npm run test:integration
 
 # 5. Verify the schema drift guard passes
 npm run check:schema-migration
@@ -108,9 +174,10 @@ git commit -m "Add my_field to FooModel"
 If a migration is missing in production (the column exists in the schema
 but not in the DB), the fix is:
 
-1. Create the migration locally (do NOT include `prisma migrate dev`'s
-   shadow database — write the SQL by hand)
+1. Create the migration locally by hand (see TL;DR step 2)
 2. Use `ADD COLUMN IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` so
    the migration is idempotent in case anyone hotfixed prod manually
-3. Deploy. `prisma migrate deploy` will apply the new migration
+3. Deploy. The entrypoint's `prisma migrate deploy` applies it; if it
+   fails, the new container exits and the old release keeps running —
+   read the deploy log, fix the SQL, redeploy
 4. Verify with `prisma migrate status` against production

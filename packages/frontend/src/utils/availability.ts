@@ -63,3 +63,18 @@ export function formatAvailability(availability: TherapistAvailability): string[
     return `${abbrev}: ${times}`;
   });
 }
+
+/**
+ * Short label for the zone a therapist's availability is written in, shown
+ * next to the slots: "UK time", "New York time", "Dublin time". Null when
+ * the zone is missing or not an IANA name.
+ */
+export function formatTimezoneLabel(timezone: string | null | undefined): string | null {
+  const tz = timezone?.trim();
+  if (!tz) return null;
+  if (tz === 'Europe/London' || tz === 'GB') return 'UK time';
+  if (tz === 'UTC' || tz === 'Etc/UTC') return 'UTC';
+  if (!/^[A-Za-z]+\/[A-Za-z_\-/]+$/.test(tz)) return null;
+  const city = tz.split('/').pop()!.replace(/_/g, ' ');
+  return `${city} time`;
+}

@@ -11,7 +11,8 @@
  *   - mobile full-screen, desktop sliding from the right
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 import AppointmentDetailPanel from './AppointmentDetailPanel';
 import type { AppointmentDetail } from '../types';
 
@@ -31,36 +32,36 @@ export default function AppointmentDetailDrawer({
   onClearSelection,
 }: AppointmentDetailDrawerProps) {
   const isOpen = !!selectedAppointment;
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Esc closes; body scroll locked while open so the panel scroll is the
-  // only scroller. Both effects are no-ops when the drawer is closed.
+  // Focus moves into the drawer, Tab is trapped inside it, Esc closes it
+  // and focus returns to the row that opened it.
+  useDialogA11y(dialogRef, { active: isOpen, onEscape: onClearSelection });
+
+  // Body scroll locked while open so the panel scroll is the only scroller.
   useEffect(() => {
     if (!isOpen) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClearSelection();
-    };
-    document.addEventListener('keydown', handleKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
-      document.removeEventListener('keydown', handleKey);
       document.body.style.overflow = prevOverflow;
     };
-  }, [isOpen, onClearSelection]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-end"
+      ref={dialogRef}
+      tabIndex={-1}
+      className="fixed inset-0 z-40 flex justify-end outline-none"
       role="dialog"
       aria-modal="true"
       aria-label="Appointment detail"
     >
-      {/* Backdrop */}
-      <button
-        type="button"
-        aria-label="Close detail panel"
+      {/* Backdrop (pointer only; keyboard users have Esc and the Close button) */}
+      <div
+        aria-hidden="true"
         onClick={onClearSelection}
         className="absolute inset-0 bg-black/30 transition-opacity"
       />

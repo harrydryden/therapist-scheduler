@@ -7,7 +7,8 @@ import { UI } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
 import type { VoucherState } from '../hooks/useVoucher';
 import { CategorySection } from './badges/CategorySection';
-import { formatAvailability, getDisplayableSlots } from '../utils/availability';
+import { formatAvailability, formatTimezoneLabel, getDisplayableSlots } from '../utils/availability';
+import BookingVerificationNotice from './BookingVerificationNotice';
 import { sanitizeExternalUrl } from '../utils/sanitize';
 import type { TherapistAvailability } from '../types';
 import { getCountryFlag, getCountryLabel } from '@therapist-scheduler/shared';
@@ -164,11 +165,13 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
 
   const {
     firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking,
-    canSubmit, showEmailError, succeededBookingMethod,
+    canSubmit, showEmailError, succeededBookingMethod, pendingVerification, suggestedEmail,
+    applySuggestedEmail, editDetails, retryInSeconds,
   } = useBookingForm({
     therapistHandle: therapist.id,
     voucherToken: voucher?.voucherToken,
   });
+  const timezoneLabel = formatTimezoneLabel(therapist.availability?.timezone);
 
   // Only an absolute http(s) link is ever rendered or opened.
   const bookingLink = sanitizeExternalUrl(therapist.bookingLink);
@@ -260,6 +263,11 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
       <div className="mt-auto bg-spill-grey-100 rounded-lg px-3.5 py-3">
         <span className="text-[11px] font-bold text-spill-grey-400 uppercase tracking-[0.8px] block mb-2">
           Availability
+          {/* The slots are in the therapist's zone; a UK client reading a
+              US therapist's card needs to know that. */}
+          {timezoneLabel && getDisplayableSlots(therapist.availability).length > 0 && (
+            <span className="normal-case tracking-normal font-medium"> · {timezoneLabel}</span>
+          )}
         </span>
         <AvailabilityDisplay
           availability={therapist.availability}
@@ -288,6 +296,17 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               Your session code has expired. Check your email for a new one.
             </p>
           </div>
+        ) : pendingVerification ? (
+          <BookingVerificationNotice
+            compact
+            email={pendingVerification.email}
+            therapistName={therapist.name}
+            expiresInHours={pendingVerification.expiresInHours}
+            bookingMethod={succeededBookingMethod}
+            suggestedEmail={suggestedEmail}
+            onUseSuggestedEmail={applySuggestedEmail}
+            onChangeEmail={editDetails}
+          />
         ) : mutation.isSuccess ? (
           <div className="text-center py-3.5 px-4 bg-spill-teal-100 rounded-lg">
             <div className="flex items-center justify-center gap-2">
@@ -418,11 +437,27 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               )}
             </div>
             {mutation.isError && (
-              <p className="text-xs text-spill-red-600 text-center">
-                {mutation.error instanceof Error
-                  ? mutation.error.message
-                  : 'Something went wrong. Please try again.'}
-              </p>
+              <div role="alert" className="text-xs text-spill-red-600 text-center">
+                <p>
+                  {mutation.error instanceof Error
+                    ? mutation.error.message
+                    : 'Something went wrong. Please try again.'}
+                </p>
+                {retryInSeconds > 0 && <p className="mt-1">You can try again in {retryInSeconds}s.</p>}
+                {suggestedEmail && (
+                  <p className="mt-1 text-black">
+                    Did you mean{' '}
+                    <button
+                      type="button"
+                      onClick={() => setEmail(suggestedEmail)}
+                      className="font-semibold text-spill-blue-800 underline focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
+                    >
+                      {suggestedEmail}
+                    </button>
+                    ?
+                  </p>
+                )}
+              </div>
             )}
           </form>
         ) : (

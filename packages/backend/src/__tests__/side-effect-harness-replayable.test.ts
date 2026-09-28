@@ -82,11 +82,11 @@ describe('runReplayableTrackedSideEffect — payload persisted after render', ()
     // registerSideEffects found the existing row and did NOT create a new one.
     expect(createMock).not.toHaveBeenCalled();
 
-    // Two update() calls: the payload-persist (this test's target) and
-    // markCompleted's status write after execute succeeds. The payload
-    // write uses the SAME idempotency key the findUnique lookup queried,
-    // so it lands on the right row.
-    expect(updateMock).toHaveBeenCalledTimes(2);
+    // One update() call: the payload-persist (this test's target).
+    // markCompleted's status write is a lease-checked updateMany. The
+    // payload write uses the SAME idempotency key the findUnique lookup
+    // queried, so it lands on the right row.
+    expect(updateMock).toHaveBeenCalledTimes(1);
     const findUniqueKey = findUniqueMock.mock.calls[0][0].where.idempotencyKey;
     expect(updateMock).toHaveBeenCalledWith({
       where: { idempotencyKey: findUniqueKey },

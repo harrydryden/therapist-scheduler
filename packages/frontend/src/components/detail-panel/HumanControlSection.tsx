@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { AppointmentDetail } from '../../types';
 import type { AppointmentControls } from '../../hooks/useAppointmentControls';
 import ScanResultsPanel from './ScanResultsPanel';
+import ConfirmDialog from '../ConfirmDialog';
 import { toDatetimeLocalValue, datetimeLocalToLondonProse, formatDateTime } from '../../utils/date-format';
 
 interface HumanControlSectionProps {
@@ -48,6 +49,9 @@ export default function HumanControlSection({
   // (the admin then picks an unambiguous date). The canonical submitted
   // string lives in controls.editConfirmedDateTime, set on change.
   const [pickerValue, setPickerValue] = useState(() => seedPickerValue(appointment));
+  // "Resume agent" hands the conversation back to the AI, which then
+  // replays anything it missed — so it asks first.
+  const [confirmingResume, setConfirmingResume] = useState(false);
 
   // Reset the cancellation-initiator picker when the operator
   // navigates to a different appointment. Without this, picking
@@ -104,7 +108,11 @@ export default function HumanControlSection({
 
       {!appointment.humanControlEnabled ? (
         <div>
+          <label htmlFor="take-control-reason" className="sr-only">
+            Reason for taking control (optional)
+          </label>
           <input
+            id="take-control-reason"
             type="text"
             placeholder="Reason for taking control (optional)"
             value={controlReason}
@@ -147,8 +155,28 @@ export default function HumanControlSection({
           </div>
 
           {/* Resume Button */}
+          {confirmingResume && (
+            <ConfirmDialog
+              title="Resume the agent?"
+              confirmLabel="Resume agent"
+              isPending={controls.releaseControlMutation.isPending}
+              onConfirm={() =>
+                controls.releaseControlMutation.mutate(appointment.id, {
+                  onSettled: () => setConfirmingResume(false),
+                })
+              }
+              onCancel={() => setConfirmingResume(false)}
+            >
+              <p className="text-sm text-slate-600">
+                The AI assistant takes this conversation back and will act on any messages that arrived while
+                you had control &mdash; it may email {appointment.userName || 'the client'} or{' '}
+                {appointment.therapistName} straight away. Make sure anything you sent by hand is reflected first.
+              </p>
+            </ConfirmDialog>
+          )}
           <button
-            onClick={() => controls.releaseControlMutation.mutate(appointment.id)}
+            type="button"
+            onClick={() => setConfirmingResume(true)}
             disabled={controls.releaseControlMutation.isPending}
             aria-label="Release human control and resume AI agent"
             aria-busy={controls.releaseControlMutation.isPending}
@@ -171,8 +199,9 @@ export default function HumanControlSection({
               <h4 className="font-medium text-slate-800 mb-2">Edit Appointment</h4>
 
               <div className="mb-2">
-                <label className="text-sm text-slate-600 block mb-1">Status:</label>
+                <label htmlFor="edit-status" className="text-sm text-slate-600 block mb-1">Status:</label>
                 <select
+                  id="edit-status"
                   value={controls.editStatus || ''}
                   onChange={(e) => controls.setEditStatus(e.target.value)}
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
@@ -250,11 +279,12 @@ export default function HumanControlSection({
               */}
               {controls.editStatus === 'cancelled' && appointment.status !== 'cancelled' && (
                 <div className="mb-2">
-                  <label className="text-sm text-slate-600 block mb-1">
+                  <label htmlFor="edit-cancelled-by" className="text-sm text-slate-600 block mb-1">
                     Who is cancelling?
                     <span className="text-red-500 ml-1">*</span>
                   </label>
                   <select
+                    id="edit-cancelled-by"
                     value={cancelledBy}
                     onChange={(e) => setCancelledBy(e.target.value as 'admin' | 'client' | 'therapist')}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
@@ -277,11 +307,12 @@ export default function HumanControlSection({
                   changing edits get audit-trailed). Mirrors the
                   /admin/appointments dialog from #215. */}
               <div className="mb-2">
-                <label className="text-sm text-slate-600 block mb-1">
+                <label htmlFor="edit-reason" className="text-sm text-slate-600 block mb-1">
                   Reason:
                   <span className="text-red-500 ml-1">*</span>
                 </label>
                 <input
+                  id="edit-reason"
                   type="text"
                   value={controls.editReason}
                   onChange={(e) => controls.setEditReason(e.target.value)}
@@ -354,8 +385,9 @@ export default function HumanControlSection({
               <h4 className="font-medium text-slate-800 mb-2">Send Message</h4>
 
               <div className="mb-2">
-                <label className="text-sm text-slate-600 block mb-1">To:</label>
+                <label htmlFor="message-to" className="text-sm text-slate-600 block mb-1">To:</label>
                 <select
+                  id="message-to"
                   value={messageRecipient}
                   onChange={(e) => setMessageRecipient(e.target.value as 'client' | 'therapist')}
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
@@ -366,8 +398,9 @@ export default function HumanControlSection({
               </div>
 
               <div className="mb-2">
-                <label className="text-sm text-slate-600 block mb-1">Subject:</label>
+                <label htmlFor="message-subject" className="text-sm text-slate-600 block mb-1">Subject:</label>
                 <input
+                  id="message-subject"
                   type="text"
                   value={messageSubject}
                   onChange={(e) => setMessageSubject(e.target.value)}
@@ -377,8 +410,9 @@ export default function HumanControlSection({
               </div>
 
               <div className="mb-3">
-                <label className="text-sm text-slate-600 block mb-1">Message:</label>
+                <label htmlFor="message-body" className="text-sm text-slate-600 block mb-1">Message:</label>
                 <textarea
+                  id="message-body"
                   value={messageBody}
                   onChange={(e) => setMessageBody(e.target.value)}
                   placeholder="Type your message..."

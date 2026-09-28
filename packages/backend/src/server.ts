@@ -47,6 +47,7 @@ import { slackWeeklySummaryService } from './services/slack-weekly-summary.servi
 import { workReportService } from './services/work-report.service';
 import { appointmentLifecycleTickService } from './domain/scheduling/lifecycle';
 import { invitationLifecycleService } from './services/invitation-lifecycle.service';
+import { bookingVerificationService } from './services/booking-verification.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
@@ -575,6 +576,7 @@ async function start() {
         therapistNudgeService.stop(),
         appointmentLifecycleTickService.stop(),
         invitationLifecycleService.stop(),
+        bookingVerificationService.stop(),
         sideEffectRetryService.stop(),
         pendingEmailService.stop(),
       ];
@@ -694,6 +696,7 @@ async function start() {
       { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
       { name: 'appointmentLifecycleTickService', service: appointmentLifecycleTickService, critical: false, async: false },
       { name: 'invitationLifecycleService', service: invitationLifecycleService, critical: false, async: false },
+      { name: 'bookingVerificationService', service: bookingVerificationService, critical: false, async: false },
       { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
       { name: 'workReportService', service: workReportService, critical: false, async: false },
       { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },

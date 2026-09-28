@@ -8,6 +8,14 @@ export { HEADERS } from '@therapist-scheduler/shared';
 export const APP = {
   COORDINATOR_NAME: 'Justin Time',
   DEFAULT_TIMEZONE: 'Europe/London',
+  /**
+   * The one support address shown anywhere on the site. It is the address
+   * every backend error message and email already names (the header used
+   * to say support@ while forms said scheduling@).
+   */
+  SUPPORT_EMAIL: 'scheduling@spill.chat',
+  /** Spill's privacy notice, linked from the signup form. */
+  PRIVACY_POLICY_URL: 'https://www.spill.chat/privacy-policy',
 } as const;
 
 // Timeouts

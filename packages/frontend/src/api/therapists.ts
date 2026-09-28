@@ -2,6 +2,7 @@ import type {
   Therapist,
   TherapistDetail,
   AppointmentRequest,
+  AppointmentRequestResponse,
 } from '../types';
 import { fetchApi, unwrap } from './core';
 
@@ -14,9 +15,14 @@ export async function getTherapist(id: string): Promise<TherapistDetail> {
   return unwrap(await fetchApi<TherapistDetail>(`/therapists/${id}`), 'therapist');
 }
 
-export async function submitAppointmentRequest(request: AppointmentRequest): Promise<{ appointmentRequestId: string }> {
+/**
+ * Submit a booking. Without a voucher the backend answers
+ * `verificationRequired: true` (check your email to confirm); with a
+ * valid voucher for the same address it starts scheduling straight away.
+ */
+export async function submitAppointmentRequest(request: AppointmentRequest): Promise<AppointmentRequestResponse> {
   return unwrap(
-    await fetchApi<{ appointmentRequestId: string; status: string; message: string }>(
+    await fetchApi<AppointmentRequestResponse>(
       '/appointments/request',
       {
         method: 'POST',

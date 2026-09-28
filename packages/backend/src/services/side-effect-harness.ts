@@ -72,12 +72,18 @@ type RegistrationFailurePolicy = 'run-untracked' | 'rethrow';
  * that differ are what `register` does and the registration-failure
  * policy):
  *   register -> (on-error: per RegistrationFailurePolicy, see above)
- *            -> if status is 'completed' or 'abandoned': skip
+ *            -> if status is terminal (completed / abandoned / superseded):
+ *               skip (a periodic caller may reconcile its sentinel via
+ *               `onAlreadyCompleted`)
  *            -> claim execute lease (skip if another worker holds it)
  *            -> execute
- *                 (on-execute-error: markFailed + re-throw)
- *            -> markCompletedAfterExecute
+ *                 (on-execute-error: markFailed(lease) + re-throw)
+ *            -> markCompletedAfterExecute(lease)
  *                 (separate phase: never marks failed, never re-throws)
+ *
+ * Every outcome write carries the lease tryClaimEffect returned, so a
+ * worker whose lease expired mid-execute cannot overwrite the outcome of
+ * the worker that re-claimed the row.
  *
  * The execute and mark-completed phases are deliberately NOT in one
  * try/catch. When execute has resolved, the effect has happened (the email
@@ -98,6 +104,7 @@ async function runWithTrackedRegistration(
   execute: (registered?: RegisteredSideEffect) => Promise<unknown>,
   logContext: Record<string, unknown>,
   onRegistrationFailure: RegistrationFailurePolicy,
+  onAlreadyCompleted?: () => Promise<void>,
 ): Promise<void> {
   let registered;
   try {
@@ -128,6 +135,26 @@ async function runWithTrackedRegistration(
       { ...logContext, idempotencyKey: registered.idempotencyKey },
       'Side effect already completed; skipping',
     );
+    if (onAlreadyCompleted) {
+      // The effect already happened, but the caller claimed a sentinel to
+      // get here — let it confirm the sentinel rather than strand it at
+      // the in-flight value (the stuck-sentinel sweep would only reset it
+      // and the next tick would land back here, forever).
+      await onAlreadyCompleted().catch((err) => {
+        logger.warn(
+          { err, ...logContext, idempotencyKey: registered.idempotencyKey },
+          'Reconciling an already-completed side effect failed',
+        );
+      });
+    }
+    return;
+  }
+
+  if (registered.status === 'superseded') {
+    logger.info(
+      { ...logContext, idempotencyKey: registered.idempotencyKey },
+      'Side effect previously superseded; not running',
+    );
     return;
   }
 
@@ -147,10 +174,10 @@ async function runWithTrackedRegistration(
   // holds the lease (or the row drifted to completed/abandoned between
   // register and claim), so we silently skip — that other worker will
   // mark the row's terminal state.
-  const claimed = await sideEffectTrackerService.tryClaimEffect(
+  const lease = await sideEffectTrackerService.tryClaimEffect(
     registered.idempotencyKey,
   );
-  if (!claimed) {
+  if (!lease) {
     logger.info(
       { ...logContext, idempotencyKey: registered.idempotencyKey },
       'Side effect execute-lease held by another worker; skipping',
@@ -169,6 +196,7 @@ async function runWithTrackedRegistration(
       .markFailed(
         registered.idempotencyKey,
         err instanceof Error ? err.message : String(err),
+        lease,
       )
       .catch((markErr) => {
         logger.error(
@@ -184,6 +212,7 @@ async function runWithTrackedRegistration(
   await sideEffectTrackerService.markCompletedAfterExecute(
     registered.idempotencyKey,
     logContext,
+    { lease },
   );
 }
 
@@ -345,6 +374,14 @@ export function runPeriodicTrackedSideEffect<P>(
   spec: {
     renderPayload: () => Promise<P>;
     execute: (payload: P, helpers: { updateStoredPayload: (patch: Partial<P>) => Promise<void> }) => Promise<unknown>;
+    /**
+     * Called instead of `execute` when this key's row is already
+     * `completed` — the effect for this cycle already went out. Sentinel-
+     * gated callers use it to confirm the sentinel they just claimed
+     * (finalisation is idempotent) instead of leaving it stranded. Errors
+     * are logged, never thrown.
+     */
+    onAlreadyCompleted?: () => Promise<void>;
   },
   options: BackgroundTaskOptions,
   scopeGeneration?: number,
@@ -364,6 +401,7 @@ export function runPeriodicTrackedSideEffect<P>(
       // Periodic effects have no row anywhere else — degrade to a single
       // untracked attempt rather than dropping the effect.
       'run-untracked',
+      spec.onAlreadyCompleted,
     );
   }, options);
 }

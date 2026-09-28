@@ -32,12 +32,14 @@ jest.mock('../utils/logger', () => ({
 
 const updateManyMock = jest.fn();
 const findManyMock = jest.fn();
+const deleteManyMock = jest.fn();
 
 jest.mock('../utils/database', () => ({
   prisma: {
     sideEffectLog: {
       updateMany: (...args: unknown[]) => updateManyMock(...args),
       findMany: (...args: unknown[]) => findManyMock(...args),
+      deleteMany: (...args: unknown[]) => deleteManyMock(...args),
     },
   },
 }));
@@ -45,69 +47,130 @@ jest.mock('../utils/database', () => ({
 import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 
 beforeEach(() => {
-  jest.clearAllMocks();
+  jest.resetAllMocks();
 });
 
 describe('tryClaimEffect — atomic CAS-claim before execute', () => {
-  it('returns true when the row was in `pending` and the CAS lands', async () => {
+  it('returns the lease (the stamped lastAttempt) when a pending/failed row is claimed', async () => {
     updateManyMock.mockResolvedValueOnce({ count: 1 });
 
-    const claimed = await sideEffectTrackerService.tryClaimEffect('idem-pending');
+    const lease = await sideEffectTrackerService.tryClaimEffect('idem-pending');
 
-    expect(claimed).toBe(true);
-    // The CAS transitions to status='running' with a fresh lastAttempt.
+    expect(lease).toBeInstanceOf(Date);
+    // The CAS transitions to status='running' and stamps the lease.
     const call = updateManyMock.mock.calls[0][0];
     expect(call.where.idempotencyKey).toBe('idem-pending');
+    expect(call.where.status).toEqual({ in: ['pending', 'failed'] });
     expect(call.data.status).toBe('running');
-    expect(call.data.lastAttempt).toBeInstanceOf(Date);
+    expect(call.data.lastAttempt).toEqual(lease);
+    // A fresh claim does not count an attempt — markFailed does that.
+    expect(call.data.attempts).toBeUndefined();
+    // No second (orphan re-claim) statement when the first one lands.
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
   });
 
-  it('returns false when the CAS finds no eligible row (count === 0)', async () => {
-    updateManyMock.mockResolvedValueOnce({ count: 0 });
+  it('returns null when neither branch finds an eligible row', async () => {
+    updateManyMock.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 0 });
 
-    const claimed = await sideEffectTrackerService.tryClaimEffect('idem-already-running');
+    const lease = await sideEffectTrackerService.tryClaimEffect('idem-already-running');
 
-    expect(claimed).toBe(false);
+    expect(lease).toBeNull();
   });
 
-  it('CAS where-clause accepts pending, failed, or stale-lease running rows', async () => {
-    updateManyMock.mockResolvedValueOnce({ count: 1 });
+  it('re-claims an expired running row AND counts the crashed attempt', async () => {
+    // Regression (review §4.4): a worker that died mid-execute never ran
+    // markFailed, so re-claims never incremented attempts and an effect
+    // that crashed the process retried every lease period forever.
+    updateManyMock.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
 
-    await sideEffectTrackerService.tryClaimEffect('idem-x');
+    const lease = await sideEffectTrackerService.tryClaimEffect('idem-orphan');
 
-    // Each clause in the OR is an explicit eligibility case. Inspecting
-    // the call args pins the exact shape so a refactor that drops one
-    // of the branches (e.g. deleting stuck-running recovery) fails this test.
-    const orClauses = updateManyMock.mock.calls[0][0].where.OR as Array<Record<string, unknown>>;
-    const states = orClauses.map((c) => c.status).sort();
-    expect(states).toEqual(['failed', 'pending', 'running']);
-
-    // The running branch is conditional on an expired lease.
-    const runningClause = orClauses.find((c) => c.status === 'running')!;
-    expect(runningClause.lastAttempt).toMatchObject({ lt: expect.any(Date) });
+    expect(lease).toBeInstanceOf(Date);
+    const orphanCall = updateManyMock.mock.calls[1][0];
+    expect(orphanCall.where.status).toBe('running');
+    expect(orphanCall.where.lastAttempt).toMatchObject({ lt: expect.any(Date) });
+    expect(orphanCall.data.attempts).toEqual({ increment: 1 });
+    expect(orphanCall.data.lastAttempt).toEqual(lease);
   });
 
-  it('the stuck-running cutoff in the CAS where-clause matches CLAIM_LEASE_MS (10 min)', async () => {
+  it('the stuck-running cutoff matches CLAIM_LEASE_MS (10 min)', async () => {
     const before = Date.now();
-    updateManyMock.mockResolvedValueOnce({ count: 1 });
+    updateManyMock.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
     await sideEffectTrackerService.tryClaimEffect('idem-x');
     const after = Date.now();
 
-    const orClauses = updateManyMock.mock.calls[0][0].where.OR as Array<Record<string, unknown>>;
-    const runningClause = orClauses.find((c) => c.status === 'running')!;
-    const cutoff = (runningClause.lastAttempt as { lt: Date }).lt.getTime();
-    // Cutoff should be ~10 min before "now"; allow generous bounds.
+    const cutoff = (updateManyMock.mock.calls[1][0].where.lastAttempt as { lt: Date }).lt.getTime();
     expect(cutoff).toBeGreaterThan(before - 11 * 60 * 1000);
     expect(cutoff).toBeLessThan(after - 9 * 60 * 1000);
   });
 });
 
-describe('getEffectsToRetry — includes stuck-running rows', () => {
+describe('outcome writes are lease-checked', () => {
+  it('markCompleted with a lease only matches a running row carrying exactly that lastAttempt', async () => {
+    const lease = new Date('2026-09-28T10:00:00.123Z');
+    updateManyMock.mockResolvedValueOnce({ count: 1 });
+
+    await expect(sideEffectTrackerService.markCompleted('k', lease)).resolves.toBe(true);
+
+    expect(updateManyMock.mock.calls[0][0].where).toEqual({
+      idempotencyKey: 'k',
+      status: 'running',
+      lastAttempt: lease,
+    });
+  });
+
+  it('a stale worker cannot flip a re-claimed/completed row: markFailed writes nothing and reports false', async () => {
+    updateManyMock.mockResolvedValueOnce({ count: 0 });
+
+    await expect(
+      sideEffectTrackerService.markFailed('k', 'boom', new Date('2026-09-28T10:00:00.000Z')),
+    ).resolves.toBe(false);
+  });
+
+  it('markAbandoned / markSuperseded carry the same ownership guard', async () => {
+    const lease = new Date();
+    updateManyMock.mockResolvedValue({ count: 1 });
+
+    await sideEffectTrackerService.markAbandoned('k', 'why', lease);
+    await sideEffectTrackerService.markSuperseded('k', 'why', lease);
+
+    for (const [args] of updateManyMock.mock.calls) {
+      expect(args.where).toEqual({ idempotencyKey: 'k', status: 'running', lastAttempt: lease });
+    }
+    expect(updateManyMock.mock.calls[1][0].data).toMatchObject({ status: 'superseded', completedAt: expect.any(Date) });
+  });
+
+  it('without a lease (legacy never-claimed callers) never resurrects a terminal row', async () => {
+    updateManyMock.mockResolvedValueOnce({ count: 1 });
+
+    await sideEffectTrackerService.markCompleted('k');
+
+    expect(updateManyMock.mock.calls[0][0].where).toEqual({
+      idempotencyKey: 'k',
+      status: { in: ['pending', 'running', 'failed'] },
+    });
+  });
+
+  it('markCompletedAfterExecute does not retry when the lease was lost', async () => {
+    updateManyMock.mockResolvedValue({ count: 0 });
+
+    const recorded = await sideEffectTrackerService.markCompletedAfterExecute('k', {}, {
+      lease: new Date(),
+      inlineRetryDelaysMs: [1, 1],
+      deferredRetryDelaysMs: [],
+    });
+
+    expect(recorded).toBe(false);
+    expect(updateManyMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getEffectsToRetry', () => {
   beforeEach(() => {
     findManyMock.mockResolvedValueOnce([]);
   });
 
-  it('OR clause includes status=running with stale lastAttempt', async () => {
+  it('OR clause includes status=running with stale lastAttempt, NOT capped by attempts', async () => {
     await sideEffectTrackerService.getEffectsToRetry();
 
     const orClauses = findManyMock.mock.calls[0][0].where.OR as Array<Record<string, unknown>>;
@@ -119,7 +182,9 @@ describe('getEffectsToRetry — includes stuck-running rows', () => {
 
     const runningClause = orClauses.find((c) => c.status === 'running')!;
     expect(runningClause.lastAttempt).toMatchObject({ lt: expect.any(Date) });
-    expect(runningClause.attempts).toMatchObject({ lt: expect.any(Number) });
+    // Crash orphans at the cap must still surface so the runner abandons
+    // (and alerts on) them instead of leaving them running forever.
+    expect(runningClause.attempts).toBeUndefined();
   });
 
   it('failed and pending clauses are preserved unchanged', async () => {
@@ -133,5 +198,29 @@ describe('getEffectsToRetry — includes stuck-running rows', () => {
     const pendingClause = orClauses.find((c) => c.status === 'pending')!;
     expect(pendingClause.attempts).toBe(0);
     expect(pendingClause.createdAt).toMatchObject({ lt: expect.any(Date) });
+  });
+
+  it('orders never-attempted rows (null lastAttempt) FIRST so they are not starved', async () => {
+    await sideEffectTrackerService.getEffectsToRetry();
+
+    expect(findManyMock.mock.calls[0][0].orderBy).toEqual([
+      { lastAttempt: { sort: 'asc', nulls: 'first' } },
+      { createdAt: 'asc' },
+    ]);
+  });
+});
+
+describe('cleanupOldEffects', () => {
+  it('deletes only finished (completed/superseded) rows older than 30 days by default', async () => {
+    deleteManyMock.mockResolvedValueOnce({ count: 3 });
+    const before = Date.now();
+
+    await expect(sideEffectTrackerService.cleanupOldEffects()).resolves.toBe(3);
+
+    const where = deleteManyMock.mock.calls[0][0].where;
+    expect(where.status).toEqual({ in: ['completed', 'superseded'] });
+    const cutoff = (where.completedAt as { lt: Date }).lt.getTime();
+    expect(cutoff).toBeLessThanOrEqual(before - 30 * 24 * 60 * 60 * 1000 + 1000);
+    expect(cutoff).toBeGreaterThan(before - 31 * 24 * 60 * 60 * 1000);
   });
 });

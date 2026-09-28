@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
+import { COUNTRIES } from '@therapist-scheduler/shared';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToastContext } from '../components/Toast';
@@ -79,14 +81,23 @@ function UserDetailDrawer({ userId, onClose }: DetailDrawerProps) {
     onError: (err) => showToast(getErrorMessage(err, 'Failed to update user'), 'error'),
   });
 
+  const drawerRef = useRef<HTMLDivElement>(null);
+  // Focus in on open, Tab trapped, Esc closes, focus back to the row.
+  useDialogA11y(drawerRef, { onEscape: onClose });
+
   return (
     <div className="fixed inset-0 bg-black/30 z-40 flex justify-end" onClick={onClose}>
       <div
-        className="bg-white w-full max-w-2xl h-full overflow-y-auto shadow-xl"
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="user-drawer-title"
+        tabIndex={-1}
+        className="bg-white w-full max-w-2xl h-full overflow-y-auto shadow-xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-900">User detail</h2>
+          <h2 id="user-drawer-title" className="text-lg font-semibold text-slate-900">User detail</h2>
           <button
             type="button"
             onClick={onClose}
@@ -131,10 +142,11 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
       {/* Editable fields */}
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Name</label>
+          <label htmlFor="user-name" className="block text-xs font-medium text-slate-500 mb-1">Name</label>
           {editName !== null ? (
             <div className="flex gap-1">
               <input
+                id="user-name"
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
                 className="flex-1 px-2 py-1 text-sm border border-slate-300 rounded"
@@ -155,6 +167,8 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
             </div>
           ) : (
             <button
+              id="user-name"
+              type="button"
               onClick={() => setEditName(data.name ?? '')}
               className="text-sm text-slate-900 hover:text-spill-blue-800 text-left"
             >
@@ -164,15 +178,25 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Country</label>
+          <label htmlFor="user-country" className="block text-xs font-medium text-slate-500 mb-1">Country</label>
           {editCountry !== null ? (
             <div className="flex gap-1">
-              <input
+              {/* Supported codes only — the backend rejects anything else. */}
+              <select
+                id="user-country"
                 value={editCountry}
-                onChange={(e) => setEditCountry(e.target.value.toUpperCase())}
-                maxLength={4}
-                className="flex-1 px-2 py-1 text-sm border border-slate-300 rounded font-mono"
-              />
+                onChange={(e) => setEditCountry(e.target.value)}
+                className="flex-1 px-2 py-1 text-sm border border-slate-300 rounded"
+              >
+                {!COUNTRIES.some((c) => c.code === editCountry) && (
+                  <option value={editCountry}>{editCountry || '—'} (unsupported)</option>
+                )}
+                {COUNTRIES.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.flag} {c.label} ({c.code})
+                  </option>
+                ))}
+              </select>
               <button
                 onClick={() => updateMutation.mutate({ country: editCountry })}
                 disabled={updateMutation.isPending}
@@ -189,6 +213,8 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
             </div>
           ) : (
             <button
+              id="user-country"
+              type="button"
               onClick={() => setEditCountry(data.country)}
               className="text-sm text-slate-900 hover:text-spill-blue-800 text-left font-mono"
             >
@@ -198,9 +224,10 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Subscribed</label>
-          <label className="inline-flex items-center gap-2 cursor-pointer">
+          <span className="block text-xs font-medium text-slate-500 mb-1">Subscribed</span>
+          <label htmlFor="user-subscribed" className="inline-flex items-center gap-2 cursor-pointer">
             <input
+              id="user-subscribed"
               type="checkbox"
               checked={data.subscribed}
               onChange={(e) => updateMutation.mutate({ subscribed: e.target.checked })}
@@ -212,7 +239,7 @@ function DetailBody({ data, editName, setEditName, editCountry, setEditCountry, 
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Source</label>
+          <span className="block text-xs font-medium text-slate-500 mb-1">Source</span>
           <SourceBadge source={data.signupSource} />
         </div>
       </div>
@@ -343,8 +370,9 @@ export default function AdminUsersPage() {
       {/* Filters */}
       <div className="bg-white border border-slate-200 rounded-lg p-4 mb-4 flex flex-wrap gap-3 items-end">
         <div className="flex-1 min-w-[200px]">
-          <label className="block text-xs font-medium text-slate-500 mb-1">Search</label>
+          <label htmlFor="user-search" className="block text-xs font-medium text-slate-500 mb-1">Search</label>
           <input
+            id="user-search"
             type="text"
             value={search}
             onChange={(e) => {
@@ -357,8 +385,9 @@ export default function AdminUsersPage() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Subscribed</label>
+          <label htmlFor="user-filter-subscribed" className="block text-xs font-medium text-slate-500 mb-1">Subscribed</label>
           <select
+            id="user-filter-subscribed"
             value={subscribed}
             onChange={(e) => {
               setSubscribed(e.target.value as UserFilters['subscribed']);
@@ -373,8 +402,9 @@ export default function AdminUsersPage() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Source</label>
+          <label htmlFor="user-filter-source" className="block text-xs font-medium text-slate-500 mb-1">Source</label>
           <select
+            id="user-filter-source"
             value={signupSource}
             onChange={(e) => {
               setSignupSource(e.target.value as UserFilters['signupSource']);
@@ -424,7 +454,15 @@ export default function AdminUsersPage() {
                   <tr
                     key={user.id}
                     onClick={() => setSelectedUserId(user.id)}
-                    className="hover:bg-slate-50 cursor-pointer"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedUserId(user.id);
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-label={`Open ${user.name || user.email}`}
+                    className="hover:bg-slate-50 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spill-blue-400"
                   >
                     <td className="px-4 py-2.5 text-slate-900">{user.name || '—'}</td>
                     <td className="px-4 py-2.5 text-slate-700">{user.email}</td>

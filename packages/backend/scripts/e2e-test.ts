@@ -12,8 +12,8 @@
  * - Test User: "Test User E2E" (scheduling+testuser@spill.chat)
  * - Test Therapist: "Test Therapist (E2E)" (scheduling+therapist@spill.chat)
  *
- * Usage:
- *   WEBHOOK_SECRET=xxx npx ts-node scripts/e2e-test.ts [scenario]
+ * Usage (TEST_API_BASE is required; production is refused):
+ *   TEST_API_BASE=http://localhost:3000 WEBHOOK_SECRET=xxx npx tsx scripts/e2e-test.ts [scenario]
  *
  * Scenarios:
  *   completion    - Full lifecycle ending with feedback and completion
@@ -22,9 +22,23 @@
  *   all           - Run all scenarios (default)
  */
 
+import { resolveE2eApiBase, E2eTargetError } from './lib/e2e-target';
+
+function requireApiBase(): string {
+  try {
+    return resolveE2eApiBase(process.env);
+  } catch (err) {
+    if (err instanceof E2eTargetError) {
+      console.error(`ERROR: ${err.message}`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
 // Test configuration — uses dedicated TEST accounts seeded in Postgres.
 const TEST_CONFIG = {
-  apiBase: process.env.TEST_API_BASE || 'https://backend-production-fe25.up.railway.app',
+  apiBase: requireApiBase(),
   webhookSecret: process.env.WEBHOOK_SECRET || '',
   testUserEmail: 'scheduling+testuser@spill.chat',
   testUserName: 'Test User E2E',
@@ -41,7 +55,7 @@ const TEST_CONFIG = {
 // Validate required env vars
 if (!TEST_CONFIG.webhookSecret) {
   console.error('ERROR: WEBHOOK_SECRET environment variable is required');
-  console.error('Usage: WEBHOOK_SECRET=xxx npx ts-node scripts/e2e-test.ts');
+  console.error('Usage: TEST_API_BASE=http://localhost:3000 WEBHOOK_SECRET=xxx npx tsx scripts/e2e-test.ts');
   process.exit(1);
 }
 

@@ -3,7 +3,12 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router-dom';
 import { submitSignup } from '../api/signup';
 import { lookupInvitation } from '../api/invitations';
+import { getFrontendSettings } from '../api/settings';
 import { COUNTRIES, DEFAULT_COUNTRY, type CountryCode } from '@therapist-scheduler/shared';
+import { APP } from '../config/constants';
+import { useRetryCountdown } from '../hooks/useRetryCountdown';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { signupSuccessCopy } from '../utils/signup-copy';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -24,6 +29,8 @@ interface FormState {
   acknowledgedRealSession: boolean;
   agreedToFeedback: boolean;
   country: CountryCode;
+  /** Explicit opt-in to the weekly availability email — unticked by default. */
+  weeklyEmails: boolean;
 }
 
 const INITIAL_STATE: FormState = {
@@ -33,9 +40,11 @@ const INITIAL_STATE: FormState = {
   acknowledgedRealSession: false,
   agreedToFeedback: false,
   country: DEFAULT_COUNTRY,
+  weeklyEmails: false,
 };
 
 export default function SignupPage() {
+  useDocumentTitle('Sign up');
   const [params] = useSearchParams();
   const invitationToken = useMemo(() => params.get('invite') || null, [params]);
 
@@ -70,6 +79,13 @@ export default function SignupPage() {
     mutationFn: submitSignup,
     onSuccess: () => setSubmitted(true),
   });
+  const retryInSeconds = useRetryCountdown(mutation.error);
+
+  const { data: frontendSettings } = useQuery({
+    queryKey: ['frontendSettings'],
+    queryFn: getFrontendSettings,
+    staleTime: 5 * 60 * 1000,
+  });
 
   const emailValid = EMAIL_REGEX.test(form.email.trim());
   const nameValid = form.name.trim().length > 0;
@@ -85,6 +101,7 @@ export default function SignupPage() {
     form.acknowledgedRealSession === true &&
     form.agreedToFeedback === true &&
     !mutation.isPending &&
+    retryInSeconds === 0 &&
     !invitationBlocked &&
     invitationLoaded;
 
@@ -99,31 +116,49 @@ export default function SignupPage() {
       acknowledgedRealSession: true,
       agreedToFeedback: true,
       country: form.country,
+      weeklyEmails: form.weeklyEmails,
       ...(invitationToken ? { invitationToken } : {}),
     });
   };
 
   if (submitted) {
+    const copy = signupSuccessCopy({
+      voucherEnabled: frontendSettings?.['voucher.enabled'] ?? true,
+      voucherRequired: frontendSettings?.['voucher.required'] ?? true,
+    });
     return (
       <div className="max-w-[640px] mx-auto py-12 px-4 sm:px-6">
-        <div className="bg-spill-teal-100 border border-spill-teal-200 rounded-xl p-8 text-center">
+        <div role="status" className="bg-spill-teal-100 border border-spill-teal-200 rounded-xl p-8 text-center">
           <svg
             className="w-10 h-10 text-spill-teal-600 mx-auto mb-3"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
+            aria-hidden="true"
           >
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
           </svg>
-          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">You&rsquo;re signed up</h3>
+          <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">{copy.headline}</h3>
           <p className="text-sm text-spill-grey-600">
-            Thanks{form.name ? `, ${form.name.trim().split(' ')[0]}` : ''}. We&rsquo;ve added you to
-            our user database. When you&rsquo;re ready to book a session, head over to the{' '}
-            <Link to="/" className="text-spill-blue-800 underline font-medium">
-              therapist directory
-            </Link>{' '}
-            and pick someone to work with.
+            Thanks{form.name ? `, ${form.name.trim().split(' ')[0]}` : ''}. {copy.body}
           </p>
+          {(copy.emailSent || form.weeklyEmails) && (
+            <p className="text-sm text-spill-grey-600 mt-2">
+              {copy.emailSent && (
+                <>
+                  We sent it to <strong className="text-black break-all">{form.email.trim().toLowerCase()}</strong>.
+                </>
+              )}
+              {form.weeklyEmails ? ' You\u2019ll also get our weekly email when therapists have availability.' : ''}
+            </p>
+          )}
+          {copy.showDirectoryLink && (
+            <p className="text-sm text-spill-grey-600 mt-2">
+              <Link to="/" className="text-spill-blue-800 underline font-medium">
+                Browse the therapist directory
+              </Link>
+            </p>
+          )}
         </div>
       </div>
     );
@@ -249,7 +284,7 @@ export default function SignupPage() {
               return (
                 <label
                   key={option}
-                  className={`flex-1 min-w-[200px] cursor-pointer rounded-lg border px-4 py-3 text-sm font-medium text-center transition-all duration-150 ${
+                  className={`flex-1 min-w-[200px] cursor-pointer rounded-lg border px-4 py-3 text-sm font-medium text-center transition-all duration-150 focus-within:ring-2 focus-within:ring-spill-blue-400 ${
                     checked
                       ? 'border-spill-blue-800 bg-spill-blue-100 text-spill-blue-900'
                       : 'border-spill-grey-200 bg-white text-spill-grey-600 hover:bg-spill-grey-100'
@@ -271,8 +306,9 @@ export default function SignupPage() {
         </fieldset>
 
         {/* Real session acknowledgement */}
-        <label className="flex items-start gap-3 cursor-pointer">
+        <label htmlFor="acknowledgedRealSession" className="flex items-start gap-3 cursor-pointer">
           <input
+            id="acknowledgedRealSession"
             type="checkbox"
             checked={form.acknowledgedRealSession}
             onChange={(e) =>
@@ -287,8 +323,9 @@ export default function SignupPage() {
         </label>
 
         {/* Feedback agreement */}
-        <label className="flex items-start gap-3 cursor-pointer">
+        <label htmlFor="agreedToFeedback" className="flex items-start gap-3 cursor-pointer">
           <input
+            id="agreedToFeedback"
             type="checkbox"
             checked={form.agreedToFeedback}
             onChange={(e) => setForm((s) => ({ ...s, agreedToFeedback: e.target.checked }))}
@@ -299,14 +336,32 @@ export default function SignupPage() {
           </span>
         </label>
 
+        {/* Weekly email: an explicit, optional opt-in (unticked by default) */}
+        <label htmlFor="weeklyEmails" className="flex items-start gap-3 cursor-pointer">
+          <input
+            id="weeklyEmails"
+            type="checkbox"
+            checked={form.weeklyEmails}
+            onChange={(e) => setForm((s) => ({ ...s, weeklyEmails: e.target.checked }))}
+            className="mt-1 h-4 w-4 accent-black border-spill-grey-200 rounded focus:ring-spill-blue-400"
+          />
+          <span className="text-sm text-spill-grey-600">
+            Email me each week when therapists have free sessions available (optional &mdash; you can
+            unsubscribe from any email).
+          </span>
+        </label>
+
         {/* Error */}
         {mutation.isError && (
-          <div className="p-3 bg-spill-red-100 border border-spill-red-200 rounded-lg">
+          <div role="alert" className="p-3 bg-spill-red-100 border border-spill-red-200 rounded-lg">
             <p className="text-sm text-spill-red-600">
               {mutation.error instanceof Error
                 ? mutation.error.message
                 : 'Failed to submit signup. Please try again.'}
             </p>
+            {retryInSeconds > 0 && (
+              <p className="text-sm text-spill-red-600 mt-1">You can try again in {retryInSeconds}s.</p>
+            )}
           </div>
         )}
 
@@ -318,6 +373,23 @@ export default function SignupPage() {
         >
           {mutation.isPending ? 'Submitting…' : 'Sign up'}
         </button>
+
+        <p className="text-xs text-spill-grey-400 text-center">
+          We use your details to arrange your session and send you your booking link. See our{' '}
+          <a
+            href={APP.PRIVACY_POLICY_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-spill-blue-800 underline"
+          >
+            privacy policy
+          </a>
+          . Questions? Email{' '}
+          <a href={`mailto:${APP.SUPPORT_EMAIL}`} className="text-spill-blue-800 underline">
+            {APP.SUPPORT_EMAIL}
+          </a>
+          .
+        </p>
 
         <p className="text-xs text-spill-grey-400 text-center">
           Already booked with us before? You can sign up again to refresh your details &mdash; we won&rsquo;t

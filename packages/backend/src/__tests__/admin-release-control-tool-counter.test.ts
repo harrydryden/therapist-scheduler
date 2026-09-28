@@ -12,6 +12,14 @@
  * the assertion is on the actual key the dispatch pre-flight peeks.
  */
 
+// schemas.ts imports conversation-health.service, whose import chain loads
+// the real config (which exits the process on missing env in tests).
+jest.mock('../config', () => require('./_global-mocks').configMock());
+jest.mock('../services/conversation-health.service', () => ({
+  computeAppointmentHealthMeta: jest.fn(() => ({ health: 'green', reasons: [] })),
+  getHealthThresholds: jest.fn(async () => ({})),
+  toAppointmentForHealth: jest.fn((a: unknown) => a),
+}));
 jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));

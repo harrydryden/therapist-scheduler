@@ -1,4 +1,16 @@
-version: '3.8'
+# Self-hosted / local production-like stack: the app image plus its own
+# Postgres and Redis. (Production itself runs on Railway; see
+# docs/PRODUCTION_DEPLOYMENT.md.)
+#
+# - Postgres and Redis are published on 127.0.0.1 only. Their defaults
+#   (postgres/postgres, Redis without a password) are for local use; set
+#   POSTGRES_PASSWORD and put Redis behind a password before exposing either.
+# - The app talks to THESE services by default. Set DATABASE_URL / REDIS_URL
+#   only to point it somewhere else.
+# - SINGLE_INSTANCE_MODE defaults to false, the code default: distributed
+#   locks are DENIED while Redis is unreachable, so two instances can never
+#   both run a locked job. Set it to true only for a deploy you know is a
+#   single instance (docs/PRODUCTION_DEPLOYMENT.md, "Distributed locking").
 
 services:
   app:
@@ -9,8 +21,8 @@ services:
       - NODE_ENV=production
       - JWT_SECRET=${JWT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-therapist_scheduling}}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
       - RATE_LIMIT_MAX=${RATE_LIMIT_MAX:-200}
       - SSE_MAX_CONNECTIONS=${SSE_MAX_CONNECTIONS:-100}
       - TOKEN_BUCKET_CAPACITY=${TOKEN_BUCKET_CAPACITY:-200}
@@ -24,7 +36,7 @@ services:
       - SLOW_QUERY_THRESHOLD=${SLOW_QUERY_THRESHOLD:-1000}
       - SLOW_MESSAGE_THRESHOLD=${SLOW_MESSAGE_THRESHOLD:-5000}
       - SLOW_AI_THRESHOLD=${SLOW_AI_THRESHOLD:-30000}
-      - SINGLE_INSTANCE_MODE=${SINGLE_INSTANCE_MODE:-true}
+      - SINGLE_INSTANCE_MODE=${SINGLE_INSTANCE_MODE:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,7 +67,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     deploy:
       resources:
         limits:
@@ -74,7 +86,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     deploy:
@@ -95,4 +107,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-

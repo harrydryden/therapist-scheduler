@@ -1,11 +1,16 @@
+import type { AppointmentStatus, HealthStatus } from '../types';
+
 /**
  * Centralized color mappings for badges and status indicators
  * Single source of truth for consistent UI theming
  * Uses Spill color palette (spill-blue, spill-teal, spill-yellow, spill-red, spill-grey)
  */
 
-// Appointment status badge colors - Full lifecycle
-export const STATUS_BADGE_COLORS: Record<string, string> = {
+// Appointment status badge colors - Full lifecycle. Keyed by the shared
+// status union, so a new status is a compile error here, and every status
+// has its own colour (confirmed used to match completed, and contacted
+// matched feedback_requested).
+export const STATUS_BADGE_COLORS: Record<AppointmentStatus, string> = {
   // Pre-booking stages
   pending: 'bg-spill-yellow-100 text-spill-yellow-600',
   contacted: 'bg-spill-blue-100 text-spill-blue-800',
@@ -16,12 +21,26 @@ export const STATUS_BADGE_COLORS: Record<string, string> = {
 
   // Post-session stages
   session_held: 'bg-spill-teal-200 text-spill-teal-600',
-  feedback_requested: 'bg-spill-blue-100 text-spill-blue-800',
-  completed: 'bg-spill-teal-100 text-spill-teal-600',
+  feedback_requested: 'bg-purple-100 text-purple-700',
+  completed: 'bg-spill-grey-200 text-spill-grey-600',
 
   // Terminal
   cancelled: 'bg-spill-red-100 text-spill-red-600',
 } as const;
+
+/** Short visible label paired with each health dot (status never by colour alone). */
+export const HEALTH_SHORT_LABELS: Record<HealthStatus, string> = {
+  green: 'OK',
+  yellow: 'Watch',
+  red: 'Alert',
+};
+
+/** Full health label for screen readers and tooltips. */
+export const HEALTH_LABELS: Record<HealthStatus, string> = {
+  green: 'Healthy',
+  yellow: 'Monitoring',
+  red: 'Needs attention',
+};
 
 // Knowledge base audience colors
 export const AUDIENCE_BADGE_COLORS: Record<string, string> = {
@@ -54,7 +73,7 @@ export const STAGE_LABELS: Record<string, string> = {
 
 // Utility function to get status color with fallback
 export function getStatusColor(status: string): string {
-  return STATUS_BADGE_COLORS[status] || 'bg-spill-grey-100 text-spill-grey-600';
+  return STATUS_BADGE_COLORS[status as AppointmentStatus] || 'bg-spill-grey-100 text-spill-grey-600';
 }
 
 // Utility function to get audience color with fallback

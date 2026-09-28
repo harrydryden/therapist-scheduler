@@ -11,6 +11,7 @@ import {
 import { getErrorMessage } from '../api/core';
 import type { VoucherRecord, VoucherFilters } from '../api/vouchers';
 import Pagination from '../components/Pagination';
+import ModalFrame from '../components/ModalFrame';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useDebounce } from '../hooks/useDebounce';
 import { formatTimeAgo, formatExpiryDate } from '../utils/date-format';
@@ -83,8 +84,7 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
   // Show result screen after successful creation
   if (result) {
     return (
-      <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+      <ModalFrame onClose={onClose} ariaLabel="Voucher issued" className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
           <div className="text-center">
             <svg className="w-12 h-12 text-green-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -137,14 +137,12 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
               Done
             </button>
           </div>
-        </div>
-      </div>
+      </ModalFrame>
     );
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+    <ModalFrame onClose={onClose} ariaLabel="Issue voucher" className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
         <h3 className="text-lg font-semibold text-slate-900 mb-4">Issue Voucher</h3>
 
         <div className="space-y-4">
@@ -211,8 +209,7 @@ function IssueVoucherModal({ onClose, onSuccess }: { onClose: () => void; onSucc
             {mutation.isPending ? 'Issuing...' : 'Issue Voucher'}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }
 

@@ -36,6 +36,8 @@ export interface ATSTherapistPayload {
   qualifications?: string[];
   profileImageUrl?: string | null;
   active?: boolean;
+  /** Country code (UK, IE, US, …); an unsupported code is rejected with 400. */
+  country?: string;
 }
 
 /** Response after therapist ingestion */
