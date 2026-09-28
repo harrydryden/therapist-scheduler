@@ -45,6 +45,7 @@ import {
 } from '../../../utils/email-mime-parser';
 import { runWithTrace, extendTraceContext } from '../../../utils/request-tracing';
 import { ConcurrentModificationError } from '../../../errors';
+import { isTransientInfrastructureError } from './transient-errors';
 import { EMAIL, EMAIL_PROCESSING, PRE_BOOKING_STATUSES } from '../../../constants';
 import { isGmail404 } from '../../../utils/gmail-errors';
 import { classifyEmail } from '../../../services/email-classifier.service';
@@ -603,6 +604,39 @@ export async function processMessage(messageId: string, traceId: string): Promis
       }
 
       const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Infrastructure failures (breaker open, rate limit, timeout, 5xx,
+      // network / DB connectivity) are NOT this message's fault. Defer
+      // without consuming one of the MAX_PROCESSING_FAILURES attempts so a
+      // short Claude or Gmail incident cannot permanently abandon every
+      // email that arrived during it. The poller / scanner re-drive the
+      // message once the dependency recovers. Visibility is preserved by a
+      // deduped Slack alert.
+      if (isTransientInfrastructureError(error)) {
+        logger.warn(
+          { traceId, messageId, errorMessage, errorName: error instanceof Error ? error.name : typeof error },
+          'Transient infrastructure failure during processMessage — deferring without counting against the abandon budget',
+        );
+        if (usingDatabaseFallback) {
+          await releaseDbLock(messageId, traceId);
+        }
+        if (await shouldEmitProcessingAlert(messageId)) {
+          slackNotificationService.sendAlert({
+            title: 'Message Processing Deferred (infrastructure)',
+            severity: 'medium',
+            details:
+              'A Gmail message could not be processed because a dependency was unavailable ' +
+              '(circuit breaker open, rate limit, timeout or upstream error). It has NOT been ' +
+              'counted against the abandon budget and will be retried automatically.\n\n' +
+              `\`\`\`${errorMessage.slice(0, 1500)}\`\`\``,
+            additionalFields: { 'Message ID': messageId },
+          }).catch((slackErr) => {
+            logger.warn({ traceId, slackErr }, 'Failed to send deferred-processing Slack alert');
+          });
+        }
+        return false;
+      }
+
       let attempts: number;
       try {
         attempts = await trackProcessingFailure(messageId, errorMessage);

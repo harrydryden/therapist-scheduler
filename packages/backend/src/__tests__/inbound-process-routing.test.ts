@@ -208,6 +208,22 @@ describe('availability-agent failure propagates to failure tracking (E9)', () =>
     expect(mockMarkMessageProcessed).not.toHaveBeenCalled();
   });
 
+  it('defers WITHOUT consuming an abandon attempt when the failure is infrastructural (O3)', async () => {
+    const { CircuitBreakerError } = jest.requireActual('../utils/circuit-breaker');
+    mockProcessReply.mockRejectedValueOnce(new CircuitBreakerError('Circuit claude is OPEN', 'claude', 'OPEN'));
+
+    const result = await processMessage('msg-1', 'trace-1');
+
+    expect(result).toBe(false);
+    // Not counted against MAX_PROCESSING_FAILURES — a short Claude outage
+    // must not permanently abandon every email that arrived during it.
+    expect(mockTrackProcessingFailure).not.toHaveBeenCalled();
+    // Left unmarked so the poller / scanner re-drive it once the
+    // dependency recovers.
+    expect(mockMarkMessageProcessed).not.toHaveBeenCalled();
+    expect(mockDetectNudgeReplyByThreadId).not.toHaveBeenCalled();
+  });
+
   it('marks the message availability-agent-active when processReply succeeds', async () => {
     mockProcessReply.mockResolvedValueOnce(undefined);
 
