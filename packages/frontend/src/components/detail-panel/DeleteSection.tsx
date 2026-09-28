@@ -12,6 +12,14 @@ export default function DeleteSection({ appointment, deleteMutation }: DeleteSec
   const [reason, setReason] = useState('');
   const [forceConfirmed, setForceConfirmed] = useState(false);
 
+  // Rendered here because the panel-level `mutationError` is only shown by
+  // HumanControlSection, which isn't mounted while this view is open — so a
+  // backend refusal (e.g. "Cannot delete confirmed appointments") used to be
+  // invisible and the button just reset.
+  const deleteError = deleteMutation.isError
+    ? (deleteMutation.error instanceof Error ? deleteMutation.error.message : 'Failed to delete appointment')
+    : null;
+
   return (
     <div className="mt-4 pt-4 border-t border-slate-200">
       {!showConfirm ? (
@@ -63,12 +71,20 @@ export default function DeleteSection({ appointment, deleteMutation }: DeleteSec
               className="w-full px-3 py-2 border border-red-200 rounded-lg text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent outline-none"
             />
           </div>
+          {deleteError && (
+            <div role="alert" className="mb-3 p-2 bg-red-100 border border-red-300 rounded">
+              <p className="text-sm text-red-800 font-medium">Couldn&apos;t delete this appointment</p>
+              <p className="text-xs text-red-700 mt-1">{deleteError}</p>
+            </div>
+          )}
+
           <div className="flex gap-2">
             <button
               onClick={() => {
                 setShowConfirm(false);
                 setReason('');
                 setForceConfirmed(false);
+                deleteMutation.reset();
               }}
               aria-label="Cancel deletion"
               className="flex-1 px-3 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-white transition-colors text-sm"

@@ -30,6 +30,13 @@ const consoleReporter: ErrorReporter = {
 
 let activeReporter: ErrorReporter = consoleReporter;
 
+/** The subset of the optional `@sentry/react` module this file calls. */
+interface SentryModule {
+  init(options: { dsn: string; environment: string; enabled: boolean }): void;
+  captureException(error: Error, context?: { extra?: Record<string, unknown> }): void;
+  captureMessage(message: string, level?: string): void;
+}
+
 /**
  * Initialize error reporting with Sentry (or another service).
  * Call this in main.tsx before rendering the app.
@@ -50,9 +57,10 @@ export async function initErrorReporter(): Promise<void> {
   try {
     // Dynamic import so Sentry is only loaded when configured
     // Use variable to prevent Rollup from statically resolving the import
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const sentryModule = '@sentry/react';
-    const Sentry: any = await import(/* @vite-ignore */ sentryModule);
+    // Typed structurally (only the members used below) so the optional
+    // dependency needs no type import and no `any`.
+    const Sentry = (await import(/* @vite-ignore */ sentryModule)) as SentryModule;
     Sentry.init({
       dsn,
       environment: import.meta.env.MODE,

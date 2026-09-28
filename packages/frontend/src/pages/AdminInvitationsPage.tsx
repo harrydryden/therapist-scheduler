@@ -317,7 +317,7 @@ export default function AdminInvitationsPage() {
       {summary && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
           <SummaryCard label="Total" value={summary.total} />
-          <SummaryCard label="Pending" value={summary.pending} accent="bg-spill-blue-50 text-spill-blue-800" />
+          <SummaryCard label="Pending" value={summary.pending} accent="bg-spill-blue-100 text-spill-blue-800" />
           <SummaryCard label="Accepted" value={summary.accepted} accent="bg-green-50 text-green-800" />
           <SummaryCard label="Expired" value={summary.expired} accent="bg-amber-50 text-amber-800" />
           <SummaryCard label="Revoked" value={summary.revoked} />
@@ -473,7 +473,7 @@ function InvitationRow({ invitation, onRevoke, onResend, actionsPending }: RowPr
               type="button"
               onClick={onResend}
               disabled={actionsPending}
-              className="px-2 py-1 text-xs font-medium text-spill-blue-800 hover:bg-spill-blue-50 rounded disabled:opacity-50"
+              className="px-2 py-1 text-xs font-medium text-spill-blue-800 hover:bg-spill-blue-100 rounded disabled:opacity-50"
               title={
                 'Send a reminder email asking the recipient to use the original invitation link. ' +
                 `Sent ${invitation.sendCount}× so far. (The reminder does NOT contain the link — ` +
@@ -519,6 +519,9 @@ interface BulkInviteModalProps {
   onCreated: (response: BulkInvitationResponse) => void;
 }
 
+/** Backend `bulkSchema.entries` is `.max(100)`: a larger batch is rejected whole. */
+const BULK_INVITE_LIMIT = 100;
+
 /** Parses a textarea where each line is `email` or `email,name`. */
 function parseBulkInput(raw: string): { entries: { email: string; name?: string }[]; errors: string[] } {
   const entries: { email: string; name?: string }[] = [];
@@ -543,16 +546,24 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
   const [invitedBy, setInvitedBy] = useState('');
   const [sendEmail, setSendEmail] = useState(true);
   const [result, setResult] = useState<BulkInvitationResponse | null>(null);
+  // Entries beyond the batch limit at the time of sending, so the result
+  // screen can say exactly which ones still need a second batch.
+  const [skippedAtSend, setSkippedAtSend] = useState<{ email: string; name?: string }[]>([]);
 
   const { entries, errors: parseErrors } = parseBulkInput(raw);
+  const batch = entries.slice(0, BULK_INVITE_LIMIT);
+  const overflow = entries.slice(BULK_INVITE_LIMIT);
 
   const mutation = useMutation({
     mutationFn: () =>
       createBulkInvitations({
-        entries,
+        entries: batch,
         invitedBy: invitedBy.trim() || undefined,
         sendEmail,
       }),
+    onMutate: () => {
+      setSkippedAtSend(overflow);
+    },
     onSuccess: (data) => {
       setResult(data);
       onCreated(data);
@@ -569,6 +580,22 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
             <span className="text-red-600 font-medium">{result.summary.failed} failed</span>,{' '}
             of {result.summary.total} total.
           </p>
+          {skippedAtSend.length > 0 && (
+            <div className="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
+              <p className="font-medium">
+                {skippedAtSend.length} {skippedAtSend.length === 1 ? 'entry was' : 'entries were'} not sent
+                (over the {BULK_INVITE_LIMIT}-per-batch limit). Copy them into another batch:
+              </p>
+              <textarea
+                readOnly
+                rows={Math.min(skippedAtSend.length, 4)}
+                value={skippedAtSend.map((e) => (e.name ? `${e.email},${e.name}` : e.email)).join('\n')}
+                aria-label="Entries not sent"
+                className="mt-2 w-full px-2 py-1 text-xs font-mono bg-white border border-amber-200 rounded"
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
+          )}
           <div className="border border-slate-200 rounded-lg max-h-80 overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
@@ -627,8 +654,10 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
 
         <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
           <span>{entries.length} valid {entries.length === 1 ? 'entry' : 'entries'}</span>
-          {entries.length > 100 && (
-            <span className="text-red-600">Over 100 — only the first 100 will be sent.</span>
+          {overflow.length > 0 && (
+            <span className="text-red-600">
+              Over {BULK_INVITE_LIMIT} — only the first {BULK_INVITE_LIMIT} will be sent; {overflow.length} will be skipped.
+            </span>
           )}
         </div>
 
@@ -689,7 +718,7 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
           >
             {mutation.isPending
               ? 'Processing…'
-              : `Send ${Math.min(entries.length, 100)} ${entries.length === 1 ? 'invitation' : 'invitations'}`}
+              : `Send ${batch.length} ${batch.length === 1 ? 'invitation' : 'invitations'}`}
           </button>
         </div>
       </div>

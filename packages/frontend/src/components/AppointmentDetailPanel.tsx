@@ -1,6 +1,8 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { ErrorBoundary } from './ErrorBoundary';
 import { actionClosure } from '../api/client';
+import { getErrorMessage } from '../api/core';
+import { useToastContext } from './Toast';
 import type { AppointmentDetail } from '../types';
 import { useAppointmentControls } from '../hooks/useAppointmentControls';
 import DetailHeader from './detail-panel/DetailHeader';
@@ -27,6 +29,7 @@ export default function AppointmentDetailPanel({
   onClearSelection,
 }: AppointmentDetailPanelProps) {
   const queryClient = useQueryClient();
+  const { showToast } = useToastContext();
   const controls = useAppointmentControls(selectedAppointment, appointmentDetail, onClearSelection);
 
   if (!selectedAppointment) {
@@ -120,10 +123,26 @@ export default function AppointmentDetailPanel({
           <ClosureRecommendationSection
             appointment={appointmentDetail}
             onAction={async (action) => {
-              await actionClosure(appointmentDetail.id, action);
-              queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
-              queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
-              queryClient.invalidateQueries({ queryKey: ['dashboard-stats'], refetchType: 'none' });
+              try {
+                await actionClosure(appointmentDetail.id, action);
+              } catch (err) {
+                showToast(
+                  getErrorMessage(err, action === 'cancel' ? 'Failed to cancel appointment' : 'Failed to dismiss recommendation'),
+                  'error'
+                );
+                // Re-throw so the section keeps its dialog open with the error inline.
+                throw err;
+              }
+              showToast(
+                action === 'cancel' ? 'Appointment cancelled' : 'Closure recommendation dismissed',
+                'success'
+              );
+              // Real refetch (not refetchType: 'none') so the list and tiles
+              // reflect the cancellation immediately instead of after the
+              // next 30 s poll.
+              void queryClient.invalidateQueries({ queryKey: ['appointment', selectedAppointment] });
+              void queryClient.invalidateQueries({ queryKey: ['appointments'] });
+              void queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] });
               if (action === 'cancel') {
                 onClearSelection();
               }

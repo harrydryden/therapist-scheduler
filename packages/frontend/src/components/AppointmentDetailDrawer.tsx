@@ -66,7 +66,7 @@ export default function AppointmentDetailDrawer({
       />
 
       {/* Drawer body. max-w on desktop, full-screen below md. */}
-      <div className="relative bg-white w-full md:w-[640px] lg:w-[720px] h-full overflow-y-auto shadow-xl border-l border-slate-200 animate-in slide-in-from-right duration-200">
+      <div className="relative bg-white w-full md:w-[640px] lg:w-[720px] h-full overflow-y-auto shadow-xl border-l border-slate-200 motion-safe:animate-slide-in-right">
         {/* Close affordance pinned top-right so it's reachable while
             scrolling the panel content. */}
         <button

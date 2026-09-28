@@ -27,7 +27,7 @@ export function Toast({ message, type = 'error', onClose }: ToastProps) {
     <div
       role="status"
       aria-live="polite"
-      className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white animate-fade-in ${colorClass}`}
+      className={`fixed bottom-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white motion-safe:animate-fade-in ${colorClass}`}
     >
       {type === 'error' && (
         <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">

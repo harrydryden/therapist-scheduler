@@ -76,7 +76,7 @@ const RowContent = memo(function RowContent({
       aria-pressed={isSelected}
       aria-label={`Open appointment for ${appointment.userName || appointment.userEmail} with ${appointment.therapistName}`}
       className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid ${GRID_TEMPLATE} gap-3 items-center transition-colors ${
-        isSelected ? 'bg-spill-blue-50 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
+        isSelected ? 'bg-spill-blue-100 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
       }`}
       style={{ height: APPOINTMENT_ROW_HEIGHT }}
     >

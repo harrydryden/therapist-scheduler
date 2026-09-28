@@ -957,7 +957,7 @@ export default function AdminFormsPage() {
                   <button
                     onClick={handleSave}
                     disabled={updateMutation.isPending}
-                    className="px-6 py-2 bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-700 disabled:opacity-50"
+                    className="px-6 py-2 bg-spill-blue-800 text-white rounded-lg hover:bg-spill-blue-900 disabled:opacity-50"
                   >
                     {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
                   </button>

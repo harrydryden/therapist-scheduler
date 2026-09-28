@@ -1,96 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import SpillLogo from '../components/SpillLogo';
-import { API_BASE } from '../config/env';
-import { fetchWithTimeout } from '../api/client';
 // FIX #39: Import shared types instead of duplicating them
 import type { FormQuestion, FormConfig } from '../types/feedback';
+import {
+  getFeedbackForm,
+  submitFeedback,
+  isAlreadySubmittedError,
+  type PrefilledData,
+} from '../api/feedback';
 import { isConditionMet, requiresExplanation as requiresExplanationCheck, getVisibleQuestions, countWords } from '@therapist-scheduler/shared/utils/form-utils';
-
-interface PrefilledData {
-  trackingCode: string;
-  userName: string | null;
-  userEmail: string;
-  therapistName: string;
-  appointmentId: string;
-}
-
-interface FeedbackFormResponse {
-  form: FormConfig;
-  prefilled: PrefilledData | null;
-  warning?: string;
-}
-
-// ============================================
-// API Functions (public, no auth)
-// ============================================
-
-const FEEDBACK_TIMEOUT_MS = 30000;
-
-const FORM_LOAD_MAX_RETRIES = 3;
-
-async function getFeedbackForm(splCode?: string, signal?: AbortSignal): Promise<FeedbackFormResponse> {
-  const endpoint = splCode
-    ? `${API_BASE}/feedback/form/${splCode}`
-    : `${API_BASE}/feedback/form`;
-
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt < FORM_LOAD_MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetchWithTimeout(endpoint, signal ? { signal } : {}, FEEDBACK_TIMEOUT_MS);
-      const data = await response.json();
-
-      if (!response.ok) {
-        const err = new Error(data.error || 'Failed to load feedback form');
-        // Don't retry client errors (4xx) — they won't succeed on retry
-        if (response.status >= 400 && response.status < 500) throw err;
-        lastError = err;
-        if (attempt < FORM_LOAD_MAX_RETRIES - 1) {
-          await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
-          continue;
-        }
-        throw err;
-      }
-
-      // Backend wraps responses in { success, data } envelope via sendSuccess()
-      return data.data ?? data;
-    } catch (err) {
-      // Don't retry if the component unmounted (external abort)
-      if (signal?.aborted) throw err;
-      lastError = err instanceof Error ? err : new Error(String(err));
-      // Don't retry client-level errors (already thrown above for 4xx)
-      if (attempt < FORM_LOAD_MAX_RETRIES - 1) {
-        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
-        continue;
-      }
-    }
-  }
-
-  throw lastError || new Error('Failed to load form');
-}
-
-async function submitFeedback(data: {
-  trackingCode?: string;
-  feedbackToken?: string;
-  therapistName: string;
-  responses: Record<string, string | number>;
-}): Promise<{ success: boolean; submissionId: string; message: string }> {
-  const response = await fetchWithTimeout(`${API_BASE}/feedback/submit`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }, FEEDBACK_TIMEOUT_MS);
-
-  const result = await response.json();
-
-  if (!response.ok) {
-    throw new Error(result.error || result.message || 'Failed to submit feedback');
-  }
-
-  // Backend wraps responses in { success, data, message } envelope via sendSuccess()
-  return { success: result.success, submissionId: result.data?.submissionId, message: result.message };
-}
 
 // ============================================
 // Components
@@ -241,11 +160,11 @@ function ChoiceWithTextQuestion({
 export default function FeedbackFormPage() {
   const { splCode } = useParams<{ splCode?: string }>();
   // HMAC-signed proof that this form was reached via the emailed link.
-  // Backend's GET prefill endpoint already reads `fk` from the URL, but
-  // the response doesn't echo it back — so the submit body has to read
-  // the same query parameter directly. Without this, every legitimate
-  // submission from an email link arrives token-less, the appointment
-  // isn't auto-completed, and an admin Slack alert fires.
+  // It is forwarded on the form GET (the backend only returns `prefilled`
+  // — greeting, therapist name, early "already submitted" check — when it
+  // can verify it) and in the submit body. Without it on submit, every
+  // legitimate submission from an email link arrives token-less, the
+  // appointment isn't auto-completed, and an admin Slack alert fires.
   const feedbackToken =
     new URLSearchParams(window.location.search).get('fk') ?? undefined;
 
@@ -258,8 +177,10 @@ export default function FeedbackFormPage() {
   // UI state
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isSubmitError, setIsSubmitError] = useState(false);
+  // loadError replaces the page (there is no form to show); submitError is
+  // shown inline so the answers stay on screen and the user can retry.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [isComplete, setIsComplete] = useState(false);
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
@@ -276,9 +197,9 @@ export default function FeedbackFormPage() {
     async function loadForm() {
       try {
         setIsLoading(true);
-        setError(null);
+        setLoadError(null);
 
-        const data = await getFeedbackForm(splCode, controller.signal);
+        const data = await getFeedbackForm(splCode, feedbackToken, controller.signal);
         if (controller.signal.aborted) return;
 
         setFormConfig(data.form);
@@ -297,15 +218,11 @@ export default function FeedbackFormPage() {
         }
       } catch (err) {
         if (controller.signal.aborted) return;
-        const errorMessage = err instanceof Error ? err.message : 'Failed to load form';
-        // FIX #40: Check structured error code in addition to string matching
-        const errorCode = (err as { code?: string })?.code;
-
         // Check if feedback was already submitted
-        if (errorCode === 'ALREADY_SUBMITTED' || errorMessage.includes('already submitted')) {
+        if (isAlreadySubmittedError(err)) {
           setAlreadySubmitted(true);
         } else {
-          setError(errorMessage);
+          setLoadError(err instanceof Error ? err.message : 'Failed to load form');
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -316,7 +233,7 @@ export default function FeedbackFormPage() {
 
     loadForm();
     return () => controller.abort();
-  }, [splCode]);
+  }, [splCode, feedbackToken]);
 
   // Compute which questions are visible based on conditional logic
   const visibleQuestions = formConfig
@@ -369,6 +286,7 @@ export default function FeedbackFormPage() {
 
   // Navigate to previous question (using visible question indices)
   const handleBack = () => {
+    setSubmitError(null);
     if (!formConfig || currentQuestionIndex <= 0) {
       setCurrentQuestionIndex(-1);
       return;
@@ -393,8 +311,7 @@ export default function FeedbackFormPage() {
 
     try {
       setIsSubmitting(true);
-      setError(null);
-      setIsSubmitError(false);
+      setSubmitError(null);
 
       // Get therapist name from responses or prefilled
       const therapistName = responses.therapist_confirmation as string || prefilled?.therapistName || '';
@@ -408,15 +325,13 @@ export default function FeedbackFormPage() {
 
       setIsComplete(true);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to submit feedback';
-      // FIX #40: Check structured error code in addition to string matching
-      const errorCode = (err as { code?: string })?.code;
-
-      if (errorCode === 'ALREADY_SUBMITTED' || errorMessage.includes('already submitted')) {
+      if (isAlreadySubmittedError(err)) {
+        // Includes a retry after a timed-out request that did save.
         setAlreadySubmitted(true);
       } else {
-        setIsSubmitError(true);
-        setError(errorMessage);
+        // Keep the wizard mounted with the answers intact; the server
+        // rejects duplicates, so retrying is safe.
+        setSubmitError(err instanceof Error ? err.message : 'Failed to submit feedback');
       }
     } finally {
       setIsSubmitting(false);
@@ -486,23 +401,21 @@ export default function FeedbackFormPage() {
     );
   }
 
-  // Error state
-  if (error || !formConfig) {
+  // Load error state (a submit error is shown inline on the question screen)
+  if (loadError || !formConfig) {
     return (
       <div className="min-h-screen bg-spill-blue-100 flex items-center justify-center p-6">
         <div className="bg-white rounded-xl border border-spill-blue-200 p-9 max-w-[460px] w-full text-center">
-          <div className={`w-14 h-14 ${isSubmitError ? 'bg-spill-yellow-100' : 'bg-spill-red-100'} rounded-full flex items-center justify-center mx-auto mb-4`}>
-            <svg className={`w-7 h-7 ${isSubmitError ? 'text-spill-yellow-600' : 'text-spill-red-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="w-14 h-14 bg-spill-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-7 h-7 text-spill-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
           </div>
           <h3 className="font-display font-bold text-xl leading-[26px] tracking-[-0.4px] text-black mb-2">
-            {isSubmitError ? 'Submission error' : 'Unable to load form'}
+            Unable to load form
           </h3>
           <p className="text-sm text-spill-grey-600 mb-6">
-            {isSubmitError
-              ? 'There was a problem submitting your feedback. Your responses may have been saved — please do not resubmit. If the issue persists, contact support.'
-              : (error || 'The feedback form is not available at this time.')}
+            {loadError || 'The feedback form is not available at this time.'}
           </p>
           <Link
             to="/"
@@ -683,6 +596,17 @@ export default function FeedbackFormPage() {
             />
           )}
         </div>
+
+        {submitError && (
+          <div role="alert" className="mb-6 p-4 bg-spill-red-100 border border-spill-red-200 rounded-lg">
+            <p className="text-sm font-semibold text-spill-red-800">We couldn&apos;t submit your feedback</p>
+            <p className="text-sm text-spill-grey-600 mt-1">{submitError}</p>
+            <p className="text-[13px] text-spill-grey-600 mt-2">
+              Your answers are still here &mdash; please try again. If it keeps failing, email{' '}
+              <a href="mailto:scheduling@spill.chat" className="underline">scheduling@spill.chat</a>.
+            </p>
+          </div>
+        )}
 
         {/* Navigation buttons */}
         <div className="flex gap-3">

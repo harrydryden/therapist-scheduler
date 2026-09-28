@@ -56,6 +56,29 @@ export class AuthError extends Error {
   }
 }
 
+/** Window event fired when an admin request is rejected for auth reasons. */
+export const ADMIN_AUTH_FAILED_EVENT = 'admin-auth-failed';
+
+/** `detail` of the ADMIN_AUTH_FAILED_EVENT CustomEvent. */
+export interface AdminAuthFailureDetail {
+  status: number;
+  message: string;
+  /** Seconds until an auth lockout (429) lifts, from Retry-After. */
+  retryAfter?: number;
+}
+
+function notifyAdminAuthFailed(detail: AdminAuthFailureDetail): void {
+  clearAdminSecret();
+  window.dispatchEvent(new CustomEvent<AdminAuthFailureDetail>(ADMIN_AUTH_FAILED_EVENT, { detail }));
+}
+
+function parseRetryAfter(response: Response): number | undefined {
+  const header = response.headers.get('Retry-After');
+  if (!header) return undefined;
+  const seconds = parseInt(header, 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
+
 /**
  * Fetch with timeout using AbortController
  */
@@ -230,18 +253,51 @@ async function fetchWithDedup<T>(
   return promise;
 }
 
+/** Methods that never carry a request body. */
+const BODYLESS_METHODS = new Set(['GET', 'HEAD']);
+
+/**
+ * Build the RequestInit for a JSON API call.
+ *
+ * - Caller headers are merged OVER `defaultHeaders` rather than replacing
+ *   them. (Previously `...options` was spread after `headers`, so any
+ *   caller passing its own `headers` silently dropped the defaults —
+ *   including the admin secret.)
+ * - A mutation with no body gets an empty JSON object (`'{}'`). The
+ *   backend (Fastify 4) rejects `Content-Type: application/json` with an
+ *   empty body as 400 FST_ERR_CTP_EMPTY_JSON_BODY, which broke every
+ *   body-less admin POST (setting reset, Slack test/reset, weekly
+ *   mailing send, work-report generate).
+ * - A FormData body drops the JSON Content-Type so the browser can set
+ *   the multipart boundary itself.
+ */
+export function buildJsonRequestInit(
+  options: RequestInit | undefined,
+  defaultHeaders: Record<string, string>
+): RequestInit {
+  const headers = new Headers(defaultHeaders);
+  if (options?.headers) {
+    new Headers(options.headers).forEach((value, key) => headers.set(key, value));
+  }
+
+  const method = (options?.method || 'GET').toUpperCase();
+  const init: RequestInit = { ...options, method, headers };
+
+  if (!BODYLESS_METHODS.has(method) && (options?.body === undefined || options.body === null)) {
+    init.body = '{}';
+  }
+  if (typeof FormData !== 'undefined' && init.body instanceof FormData) {
+    headers.delete('Content-Type');
+  }
+  return init;
+}
+
 export async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<ApiResponse<T>> {
   // FIX M3: Use request deduplication for GET requests
   return fetchWithDedup<ApiResponse<T>>(endpoint, options, async () => {
     const response = await fetchWithRetry(
       `${API_BASE}${endpoint}`,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          ...options?.headers,
-        },
-        ...options,
-      },
+      buildJsonRequestInit(options, { 'Content-Type': 'application/json' }),
       TIMEOUTS.DEFAULT_MS
     );
 
@@ -286,14 +342,10 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
       const fetchFn = method === 'GET' ? fetchWithRetry : fetchWithTimeout;
       const response = await fetchFn(
         `${API_BASE}${endpoint}`,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            [HEADERS.WEBHOOK_SECRET]: getAdminSecret(),
-            ...options?.headers,
-          },
-          ...options,
-        },
+        buildJsonRequestInit(options, {
+          'Content-Type': 'application/json',
+          [HEADERS.WEBHOOK_SECRET]: getAdminSecret(),
+        }),
         timeoutMs
       );
 
@@ -302,13 +354,10 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
       // Handle auth failures: clear stored secret and throw AuthError
       // so React Query stops retrying and AdminLayout shows login screen
       if (response.status === 401 || response.status === 403) {
-        clearAdminSecret();
-        window.dispatchEvent(new Event('admin-auth-failed'));
         const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
-        throw new AuthError(
-          (errorData.error as string) || 'Authentication failed. Please re-enter your admin secret.',
-          response.status
-        );
+        const message = (errorData.error as string) || 'Authentication failed. Please re-enter your admin secret.';
+        notifyAdminAuthFailed({ status: response.status, message });
+        throw new AuthError(message, response.status);
       }
 
       const errorData = data && typeof data === 'object' ? data as Record<string, unknown> : {};
@@ -317,14 +366,10 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
         const errorMsg = (errorData.error as string) || '';
         if (errorMsg.toLowerCase().includes('authentication')) {
           // Auth lockout - clear secret so user can re-enter after lockout expires
-          clearAdminSecret();
-          window.dispatchEvent(new Event('admin-auth-failed'));
-          const retryAfter = response.headers.get('Retry-After');
-          throw new AuthError(
-            errorMsg || 'Too many failed attempts. Please try again later.',
-            429,
-            retryAfter ? parseInt(retryAfter, 10) : undefined
-          );
+          const retryAfter = parseRetryAfter(response);
+          const message = errorMsg || 'Too many failed attempts. Please try again later.';
+          notifyAdminAuthFailed({ status: 429, message, retryAfter });
+          throw new AuthError(message, 429, retryAfter);
         }
       }
 
@@ -346,6 +391,59 @@ export async function fetchAdminApi<T>(endpoint: string, options?: RequestInit, 
       return data as unknown as ApiResponse<T> & { pagination?: PaginationInfo; total?: number };
     }
   );
+}
+
+/**
+ * Check a candidate admin secret against the backend before storing it.
+ *
+ * Uses GET /admin/alerts/count — the lightest authenticated admin endpoint
+ * (three COUNT queries, no payload). Deliberately bypasses fetchAdminApi:
+ * no GET de-duplication (which is keyed by endpoint, not secret), no retry
+ * (each wrong attempt counts toward the backend's per-IP lockout), and no
+ * `admin-auth-failed` side effects for a secret that was never stored.
+ *
+ * Resolves when the secret is accepted; throws AuthError (401/403, or 429
+ * with `retryAfter` seconds for a lockout) or ApiError otherwise.
+ */
+export async function verifyAdminSecret(secret: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      `${API_BASE}/admin/alerts/count`,
+      { method: 'GET', headers: { [HEADERS.WEBHOOK_SECRET]: secret } },
+      TIMEOUTS.DEFAULT_MS
+    );
+  } catch (error) {
+    throw new ApiError(
+      error instanceof TypeError
+        ? 'Could not reach the server. Check your connection and try again.'
+        : getErrorMessage(error, 'Could not reach the server.')
+    );
+  }
+
+  if (response.ok) return;
+
+  let serverMessage = '';
+  try {
+    const data = await safeParseJson(response);
+    if (data && typeof data === 'object' && typeof (data as { error?: unknown }).error === 'string') {
+      serverMessage = (data as { error: string }).error;
+    }
+  } catch {
+    // Non-JSON body; fall back to the status-based messages below.
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new AuthError('That admin secret is not correct.', response.status);
+  }
+  if (response.status === 429) {
+    throw new AuthError(
+      serverMessage || 'Too many attempts. Please try again later.',
+      429,
+      parseRetryAfter(response)
+    );
+  }
+  throw new ApiError(serverMessage || `Could not verify the admin secret (HTTP ${response.status}).`);
 }
 
 /**

@@ -8,6 +8,7 @@ import { useBookingForm } from '../hooks/useBookingForm';
 import type { VoucherState } from '../hooks/useVoucher';
 import { CategorySection } from './badges/CategorySection';
 import { formatAvailability, getDisplayableSlots } from '../utils/availability';
+import { sanitizeExternalUrl } from '../utils/sanitize';
 import type { TherapistAvailability } from '../types';
 import { getCountryFlag, getCountryLabel } from '@therapist-scheduler/shared';
 
@@ -42,7 +43,8 @@ interface AvailabilityDisplayProps {
   bookingLink: string | null;
   isExpanded: boolean;
   onToggle: () => void;
-  /** Called when user clicks "Book now" — parent should show the booking form */
+  /** Called when user clicks "Book now" — parent should show the booking form.
+   *  The calendar itself is only offered after the details are submitted. */
   onBookNowClick?: () => void;
 }
 
@@ -68,16 +70,15 @@ function AvailabilityDisplay({ availability, bookingLink, isExpanded, onToggle, 
   const rows = hasAvailability ? displaySlots : ['Available on request'];
   const fillerRows = isExpanded ? 0 : Math.max(0, UI.MAX_AVAILABILITY_SLOTS - rows.length);
 
+  // Collect the client's details first; the external calendar is offered
+  // only once the booking request has succeeded (see the success state).
   const bookNowButton = bookingLink && (
     <button
       type="button"
-      onClick={() => {
-        window.open(bookingLink, '_blank', 'noopener,noreferrer');
-        onBookNowClick?.();
-      }}
+      onClick={() => onBookNowClick?.()}
       className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-spill-blue-800 hover:underline transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 rounded"
     >
-      Book now <ExternalLinkIcon />
+      Book now
     </button>
   );
 
@@ -161,10 +162,17 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
   // Tracks whether user entered the form via "Book now" (direct link) vs "Get started"
   const [enteredViaDirectLink, setEnteredViaDirectLink] = useState(false);
 
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
+  const {
+    firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking,
+    canSubmit, showEmailError, succeededBookingMethod,
+  } = useBookingForm({
     therapistHandle: therapist.id,
     voucherToken: voucher?.voucherToken,
   });
+
+  // Only an absolute http(s) link is ever rendered or opened.
+  const bookingLink = sanitizeExternalUrl(therapist.bookingLink);
+  const bookedViaDirectLink = succeededBookingMethod === 'direct_link' && !!bookingLink;
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => {
@@ -255,7 +263,7 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
         </span>
         <AvailabilityDisplay
           availability={therapist.availability}
-          bookingLink={therapist.bookingLink}
+          bookingLink={bookingLink}
           isExpanded={isExpanded('availability')}
           onToggle={() => toggleSection('availability')}
           onBookNowClick={() => {
@@ -287,21 +295,33 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
               <span className="text-sm font-semibold text-spill-teal-600">
-                {enteredViaDirectLink ? 'Details received!' : 'Request sent!'}
+                {bookedViaDirectLink ? 'Details received!' : 'Request sent!'}
               </span>
             </div>
             <p className="text-xs text-spill-grey-600 mt-1">
-              {enteredViaDirectLink
-                ? "We'll follow up to confirm your booking time."
+              {bookedViaDirectLink
+                ? "Now pick a time on their calendar — we'll follow up to confirm your booking."
                 : "We'll email you to schedule your session."
               }
             </p>
+            {bookedViaDirectLink && (
+              /* A plain user-clicked link (never popup-blocked), shown only
+                 after the booking request succeeded. */
+              <a
+                href={bookingLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2.5 inline-flex items-center justify-center gap-1.5 py-2 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 transition-colors duration-150"
+              >
+                Continue to {therapist.name}&apos;s calendar <ExternalLinkIcon />
+              </a>
+            )}
           </div>
         ) : showBookingForm ? (
-          <form onSubmit={enteredViaDirectLink ? (e) => { e.preventDefault(); handleDirectBooking(); } : handleSubmit} className="space-y-2.5">
+          <form onSubmit={enteredViaDirectLink && bookingLink ? (e) => { e.preventDefault(); handleDirectBooking(); } : handleSubmit} className="space-y-2.5">
             {enteredViaDirectLink && (
               <p className="text-xs text-spill-grey-400 text-center">
-                Share your details so we can confirm your booking time.
+                Share your details first, then we&apos;ll take you to {therapist.name}&apos;s calendar.
               </p>
             )}
             <div className="flex gap-2">
@@ -358,16 +378,16 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
               >
                 Cancel
               </button>
-              {enteredViaDirectLink ? (
-                /* User already opened the booking page — just capture their details */
+              {enteredViaDirectLink && bookingLink ? (
+                /* Came via "Book now": capture details; the calendar link is shown on success */
                 <button
                   type="submit"
                   disabled={!canSubmit}
                   className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150"
                 >
-                  {mutation.isPending ? <PendingLabel /> : 'Confirm details'}
+                  {mutation.isPending ? <PendingLabel /> : 'Continue to booking'}
                 </button>
-              ) : therapist.bookingLink ? (
+              ) : bookingLink ? (
                 /* User entered via "Get started" but therapist has a booking link — offer both paths */
                 <>
                   <button
@@ -380,13 +400,10 @@ const TherapistCard = memo(function TherapistCard({ therapist, voucher, voucherR
                   <button
                     type="button"
                     disabled={!canSubmit}
-                    onClick={() => {
-                      handleDirectBooking();
-                      window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
-                    }}
+                    onClick={() => handleDirectBooking()}
                     className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150 flex items-center justify-center gap-1.5"
                   >
-                    {mutation.isPending ? <PendingLabel /> : <>Book now <ExternalLinkIcon /></>}
+                    {mutation.isPending ? <PendingLabel /> : 'Book now'}
                   </button>
                 </>
               ) : (

@@ -46,7 +46,15 @@ export default function ConfirmDialog({
     <div
       className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
       onClick={onCancel}
-      onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          // Stop here so a surrounding drawer's document-level Esc handler
+          // doesn't also close (e.g. the appointment drawer behind a
+          // "Cancel appointment?" confirmation).
+          e.stopPropagation();
+          onCancel();
+        }
+      }}
     >
       <div
         role="dialog"

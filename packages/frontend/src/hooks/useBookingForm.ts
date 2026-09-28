@@ -54,6 +54,14 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
 
   const canSubmit = firstName.trim().length > 0 && emailValid && !mutation.isPending;
 
+  // Method of the request that actually SUCCEEDED (undefined until then).
+  // Read from the mutation itself rather than set on click, so a failed
+  // "Book now" attempt followed by a successful "Request booking" shows the
+  // right success copy.
+  const succeededBookingMethod: BookingMethod | undefined = mutation.isSuccess
+    ? mutation.variables?.bookingMethod ?? 'agent_negotiated'
+    : undefined;
+
   // Show validation hint only after user has typed something
   const showEmailError = email.trim().length > 0 && !emailValid;
 
@@ -67,5 +75,6 @@ export function useBookingForm({ therapistHandle, onSuccess, voucherToken }: Use
     handleDirectBooking,
     canSubmit,
     showEmailError,
+    succeededBookingMethod,
   };
 }

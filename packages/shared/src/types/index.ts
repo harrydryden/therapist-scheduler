@@ -446,7 +446,8 @@ export interface AdminUser {
 
 export interface AdminTherapist {
   id: string;
-  notionId: string;
+  /** Legacy Notion page ID; null for therapists created after Notion (e.g. PDF ingestion). */
+  notionId: string | null;
   email: string;
   name: string;
   odId: string;

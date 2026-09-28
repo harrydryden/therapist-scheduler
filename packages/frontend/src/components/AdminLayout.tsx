@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation, Outlet } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import AdminLogin from './AdminLogin';
 
@@ -74,8 +75,16 @@ const navItems: NavItem[] = [
 
 export default function AdminLayout() {
   const location = useLocation();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
+  const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const handleLogout = () => {
+    setSidebarOpen(false);
+    logout();
+    // Drop cached admin data so none of it is shown before the next sign-in.
+    queryClient.clear();
+  };
 
   if (!isAuthenticated) {
     return <AdminLogin />;
@@ -169,6 +178,16 @@ export default function AdminLayout() {
             </svg>
             Back to booking site
           </Link>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-500 hover:text-slate-700 hover:bg-white/60 rounded-lg transition-colors"
+          >
+            <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            Log out
+          </button>
         </div>
       </aside>
 

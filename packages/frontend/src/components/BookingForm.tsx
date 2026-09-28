@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ApiError } from '../api/client';
+import { sanitizeExternalUrl } from '../utils/sanitize';
 import type { TherapistDetail } from '../types';
 import { APP } from '../config/constants';
 import { useBookingForm } from '../hooks/useBookingForm';
@@ -25,13 +26,18 @@ const INPUT_CLASSES =
 export default function BookingForm({ therapist, voucher, voucherRequired = false }: BookingFormProps) {
   const [submitted, setSubmitted] = useState(false);
 
-  const [bookingMethodUsed, setBookingMethodUsed] = useState<'agent_negotiated' | 'direct_link'>('agent_negotiated');
-
-  const { firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking, canSubmit, showEmailError } = useBookingForm({
+  const {
+    firstName, setFirstName, email, setEmail, mutation, handleSubmit, handleDirectBooking,
+    canSubmit, showEmailError, succeededBookingMethod,
+  } = useBookingForm({
     therapistHandle: therapist.id,
     onSuccess: () => setSubmitted(true),
     voucherToken: voucher?.voucherToken,
   });
+
+  // Only an absolute http(s) link is ever rendered or opened.
+  const bookingLink = sanitizeExternalUrl(therapist.bookingLink);
+  const bookedViaDirectLink = succeededBookingMethod === 'direct_link' && !!bookingLink;
 
   // Show "therapist booked" message when not accepting bookings
   if (therapist.acceptingBookings === false) {
@@ -98,14 +104,30 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
         </svg>
         <h4 className="text-lg font-semibold tracking-[-0.36px] text-spill-teal-600 mb-2">
-          {bookingMethodUsed === 'direct_link' ? 'Details received!' : 'Request submitted!'}
+          {bookedViaDirectLink ? 'Details received!' : 'Request submitted!'}
         </h4>
         <p className="text-sm text-spill-grey-600">
-          {bookingMethodUsed === 'direct_link'
-            ? `Once you've booked with ${therapist.name}, our coordinator ${APP.COORDINATOR_NAME} will follow up to confirm your session time.`
+          {bookedViaDirectLink
+            ? `Now pick a time on ${therapist.name}'s calendar. Once you've booked, our coordinator ${APP.COORDINATOR_NAME} will follow up to confirm your session time.`
             : `We've received your appointment request. Our scheduling coordinator ${APP.COORDINATOR_NAME} will email you shortly to find a time that works for both you and ${therapist.name}.`
           }
         </p>
+        {bookedViaDirectLink && (
+          /* Opened only after the request succeeded, and as a plain link the
+             user clicks — so it is never popup-blocked and nobody books
+             outside the pipeline after a failed request. */
+          <a
+            href={bookingLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-4 inline-flex items-center justify-center gap-1.5 px-4 py-3 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 transition-colors duration-150"
+          >
+            Continue to {therapist.name}&apos;s calendar
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </a>
+        )}
         {voucher?.displayCode && (
           <p className="text-sm text-spill-teal-600 mt-3">
             Your voucher code <span className="font-mono font-medium">{voucher.displayCode}</span> has been used.
@@ -197,7 +219,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
         </div>
       )}
 
-      {therapist.bookingLink ? (
+      {bookingLink ? (
         <div className="space-y-2">
           <div className="flex gap-3">
             <button
@@ -210,11 +232,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
             <button
               type="button"
               disabled={!canSubmit}
-              onClick={() => {
-                setBookingMethodUsed('direct_link');
-                handleDirectBooking();
-                window.open(therapist.bookingLink!, '_blank', 'noopener,noreferrer');
-              }}
+              onClick={() => handleDirectBooking()}
               className="flex-1 px-4 py-3 text-sm font-semibold text-white bg-black rounded-lg hover:bg-spill-grey-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-spill-blue-400 disabled:opacity-45 disabled:cursor-not-allowed transition-colors duration-150 inline-flex items-center justify-center gap-1.5"
             >
               {mutation.isPending ? 'Submitting...' : (
@@ -228,7 +246,7 @@ export default function BookingForm({ therapist, voucher, voucherRequired = fals
             </button>
           </div>
           <p className="text-xs text-spill-grey-400 text-center">
-            <strong>Book now</strong> opens {therapist.name}'s booking page. We'll follow up to confirm your session time.
+            <strong>Book now</strong> sends us your details, then takes you to {therapist.name}&apos;s booking page. We&apos;ll follow up to confirm your session time.
           </p>
         </div>
       ) : (
