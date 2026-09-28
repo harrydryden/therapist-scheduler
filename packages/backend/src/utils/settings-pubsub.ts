@@ -6,7 +6,7 @@
  * in-memory cache (30 s TTL) and the Redis cache (60 s TTL), but every
  * other instance keeps serving the stale value from its own memory cache
  * for up to 30 s. For ops-critical toggles like `voucher.required` or
- * `general.maxBookingRequestsPerTherapist` that's a real correctness gap.
+ * `chase.enabled` that's a real correctness gap.
  *
  * Mechanism:
  *   - `publishSettingsInvalidation(keys)` — called by admin update routes

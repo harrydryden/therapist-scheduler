@@ -123,20 +123,25 @@ Transitions are atomic and race-safe, but the mechanism varies by tier: **light*
 
 ## Background Services
 
-Ten background services run on configurable intervals, coordinated via Redis distributed locks:
+Fifteen background services run on configurable intervals, coordinated via Redis distributed locks (each `LockedPeriodicService` takes a lock so only one instance runs the work; services without an explicit start delay get a jittered 30–120 s first run so a restart doesn't fire every sweep at once):
 
 | Service | Purpose | Interval |
 |---------|---------|----------|
-| EmailQueueService | BullMQ email send queue with retry | Continuous |
+| EmailQueueService | BullMQ email send queue with retry (single send path shared with the DB poller) | Continuous |
 | EmailPollingService | Fallback Gmail polling if Pub/Sub fails | 3 min |
-| GmailWatchService | Renews Gmail push notification watches | 6 days (watches expire at 7) |
-| PendingEmailService | Retries failed email sends | 2 min |
-| StaleCheckService | Flags 48h+ inactive conversations | 1 hour |
-| PostBookingFollowupService | Meeting link checks, feedback forms | 15 min |
-| SideEffectRetryService | Retries failed Slack side effects | 5 min |
-| WeeklyMailingListService | Sends weekly promotional mailing | Hourly |
+| GmailWatchService | Renews Gmail push notification watches (alerts + hourly retry on failure) | 6 days (watches expire at 7) |
+| PendingEmailService | Re-drives pending/failed sends through the shared send path | 2 min |
+| StaleCheckService | Flags stale/stalled conversations, chases, retention sweep | 1 hour |
+| PostBookingFollowupService | Meeting link checks, reminders, feedback forms | 15 min |
+| SideEffectRetryService | Re-drives failed/stranded outbox effects; supersedes overtaken ones | 5 min |
+| WeeklyMailingListService | Weekly promotional mailing (per-recipient send-once guard) | Hourly check |
 | AppointmentLifecycleTickService | Transitions confirmed → session_held after the session time | 30 min |
-| SlackWeeklySummaryService | Monday 9am weekly summary to Slack | Hourly |
+| InvitationLifecycleService | Signup invitation reminders / expiry | Periodic |
+| SlackWeeklySummaryService | Monday 9am weekly summary to Slack | Hourly check |
+| WorkReportService | Weekday 9am agent activity report | 30 min check |
+| TherapistNudgeService | Nudges unmatched therapists (max 3) | 6 h |
+| MissedMessageScannerService | Recovers inbound mail the push/poll paths missed | 1 hour |
+| BookingVerificationService | Expires booking requests whose email was never verified | Periodic |
 
 ## Health Checks
 
@@ -170,14 +175,16 @@ against this table.
 | `FRONTEND_URL` | `http://localhost:5173` | required, non-localhost | Same shape as above; signup invitation links 404 if wrong. |
 | `CORS_ORIGIN` | unset | required (comma-separated origins) | Without this, CORS rejects every cross-origin request in prod (admin dashboard goes blank). |
 | `REQUIRE_PUBSUB_AUTH` | `true` | leave unset (or explicitly `true`) | **Setting to `false` in prod triggers the recurring `INSECURE CONFIG` boot banner.** The Gmail push webhook then accepts unauthenticated POSTs — forged Pub/Sub notifications can drive bounce, cancel, and reschedule flows. Configure GCP Pub/Sub OIDC auth instead of using this override (see below). |
-| `GOOGLE_PUBSUB_AUDIENCE` | unset | should be set to the audience configured on the GCP push subscription | When unset, the webhook still verifies the token came from a Google service account but **skips the audience claim check** — a token minted for any GCP push subscription pointing at this host would verify. Triggers an `INSECURE CONFIG` warning at boot. Set to your webhook URL (e.g. `https://<host>/api/webhooks/gmail/push`) or the custom audience string configured on the subscription. |
+| `GOOGLE_PUBSUB_AUDIENCE` | unset | **required whenever `GOOGLE_PUBSUB_TOPIC` is set** | When unset in production the webhook **rejects every push (401)** and raises an hourly Slack alert, so inbound mail arrives only via the 3-minute poll; the boot banner also fires. Set to your webhook URL (e.g. `https://<host>/api/webhooks/gmail/push`) or the custom audience string configured on the subscription. |
 | `GOOGLE_PUBSUB_TOPIC` | unset | required for Gmail push | Without this, Gmail push isn't set up and inbound email falls back to the 3-minute backup poll path. Functional but slower and burns more Gmail API quota. Format: `projects/<project>/topics/<topic>`. |
 | `JWT_SECRET` | unset | required | All HMAC-derived tokens (unsubscribe, voucher, feedback) sign with keys derived from this. Rotation: set the new value in `JWT_SECRET` and the old value(s) in `HMAC_KEYS_OLD` (comma-separated) so previously-issued tokens keep verifying. |
 | `HMAC_KEYS_OLD` | unset | optional, used during rotation | Comma-separated previous `JWT_SECRET` values. Tokens signed with any listed key still verify. Drop entries once their tokens have aged past their validity window. |
-| `WEBHOOK_SECRET` | unset | required | Validates inbound Notion / external webhooks. |
+| `WEBHOOK_SECRET` | unset | required | Admin dashboard, ATS and admin API credential (header `x-webhook-secret`; the SSE stream uses a short-lived ticket minted from it). |
 | `ANTHROPIC_API_KEY` | unset | required | The agent stops working without it. No banner — the failure is at first agent call. |
 | `DATABASE_URL` | unset | required | Service won't start. |
-| `REDIS_URL` | `redis://localhost:6379` | required, non-localhost in prod | Tool idempotency and lock primitives need Redis. Local default falls open with warnings. |
+| `EMAIL_FROM_ADDRESS` | `scheduling@spill.chat` | must match the Gmail account | Single source for "our address" on inbound and the `From:` header on outbound; a mismatch logs an error at boot. |
+| `TRUSTED_PROXY_DEPTH` | `1` | set to the real proxy hop count | Drives `trustProxy` and the auth limiter's client IP; wrong depth collapses per-IP limits into one bucket. |
+| `REDIS_URL` | `redis://localhost:6379` | required, non-localhost in prod | Tool idempotency, the auth limiter and send-once markers fail **closed** without Redis; locks fall back to Postgres guards. |
 
 #### Pre-deploy checklist
 

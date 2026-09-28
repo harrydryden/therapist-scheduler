@@ -62,10 +62,9 @@ export const STALL_DETECTION = {
   STALL_THRESHOLD_HOURS: 24,
 } as const;
 
-// Therapist booking freeze — DEFAULTS ONLY, runtime value: general.maxBookingRequestsPerTherapist
+// Therapist booking freeze defaults.
 export const THERAPIST_BOOKING = {
   INACTIVITY_ALERT_HOURS: INACTIVITY_THRESHOLDS.ALERT_HOURS,
-  MAX_UNIQUE_REQUESTS: 2,
   // Default target number of distinct completed clients a NEW therapist must
   // reach before graduating off the public finder. Runtime value:
   // general.defaultTargetAppointments. See

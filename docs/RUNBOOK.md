@@ -837,7 +837,7 @@ sequenceDiagram
 > weekly mailing), then tries to match an appointment. Unmatched → tracked and
 > abandoned after three tries. Matched → classify, dismiss stale closures, check
 > thread divergence, fetch full thread history, hand to the agent, mark
-> processed **unless the agent paused or deferred**, and remove the UNREAD label.
+> processed **unless the agent paused or deferred** (deferred ids are recorded so the poll skips them until release). The UNREAD label is removed on every terminal outcome, including bounces, auto-replies and abandoned messages, so handled mail never clogs the poll window.
 
 Two facts to internalise:
 

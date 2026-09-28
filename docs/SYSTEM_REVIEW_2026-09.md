@@ -152,6 +152,89 @@ for every fix above.
 
 ---
 
+## 2b. Phase 2 — the recommendations, implemented
+
+With the review approved, every ranked opportunity in §3 and the per-area
+lists in §4 were implemented on the same branch (five parallel workstreams
+on disjoint file sets, each change with a regression test). The table in
+§3 is kept for the reasoning; the status column below says what happened.
+
+| # | Status |
+|---|---|
+| 1 | Done — per-recipient `users.last_weekly_mailing_at` claim (CAS) plus the Redis fast path; one day-7 rule. |
+| 2 | Done — breaker wraps each attempt; OPEN/recovery alerts; infra errors defer instead of consuming abandon attempts. |
+| 3 | Done — booking email verification (24h HMAC link; voucher holders skip); unverified requests never freeze a therapist or start the agent; expired after 24h. |
+| 4 | Done — `therapist_completed_clients` (hashed, never swept) is the graduation source; delete needs force + reason for any post-booking row and leaves a Slack tombstone. |
+| 5 | Done — fail-fast `prisma migrate deploy`, `baseline.sh` deleted, `bootstrap-dev-db.sh` for fresh databases, drift reconciled (FK, unique tracking code). |
+| 6 | Done — 60-second single-use SSE tickets; `?secret=` still accepted for one release with a deprecation log (remove next release). |
+| 7 | Done — paginated `history.list`, checkpoint never moved backwards, wider gap recovery, UNREAD cleared on every terminal outcome, watch-renewal alert + hourly retry. |
+| 8 | Done — atomic `pending → sending` claim with lease; one send path for the BullMQ worker and the DB poller. |
+| 9 | Done — abandoned-email alert; breaker-open alerts; scanner counts fetch failures. |
+| 10 | Done — state stores only the new inbound (thread is prompt-only, newest 50KB), byte cap on every save, prompt caching on both loops, SDK retries off, per-turn usage, daily token budget (`agent.dailyTokenBudget`). |
+| 11 | Done — server-side multi-status / human-control / health / search filters, tiles from `/stats`, URL-persisted filters, `appointment:activity` emitted. |
+| 12 | Done — the `AppointmentConversation` mirror is **dropped** (simplification): no dual-write, no backfill script, table removed by migration. |
+| 13 | Done — `List-Unsubscribe` / `List-Unsubscribe-Post` headers; GET renders a confirmation page, POST unsubscribes. |
+| 14 | Done — Node 22, `.dockerignore`, devDeps pruned, tests out of the image, `.npmrc` fixed, `.github/workflows/ci.yml`. |
+| 15 | Done — `agent.turnSerialization` defaults on. |
+
+Also implemented from §4: settings validation and last-known-good reads;
+dead settings wired or removed; jittered service start and awaited
+shutdown; `/health/full` 503; rolling rejection window; Slack queue
+through the breaker with exponential retry; Redis-down dedup lease;
+paused-message deferral; queued-send fallback keeps the tracking code and
+stores thread ids; auto-reply gating; one scheduler address; Pub/Sub
+audience enforced in production; thread context keeps newest messages and
+strips quoted text; `stop_reason` guards; turn-scoped idempotency; honest
+handler outcomes; merged saves for mid-turn audit notes; human-review
+alert dedup by reason; holding reply on escalation
+(`agent.holdingReplyOnEscalation`); lead time from the setting; outbox
+supersession by `transition_generation`; tracker ownership/attempt/ordering
+fixes and `cleanupOldEffects` wired; force-update sentinel resets; per-party
+chase generations; retry-safe feedback dispatch; emails normalised on
+write; signup opt-in checkbox and privacy link; 429 countdown; confirm
+dialogs; admin display name; conversation view in the drawer; per-route
+titles and `noindex`; accessibility pass; conflicts C6/C7/C8/C10/C13/C15
+resolved; missing indexes added and redundant ones dropped.
+
+### Operator notes for this release
+
+- **Env to set before deploy:** `GOOGLE_PUBSUB_AUDIENCE` wherever
+  `GOOGLE_PUBSUB_TOPIC` is set (pushes are otherwise rejected in
+  production); `EMAIL_FROM_ADDRESS` must equal the Gmail account
+  (`GMAIL_USER` is no longer read); `TRUSTED_PROXY_DEPTH` to the real hop
+  count. Rotate `WEBHOOK_SECRET` at your convenience.
+- **Behaviour changes users will notice:** booking now requires clicking a
+  verification email before the therapist is contacted (voucher holders
+  are exempt); outbound mail carries the agent's display name in `From:`;
+  the unsubscribe link shows a confirmation page; signup no longer
+  subscribes to the weekly mailing unless the box is ticked.
+- **Data:** the migration `20260928_review_schema_consolidation` rewrites
+  legacy string-typed conversation state to objects, drops
+  `appointment_conversations`, seeds `therapist_completed_clients` and
+  backfills `email_verified_at`; verified idempotent on a database built
+  from the previous schema. The Slack queue moved to a new Redis key; items
+  under the old key expire within 24h.
+- **Not carried over:** `pending_emails.status` now also uses `sending`,
+  `skipped` and side effects `superseded` (free-text columns, no migration).
+
+### Still open after Phase 2
+
+- Sweep the ~39 inline email-normalisation copies onto
+  `utils/email-equals.normalizeEmail`, dedupe the three HTML-escape and two
+  wall-clock helpers, and add the kernel-boundary lint rule (§5 items 1–3).
+- Remove `?secret=` from the SSE route next release; consider real admin
+  sessions and a separate ATS credential (§3 #6, longer term).
+- Weekly-mailing inquiry replies are not counted against the token budget;
+  the availability agent's tool hash has no turn scope; a Redis outage
+  still reads to the agent as "already completed".
+- Justin Time's audit event / Slack alert still run once before its pause
+  check (the deferral now limits repeats to once per pause + once on replay).
+- Prompt-injection delimiter escaping, outbound Markdown `href` escaping
+  and pino `redact` for nested payloads (§4.1) remain hardening items.
+- Dead code list in §5 item 5 (unused checkpoint-recovery API, unconsumed
+  config fields, three unused `@fastify/*` deps, deprecated Gmail routes)
+  is still to delete.
+
 ## 3. High-impact opportunities (ranked)
 
 Effort: **S** = hours, **M** = a day or two, **L** = a week+.

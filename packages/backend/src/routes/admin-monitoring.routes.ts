@@ -510,6 +510,12 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
           if (email.status === 'sent') {
             return Errors.badRequest(reply, 'Email has already been sent');
           }
+          // A row in 'sending' is leased by a worker mid-send; resetting it
+          // would race that send and can deliver the email twice. Stale
+          // leases expire back to 'pending' on their own within 10 minutes.
+          if (email.status === 'sending') {
+            return Errors.conflict(reply, 'Email is currently being sent — retry in a few minutes if it does not complete');
+          }
 
           await prisma.pendingEmail.update({
             where: { id },
