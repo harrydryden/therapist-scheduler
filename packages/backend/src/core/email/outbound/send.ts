@@ -27,6 +27,14 @@ export async function sendEmail(params: {
 }): Promise<{ messageId: string; threadId: string }> {
   const gmail = await emailOAuthService.ensureGmailClient();
 
+  // Header-injection guard. The raw RFC 2822 message below is assembled by
+  // string concatenation, so a recipient containing CR/LF (or a comma-
+  // separated list) could smuggle extra headers or recipients. Recipients
+  // come from our own records, but several callers derive them from
+  // model output or inbound mail, so refuse rather than trust.
+  assertSingleAddressHeader('to', params.to);
+  if (params.replyTo) assertSingleAddressHeader('replyTo', params.replyTo);
+
   // Encode subject if it contains non-ASCII characters (RFC 2047).
   const encodedSubject = encodeEmailHeader(params.subject);
 
@@ -139,4 +147,22 @@ export async function sendEmail(params: {
   );
 
   return { messageId: response.data.id || '', threadId };
+}
+
+/**
+ * Reject header values that could break out of a single address header.
+ * Allows exactly one bare address or one `Name <addr>` form; rejects
+ * control characters (CR/LF/NUL) and comma/semicolon-separated lists.
+ */
+function assertSingleAddressHeader(field: 'to' | 'replyTo', value: string): void {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`sendEmail: ${field} must be a non-empty string`);
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\r\n\x00]/.test(value)) {
+    throw new Error(`sendEmail: ${field} contains control characters`);
+  }
+  if (field === 'to' && /[,;]/.test(value)) {
+    throw new Error('sendEmail: to must be a single recipient');
+  }
 }

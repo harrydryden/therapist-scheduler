@@ -697,15 +697,16 @@ Please answer their question helpfully and direct them to the booking URL to sch
       const inquiryTools: Anthropic.Tool[] = [
         {
           name: 'send_email',
-          description: 'Send an email response to the user',
+          description:
+            'Send an email reply to the person you are replying to. You do NOT supply a recipient — ' +
+            'the system always sends to the verified sender of this conversation.',
           input_schema: {
             type: 'object',
             properties: {
-              to: { type: 'string', description: 'Recipient email address' },
               subject: { type: 'string', description: 'Email subject line. MUST include "Spill" somewhere in the subject.' },
               body: { type: 'string', description: 'Email body content' },
             },
-            required: ['to', 'subject', 'body'],
+            required: ['subject', 'body'],
           },
         },
         {
@@ -758,7 +759,19 @@ Please answer their question helpfully and direct them to the booking URL to sch
       // Execute tool calls
       for (const toolCall of toolCalls) {
         if (toolCall.name === 'send_email') {
-          const input = toolCall.input as { to: string; subject: string; body: string };
+          const input = toolCall.input as { subject: string; body: string; to?: unknown };
+
+          // SECURITY: the recipient is pinned to the inquiry's verified
+          // sender. The model never chooses the address — a prompt-injected
+          // reply must not be able to make scheduling@ email a third party,
+          // and a model-supplied `to` (legacy schema) is ignored outright.
+          const recipient = inquiry.userEmail;
+          if (typeof input.to === 'string' && input.to.trim().toLowerCase() !== recipient.toLowerCase()) {
+            logger.warn(
+              { traceId: this.traceId, inquiryId, ignoredTo: input.to },
+              'Inquiry send_email supplied a recipient that is not the verified sender — ignoring it',
+            );
+          }
 
           // Ensure subject includes "Spill" for brand consistency
           let normalizedSubject = input.subject;
@@ -771,14 +784,14 @@ Please answer their question helpfully and direct them to the booking URL to sch
           }
 
           logger.info(
-            { traceId: this.traceId, inquiryId, to: input.to, subject: normalizedSubject },
+            { traceId: this.traceId, inquiryId, to: recipient, subject: normalizedSubject },
             'Sending inquiry response email'
           );
 
           // Try to send directly, fall back to queue
           try {
             await sendEmail({
-              to: input.to,
+              to: recipient,
               subject: normalizedSubject,
               body: input.body,
               threadId: inquiry.gmailThreadId || undefined,
@@ -790,7 +803,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
             );
             // Queue without appointmentId (inquiry emails don't have one)
             await emailQueueService.enqueue({
-              to: input.to,
+              to: recipient,
               subject: normalizedSubject,
               body: input.body,
             });
@@ -799,7 +812,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
           // Log tool execution
           conversationState.messages.push({
             role: 'user',
-            content: `[Tool executed: send_email to ${input.to}]`,
+            content: `[Tool executed: send_email to ${recipient}]`,
           });
         } else if (toolCall.name === 'unsubscribe_user') {
           const input = toolCall.input as { reason?: string };
