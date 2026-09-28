@@ -170,7 +170,13 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
           where: { appointmentRequestId: appointment.id },
         });
         if (existingFeedback) {
-          return Errors.badRequest(reply, 'Feedback already submitted');
+          // `code` lets the client distinguish this terminal state from a
+          // transient submit failure (which must keep the form and answers).
+          return reply.status(400).send({
+            success: false,
+            error: 'Feedback already submitted',
+            code: 'ALREADY_SUBMITTED',
+          });
         }
 
         const prefilled: PrefilledData = {
@@ -423,7 +429,11 @@ export async function feedbackFormRoutes(fastify: FastifyInstance) {
     } catch (error) {
       // Handle duplicate feedback error from transaction
       if (error instanceof Error && error.message === 'DUPLICATE_FEEDBACK') {
-        return Errors.badRequest(reply, 'Feedback already submitted');
+        return reply.status(400).send({
+          success: false,
+          error: 'Feedback already submitted',
+          code: 'ALREADY_SUBMITTED',
+        });
       }
       logger.error({ error }, 'Failed to submit feedback');
       return Errors.internal(reply, 'Failed to submit feedback');

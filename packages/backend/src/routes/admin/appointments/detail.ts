@@ -44,6 +44,7 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
             status: true,
             confirmedAt: true,
             confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
             notes: true,
             createdAt: true,
             updatedAt: true,
@@ -154,6 +155,11 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           trackingCode: appointment.trackingCode,
           confirmedAt: appointment.confirmedAt,
           confirmedDateTime: appointment.confirmedDateTime,
+          // The ISO instant the admin-UI confirmed-time picker seeds from.
+          // The shared AppointmentDetail type has always declared it, but the
+          // route never returned it, so the picker fell back to parsing the
+          // prose string and showed a misleading "legacy value" warning.
+          confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
           notes: appointment.notes,
           createdAt: appointment.createdAt,
           updatedAt: appointment.updatedAt,
