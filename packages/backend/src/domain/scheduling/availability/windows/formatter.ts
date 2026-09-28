@@ -120,11 +120,13 @@ function generateSlots(
   intervalMinutes: number = DEFAULT_SLOT_INTERVAL_MINUTES,
 ): Date[] {
   const slots: Date[] = [];
-  const now = new Date();
   const timezone = availability.timezone || 'Europe/London';
 
-  // Buffer: don't show slots starting within the minimum booking lead time
-  const minStartTime = new Date(now.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
+  // Buffer: don't show slots starting within the minimum booking lead time.
+  // Anchored on `referenceDate` rather than wall-clock `new Date()` so slot
+  // generation is fully deterministic for a given reference instant —
+  // production callers pass "now", while tests and replays can pin a date.
+  const minStartTime = new Date(referenceDate.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
 
   // Anchor week iteration on the reference date as it appears in the
   // therapist's timezone — otherwise a referenceDate near UTC midnight could
