@@ -264,8 +264,10 @@ describe('signup routes', () => {
         acknowledgedRealSession: true,
         agreedToFeedback: true,
         signupSource: 'signup_form',
-        subscribed: true,
       });
+      // The public, unverified form must never (re-)subscribe an address:
+      // new users get the column default, opted-out users stay opted out.
+      expect(call.data).not.toHaveProperty('subscribed');
       expect(call.data.consentGivenAt).toBeInstanceOf(Date);
     });
 

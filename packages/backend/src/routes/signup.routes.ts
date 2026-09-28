@@ -190,9 +190,12 @@ export async function signupRoutes(fastify: FastifyInstance) {
                 // acceptances so the admin user filter can split conversion
                 // attribution (a self-service signup vs. a prospect we invited).
                 signupSource: invitationToken ? 'invitation' : 'signup_form',
-                // Auto-subscribe to weekly mailing list, matching the booking
-                // flow's behaviour for newly-created users.
-                subscribed: true,
+                // NOTE: `subscribed` is deliberately NOT set here. New users
+                // are subscribed by the column default (matching the booking
+                // flow), but this form is public and unverified, so it must
+                // not be able to re-subscribe an address that has explicitly
+                // opted out — anyone who knows the email could undo the
+                // unsubscribe. Re-subscription needs an explicit opt-in.
               },
               select: {
                 id: true,
