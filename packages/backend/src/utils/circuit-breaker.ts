@@ -7,6 +7,15 @@
  * - CLOSED: Normal operation, requests pass through
  * - OPEN: Failing fast, requests rejected immediately
  * - HALF_OPEN: Testing if service recovered, limited requests allowed
+ *
+ * Alerting: when a breaker opens from CLOSED (the start of an outage) it
+ * raises a high-severity alert, and when it closes again an info alert.
+ * The HALF_OPEN → OPEN re-trips during an outage stay quiet. Alerts go to
+ * the sink registered with setCircuitBreakerAlertSink — the Slack service
+ * registers itself, which keeps this module free of an import cycle (the
+ * Slack service owns a breaker of its own). A breaker created with
+ * `alertOnStateChange: false` (the Slack webhook breaker, which cannot
+ * usefully report its own outage to Slack) only logs.
  */
 
 import { logger } from './logger';
@@ -28,6 +37,30 @@ export interface CircuitBreakerOptions {
   successThreshold: number;
   /** Optional: time window in ms for counting failures (rolling window) */
   failureWindow?: number;
+  /** Raise an alert when the breaker opens / recovers (default true). */
+  alertOnStateChange?: boolean;
+}
+
+/**
+ * What a breaker hands the alert sink. Shaped to be passed straight to
+ * `slackNotificationService.sendAlert`; `dedupGroup` is per breaker so
+ * several instances reporting the same transition collapse to one alert.
+ */
+export interface CircuitBreakerAlert {
+  title: string;
+  severity: 'high' | 'low';
+  details: string;
+  dedupGroup: string;
+  additionalFields: Record<string, string>;
+}
+
+type CircuitBreakerAlertSink = (alert: CircuitBreakerAlert) => Promise<unknown> | unknown;
+
+let alertSink: CircuitBreakerAlertSink | null = null;
+
+/** Register where breaker open/recover alerts go (the Slack service). */
+export function setCircuitBreakerAlertSink(sink: CircuitBreakerAlertSink | null): void {
+  alertSink = sink;
 }
 
 export interface CircuitBreakerStats {
@@ -45,6 +78,7 @@ const DEFAULT_OPTIONS: Partial<CircuitBreakerOptions> = {
   resetTimeout: 30000, // 30 seconds
   successThreshold: 2,
   failureWindow: 60000, // 1 minute
+  alertOnStateChange: true,
 };
 
 export class CircuitBreaker {
@@ -60,6 +94,8 @@ export class CircuitBreaker {
   /** Tracks active probe requests in HALF_OPEN state to limit concurrency */
   private halfOpenActiveProbes: number = 0;
   private static readonly MAX_HALF_OPEN_PROBES = 1;
+  /** Set when an outage's "opened" alert went out; its recovery alert clears it. */
+  private outageAlerted = false;
 
   private readonly options: Required<CircuitBreakerOptions>;
 
@@ -205,6 +241,7 @@ export class CircuitBreaker {
   private transitionTo(newState: CircuitState): void {
     const oldState = this.state;
     this.state = newState;
+    const failuresAtTransition = this.failureTimestamps.length;
 
     logger.info(
       {
@@ -236,6 +273,43 @@ export class CircuitBreaker {
         this.halfOpenActiveProbes = 0;
         break;
     }
+
+    if (oldState === CircuitState.CLOSED && newState === CircuitState.OPEN) {
+      this.outageAlerted = this.raiseAlert({
+        title: 'Circuit Breaker Opened',
+        severity: 'high',
+        details:
+          `The *${this.options.name}* circuit breaker opened after ${failuresAtTransition} failures ` +
+          `in ${Math.round(this.options.failureWindow / 1000)}s. Calls to it now fail fast; a probe ` +
+          `is allowed every ${Math.round(this.options.resetTimeout / 1000)}s until it recovers.`,
+        dedupGroup: `circuit-breaker:${this.options.name}`,
+        additionalFields: { Breaker: this.options.name },
+      });
+    } else if (newState === CircuitState.CLOSED && oldState !== CircuitState.CLOSED && this.outageAlerted) {
+      this.outageAlerted = false;
+      this.raiseAlert({
+        title: 'Circuit Breaker Recovered',
+        severity: 'low',
+        details: `The *${this.options.name}* circuit breaker closed again; calls are flowing normally.`,
+        dedupGroup: `circuit-breaker:${this.options.name}`,
+        additionalFields: { Breaker: this.options.name },
+      });
+    }
+  }
+
+  /**
+   * Hand an alert to the registered sink without blocking or throwing
+   * into the caller. Returns whether an alert was dispatched.
+   */
+  private raiseAlert(alert: CircuitBreakerAlert): boolean {
+    if (!this.options.alertOnStateChange || !alertSink) return false;
+    const sink = alertSink;
+    Promise.resolve()
+      .then(() => sink(alert))
+      .catch((err) => {
+        logger.warn({ err, circuitBreaker: this.options.name }, 'Failed to send circuit breaker alert');
+      });
+    return true;
   }
 
   /**

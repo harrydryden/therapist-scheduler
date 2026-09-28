@@ -10,7 +10,6 @@ import {
   INACTIVITY_THRESHOLDS,
   POST_BOOKING,
   CONVERSATION_LIMITS,
-  CLAUDE_API,
   DATA_RETENTION,
   APP_DEFAULTS,
   STALL_DETECTION,
@@ -102,15 +101,6 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     maxValue: 250,
     defaultValue: CONVERSATION_LIMITS.TRIM_TO_MESSAGES,
   },
-  'agent.maxRetries': {
-    category: 'agent',
-    label: 'Max Claude API Retries',
-    description: 'Maximum retry attempts for rate-limited Claude API calls',
-    valueType: 'number',
-    minValue: 1,
-    maxValue: 10,
-    defaultValue: CLAUDE_API.MAX_RETRIES,
-  },
   'agent.stageGatedTools': {
     category: 'agent',
     label: 'Stage-gated Tool Surface',
@@ -121,9 +111,25 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
   'agent.turnSerialization': {
     category: 'agent',
     label: 'Per-appointment Turn Serialization',
-    description: 'When enabled, startScheduling and processEmailReply take an exclusive per-appointment lock for the duration of the turn, so two overlapping turns (e.g. a fast double-reply, or a reply arriving while startScheduling is still saving) can no longer race on the same conversation state. Once turns are serialized, a ConcurrentModificationError on the final save is treated as a real conflict (the turn aborts and the triggering message is left for redelivery) instead of silently adopting the other writer\'s version. Defaults off; enable after confirming Redis lock behaviour in your environment.',
+    description: 'When enabled, startScheduling and processEmailReply take an exclusive per-appointment lock for the duration of the turn, so two overlapping turns (e.g. a fast double-reply, or a reply arriving while startScheduling is still saving) can no longer race on the same conversation state. Once turns are serialized, a ConcurrentModificationError on the final save is treated as a real conflict (the turn aborts and the triggering message is left for redelivery) instead of silently adopting the other writer\'s version. On by default: without it two quick replies run parallel turns and the losing save is discarded while its message is still marked processed.',
     valueType: 'boolean',
-    defaultValue: false,
+    defaultValue: true,
+  },
+  'agent.dailyTokenBudget': {
+    category: 'agent',
+    label: 'Daily Claude Token Budget',
+    description: 'Maximum Claude tokens the booking and availability agents may use per UTC day (input + cache writes + cache reads + output, summed across every call). A Slack alert fires once when 80% is used; once the budget is exhausted, conversations are paused for human review instead of calling Claude until the next UTC day. 0 disables the budget.',
+    valueType: 'number',
+    minValue: 0,
+    maxValue: 1_000_000_000,
+    defaultValue: 50_000_000,
+  },
+  'agent.holdingReplyOnEscalation': {
+    category: 'agent',
+    label: 'Holding Reply on Escalation',
+    description: 'When the agent pauses a conversation for human review (it flagged it itself, or a safety guard tripped), send the client or therapist whose email triggered the turn a brief "thanks, a colleague will pick this up" reply, so they are not left without a response. Sent at most once per escalation; never sent to an unverified sender.',
+    valueType: 'boolean',
+    defaultValue: true,
   },
   'agent.languageStyle': {
     category: 'agent',
@@ -196,15 +202,6 @@ export const SETTING_DEFINITIONS: Record<string, SettingDefinition> = {
     minValue: 1,
     maxValue: 48,
     defaultValue: 4,
-  },
-  'general.maxBookingRequestsPerTherapist': {
-    category: 'general',
-    label: 'Max Active Requests Per Therapist',
-    description: 'Maximum active booking requests a therapist can have before being frozen (no new bookings accepted).',
-    valueType: 'number',
-    minValue: 1,
-    maxValue: 10,
-    defaultValue: THERAPIST_BOOKING.MAX_UNIQUE_REQUESTS,
   },
   'general.defaultTargetAppointments': {
     category: 'general',
@@ -1193,6 +1190,33 @@ Thanks for signing up to Spill.
 [Book a session]({webAppUrl})
 
 If you have any questions, just reply to this email.
+
+Best wishes,
+The Spill team`,
+  },
+
+  // Booking request email confirmation (services/booking-verification.service.ts).
+  'email.bookingVerificationSubject': {
+    category: 'emailTemplates',
+    label: 'Booking Confirmation Link - Subject',
+    description: 'Subject of the email asking a client to confirm a booking request before anything is sent to the therapist. Variables: {userName}, {therapistName}',
+    valueType: 'string',
+    defaultValue: 'Confirm your session request with {therapistName}',
+  },
+  'email.bookingVerificationBody': {
+    category: 'emailTemplates',
+    label: 'Booking Confirmation Link - Body',
+    description: 'Email body asking the client to confirm their booking request. Nothing is sent to the therapist until they do. Variables: {userName}, {therapistName}, {verificationUrl}, {expiryHours}, {coordinatorName}. Supports markdown links.',
+    valueType: 'string',
+    defaultValue: `Hi {userName},
+
+Thanks for requesting a free session with {therapistName}. Please confirm it's really you so we can pass your request on:
+
+[Confirm my request]({verificationUrl})
+
+The link works for {expiryHours} hours. Once you've confirmed, {coordinatorName}, our scheduling assistant, will email you to find a time that suits you both.
+
+If you didn't request this, you can ignore this email and nothing will happen.
 
 Best wishes,
 The Spill team`,

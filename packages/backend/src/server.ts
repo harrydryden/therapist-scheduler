@@ -52,7 +52,12 @@ import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
 import { redis } from './utils/redis';
 import { circuitBreakerRegistry } from './utils/circuit-breaker';
-import { getAllTaskMetrics, getBackgroundTaskHealth } from './utils/background-task';
+import {
+  getAllTaskMetrics,
+  getBackgroundTaskHealth,
+  recordUnhandledRejection,
+  getUnhandledRejectionStats,
+} from './utils/background-task';
 import { getTimeoutStats } from './utils/timeout';
 import { slackNotificationService } from './services/slack-notification.service';
 import { sseService } from './services/sse.service';
@@ -74,28 +79,10 @@ const HEALTH_PROBE_TIMEOUT_MS = 2000;
 // Upper bound on graceful shutdown before the process force-exits.
 const SHUTDOWN_FORCE_EXIT_MS = 30_000;
 
-// Process-wide tally of `unhandledRejection` events. The handler logs
-// each one but deliberately doesn't crash; the count is surfaced in
-// /health/full so an outside monitor can alert on rejections piling up
-// even when individual log lines slip past.
-const UNHANDLED_REJECTION_SAMPLE_SIZE = 5;
-let unhandledRejectionCount = 0;
-const recentUnhandledRejections: Array<{ at: string; reason: string }> = [];
-
-function recordUnhandledRejection(reason: unknown): void {
-  unhandledRejectionCount++;
-  const text = reason instanceof Error
-    ? `${reason.name}: ${reason.message}`
-    : String(reason);
-  recentUnhandledRejections.push({ at: new Date().toISOString(), reason: text.slice(0, 500) });
-  if (recentUnhandledRejections.length > UNHANDLED_REJECTION_SAMPLE_SIZE) {
-    recentUnhandledRejections.shift();
-  }
-}
-
-function getUnhandledRejectionStats(): { count: number; recent: Array<{ at: string; reason: string }> } {
-  return { count: unhandledRejectionCount, recent: [...recentUnhandledRejections] };
-}
+// How long shutdown waits for in-flight background ticks to finish after
+// their timers are stopped. Leaves room inside SHUTDOWN_FORCE_EXIT_MS for
+// the email-queue drain and closing Redis/Prisma.
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 15_000;
 
 const logger = pino({
   level: config.logLevel,
@@ -321,8 +308,9 @@ async function buildServer() {
   });
 
   // /health/full - Comprehensive health check combining all checks (auth required)
-  // Use this for detailed debugging and monitoring dashboards
-  fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async () => {
+  // Use this for detailed debugging and monitoring dashboards. Answers 503
+  // when degraded, so an uptime monitor can alert on the status code alone.
+  fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async (_request, reply) => {
     const checks: Record<string, unknown> = {};
 
     // Database — timeout-bounded so a wedged connection doesn't hang the probe.
@@ -404,12 +392,15 @@ async function buildServer() {
     };
 
     // Unhandled rejections — the process keeps running on these, so we
-    // surface the count + a recent sample here. Any non-zero count is
-    // degraded; the recent sample helps locate the leaking promise.
+    // surface them here. Any in the last hour is degraded (a rolling
+    // window, so one old rejection doesn't pin the probe degraded for the
+    // life of the process); the recent sample helps locate the leak.
     const rejectionStats = getUnhandledRejectionStats();
     checks.unhandledRejections = {
       status: rejectionStats.count === 0 ? 'ok' : 'degraded',
       count: rejectionStats.count,
+      windowMs: rejectionStats.windowMs,
+      totalSinceBoot: rejectionStats.total,
       recent: rejectionStats.recent,
     };
 
@@ -422,11 +413,11 @@ async function buildServer() {
       rejectionStats.count === 0
       ? 'ok' : 'degraded';
 
-    return {
+    return reply.status(overallStatus === 'ok' ? 200 : 503).send({
       status: overallStatus,
       timestamp: new Date().toISOString(),
       checks,
-    };
+    });
   });
 
   // ==========================================
@@ -563,34 +554,42 @@ async function start() {
 
       // Stop background services in dependency order:
       // 1. Real-time connections (SSE) — stop pushing updates to clients
-      // 2. Producers (polling, scanning, scheduling) — stop generating new work
-      // 3. Side-effect processors — let in-flight retries finish
-      // 4. Consumers (email queue) — drain remaining jobs
+      // 2. Producers (polling, scanning, scheduling) and side-effect
+      //    processors — stop their timers, then wait (bounded) for any tick
+      //    already running to finish and release its lock
+      // 3. Consumers (email queue) — drain remaining jobs
       logger.info('Stopping background services...');
       if (slackQueueInterval) clearInterval(slackQueueInterval);
 
-      // Stop producers
-      emailPollingService.stop();
-      gmailWatchService.stop();
-      missedMessageScannerService.stop();
-      staleCheckService.stop();
-      postBookingFollowupService.stop();
-      weeklyMailingListService.stop();
-      slackWeeklySummaryService.stop();
-      workReportService.stop();
-      therapistNudgeService.stop();
-      appointmentLifecycleTickService.stop();
-      invitationLifecycleService.stop();
-
-      // Stop side-effect retries and pending email processing
-      sideEffectRetryService.stop();
-      pendingEmailService.stop();
+      // Every stop() clears its timers synchronously; periodic services
+      // return a promise that settles when their in-flight run finishes.
+      const drains: Array<Promise<void> | void> = [
+        emailPollingService.stop(),
+        gmailWatchService.stop(),
+        missedMessageScannerService.stop(),
+        staleCheckService.stop(),
+        postBookingFollowupService.stop(),
+        weeklyMailingListService.stop(),
+        slackWeeklySummaryService.stop(),
+        workReportService.stop(),
+        therapistNudgeService.stop(),
+        appointmentLifecycleTickService.stop(),
+        invitationLifecycleService.stop(),
+        sideEffectRetryService.stop(),
+        pendingEmailService.stop(),
+      ];
+      const drained = await Promise.race([
+        Promise.allSettled(drains).then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_TIMEOUT_MS).unref()),
+      ]);
+      if (drained) {
+        logger.info('Background services stopped; in-flight runs finished');
+      } else {
+        logger.warn({ timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS }, 'Background runs still in flight at shutdown deadline — continuing');
+      }
 
       // Drain the email queue last (it may still have in-flight jobs)
       await emailQueueService.stop();
-
-      // Give services a moment to release locks
-      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       // Close Redis connection
       await redis.quit();
@@ -616,7 +615,7 @@ async function start() {
   process.on('unhandledRejection', (reason, promise) => {
     recordUnhandledRejection(reason);
     logger.error(
-      { reason, promise: String(promise), unhandledRejectionCount: getUnhandledRejectionStats().count },
+      { reason, promise: String(promise), unhandledRejectionsLastHour: getUnhandledRejectionStats().count },
       'Unhandled promise rejection - logging but not crashing'
     );
   });
@@ -662,23 +661,8 @@ async function start() {
       host: config.host,
     });
 
-    // Cleanup stale locks from previous runs (crash recovery)
-    // Run asynchronously to avoid blocking server startup during deploys
-    const staleLockPatterns = [
-      'gmail:lock:*',
-      'appointment:lock:*',
-      'pending-email:lock:*',
-      'weekly-mailing:lock:*',
-      'stale-check:lock:*',
-      'missed-message-scanner:lock:*',
-    ];
-    redis.cleanupStaleLocks(staleLockPatterns, 300).then((cleanedLocks) => {
-      if (cleanedLocks > 0) {
-        logger.info({ cleanedLocks }, 'Cleaned up stale locks from previous run');
-      }
-    }).catch((err) => {
-      logger.warn({ err }, 'Failed to cleanup stale locks (non-fatal)');
-    });
+    // No boot-time stale-lock sweep: every lock is SET with EX, so a
+    // crashed holder's lock simply expires via its TTL.
 
     // Load persisted Slack notification queue from Redis
     const loadedSlackNotifications = await slackNotificationService.loadPersistedQueue();

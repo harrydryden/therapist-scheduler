@@ -42,6 +42,10 @@ jest.mock('../utils/database', () => ({
     user: {
       findMany: jest.fn(),
       update: jest.fn(),
+      // Per-recipient send-once guard (claim + newest stamp); default: no
+      // prior sends, every claim succeeds.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      aggregate: jest.fn().mockResolvedValue({ _max: { lastWeeklyMailingAt: null } }),
     },
     therapist: {
       findMany: jest.fn(),

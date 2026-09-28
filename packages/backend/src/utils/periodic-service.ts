@@ -9,18 +9,32 @@
  * - setInterval management
  * - Overlapping execution guard
  * - Safe error catching to prevent interval breakage
- * - Optional startup delay
+ * - Startup delay (jittered by default, so a restart doesn't fire every
+ *   sweep at t=0 alongside WAL recovery and the Pub/Sub backlog)
+ * - stop() that resolves once any in-flight run has finished
  * - getStatus() for health checks
  */
 
 import { logger } from './logger';
+
+/**
+ * First-run delay for services that don't set `startupDelayMs`: a random
+ * point in [MIN, MIN + JITTER). Staggers the boot-time sweeps (stale-check,
+ * post-booking, weekly-mailing, Slack summary, work report) instead of
+ * running them all the instant the process starts.
+ */
+export const DEFAULT_STARTUP_DELAY_MIN_MS = 30_000;
+export const DEFAULT_STARTUP_DELAY_JITTER_MS = 90_000;
 
 export interface PeriodicServiceOptions {
   /** Human-readable name for logging */
   name: string;
   /** Interval between runs in milliseconds */
   intervalMs: number;
-  /** Optional delay before the first run (0 = run immediately) */
+  /**
+   * Delay before the first run. Omitted → a jittered default (see
+   * DEFAULT_STARTUP_DELAY_MIN_MS); 0 → run immediately on start().
+   */
   startupDelayMs?: number;
 }
 
@@ -31,11 +45,16 @@ export abstract class PeriodicService {
   protected readonly serviceName: string;
   protected readonly intervalMs: number;
   private readonly startupDelayMs: number;
+  /** Runs (scheduled or manual) that haven't settled yet; stop() awaits them. */
+  private readonly inFlight = new Set<Promise<unknown>>();
+  /** Set by stop() so long-running work can bail out early. */
+  private stopping = false;
 
   constructor(options: PeriodicServiceOptions) {
     this.serviceName = options.name;
     this.intervalMs = options.intervalMs;
-    this.startupDelayMs = options.startupDelayMs ?? 0;
+    this.startupDelayMs = options.startupDelayMs
+      ?? DEFAULT_STARTUP_DELAY_MIN_MS + Math.floor(Math.random() * DEFAULT_STARTUP_DELAY_JITTER_MS);
   }
 
   /**
@@ -54,24 +73,35 @@ export abstract class PeriodicService {
       logger.warn(`${this.serviceName} already running`);
       return;
     }
+    this.stopping = false;
 
-    logger.info(`Starting ${this.serviceName} (interval: ${this.intervalMs}ms)`);
+    logger.info(
+      { startupDelayMs: this.startupDelayMs },
+      `Starting ${this.serviceName} (interval: ${this.intervalMs}ms)`,
+    );
 
     if (this.startupDelayMs > 0) {
       this.startupTimeoutId = setTimeout(() => {
         this.startupTimeoutId = null;
-        this.runSafe('startup');
+        void this.runSafe('startup');
       }, this.startupDelayMs);
     } else {
-      this.runSafe('startup');
+      void this.runSafe('startup');
     }
 
     this.intervalId = setInterval(() => {
-      this.runSafe('scheduled');
+      void this.runSafe('scheduled');
     }, this.intervalMs);
   }
 
-  stop(): void {
+  /**
+   * Stop scheduling new runs. The returned promise resolves once any run
+   * already in progress has finished, so shutdown can wait for it before
+   * closing Redis and Prisma underneath it. Long runs can check
+   * isStopping() to finish early.
+   */
+  stop(): Promise<void> {
+    this.stopping = true;
     if (this.startupTimeoutId) {
       clearTimeout(this.startupTimeoutId);
       this.startupTimeoutId = null;
@@ -81,6 +111,12 @@ export abstract class PeriodicService {
       this.intervalId = null;
       logger.info(`${this.serviceName} stopped`);
     }
+    return Promise.allSettled([...this.inFlight]).then(() => undefined);
+  }
+
+  /** True once stop() has been called (until the next start()). */
+  protected isStopping(): boolean {
+    return this.stopping;
   }
 
   getStatus(): { running: boolean; intervalMs: number } {
@@ -88,6 +124,14 @@ export abstract class PeriodicService {
       running: this.intervalId !== null,
       intervalMs: this.intervalMs,
     };
+  }
+
+  /** Register a run so stop() waits for it. Returns the same promise. */
+  protected trackRun<T>(run: Promise<T>): Promise<T> {
+    this.inFlight.add(run);
+    const settle = () => { this.inFlight.delete(run); };
+    run.then(settle, settle);
+    return run;
   }
 
   private async runSafe(trigger: 'startup' | 'scheduled'): Promise<void> {
@@ -98,7 +142,7 @@ export abstract class PeriodicService {
 
     this.isRunning = true;
     try {
-      await this.runCheck(trigger);
+      await this.trackRun(this.runCheck(trigger));
     } catch (error) {
       logger.error({ error }, `Unhandled error in ${this.serviceName} — will retry next interval`);
     } finally {

@@ -2,8 +2,11 @@
  * Post-Booking Follow-up Service
  *
  * Handles automated follow-up emails after appointments are confirmed:
- * 1. Meeting Link Check - 24h after confirmation (or 4h before appointment if sooner)
- * 2. Feedback Form - 1h after session ends (sent to user only)
+ * 1. Meeting Link Check - postBooking.meetingLinkCheckDelayHours after
+ *    confirmation (or postBooking.meetingLinkCheckMinBeforeHours before the
+ *    appointment if sooner); defaults 24h / 4h
+ * 2. Feedback Form - postBooking.feedbackFormDelayHours after the session
+ *    start (default 1h; sent to user only)
  *
  * Runs as a background service checking every 15 minutes.
  *
@@ -439,7 +442,11 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
     // Used below to skip the meeting-link check when the session-reminder window
     // is already open — in that case the reminder is the better channel for "your
     // session is approaching" and we don't want both emails landing within minutes.
-    const sessionReminderHoursBefore = await getSettingValue<number>('postBooking.sessionReminderHoursBefore');
+    const [sessionReminderHoursBefore, linkCheckDelayHours, linkCheckMinBeforeHours] = await Promise.all([
+      getSettingValue<number>('postBooking.sessionReminderHoursBefore'),
+      getSettingValue<number>('postBooking.meetingLinkCheckDelayHours'),
+      getSettingValue<number>('postBooking.meetingLinkCheckMinBeforeHours'),
+    ]);
     const sessionReminderWindowMs = sessionReminderHoursBefore * 60 * 60 * 1000;
 
     await processSentinelBatch({
@@ -486,6 +493,8 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
         const sendTime = calculateMeetingLinkCheckTime(
           appointment.confirmedAt,
           appointment.confirmedDateTimeParsed,
+          linkCheckDelayHours,
+          linkCheckMinBeforeHours,
         );
         if (sendTime > now) return { kind: 'wait' };
 
@@ -548,7 +557,8 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
    * Send feedback form emails
    *
    * Rules:
-   * - Send 1 hour after session start time (50min session + 10min buffer)
+   * - Send postBooking.feedbackFormDelayHours after session start time
+   *   (default 1h: 50min session + 10min buffer)
    * - Send to USER only (not therapist)
    * - Skip if already sent or sending
    * - Skip if appointment is cancelled
@@ -559,6 +569,7 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
    */
   private async processFeedbackForms(checkId: string): Promise<void> {
     const now = new Date();
+    const feedbackFormDelayHours = await getSettingValue<number>('postBooking.feedbackFormDelayHours');
 
     await processSentinelBatch({
       checkId,
@@ -594,8 +605,8 @@ class PostBookingFollowupService extends LockedPeriodicService<void> {
         if (!appointment.confirmedDateTimeParsed) return { kind: 'wait' };
         // FIX #11: require session_held — drift away is a skip, not a wait.
         if (appointment.status !== APPOINTMENT_STATUS.SESSION_HELD) return { kind: 'skip' };
-        // Not yet due — silent wait until the 50min+10min window opens.
-        const feedbackTime = calculateFeedbackFormTime(appointment.confirmedDateTimeParsed);
+        // Not yet due — silent wait until the configured delay has passed.
+        const feedbackTime = calculateFeedbackFormTime(appointment.confirmedDateTimeParsed, feedbackFormDelayHours);
         if (feedbackTime > now) return { kind: 'wait' };
         return { kind: 'proceed' };
       },

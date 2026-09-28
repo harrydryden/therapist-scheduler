@@ -41,6 +41,101 @@ const bulkUpdateSchema = z.object({
   adminId: z.string().min(1).max(255),
 });
 
+/**
+ * Validate a value against its setting definition. Returns an error
+ * message, or null when the value is acceptable. One rule set for the
+ * single and bulk PATCH endpoints.
+ *
+ * Types are checked strictly: the value is stored as JSON and read back
+ * as-is, so the string "false" for a boolean setting would be truthy
+ * (switching a kill switch ON) and "5" for a number would reach arithmetic
+ * as a string.
+ */
+export function validateSettingValue(
+  key: string,
+  definition: SettingDefinition,
+  value: unknown,
+): string | null {
+  switch (definition.valueType) {
+    case 'boolean':
+      return typeof value === 'boolean' ? null : 'Value must be a boolean (true or false)';
+
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return 'Value must be a number';
+      }
+      if (definition.minValue !== undefined && value < definition.minValue) {
+        return `Value must be at least ${definition.minValue}`;
+      }
+      if (definition.maxValue !== undefined && value > definition.maxValue) {
+        return `Value must be at most ${definition.maxValue}`;
+      }
+      return null;
+    }
+
+    case 'string': {
+      if (typeof value !== 'string') {
+        return 'Value must be a string';
+      }
+      if (definition.allowedValues) {
+        return definition.allowedValues.includes(value)
+          ? null
+          : `Value must be one of: ${definition.allowedValues.join(', ')}`;
+      }
+      if (requiresNonEmptyString(key) && value.trim().length === 0) {
+        return 'Value must not be empty';
+      }
+      // eslint-disable-next-line no-control-regex
+      if (key === 'agent.fromName' && /[\x00-\x1f\x7f]/.test(value)) {
+        return 'Value must not contain control characters or line breaks';
+      }
+      if (key === 'general.timezone' && !isValidIanaTimezone(value)) {
+        return 'Value must be a valid IANA timezone (e.g. Europe/London)';
+      }
+      if (key === 'weeklyMailing.webAppUrl' && !isHttpUrl(value)) {
+        return 'Value must be an http(s) URL';
+      }
+      return null;
+    }
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * String settings that break something when blank: every email subject /
+ * body template (an empty template sends a blank email), the agent's
+ * display name (the From header and signature), and the two validated
+ * formats below.
+ */
+function requiresNonEmptyString(key: string): boolean {
+  return (
+    key.startsWith('email.') ||
+    key === 'agent.fromName' ||
+    key === 'general.timezone' ||
+    key === 'weeklyMailing.webAppUrl'
+  );
+}
+
+function isValidIanaTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 export async function adminSettingsRoutes(fastify: FastifyInstance) {
   // Auth middleware - require webhook secret for admin access
   fastify.addHook('preHandler', verifyWebhookSecret);
@@ -189,38 +284,12 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
 
       const { value, adminId } = validation.data;
 
-      // Validate value type and range
-      if (definition.valueType === 'number') {
-        const numValue = Number(value);
-        if (isNaN(numValue)) {
-          return reply.status(400).send({
-            success: false,
-            error: 'Value must be a number',
-          });
-        }
-        if (definition.minValue !== undefined && numValue < definition.minValue) {
-          return reply.status(400).send({
-            success: false,
-            error: `Value must be at least ${definition.minValue}`,
-          });
-        }
-        if (definition.maxValue !== undefined && numValue > definition.maxValue) {
-          return reply.status(400).send({
-            success: false,
-            error: `Value must be at most ${definition.maxValue}`,
-          });
-        }
-      }
-
-      // Validate allowedValues for string settings with restricted options
-      if (definition.valueType === 'string' && definition.allowedValues) {
-        const strValue = String(value);
-        if (!definition.allowedValues.includes(strValue)) {
-          return reply.status(400).send({
-            success: false,
-            error: `Value must be one of: ${definition.allowedValues.join(', ')}`,
-          });
-        }
+      const valueError = validateSettingValue(key, definition, value);
+      if (valueError) {
+        return reply.status(400).send({
+          success: false,
+          error: valueError,
+        });
       }
 
       try {
@@ -315,23 +384,9 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
           continue;
         }
 
-        if (definition.valueType === 'number') {
-          const numValue = Number(value);
-          if (isNaN(numValue)) {
-            errors.push({ key, error: 'Value must be a number' });
-          } else if (definition.minValue !== undefined && numValue < definition.minValue) {
-            errors.push({ key, error: `Value must be at least ${definition.minValue}` });
-          } else if (definition.maxValue !== undefined && numValue > definition.maxValue) {
-            errors.push({ key, error: `Value must be at most ${definition.maxValue}` });
-          }
-        }
-
-        // Validate allowedValues for string settings with restricted options
-        if (definition.valueType === 'string' && definition.allowedValues) {
-          const strValue = String(value);
-          if (!definition.allowedValues.includes(strValue)) {
-            errors.push({ key, error: `Value must be one of: ${definition.allowedValues.join(', ')}` });
-          }
+        const valueError = validateSettingValue(key, definition, value);
+        if (valueError) {
+          errors.push({ key, error: valueError });
         }
       }
 
@@ -462,9 +517,11 @@ export async function adminSettingsRoutes(fastify: FastifyInstance) {
           // Ignore if doesn't exist
         });
 
-        // Double-invalidate after delete
+        // Double-invalidate after delete, then tell peer instances (they
+        // would otherwise keep serving the old value from memory for 30 s).
         memoryCacheInvalidate(key);
         await cacheManager.delete(`${SETTINGS_CACHE_PREFIX}${key}`);
+        await publishSettingsInvalidation([key]);
 
         logger.info({ requestId, key, defaultValue: definition.defaultValue }, 'Setting reset to default');
 
@@ -678,6 +735,9 @@ export async function publicSettingsRoutes(fastify: FastifyInstance) {
         frontendSettings['voucher.enabled'] = voucherEnabled;
         frontendSettings['voucher.required'] = voucherEnabled && voucherRequired;
         frontendSettings['voucher.expiryDays'] = voucherExpiryDays;
+        // The booking form's "up to N active requests" copy (0 = no limit).
+        frontendSettings['general.maxActiveThreadsPerUser'] =
+          await getSettingValue<number>('general.maxActiveThreadsPerUser');
 
         return reply.send({
           success: true,

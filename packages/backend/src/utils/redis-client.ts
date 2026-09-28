@@ -6,6 +6,41 @@ import { REDIS_BACKPRESSURE } from '../constants';
 // Hard ceiling on a single Redis command (see constructor note).
 const REDIS_COMMAND_TIMEOUT_MS = 5000;
 
+// ioredis emits 'error' on every failed reconnect (~every 2s during an
+// outage). Log the first at error level, then at most one summary per
+// interval with the number suppressed in between.
+export const REDIS_ERROR_LOG_INTERVAL_MS = 60_000;
+
+/**
+ * Build a connection-error logger that emits at most one line per
+ * `intervalMs`, carrying the count of errors suppressed since the last
+ * line. `reset()` (on reconnect) makes the next error log immediately.
+ */
+export function createRateLimitedErrorLogger(
+  log: (fields: Record<string, unknown>, message: string) => void,
+  intervalMs: number = REDIS_ERROR_LOG_INTERVAL_MS,
+  now: () => number = Date.now,
+): { onError: (err: unknown, fields?: Record<string, unknown>) => void; reset: () => void } {
+  let lastLoggedAt: number | null = null;
+  let suppressed = 0;
+  return {
+    onError(err, fields = {}) {
+      const t = now();
+      if (lastLoggedAt !== null && t - lastLoggedAt < intervalMs) {
+        suppressed++;
+        return;
+      }
+      log({ err, ...fields, suppressedSinceLastLog: suppressed }, 'Redis connection error');
+      lastLoggedAt = t;
+      suppressed = 0;
+    },
+    reset() {
+      lastLoggedAt = null;
+      suppressed = 0;
+    },
+  };
+}
+
 // Redis health tracking for backpressure
 export interface RedisHealthState {
   isHealthy: boolean;
@@ -53,9 +88,10 @@ export class RedisClientManager {
         // ioredis applies this timeout to queued commands too.
         commandTimeout: REDIS_COMMAND_TIMEOUT_MS,
       });
+      const errorLog = createRateLimitedErrorLogger((fields, message) => logger.error(fields, message));
       this.client.on('error', (err) => {
         this.recordFailure();
-        logger.error({ err, backpressure: this.healthState.backpressureLevel }, 'Redis connection error');
+        errorLog.onError(err, { backpressure: this.healthState.backpressureLevel });
       });
       this.client.on('connect', () => {
         this.recordSuccess();
@@ -63,10 +99,13 @@ export class RedisClientManager {
       });
       this.client.on('ready', () => {
         this.recordSuccess();
+        errorLog.reset();
         logger.info('Redis ready');
       });
       this.client.on('reconnecting', () => {
-        logger.info({ backpressure: this.healthState.backpressureLevel }, 'Redis reconnecting');
+        // Debug: fires on every reconnect attempt; the rate-limited error
+        // log above already reports the outage.
+        logger.debug({ backpressure: this.healthState.backpressureLevel }, 'Redis reconnecting');
       });
     } catch (err) {
       logger.warn(

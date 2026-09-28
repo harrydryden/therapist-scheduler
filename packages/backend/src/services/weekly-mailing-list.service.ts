@@ -16,6 +16,14 @@
  * Both branches respect a once-per-7-days ceiling so back-to-back
  * therapist ingestions never produce back-to-back emails to the same user.
  *
+ * Send-once guard. Postgres is the source of truth: every recipient is
+ * claimed (compare-and-set on `users.last_weekly_mailing_at`) before their
+ * email goes out, recipient selection skips anyone mailed inside the
+ * interval, and the global "last sent" time is the later of the Redis
+ * marker and the newest per-user stamp. The Redis marker is only a fast
+ * path, so an evicted or lost key can no longer re-blast anyone mailed in
+ * the last week; an unreadable guard still counts as "already sent".
+ *
  * The ceiling is only consumed by a run that actually delivered something:
  * if every send fails (broken Gmail credentials, open circuit breaker) the
  * last-send marker is left alone so the next hourly tick retries, and a
@@ -33,6 +41,7 @@
  *
  * Eligibility (per user) — all must be true:
  *   - Subscribed
+ *   - Not mailed inside the interval (`lastWeeklyMailingAt`)
  *   - Has no upcoming confirmed appointment
  *   - At least one therapist is available platform-wide
  *
@@ -66,6 +75,8 @@ interface MailingListUser {
   id: string;
   email: string;
   name: string;
+  /** Previous per-user send stamp; restored if this run's send fails. */
+  lastWeeklyMailingAt: Date | null;
 }
 
 /**
@@ -129,10 +140,14 @@ class WeeklyMailingListService extends LockedPeriodicService {
     );
 
     if (shouldRetry) {
-      setTimeout(() => {
+      const retryTimer = setTimeout(() => {
+        // A retry must not outlive stop(): during shutdown it would start
+        // a mailing run while Redis and Prisma are being closed.
+        if (!this.getStatus().running) return;
         logger.info({ attempt: this.consecutiveFailures + 1 }, 'Retrying weekly mailing check');
         void this.trigger();
       }, backoffDelay);
+      retryTimer.unref();
     }
   }
 
@@ -142,7 +157,8 @@ class WeeklyMailingListService extends LockedPeriodicService {
    *
    * Respects the enabled flag and the 7-day ceiling by default; pass
    * `skipAlreadySentCheck=true` only from internal tooling that has
-   * already vetted the call.
+   * already vetted the call. The per-recipient guard is never skipped:
+   * anyone mailed inside the interval is left out either way.
    *
    * Unlike the periodic tick, this skips the event/threshold gate —
    * the admin has decided to send.
@@ -183,31 +199,12 @@ class WeeklyMailingListService extends LockedPeriodicService {
 
     const emailSettings = await this.fetchEmailSettings();
 
-    let sent = 0;
-    let failed = 0;
-    for (const user of users) {
-      try {
-        await this.sendWeeklyEmail(user, emailSettings);
-        sent++;
-      } catch (error) {
-        logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
-        failed++;
-      }
-    }
-
-    // Same rule as the periodic tick: a run where nothing got out must not
-    // consume the 7-day window or the new-therapist trigger. Without this an
-    // admin pressing "Send now" during a Gmail outage would lock the mailing
-    // out for a week while appearing to have sent.
-    if (sent > 0) {
-      await this.markAsSent();
-    } else {
-      logger.error(
-        { checkId, failed, total: users.length },
-        'Force weekly mailing sent nothing — every send failed. Not marking as sent',
-      );
-      await this.alertSendFailure(checkId, users.length);
-    }
+    // Same rules as the periodic tick (see sendToRecipients): a run where
+    // nothing got out must not consume the 7-day window or the
+    // new-therapist trigger. Without this an admin pressing "Send now"
+    // during a Gmail outage would lock the mailing out for a week while
+    // appearing to have sent.
+    const { sent, failed } = await this.sendToRecipients(checkId, users, emailSettings, () => true);
 
     logger.info({ checkId, sent, failed, total: users.length }, 'Force weekly mailing complete');
     return { sent, failed, total: users.length };
@@ -309,47 +306,113 @@ class WeeklyMailingListService extends LockedPeriodicService {
 
     const emailSettings = await this.fetchEmailSettings();
 
+    const { sent, failed } = await this.sendToRecipients(checkId, users, emailSettings, isLockValid);
+
+    logger.info({ checkId, sent, failed, total: users.length, trigger: decision.reason }, 'Weekly mailing complete');
+  }
+
+  /**
+   * The one send loop, shared by the periodic tick and forceSend().
+   *
+   * Each recipient is CLAIMED before their email goes out: a compare-and-
+   * set that stamps `lastWeeklyMailingAt = now` only if the user has not
+   * been mailed inside the interval. That makes the per-user send-once
+   * guard hold even when the global marker is gone and two runners overlap
+   * (the distributed lock fails open in single-instance mode when Redis is
+   * down). A failed send releases the claim so the next run retries that
+   * user; a crash between claim and send skips them for a week, which is
+   * the safe direction.
+   *
+   * Only a run that got at least one email out records the global send.
+   * That marker drives BOTH the 7-day ceiling and the "new therapists
+   * since last send" event trigger, so marking after a total failure
+   * (Gmail credentials broken, circuit breaker open) used to buy a week of
+   * silence and burn the fast lane. A partial success still marks: the
+   * alternative is re-emailing the recipients who already received it.
+   */
+  private async sendToRecipients(
+    checkId: string,
+    users: MailingListUser[],
+    emailSettings: EmailSettings,
+    isLockValid: () => boolean,
+  ): Promise<{ sent: number; failed: number; skipped: number }> {
+    const now = new Date();
+    const cutoff = intervalCutoff(now);
     let sent = 0;
     let failed = 0;
+    let skipped = 0;
 
     for (const user of users) {
       if (!isLockValid()) {
-        logger.warn({ checkId, sent, failed, remaining: users.length - sent - failed }, 'Aborting weekly mailing - lock lost');
+        logger.warn(
+          { checkId, sent, failed, skipped, remaining: users.length - sent - failed - skipped },
+          'Aborting weekly mailing - lock lost or service stopping',
+        );
         break;
       }
+
+      let claimed: boolean;
+      try {
+        claimed = await this.claimRecipient(user, cutoff, now);
+      } catch (error) {
+        // Can't prove the user wasn't just mailed — don't send.
+        logger.error({ error, userId: user.id }, 'Failed to claim weekly mailing recipient - skipping');
+        failed++;
+        continue;
+      }
+      if (!claimed) {
+        logger.info({ checkId, userId: user.id }, 'Weekly mailing recipient already mailed inside the interval - skipping');
+        skipped++;
+        continue;
+      }
+
       try {
         await this.sendWeeklyEmail(user, emailSettings);
         sent++;
       } catch (error) {
         logger.error({ error, email: user.email }, 'Failed to send weekly email to user');
         failed++;
+        await this.releaseRecipient(user, now);
       }
     }
 
-    // Only record a send when at least one email actually got out.
-    //
-    // This marker drives BOTH the 7-day ceiling and the "new therapists
-    // since last send" event trigger (countNewTherapistsSince keys on
-    // `ingestedAt > lastSentAt`). Marking unconditionally meant a total
-    // send failure — Gmail credentials broken, circuit breaker open —
-    // silently bought a week of quiet AND consumed the fast lane for every
-    // therapist ingested beforehand, then repeated the next week. A
-    // transient outage became a permanent one.
-    //
-    // Leaving the marker untouched lets the next hourly tick retry. A
-    // partial success still marks: the alternative is re-emailing the
-    // recipients who already received it.
     if (sent > 0) {
       await this.markAsSent();
-    } else {
+    } else if (failed > 0) {
       logger.error(
-        { checkId, failed, total: users.length, trigger: decision.reason },
+        { checkId, failed, skipped, total: users.length },
         'Weekly mailing sent nothing — every send failed. Not marking as sent; will retry on the next tick',
       );
       await this.alertSendFailure(checkId, users.length);
     }
 
-    logger.info({ checkId, sent, failed, total: users.length, trigger: decision.reason }, 'Weekly mailing complete');
+    return { sent, failed, skipped };
+  }
+
+  /**
+   * Stamp the recipient as mailed now, but only if they were not already
+   * mailed inside the interval. Returns false when another run got there
+   * first.
+   */
+  private async claimRecipient(user: MailingListUser, cutoff: Date, now: Date): Promise<boolean> {
+    const { count } = await prisma.user.updateMany({
+      where: { id: user.id, ...notMailedSince(cutoff) },
+      data: { lastWeeklyMailingAt: now },
+    });
+    return count === 1;
+  }
+
+  /** Undo this run's claim after a failed send (best effort). */
+  private async releaseRecipient(user: MailingListUser, claimedAt: Date): Promise<void> {
+    try {
+      await prisma.user.updateMany({
+        where: { id: user.id, lastWeeklyMailingAt: claimedAt },
+        data: { lastWeeklyMailingAt: user.lastWeeklyMailingAt },
+      });
+    } catch (error) {
+      // The user stays stamped and misses this week — the safe outcome.
+      logger.warn({ error, userId: user.id }, 'Failed to release weekly mailing claim after send failure');
+    }
   }
 
   /**
@@ -413,70 +476,64 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
-   * Read the last-sent timestamp from Redis. Returns null if never sent
-   * or if the key has expired (90-day TTL).
+   * When the mailing last went out: the later of the Redis marker and the
+   * newest per-user stamp in Postgres. Returns null only if neither has
+   * ever been written.
+   *
+   * THROWS when either source is unreadable. The lenient Redis wrapper
+   * used to return null on failure, which made countNewTherapistsSince
+   * treat every therapist as new and re-blast the entire list; Postgres
+   * now also backs the answer when the key was merely evicted or lost.
    */
   private async getLastSentAt(): Promise<Date | null> {
-    // getStrict: a Redis failure must surface as an error, not as "never
-    // sent". The lenient wrapper returned null on failure, which made
-    // countNewTherapistsSince treat every therapist as new and re-blast
-    // the entire list on every hourly tick for as long as Redis was down.
+    const [redisAt, dbAt] = await Promise.all([
+      this.getRedisLastSentAt(),
+      this.getDbLastSentAt(),
+    ]);
+    if (redisAt && dbAt) return redisAt > dbAt ? redisAt : dbAt;
+    return redisAt ?? dbAt;
+  }
+
+  /** The Redis fast-path marker. Throws if Redis is unreadable. */
+  private async getRedisLastSentAt(): Promise<Date | null> {
     const str = await redis.getStrict(WEEKLY_MAILING.LAST_SEND_KEY);
     if (!str) return null;
     const dt = new Date(str);
     return isNaN(dt.getTime()) ? null : dt;
   }
 
+  /** Newest per-user send stamp — the Postgres source of truth. */
+  private async getDbLastSentAt(): Promise<Date | null> {
+    const agg = await prisma.user.aggregate({ _max: { lastWeeklyMailingAt: true } });
+    return agg._max.lastWeeklyMailingAt ?? null;
+  }
+
   /**
-   * Check if we've already sent the weekly email this week
+   * Has the mailing gone out inside the current interval?
    *
-   * FIX: Uses UTC date-only comparison to prevent DST-related issues.
-   * During DST transitions (especially fall-back), comparing elapsed time
-   * with milliseconds could allow double-sends (23h or 25h days).
+   * Uses UTC calendar days (see intervalCutoff), the same rule recipient
+   * selection uses, so the global ceiling can never open on a day when
+   * every recipient would still be filtered out (that mismatch would mark
+   * an empty run as "sent" and push the next real send back a week).
    *
-   * Solution: Count calendar days using UTC dates only, ignoring time component.
+   * A recent Redis marker answers on its own (fast path). Otherwise the
+   * Postgres stamps decide, so an evicted key does not reopen the window.
    */
   private async hasAlreadySentThisWeek(): Promise<boolean> {
     try {
-      const lastSendStr = await redis.getStrict(WEEKLY_MAILING.LAST_SEND_KEY);
-      if (!lastSendStr) return false;
+      const cutoff = intervalCutoff(new Date());
+      const redisAt = await this.getRedisLastSentAt();
+      if (redisAt && redisAt >= cutoff) return true;
 
-      // Extract UTC date components (ignore time to avoid DST issues)
-      const lastSend = new Date(lastSendStr);
-      const now = new Date();
-
-      // Get UTC dates as YYYY-MM-DD strings for comparison
-      const lastSendDate = lastSendStr.split('T')[0]; // e.g., "2024-01-15"
-      const todayDate = now.toISOString().split('T')[0];
-
-      // If sent today, definitely skip
-      if (lastSendDate === todayDate) {
-        return true;
-      }
-
-      // FIX: Count calendar days using UTC dates only
-      // This avoids DST issues where a day might be 23h or 25h
-      const lastSendUTC = Date.UTC(
-        lastSend.getUTCFullYear(),
-        lastSend.getUTCMonth(),
-        lastSend.getUTCDate()
-      );
-      const nowUTC = Date.UTC(
-        now.getUTCFullYear(),
-        now.getUTCMonth(),
-        now.getUTCDate()
-      );
-
-      // Calculate days difference using UTC midnight-to-midnight
-      const daysDiff = Math.floor((nowUTC - lastSendUTC) / (1000 * 60 * 60 * 24));
-      return daysDiff < WEEKLY_MAILING.MIN_INTERVAL_DAYS - 1;
+      const dbAt = await this.getDbLastSentAt();
+      return !!dbAt && dbAt >= cutoff;
     } catch (error) {
-      // FAIL SAFE: if the only send-once guard can't be read, assume we
+      // FAIL SAFE: if the send-once guard can't be read, assume we
       // already sent. Skipping a week is recoverable; mailing every
       // subscriber again every hour is not.
       logger.error(
         { error },
-        'Weekly mailing: last-send guard unreadable (Redis) — treating as already sent this week',
+        'Weekly mailing: last-send guard unreadable — treating as already sent this week',
       );
       return true;
     }
@@ -521,9 +578,9 @@ class WeeklyMailingListService extends LockedPeriodicService {
    * without a send means the mailing has stopped and nobody was told.
    * This is the gap that let a 10-day outage pass unnoticed.
    *
-   * lastSentAt of null is not treated as overdue: it means "never sent"
-   * or an expired key, both of which make the next tick send rather than
-   * stall, so alerting would be noise on a fresh environment.
+   * lastSentAt of null is not treated as overdue: it means "never sent",
+   * which makes the next tick send rather than stall, so alerting would be
+   * noise on a fresh environment.
    */
   private async alertIfSendOverdue(checkId: string, reason: string): Promise<void> {
     try {
@@ -607,9 +664,10 @@ class WeeklyMailingListService extends LockedPeriodicService {
   }
 
   /**
-   * Get users eligible for the weekly mailing: subscribed and with no
-   * confirmed upcoming appointment. Reads from Postgres now that the
-   * Notion users database has been retired.
+   * Get users eligible for the weekly mailing: subscribed, not mailed
+   * inside the interval, and with no confirmed upcoming appointment.
+   * Reads from Postgres now that the Notion users database has been
+   * retired.
    *
    * THROWS on query failure — deliberately. This used to swallow the error
    * and return [], which the caller could not distinguish from "nobody is
@@ -639,15 +697,17 @@ class WeeklyMailingListService extends LockedPeriodicService {
       const rows = await prisma.user.findMany({
         where: {
           subscribed: true,
+          ...notMailedSince(intervalCutoff(now)),
           ...(excludedIds.length > 0 ? { id: { notIn: excludedIds } } : {}),
         },
-        select: { id: true, email: true, name: true },
+        select: { id: true, email: true, name: true, lastWeeklyMailingAt: true },
       });
 
       return rows.map((u) => ({
         id: u.id,
         email: u.email,
         name: u.name ?? 'there',
+        lastWeeklyMailingAt: u.lastWeeklyMailingAt ?? null,
       }));
     } catch (error) {
       logger.error({ error }, 'Failed to get eligible mailing list users');
@@ -842,7 +902,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       { userName: userFirstName, webAppUrl: sections.webAppUrl, unsubscribeUrl: sections.unsubscribeUrl },
       sections.voucherSection,
     );
-    await sendEmail({ to: user.email, subject, body });
+    await sendEmail({ to: user.email, subject, body, listUnsubscribe: { url: sections.unsubscribeUrl } });
   }
 
   /**
@@ -865,7 +925,7 @@ class WeeklyMailingListService extends LockedPeriodicService {
       unsubscribeUrl,
     });
 
-    await sendEmail({ to: user.email, subject, body });
+    await sendEmail({ to: user.email, subject, body, listUnsubscribe: { url: unsubscribeUrl } });
 
     // Update tracking with final strike count and unsubscribe timestamp
     const now = new Date();
@@ -912,6 +972,29 @@ interface EmailSettings {
   voucherExpiryDays: number;
   voucherMaxStrikes: number;
   voucherAutoUnsubscribeEnabled: boolean;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Earliest instant that still counts as "inside the current interval".
+ *
+ * A send on UTC day D blocks days D .. D+MIN_INTERVAL_DAYS-1 and the next
+ * send may go out from 00:00 UTC on D+MIN_INTERVAL_DAYS. Calendar days
+ * rather than elapsed milliseconds, so DST (23h/25h days) and the hourly
+ * tick's drift can't shift the weekday. The global ceiling and recipient
+ * selection both use this, so they always agree.
+ */
+function intervalCutoff(now: Date): Date {
+  const startOfToday = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return new Date(startOfToday - (WEEKLY_MAILING.MIN_INTERVAL_DAYS - 1) * DAY_MS);
+}
+
+/** Prisma filter: users never mailed, or last mailed before `cutoff`. */
+function notMailedSince(cutoff: Date) {
+  return {
+    OR: [{ lastWeeklyMailingAt: null }, { lastWeeklyMailingAt: { lt: cutoff } }],
+  };
 }
 
 /**

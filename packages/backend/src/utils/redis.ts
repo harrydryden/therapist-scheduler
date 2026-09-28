@@ -95,8 +95,6 @@ export const redis = {
   // Check if operations should be attempted
   shouldAttemptOperation: () => cacheManager.shouldAttemptOperation(),
   shouldAttemptDistributedLock: () => cacheManager.shouldAttemptDistributedLock(),
-  // Stale lock cleanup
-  cleanupStaleLocks: (patterns: string[], maxAgeSeconds: number) => cacheManager.cleanupStaleLocks(patterns, maxAgeSeconds),
   // Graceful shutdown
   quit: () => cacheManager.quit(),
 };

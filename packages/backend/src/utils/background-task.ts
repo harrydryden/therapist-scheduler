@@ -327,3 +327,64 @@ export function runBackgroundTask(
   });
 }
 
+
+// ============================================
+// Unhandled promise rejections
+// ============================================
+//
+// The process-level `unhandledRejection` handler (server.ts) logs and
+// keeps running. These counters surface the rejections in /health/full so
+// an outside monitor can see them piling up. The health signal is a
+// rolling one-hour window: a lifetime counter left the probe degraded
+// forever after a single rejection, which trains everyone to ignore it.
+
+export const UNHANDLED_REJECTION_WINDOW_MS = 60 * 60 * 1000;
+const UNHANDLED_REJECTION_SAMPLE_SIZE = 5;
+// Bound on timestamps kept for the window (a rejection storm must not
+// grow memory); the window count saturates at this value.
+const UNHANDLED_REJECTION_MAX_TRACKED = 1000;
+
+let unhandledRejectionTotal = 0;
+const unhandledRejectionTimes: number[] = [];
+const recentUnhandledRejections: Array<{ at: string; reason: string }> = [];
+
+function pruneUnhandledRejections(now: number): void {
+  const windowStart = now - UNHANDLED_REJECTION_WINDOW_MS;
+  while (unhandledRejectionTimes.length > 0 && unhandledRejectionTimes[0] <= windowStart) {
+    unhandledRejectionTimes.shift();
+  }
+}
+
+export function recordUnhandledRejection(reason: unknown, now: number = Date.now()): void {
+  unhandledRejectionTotal++;
+  unhandledRejectionTimes.push(now);
+  if (unhandledRejectionTimes.length > UNHANDLED_REJECTION_MAX_TRACKED) {
+    unhandledRejectionTimes.shift();
+  }
+  pruneUnhandledRejections(now);
+
+  const text = reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason);
+  recentUnhandledRejections.push({ at: new Date(now).toISOString(), reason: text.slice(0, 500) });
+  if (recentUnhandledRejections.length > UNHANDLED_REJECTION_SAMPLE_SIZE) {
+    recentUnhandledRejections.shift();
+  }
+}
+
+/**
+ * `count` is rejections in the last hour (drives health); `total` is the
+ * lifetime count since boot; `recent` samples the last few reasons.
+ */
+export function getUnhandledRejectionStats(now: number = Date.now()): {
+  count: number;
+  total: number;
+  windowMs: number;
+  recent: Array<{ at: string; reason: string }>;
+} {
+  pruneUnhandledRejections(now);
+  return {
+    count: unhandledRejectionTimes.length,
+    total: unhandledRejectionTotal,
+    windowMs: UNHANDLED_REJECTION_WINDOW_MS,
+    recent: [...recentUnhandledRejections],
+  };
+}

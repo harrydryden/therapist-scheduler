@@ -32,7 +32,13 @@ jest.mock('../config', () => ({
 jest.mock('../utils/database', () => ({
   prisma: {
     voucherTracking: { findUnique: jest.fn(), upsert: jest.fn(), update: jest.fn() },
-    user: { findMany: jest.fn(), update: jest.fn() },
+    user: {
+      findMany: jest.fn(),
+      update: jest.fn(),
+      // Per-recipient send-once guard; default: no prior sends, claims succeed.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      aggregate: jest.fn().mockResolvedValue({ _max: { lastWeeklyMailingAt: null } }),
+    },
     therapist: { findMany: jest.fn(), count: jest.fn() },
     appointmentRequest: { findMany: jest.fn() },
   },
