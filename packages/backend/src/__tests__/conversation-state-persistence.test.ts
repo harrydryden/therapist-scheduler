@@ -47,7 +47,6 @@ jest.mock('../services/email-queue.service', () => ({ emailQueueService: { enque
 type Row = Record<string, unknown> & { id: string; updatedAt: Date };
 
 const appointmentRows: Record<string, Row> = {};
-const conversationMirror: Record<string, { conversationState: unknown }> = {};
 
 function clone<T>(value: T): T {
   return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
@@ -114,19 +113,6 @@ const appointmentRequestFake = {
   }),
 };
 
-const appointmentConversationFake = {
-  upsert: jest.fn(async ({ where, create, update }: {
-    where: { appointmentId: string };
-    create: { conversationState: unknown };
-    update: { conversationState: unknown };
-  }) => {
-    const existing = conversationMirror[where.appointmentId];
-    conversationMirror[where.appointmentId] = {
-      conversationState: clone(existing ? update.conversationState : create.conversationState),
-    };
-    return { appointmentId: where.appointmentId };
-  }),
-};
 
 jest.mock('../utils/database', () => {
   const client = {
@@ -134,9 +120,6 @@ jest.mock('../utils/database', () => {
       findUnique: (...a: unknown[]) => (appointmentRequestFake.findUnique as jest.Mock)(...a),
       update: (...a: unknown[]) => (appointmentRequestFake.update as jest.Mock)(...a),
       updateMany: (...a: unknown[]) => (appointmentRequestFake.updateMany as jest.Mock)(...a),
-    },
-    appointmentConversation: {
-      upsert: (...a: unknown[]) => (appointmentConversationFake.upsert as jest.Mock)(...a),
     },
   };
   return {
@@ -327,7 +310,6 @@ function playToolUsingTurn(captured: { state?: ConversationState; context?: Sche
 beforeEach(() => {
   jest.clearAllMocks();
   for (const k of Object.keys(appointmentRows)) delete appointmentRows[k];
-  for (const k of Object.keys(conversationMirror)) delete conversationMirror[k];
   buildSystemPromptMock.mockResolvedValue('SYSTEM');
 });
 
@@ -386,7 +368,7 @@ describe('conversation-state CAS uses conversationVersion, not updatedAt', () =>
     ).rejects.toThrow(/modified by another process/);
   });
 
-  it('writes conversationState as a JSON object (not a JSON string) to both tables', async () => {
+  it('writes conversationState as a JSON object (not a JSON string)', async () => {
     seedAppointment({ state: null, conversationVersion: 0 });
     const svc = new AIConversationService('trace-json');
 
@@ -396,8 +378,6 @@ describe('conversation-state CAS uses conversationVersion, not updatedAt', () =>
 
     await svc.storeConversationState(APT, storedState(), 1); // CAS write
     expect(typeof appointmentRows[APT].conversationState).toBe('object');
-    expect(typeof conversationMirror[APT].conversationState).toBe('object');
-    expect(conversationMirror[APT].conversationState).toEqual(appointmentRows[APT].conversationState);
 
     await svc.applyCheckpointAction(APT, 'sent_chase_followup');
     expect(typeof appointmentRows[APT].conversationState).toBe('object');

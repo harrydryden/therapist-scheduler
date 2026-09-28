@@ -157,12 +157,6 @@ export class AIConversationService {
       // Use optimistic locking - only update if version matches.
       // FIX ST2: Include activity recording in same atomic operation.
       //
-      // Phase 3a dual-write: in the same transaction we mirror
-      // `conversationState` to the sibling `appointment_conversations`
-      // row. The cutover (reads switching to the new table) is a
-      // follow-up PR; until then the legacy column is the source of
-      // truth and the mirror is for safety.
-      //
       // withSerializationRetry re-runs the whole transaction on a
       // transient DB error (dropped connection, expired transaction) —
       // nothing was committed, so a clean re-run is correct. A
@@ -199,11 +193,6 @@ export class AIConversationService {
             throw new ConcurrentModificationError(appointmentRequestId);
           }
 
-          await tx.appointmentConversation.upsert({
-            where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateValue },
-            update: { conversationState: stateValue },
-          });
         }),
         { appointmentRequestId, op: 'storeConversationState' },
         (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
@@ -216,7 +205,6 @@ export class AIConversationService {
       // no version to compare against). Still increments the version so
       // any reader holding the old one detects this write.
       // FIX ST2: Include activity recording in same atomic operation.
-      // Phase 3a dual-write applied as in the optimistic-locked branch.
       return withSerializationRetry(
         () => prisma.$transaction(async (tx) => {
           const updated = await tx.appointmentRequest.update({
@@ -238,11 +226,6 @@ export class AIConversationService {
             select: { id: true, conversationVersion: true },
           });
 
-          await tx.appointmentConversation.upsert({
-            where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateValue },
-            update: { conversationState: stateValue },
-          });
           return updated?.conversationVersion;
         }),
         { appointmentRequestId, op: 'storeConversationState:init' },
@@ -328,19 +311,6 @@ export class AIConversationService {
       // `storeConversationState` so the two writers can't drift.
       const chaseResetFields = chaseResetIfStageChanged(oldStage, checkpointStage);
 
-      // Phase 3a dual-write: applyCheckpointUpdate is one of the four
-      // writers of `conversationState`. Mirror to
-      // `appointment_conversations` in the same transaction.
-      //
-      // The transaction returns the updateMany count so the caller
-      // can distinguish optimistic-lock losses from successes. If the
-      // legacy update misses (count=0) we DON'T touch the mirror
-      // table — the rest of the row state didn't change either.
-      //
-      // withSerializationRetry re-runs the transaction on a transient
-      // DB error (dropped connection, expired transaction). If the row
-      // changed between attempts, the re-run just yields count=0 and
-      // the outer optimistic-lock loop takes over.
       const transactionResult = await withSerializationRetry(
         () => prisma.$transaction(async (tx) => {
           const result = await tx.appointmentRequest.updateMany({
@@ -363,13 +333,6 @@ export class AIConversationService {
             },
           });
 
-          if (result.count === 1) {
-            await tx.appointmentConversation.upsert({
-              where: { appointmentId: appointmentRequestId },
-              create: { appointmentId: appointmentRequestId, conversationState: stateValue },
-              update: { conversationState: stateValue },
-            });
-          }
 
           return result;
         }),

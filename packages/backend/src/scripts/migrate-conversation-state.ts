@@ -159,10 +159,6 @@ async function migrateConversationStates() {
       };
 
       // Store updated state and sync denormalized columns.
-      // Phase 3a dual-write: mirror conversationState to
-      // appointment_conversations so a re-run of this script doesn't
-      // diverge from the new sibling table. Written as a JSON object
-      // (never a JSON string — see serialiseConversationState).
       const stateJson = JSON.parse(JSON.stringify(updatedState)) as Prisma.InputJsonObject;
       // Denormalise the checkpoint timestamp alongside stage — both
       // columns are kept in lock-step by storeConversationState /
@@ -188,11 +184,6 @@ async function migrateConversationStates() {
           },
         });
         if (result.count === 0) return false;
-        await tx.appointmentConversation.upsert({
-          where: { appointmentId: appointment.id },
-          create: { appointmentId: appointment.id, conversationState: stateJson },
-          update: { conversationState: stateJson },
-        });
         return true;
       });
 

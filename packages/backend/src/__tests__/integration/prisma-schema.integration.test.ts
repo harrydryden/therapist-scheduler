@@ -263,29 +263,6 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
           return prisma.therapistConversation.findMany();
         },
       },
-      {
-        name: 'AppointmentConversation',
-        run: async () => {
-          // Create the parent appointment first since AppointmentConversation
-          // is FK-bound to AppointmentRequest with onDelete: Cascade.
-          const apt = await prisma.appointmentRequest.create({
-            data: {
-              userEmail: 'apt-conv@x',
-              therapistHandle: 'n-conv',
-              therapistEmail: 't-conv@x',
-              therapistName: 'T',
-            },
-          });
-          await prisma.appointmentConversation.create({
-            data: {
-              appointmentId: apt.id,
-              conversationState: { messages: [] },
-              memory: { notes: [], availabilityWindows: [] },
-            },
-          });
-          return prisma.appointmentConversation.findMany();
-        },
-      },
     ];
 
     for (const { name, run } of cases) {
