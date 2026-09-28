@@ -198,6 +198,19 @@ export async function humanControlRoutes(fastify: FastifyInstance): Promise<void
             );
           });
 
+        // Reset the per-appointment tool-call counter, same as the bulk
+        // ceiling-tripped release below. An appointment paused at the
+        // lifetime ceiling keeps its counter (≥ limit, 30-day TTL), so
+        // without this the replayed message's first tool call re-trips
+        // the ceiling and re-pauses it immediately — a single release
+        // could never actually resume it. An explicit admin release is
+        // the human review the ceiling exists to force, so the agent gets
+        // a fresh budget. Done BEFORE the flag flip: while human control
+        // is still on, tool calls are skipped without advancing the
+        // counter, so nothing can re-trip in between. Falls open on
+        // Redis failure (logs, never throws).
+        await resetAppointmentToolCount(id);
+
         const appointment = await prisma.appointmentRequest.update({
           where: { id },
           data: {

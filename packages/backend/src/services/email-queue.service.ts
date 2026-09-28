@@ -12,6 +12,7 @@
  * jobs are enqueued and updated when they complete or fail permanently.
  */
 
+import { createHash } from 'crypto';
 import { Queue, Worker, Job, QueueEvents } from 'bullmq';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -27,6 +28,64 @@ const SEND_GUARD_PREFIX = 'email:send-guard:'; // Idempotent send guard
 const SEND_GUARD_TTL_SECONDS = 5 * 3600; // 5 hours (must exceed max retry backoff of 4h)
 const WAL_KEY = 'email:write-ahead-log'; // Write-ahead log for DB downtime
 const WAL_ENTRY_TTL_SECONDS = 86400; // 24 hours
+
+interface WalEntry {
+  id?: string;
+  to: string;
+  subject: string;
+  body: string;
+  threadId?: string;
+  appointmentId?: string;
+  createdAt?: string;
+}
+
+/** Parse a WAL entry; null if it is not JSON or lacks the fields a send needs. */
+function parseWalEntry(entryStr: string): WalEntry | null {
+  try {
+    const parsed = JSON.parse(entryStr) as Partial<WalEntry> | null;
+    if (
+      !parsed ||
+      typeof parsed.to !== 'string' ||
+      typeof parsed.subject !== 'string' ||
+      typeof parsed.body !== 'string'
+    ) {
+      return null;
+    }
+    return parsed as WalEntry;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic PendingEmail id for a WAL entry (UUID-formatted SHA-256 of
+ * the entry's own id, or of the raw entry for legacy entries without one).
+ * Makes WAL recovery idempotent: recovering the same entry twice collides
+ * on the primary key instead of creating a duplicate email.
+ */
+function walEntryPendingEmailId(entry: WalEntry, entryStr: string): string {
+  const bytes = createHash('sha256')
+    .update(`email-wal:${entry.id ?? entryStr}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50; // version nibble (name-based)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Remove one occurrence of exactly this entry (LREM), wherever it now sits. */
+async function removeWalEntry(entryStr: string): Promise<void> {
+  await redis.eval("return redis.call('LREM', KEYS[1], 1, ARGV[1])", 1, WAL_KEY, entryStr);
+}
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: unknown }).code === 'P2002'
+  );
+}
 
 // ============================================
 // Types
@@ -414,6 +473,20 @@ class EmailQueueService {
    * Called on startup and periodically to sync any emails that were
    * buffered in Redis when the database was unavailable.
    *
+   * Peek → insert → remove, never pop-first. The head entry is only
+   * removed from the WAL after its PendingEmail row is committed, so a
+   * failed insert (typically: the DB is still down) leaves it — and every
+   * entry behind it — in place for the next recovery run instead of
+   * dropping the email (lifecycle audit L13).
+   *
+   * Duplicate-safety: the PendingEmail id is derived deterministically from
+   * the WAL entry, so re-inserting an entry that was already recovered (a
+   * crash between insert and removal, or two recoverers — server startup
+   * and the stale-check tick — peeking the same head concurrently) hits the
+   * primary key instead of creating a second row, and is treated as
+   * "already recovered". Only the recoverer whose insert created the row
+   * enqueues it.
+   *
    * Returns the number of recovered emails.
    */
   async recoverFromWAL(): Promise<number> {
@@ -429,15 +502,29 @@ class EmailQueueService {
       const maxEntries = Math.min(walLength, 100);
 
       for (let i = 0; i < maxEntries; i++) {
-        const entryStr = await redis.lpop(WAL_KEY);
+        // Peek, don't pop.
+        const [entryStr] = await redis.lrange(WAL_KEY, 0, 0);
         if (!entryStr) break;
 
-        try {
-          const entry = JSON.parse(entryStr);
+        const entry = parseWalEntry(entryStr);
+        if (!entry) {
+          // Genuinely unparseable — retrying can never succeed, and leaving
+          // it at the head would block every entry behind it. Drop it.
+          logger.error(
+            { entry: entryStr.slice(0, 200) },
+            'Dropping corrupt write-ahead log entry (unparseable or missing to/subject/body)'
+          );
+          await removeWalEntry(entryStr);
+          continue;
+        }
 
+        const pendingEmailId = walEntryPendingEmailId(entry, entryStr);
+        let created = false;
+        try {
           // Create the DB record that was missed during downtime
-          const pendingEmail = await prisma.pendingEmail.create({
+          await prisma.pendingEmail.create({
             data: {
+              id: pendingEmailId,
               toEmail: entry.to,
               subject: entry.subject,
               body: entry.body,
@@ -445,36 +532,53 @@ class EmailQueueService {
               appointmentId: entry.appointmentId || null,
             },
           });
-
-          // Also enqueue in BullMQ if available
-          if (this.queue) {
-            try {
-              await this.queue.add('send-email', {
-                pendingEmailId: pendingEmail.id,
-                to: entry.to,
-                subject: entry.subject,
-                body: entry.body,
-                threadId: entry.threadId,
-                appointmentId: entry.appointmentId,
-              }, {
-                jobId: pendingEmail.id,
-              });
-            } catch {
-              // DB record exists; polling fallback will handle it
-            }
+          created = true;
+        } catch (insertErr) {
+          if (!isUniqueConstraintViolation(insertErr)) {
+            // DB still unavailable (or another transient failure): keep the
+            // entry — and everything behind it, in order — for the next run.
+            logger.warn(
+              { err: insertErr, walEntryId: entry.id, remaining: walLength - recovered },
+              'Failed to insert WAL entry into pending_emails — leaving it in the write-ahead log for the next recovery run'
+            );
+            break;
           }
-
-          recovered++;
+          // Row already exists: an earlier run inserted it and died before
+          // removing the entry, or a concurrent recoverer won. Its owner
+          // (or the PendingEmail polling fallback) sends it.
           logger.info(
-            { walEntryId: entry.id, pendingEmailId: pendingEmail.id, to: entry.to },
-            'Recovered email from write-ahead log'
-          );
-        } catch (parseErr) {
-          logger.error(
-            { err: parseErr, entry: entryStr.slice(0, 200) },
-            'Failed to recover WAL entry — entry may be corrupt'
+            { walEntryId: entry.id, pendingEmailId },
+            'WAL entry already recovered — removing it from the write-ahead log'
           );
         }
+
+        // Remove exactly this entry now that its row is committed.
+        await removeWalEntry(entryStr);
+        if (!created) continue;
+
+        // Also enqueue in BullMQ if available
+        if (this.queue) {
+          try {
+            await this.queue.add('send-email', {
+              pendingEmailId,
+              to: entry.to,
+              subject: entry.subject,
+              body: entry.body,
+              threadId: entry.threadId,
+              appointmentId: entry.appointmentId,
+            }, {
+              jobId: pendingEmailId,
+            });
+          } catch {
+            // DB record exists; polling fallback will handle it
+          }
+        }
+
+        recovered++;
+        logger.info(
+          { walEntryId: entry.id, pendingEmailId, to: entry.to },
+          'Recovered email from write-ahead log'
+        );
       }
 
       if (recovered > 0) {

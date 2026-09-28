@@ -182,10 +182,16 @@ export async function transitionToCancelled(
     // skipNotifications/settings, keyed WITHOUT a transitionGeneration
     // (matches transitionSideEffectsService.onCancelled's call, which
     // doesn't pass one either). The Slack/email rows below only exist
-    // when skipNotifications is false, matching notifyCancelled's guard
-    // in this same file; slack_notify_cancelled is keyed WITHOUT a
-    // generation (matches notifyCancelled's call), while both email
-    // types ARE keyed with the post-update generation (also matching).
+    // when skipNotifications is false, matching the `!skipNotifications`
+    // guard around the notifyCancelled dispatch further down this file.
+    // slack_notify_cancelled and both email types are keyed WITH the
+    // post-update generation, because notifyCancelled passes
+    // `transitionGeneration: newGeneration` (= row.transition_generation
+    // + 1 = postUpdateGeneration) to runTrackedSideEffect /
+    // runReplayableTrackedSideEffect for all three. (slack_notify_cancelled
+    // used to be registered here WITHOUT a generation: the keys differed,
+    // this row stayed pending, and the retry runner posted a second
+    // "Appointment cancelled" Slack message ~10 minutes later.)
     registerEffects: async (tx, row, postUpdateGeneration) => {
       if (row.therapist_handle) {
         await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'cancelled', {
@@ -194,9 +200,13 @@ export async function transitionToCancelled(
       }
       if (!notificationSettings) return;
       if (notificationSettings.slack.cancelled) {
-        await sideEffectTrackerService.registerInTransaction(tx, appointmentId, 'cancelled', {
-          effectType: 'slack_notify_cancelled',
-        });
+        await sideEffectTrackerService.registerInTransaction(
+          tx,
+          appointmentId,
+          'cancelled',
+          { effectType: 'slack_notify_cancelled' },
+          postUpdateGeneration,
+        );
       }
       if (notificationSettings.email.clientCancellation && row.user_email) {
         await sideEffectTrackerService.registerInTransaction(

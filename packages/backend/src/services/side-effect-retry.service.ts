@@ -243,15 +243,17 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
 
       retried++;
 
+      // Execute and mark-completed are separate phases (lifecycle audit
+      // L3): once executeEffect resolves the email/Slack message has gone
+      // out, so a DB blip on markCompleted must NOT fall into the catch
+      // below — that would markFailed (or markAbandoned + alert at the
+      // cap) a row whose effect succeeded, and the next cycle would send
+      // it again. markCompletedAfterExecute retries the bookkeeping write
+      // and never throws.
+      let executed = false;
       try {
         await this.executeEffect(effect);
-        await sideEffectTrackerService.markCompleted(effect.idempotencyKey);
-        succeeded++;
-
-        logger.info(
-          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempt: effect.attempts + 1 },
-          'Side effect retry succeeded'
-        );
+        executed = true;
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         const nextAttempt = effect.attempts + 1;
@@ -292,6 +294,21 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             `Side effect retry failed (${nextAttempt}/${MAX_RETRY_ATTEMPTS})`
           );
         }
+      }
+
+      if (executed) {
+        succeeded++;
+        await sideEffectTrackerService.markCompletedAfterExecute(effect.idempotencyKey, {
+          effectId: effect.id,
+          effectType: effect.effectType,
+          appointmentId: effect.appointmentId,
+          therapistId: effect.therapistId,
+        });
+
+        logger.info(
+          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempt: effect.attempts + 1 },
+          'Side effect retry succeeded'
+        );
       }
     }
 

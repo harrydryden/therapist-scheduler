@@ -115,6 +115,24 @@ export interface RegisteredSideEffect {
  */
 const CLAIM_LEASE_MS = 10 * 60 * 1000;
 
+/**
+ * Back-off schedule for persisting `completed` AFTER an effect's execute
+ * already succeeded (see `markCompletedAfterExecute`). The inline delays
+ * are awaited by the caller, so they stay short enough to fit inside
+ * runBackgroundTask's 15s default timeout alongside the execute itself.
+ * The deferred delays run detached (unref'd timers), each one after the
+ * previous deferred attempt failed — 30s, then 90s, then 180s, so the last
+ * attempt lands ~5 min after the execute, well inside CLAIM_LEASE_MS. A DB
+ * outage of a few minutes is therefore reconciled before the lease-expiry
+ * path could re-claim (and re-execute) the row.
+ */
+const MARK_COMPLETED_INLINE_RETRY_DELAYS_MS = [200, 1000, 3000] as const;
+const MARK_COMPLETED_DEFERRED_RETRY_DELAYS_MS = [30_000, 90_000, 180_000] as const;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 class SideEffectTrackerService {
   /**
    * Generate an idempotency key for a side effect.
@@ -398,11 +416,13 @@ class SideEffectTrackerService {
     // This is reachable in ordinary operation, not just under a race, because
     // several effects are deliberately keyed WITHOUT a transitionGeneration
     // (therapist_unfreeze_sync on cancelled/completed, therapist_freeze_sync on
-    // confirmed, slack_notify_cancelled) so that the post-commit dispatch finds
-    // the same row. Their key is therefore constant for the appointment's
-    // lifetime, and any SECOND occurrence of that transition collides. Observed
-    // in production as a feedback_requested appointment that could never
-    // complete: completed once, an admin re-requested feedback, and every
+    // confirmed) so that the post-commit dispatch finds the same row. Their
+    // key is therefore constant for the appointment's lifetime, and any
+    // SECOND occurrence of that transition collides. (slack_notify_cancelled
+    // used to be listed here too, but notifyCancelled keys it WITH the
+    // generation; the in-tx registration now does too — lifecycle audit L6.)
+    // Observed in production as a feedback_requested appointment that could
+    // never complete: completed once, an admin re-requested feedback, and every
     // subsequent auto-complete sweep died on
     // `Unique constraint failed on the fields: (idempotency_key)`.
     //
@@ -488,6 +508,108 @@ class SideEffectTrackerService {
     });
 
     logger.debug({ idempotencyKey }, 'Side effect marked completed');
+  }
+
+  /**
+   * Persist `completed` for an effect whose execute has ALREADY resolved.
+   *
+   * Never throws, and never marks the row failed. Once the email/Slack
+   * message/sync has actually happened, a failure to record that fact is
+   * a bookkeeping problem, not an effect failure: marking the row
+   * `failed` (or re-throwing into runBackgroundTask's in-process retry)
+   * would re-claim the row and run the effect a second time — the
+   * duplicate-send bug this method exists to prevent (lifecycle audit L3).
+   *
+   * Strategy:
+   *   1. Retry `markCompleted` inline with short back-off (covers pool
+   *      timeouts / sub-second DB blips).
+   *   2. If still failing, log at error level with the idempotency key
+   *      and schedule detached retries that all land inside the execute
+   *      lease (CLAIM_LEASE_MS). The row stays `running` meanwhile, so no
+   *      other worker can claim it until the lease expires.
+   *   3. If the deferred retries also fail, the row is left `running`;
+   *      the retry runner's lease-expiry bucket will re-claim it after
+   *      CLAIM_LEASE_MS, which DOES re-execute the effect. That residual
+   *      duplicate needs a DB outage spanning the whole lease window (or
+   *      a process death during it) and is logged loudly so an operator
+   *      can reconcile the row by key.
+   *
+   * Returns true iff `completed` was persisted inline.
+   */
+  async markCompletedAfterExecute(
+    idempotencyKey: string,
+    logContext: Record<string, unknown> = {},
+    options: {
+      inlineRetryDelaysMs?: readonly number[];
+      deferredRetryDelaysMs?: readonly number[];
+    } = {},
+  ): Promise<boolean> {
+    const inlineDelays = options.inlineRetryDelaysMs ?? MARK_COMPLETED_INLINE_RETRY_DELAYS_MS;
+    const deferredDelays = options.deferredRetryDelaysMs ?? MARK_COMPLETED_DEFERRED_RETRY_DELAYS_MS;
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= inlineDelays.length; attempt++) {
+      if (attempt > 0) {
+        await sleep(inlineDelays[attempt - 1]);
+      }
+      try {
+        await this.markCompleted(idempotencyKey);
+        if (attempt > 0) {
+          logger.info(
+            { ...logContext, idempotencyKey, attempts: attempt + 1 },
+            'Side effect marked completed after retrying markCompleted',
+          );
+        }
+        return true;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    logger.error(
+      {
+        ...logContext,
+        idempotencyKey,
+        err: lastErr,
+        attempts: inlineDelays.length + 1,
+      },
+      'Side effect EXECUTED but markCompleted failed — NOT marking failed (would re-send); ' +
+        'row left running, deferred reconciliation scheduled inside the execute lease',
+    );
+    this.scheduleDeferredCompletion(idempotencyKey, logContext, deferredDelays, 0);
+    return false;
+  }
+
+  private scheduleDeferredCompletion(
+    idempotencyKey: string,
+    logContext: Record<string, unknown>,
+    delaysMs: readonly number[],
+    index: number,
+  ): void {
+    if (index >= delaysMs.length) {
+      logger.error(
+        { ...logContext, idempotencyKey },
+        'Side effect EXECUTED but could not be marked completed within the execute lease — ' +
+          'the retry runner will re-claim it once the lease expires and may re-send it; ' +
+          'reconcile this row by idempotency key',
+      );
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.markCompleted(idempotencyKey).then(
+        () => {
+          logger.warn(
+            { ...logContext, idempotencyKey, deferredAttempt: index + 1 },
+            'Deferred reconciliation: executed side effect marked completed',
+          );
+        },
+        () => {
+          this.scheduleDeferredCompletion(idempotencyKey, logContext, delaysMs, index + 1);
+        },
+      );
+    }, delaysMs[index]);
+    // Never keep the process alive (or a test worker open) just for this.
+    timer.unref?.();
   }
 
   /**

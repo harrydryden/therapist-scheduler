@@ -810,3 +810,79 @@ describe('retryFailedEffects — abandon-flow wiring', () => {
     cleanupSpy.mockRestore();
   });
 });
+
+describe('retryFailedEffects — execute succeeded but markCompleted failed (lifecycle audit L3)', () => {
+  // The retry runner used to run executeEffect + markCompleted in one
+  // try/catch, so a DB blip on markCompleted after the email had already
+  // been enqueued/sent was booked as an execute failure: markFailed (or,
+  // at the cap, markAbandoned + a "Side Effect Abandoned" alert for an
+  // effect that actually succeeded) — and the next 5-minute cycle sent it
+  // again.
+  const TRANSITION_APPOINTMENT_ROW = {
+    ...APPOINTMENT_ROW,
+    confirmedDateTime: '2026-06-01T10:00:00Z',
+    confirmedDateTimeParsed: new Date('2026-06-01T10:00:00Z'),
+    gmailThreadId: 'thread-c',
+    therapistGmailThreadId: 'thread-t',
+  };
+
+  const failedRow = (attempts: number) => ({
+    id: 'log-c',
+    appointmentId: 'apt-1',
+    therapistId: null,
+    effectType: 'email_client_confirmation',
+    idempotencyKey: 'key-c',
+    attempts,
+    payload: { to: 'alice@example.com', subject: 'stored subj', body: 'stored body' },
+    createdAt: new Date('2026-05-16T10:00:00.000Z'),
+  });
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    appointmentFindUniqueMock.mockResolvedValue(TRANSITION_APPOINTMENT_ROW);
+    // markCompleted keeps failing; markFailed / markAbandoned would succeed.
+    sideEffectUpdateMock.mockImplementation(async (args: { data: { status?: string } }) => {
+      if (args.data.status === 'completed') throw new Error('pool timeout');
+      return {};
+    });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    sideEffectUpdateMock.mockReset();
+  });
+
+  async function runCycle() {
+    const p = retryFailedEffects(() => true);
+    for (let i = 0; i < 30; i++) {
+      await jest.advanceTimersByTimeAsync(30_000);
+    }
+    return p;
+  }
+
+  const statusWrites = (status: string) =>
+    sideEffectUpdateMock.mock.calls.filter(([args]) => args.data.status === status);
+
+  it('does not mark the row failed, and counts the retry as succeeded', async () => {
+    sideEffectFindManyMock.mockResolvedValue([failedRow(1)]);
+
+    const result = await runCycle();
+
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites('failed')).toHaveLength(0);
+    expect(result).toMatchObject({ retried: 1, succeeded: 1, failed: 0, abandoned: 0 });
+    // markCompleted was retried rather than abandoned after one attempt.
+    expect(statusWrites('completed').length).toBeGreaterThan(1);
+  });
+
+  it('does not abandon (or alert on) an effect that succeeded on its last allowed attempt', async () => {
+    sideEffectFindManyMock.mockResolvedValue([failedRow(4)]);
+
+    const result = await runCycle();
+
+    expect(emailEnqueueMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites('abandoned')).toHaveLength(0);
+    expect(slackAlertMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ succeeded: 1, abandoned: 0 });
+  });
+});

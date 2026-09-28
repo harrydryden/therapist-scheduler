@@ -46,14 +46,48 @@ export type SideEffectScope =
   | { kind: 'therapist'; therapistId: string };
 
 /**
+ * What the harness does when `register()` itself throws (DB outage,
+ * pool timeout, ...).
+ *
+ *   - 'run-untracked': log and run `execute` once without a row. Degrade-
+ *     rather-than-drop, for effects that have NO durable row anywhere else
+ *     (the periodic harness: sentinel-gated follow-ups and therapist
+ *     nudges, whose rows are only ever created here).
+ *   - 'rethrow': do NOT execute; re-throw so runBackgroundTask's short
+ *     in-process retry re-attempts registration. For the status-
+ *     transition wrappers, whose rows were pre-registered inside the
+ *     transition's own transaction (register-in-tx-design.md §7 / §11).
+ *     That in-tx row is the durable owner of the effect: running the
+ *     effect untracked here would leave the in-tx row `pending`, and the
+ *     retry runner's stale-pending bucket would then send it AGAIN ~10
+ *     minutes later (lifecycle audit L3). If registration keeps failing,
+ *     the retry runner picks the in-tx row up once the DB is back.
+ */
+type RegistrationFailurePolicy = 'run-untracked' | 'rethrow';
+
+/**
  * Shared body for every harness wrapper.
  *
- * Sequence (identical for all three public wrappers — the only thing
- * that differs is what `register` does):
- *   register -> (on-error: log + run execute untracked, return)
+ * Sequence (identical for all three public wrappers — the only things
+ * that differ are what `register` does and the registration-failure
+ * policy):
+ *   register -> (on-error: per RegistrationFailurePolicy, see above)
  *            -> if status is 'completed' or 'abandoned': skip
- *            -> execute -> markCompleted
- *            -> (on-execute-error: markFailed + re-throw)
+ *            -> claim execute lease (skip if another worker holds it)
+ *            -> execute
+ *                 (on-execute-error: markFailed + re-throw)
+ *            -> markCompletedAfterExecute
+ *                 (separate phase: never marks failed, never re-throws)
+ *
+ * The execute and mark-completed phases are deliberately NOT in one
+ * try/catch. When execute has resolved, the effect has happened (the email
+ * is in Gmail, the Slack message is posted). If markCompleted then hits a
+ * DB blip, treating that as an execute failure would markFailed + re-throw,
+ * and runBackgroundTask's retry (every transition notification uses
+ * retry: true) would re-claim the now-`failed` row and send the effect a
+ * second time ~1s later (lifecycle audit L3). `markCompletedAfterExecute`
+ * retries the bookkeeping write instead and leaves the row `running`
+ * (lease-protected) if it cannot be persisted.
  *
  * Locking this in one place means a behaviour change (e.g. a new
  * completed/abandoned branch, or a different way of logging
@@ -63,11 +97,20 @@ async function runWithTrackedRegistration(
   register: () => Promise<RegisteredSideEffect>,
   execute: (registered?: RegisteredSideEffect) => Promise<unknown>,
   logContext: Record<string, unknown>,
+  onRegistrationFailure: RegistrationFailurePolicy,
 ): Promise<void> {
   let registered;
   try {
     registered = await register();
   } catch (regErr) {
+    if (onRegistrationFailure === 'rethrow') {
+      logger.warn(
+        { err: regErr, ...logContext },
+        'Side-effect registration failed; not running untracked — the row pre-registered ' +
+          'in the transition transaction owns this effect (in-process retry / retry runner will re-drive it)',
+      );
+      throw regErr;
+    }
     // Registration failure (DB outage, etc.) — fall back to running the
     // task untracked rather than dropping the side effect entirely.
     logger.warn(
@@ -115,9 +158,9 @@ async function runWithTrackedRegistration(
     return;
   }
 
+  // Phase 1: execute. Only a failure HERE means the effect did not happen.
   try {
     await execute(registered);
-    await sideEffectTrackerService.markCompleted(registered.idempotencyKey);
   } catch (err) {
     // Persist the failure so the periodic retry service picks it up.
     // Re-throw so runBackgroundTask still records the metric and runs
@@ -135,6 +178,13 @@ async function runWithTrackedRegistration(
       });
     throw err;
   }
+
+  // Phase 2: record completion. The effect has already happened — this
+  // must never mark the row failed or throw back into a retry.
+  await sideEffectTrackerService.markCompletedAfterExecute(
+    registered.idempotencyKey,
+    logContext,
+  );
 }
 
 /**
@@ -174,6 +224,10 @@ export function runTrackedSideEffect(
         },
         task,
         { appointmentId, transition, effectType },
+        // Every status-transition effect is pre-registered inside the
+        // transition's transaction (confirmed.ts / cancelled.ts /
+        // completed.ts registerEffects) — never run it untracked.
+        'rethrow',
       ),
     options,
   );
@@ -192,6 +246,12 @@ export function runTrackedSideEffect(
  * behaviour where a template-load failure dropped the email).
  * If execute throws: row is marked failed and the periodic retry runner
  * picks it up using the stored payload.
+ * If registration throws: nothing executes — the row pre-registered in the
+ * transition transaction owns the effect (RegistrationFailurePolicy
+ * 'rethrow'); runBackgroundTask's retry or the retry runner re-drives it.
+ * If execute succeeds but markCompleted fails: the row is NOT marked failed
+ * and nothing re-throws (see markCompletedAfterExecute), so the email is not
+ * re-sent by the in-process retry.
  */
 export function runReplayableTrackedSideEffect<P>(
   appointmentId: string,
@@ -229,6 +289,8 @@ export function runReplayableTrackedSideEffect<P>(
       },
       () => spec.execute(payload),
       { appointmentId, transition, effectType },
+      // Pre-registered in the transition transaction — see runTrackedSideEffect.
+      'rethrow',
     );
   }, options);
 }
@@ -299,6 +361,9 @@ export function runPeriodicTrackedSideEffect<P>(
             },
       }),
       scopeLogContext(scope, effectType),
+      // Periodic effects have no row anywhere else — degrade to a single
+      // untracked attempt rather than dropping the effect.
+      'run-untracked',
     );
   }, options);
 }
