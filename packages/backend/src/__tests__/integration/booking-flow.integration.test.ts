@@ -153,6 +153,7 @@ import {
   integrationDescribe,
 } from '../helpers/integration-db';
 import { appointmentsRoutes } from '../../routes/appointments.routes';
+import { generateBookingVerificationToken } from '../../services/booking-verification.service';
 import { appointmentLifecycleService } from '../../domain/scheduling/lifecycle';
 
 // ============================================
@@ -199,7 +200,7 @@ integrationDescribe('Booking flow (e2e)', () => {
   });
 
   describe('POST /api/appointments/request', () => {
-    it('creates an appointment row and a justintime_start outbox row in one transaction', async () => {
+    it('creates an unverified row, then verification writes the justintime_start outbox row', async () => {
       const therapist = await seedTherapist();
 
       const res = await app.inject({
@@ -212,35 +213,43 @@ integrationDescribe('Booking flow (e2e)', () => {
         },
       });
 
-      expect(res.statusCode).toBe(201);
+      // A public request only creates an UNVERIFIED row and sends the
+      // verification link; nothing therapist-facing happens yet.
+      expect(res.statusCode).toBe(202);
       const body = res.json();
       expect(body.success).toBe(true);
-      const appointmentId = body.data.appointmentRequestId;
-      expect(typeof appointmentId).toBe('string');
+      expect(body.data.verificationRequired).toBe(true);
 
-      // Appointment row written.
-      const apt = await prisma.appointmentRequest.findUnique({ where: { id: appointmentId } });
+      const apt = await prisma.appointmentRequest.findFirst({ where: { userEmail: 'alice@example.com' } });
       expect(apt).not.toBeNull();
-      expect(apt!.userEmail).toBe('alice@example.com');
       expect(apt!.therapistHandle).toBe(therapist.notionId);
       expect(apt!.status).toBe('pending');
-      // transitionGeneration starts at 0 — no transitions yet, just creation.
+      expect(apt!.emailVerifiedAt).toBeNull();
       expect(apt!.transitionGeneration).toBe(0);
+      expect(
+        await prisma.sideEffectLog.findMany({ where: { appointmentId: apt!.id, effectType: 'justintime_start' } }),
+      ).toHaveLength(0);
 
-      // Outbox row written atomically with the appointment (the whole
-      // point of the JustinTime stranding fix). Status='pending'
-      // because the in-process startScheduling hasn't completed yet
-      // (or has, and would flip to 'completed' — but in this test the
-      // mock resolves quickly, so we accept either pending or completed).
+      // Clicking the link (the POST the confirmation page submits) activates
+      // the request: verified stamp + outbox row in one transaction.
+      const token = generateBookingVerificationToken(apt!.id, 'alice@example.com');
+      const verify = await app.inject({
+        method: 'POST',
+        url: `/api/appointments/${apt!.id}/verify?token=${encodeURIComponent(token)}`,
+      });
+      expect(verify.statusCode).toBeLessThan(400);
+
+      const activated = await prisma.appointmentRequest.findUnique({ where: { id: apt!.id } });
+      expect(activated!.emailVerifiedAt).not.toBeNull();
       const outboxRows = await prisma.sideEffectLog.findMany({
-        where: { appointmentId, effectType: 'justintime_start' },
+        where: { appointmentId: apt!.id, effectType: 'justintime_start' },
       });
       expect(outboxRows).toHaveLength(1);
       expect(outboxRows[0].transition).toBe('requested');
       expect(['pending', 'completed']).toContain(outboxRows[0].status);
     });
 
-    it('idempotent: a duplicate request within the dedup window returns the existing appointment', async () => {
+    it('idempotent: a duplicate request within the dedup window re-uses the existing unverified row', async () => {
       const therapist = await seedTherapist();
       const payload = {
         userName: 'Bob Test',
@@ -249,33 +258,24 @@ integrationDescribe('Booking flow (e2e)', () => {
       };
 
       const first = await app.inject({ method: 'POST', url: '/api/appointments/request', payload });
-      expect(first.statusCode).toBe(201);
-      const firstId = first.json().data.appointmentRequestId;
+      expect(first.statusCode).toBe(202);
 
-      // Same payload within the 5-min dedup window — the route's
-      // idempotency-key check at the top of the handler returns the
-      // existing appointment with `deduplicated: true`. This is the
-      // happy-path UX for double-clicks; the 400-style "active thread"
-      // error is reserved for cases without a matching idempotency key.
+      // Same payload within the dedup window: answered exactly like the
+      // first request (no oracle about existing requests) and no second row.
       const second = await app.inject({ method: 'POST', url: '/api/appointments/request', payload });
-      expect(second.statusCode).toBe(200);
-      const secondBody = second.json();
-      expect(secondBody.success).toBe(true);
-      expect(secondBody.deduplicated).toBe(true);
-      expect(secondBody.data.appointmentRequestId).toBe(firstId);
+      expect(second.statusCode).toBe(202);
+      expect(second.json()).toEqual(first.json());
 
-      // Crucial: only one appointment row exists, only one outbox row.
-      // The dedup is the whole point — we don't want a phantom second
-      // appointment from a double-click.
       const apts = await prisma.appointmentRequest.findMany({
         where: { therapistHandle: therapist.notionId! },
       });
       expect(apts).toHaveLength(1);
-      expect(apts[0].id).toBe(firstId);
+      // Still unverified, so still no therapist-facing work has been queued.
+      expect(apts[0].emailVerifiedAt).toBeNull();
       const outboxRows = await prisma.sideEffectLog.findMany({
-        where: { appointmentId: firstId, effectType: 'justintime_start' },
+        where: { appointmentId: apts[0].id, effectType: 'justintime_start' },
       });
-      expect(outboxRows).toHaveLength(1);
+      expect(outboxRows).toHaveLength(0);
     });
   });
 
