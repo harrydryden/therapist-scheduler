@@ -13,14 +13,23 @@
  * `flagForHumanReview` is also exposed for the tool loop to call
  * directly (via `flagForHumanReviewFromLoop` on the executor) when
  * the runaway-loop circuit breaker trips without the agent
- * explicitly calling the tool. Same side effects either way.
+ * explicitly calling the tool. Same side effects either way —
+ * including the holding reply to whoever wrote in (see
+ * `sendHoldingReply`) and the (appointment, reason)-deduplicated
+ * Slack alert (admin-notification.service).
  */
 
 import { logger } from '../../../../utils/logger';
 import { prisma } from '../../../../utils/database';
+import { cacheManager } from '../../../../utils/redis';
+import { firstName } from '../../../../utils/first-name';
 import { auditEventService } from '../../../../services/audit-event.service';
 import { slackNotificationService } from '../../../../services/slack-notification.service';
+import { adminNotificationService } from '../../../../services/admin-notification.service';
+import { aiConversationService } from '../../../../services/ai-conversation.service';
+import { getSettingValue } from '../../../../services/settings.service';
 import { recommendCancelMatchInputSchema } from '../../../../schemas/tool-inputs';
+import { sendAppointmentEmail } from '../send';
 import type {
   SchedulingContext,
   ToolExecutionResult,
@@ -69,6 +78,12 @@ export async function flagForHumanReview(
     ? `Agent uncertain: ${params.reason}\n\nSuggested action: ${params.suggested_action}`
     : `Agent uncertain: ${params.reason}`;
 
+  // Before the flip, not after: the reply goes out through the agent's
+  // normal outbound path, whose atomic re-check refuses to send once human
+  // control is on. If an admin already holds control, that same check
+  // suppresses it.
+  await sendHoldingReply(context, traceId);
+
   // Atomic: only take the flag if human control isn't already enabled.
   // This is also reachable from the tool loop's runaway-loop circuit
   // breaker (flagForHumanReviewFromLoop), which can fire after an admin
@@ -104,11 +119,75 @@ export async function flagForHumanReview(
     reason: controlReason,
   });
 
-  await slackNotificationService.notifyHumanReviewFlagged({
+  await adminNotificationService.notifyHumanReviewFlagged({
     appointmentId: context.appointmentRequestId,
     therapistName: context.therapistName,
     reason: params.reason,
   });
+}
+
+/** How long the one-per-escalation holding-reply marker is kept. */
+const HOLDING_REPLY_MARKER_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * When a turn escalates to human review, the client or therapist whose
+ * email triggered it used to hear nothing until an admin picked it up —
+ * possibly days. Send them a brief holding reply instead, behind
+ * `agent.holdingReplyOnEscalation` (default on).
+ *
+ * Only for a verified sender (never an 'unknown' one, never the kickoff
+ * turn, which has no sender). At most once per escalation: a Redis marker
+ * keyed on the appointment and the turn (the inbound email), so a guard
+ * that re-trips on every remaining tool call, or a redelivery of the same
+ * email, doesn't send it again. Best-effort — never throws, never blocks
+ * the escalation itself.
+ */
+async function sendHoldingReply(context: SchedulingContext, traceId: string): Promise<void> {
+  const sender = context.inboundSender;
+  if ((sender !== 'user' && sender !== 'therapist') || !context.turnId) return;
+
+  try {
+    if ((await getSettingValue<boolean>('agent.holdingReplyOnEscalation')) !== true) return;
+
+    const marker = await cacheManager.setNX(
+      `agent:holding-reply:${context.appointmentRequestId}:${context.turnId}`,
+      traceId,
+      HOLDING_REPLY_MARKER_TTL_SECONDS,
+    );
+    if (marker !== 'OK') return;
+
+    const to = sender === 'user' ? context.userEmail : context.therapistEmail;
+    const name = sender === 'user' ? context.userName : context.therapistName;
+    const agentFirstName = firstName(await getSettingValue<string>('agent.fromName'));
+    const delivery = await sendAppointmentEmail(
+      {
+        to,
+        subject: 'Thanks for your message',
+        body:
+          `Hi ${name},\n\n` +
+          `Thanks for your message. I've passed it to a colleague, who will pick this up and get back to you shortly.\n\n` +
+          `Best wishes,\n${agentFirstName}`,
+      },
+      context.appointmentRequestId,
+      traceId,
+    );
+    logger.info(
+      { traceId, appointmentRequestId: context.appointmentRequestId, recipient: sender, delivery: delivery.status },
+      'Holding reply on escalation',
+    );
+    if (delivery.status === 'sent' || delivery.status === 'queued') {
+      // So the agent (and the admin) can see it after release.
+      await aiConversationService.appendConversationMessage(context.appointmentRequestId, {
+        role: 'admin',
+        content: `[System: holding reply sent to the ${sender === 'user' ? 'client' : 'therapist'} — "a colleague will pick this up".]`,
+      });
+    }
+  } catch (err) {
+    logger.warn(
+      { traceId, appointmentRequestId: context.appointmentRequestId, err },
+      'Holding reply on escalation failed (non-fatal)',
+    );
+  }
 }
 
 // ─── recommend_cancel_match ─────────────────────────────────────────

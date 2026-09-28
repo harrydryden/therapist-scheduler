@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { logger } from './logger';
+import { CONVERSATION_LIMITS } from '../constants';
 import type { ConversationState, ResponseTracking, TherapistAvailability } from '../types';
 import type { ConversationCheckpoint, ConversationStage } from '../services/conversation-checkpoint.service';
 import type { ConversationFacts } from './conversation-facts';
@@ -10,7 +11,15 @@ import type { ConversationFacts } from './conversation-facts';
  */
 const JSON_SIZE_LIMITS = {
   DEFAULT: 1_000_000,          // 1MB - general JSON parsing
-  CONVERSATION_STATE: 500_000, // 500KB - conversation history can grow
+  // Tied to the writer's cap so the two can't drift: every save trims the
+  // state to MAX_STATE_BYTES (UTF-8 bytes, which is never fewer than the
+  // string's length), so any state we wrote is readable. The read limit
+  // used to be 500,000 — BELOW the 512,000-byte trim limit — so a state
+  // between the two was saved fine and then unreadable on every later
+  // turn ("Conversation state not found"). 2x leaves headroom for legacy
+  // rows written before the cap was enforced on every save; they are
+  // trimmed on their next save.
+  CONVERSATION_STATE: CONVERSATION_LIMITS.MAX_STATE_BYTES * 2,
   AVAILABILITY: 50_000,        // 50KB - availability data is small
   STRICT: 100_000,             // 100KB - for untrusted inputs
 };

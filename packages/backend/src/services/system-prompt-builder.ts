@@ -139,6 +139,8 @@ export async function buildSystemPrompt(
     'agent.maxSlotsPerGroup',
     'agent.maxTotalSlots',
     'general.timezone',
+    'general.minBookingLeadHours',
+    'agent.holdingReplyOnEscalation',
   ]);
   const initialClientSubject = requireSetting(settingsMap, 'email.initialClientWithAvailabilitySubject');
   const initialClientBody = requireSetting(settingsMap, 'email.initialClientWithAvailabilityBody');
@@ -157,6 +159,17 @@ export async function buildSystemPrompt(
   const maxSlotsPerGroup = requireSetting(settingsMap, 'agent.maxSlotsPerGroup') as unknown as number;
   const maxTotalSlots = requireSetting(settingsMap, 'agent.maxTotalSlots') as unknown as number;
   const timezone = requireSetting(settingsMap, 'general.timezone') as string;
+  // The lead time mark_scheduling_complete validates against
+  // (availabilityResolver.validateMarkComplete) — offering slots on the
+  // same rule means the agent is never shown a time it can't book.
+  const minBookingLeadHours = requireSetting(settingsMap, 'general.minBookingLeadHours') as unknown as number;
+  // When on, flagging sends the person who wrote in a holding reply
+  // automatically (handlers/human-control.ts) — the agent must not send a
+  // second one itself.
+  const automaticHoldingReply = (settingsMap.get('agent.holdingReplyOnEscalation') as unknown) === true;
+  const holdingReplyGuidance = automaticHoldingReply
+    ? 'Do not send a holding reply yourself: when you call flag_for_human_review, the system automatically sends the person who wrote in a brief "thanks, a colleague will pick this up" reply.'
+    : 'You may send a brief holding reply ("Thanks — I\'m passing this to the right person at Spill who\'ll follow up directly.").';
 
   const hasAvailability = context.therapistAvailability &&
     (context.therapistAvailability as any).slots &&
@@ -177,6 +190,7 @@ export async function buildSystemPrompt(
         maxSlotsPerGroup,
         maxTotalSlots,
         sessionDurationMinutes: sessionDuration,
+        minBookingLeadHours,
       })
     : null;
 
@@ -482,7 +496,7 @@ Use flag_for_human_review when:
 
 ### Out-of-Scope Topics — Escalate, Never Improvise
 
-Your remit is **scheduling only**. The following topics are outside it. If a message raises one, do NOT attempt to answer, negotiate, or reassure on the substance — call flag_for_human_review with a short description and let a human take it. You may send a brief holding reply ("Thanks — I'm passing this to the right person at Spill who'll follow up directly."), but never invent or commit to anything on these:
+Your remit is **scheduling only**. The following topics are outside it. If a message raises one, do NOT attempt to answer, negotiate, or reassure on the substance — call flag_for_human_review with a short description and let a human take it. Never invent or commit to anything on these topics. ${holdingReplyGuidance} The topics:
 
 - **Pay, rates, fees, invoicing, or compensation** — e.g. a therapist asking about their hourly rate, pay bands, or when they'll be paid. Never quote, estimate, or negotiate figures.
 - **Recruitment, hiring, contracts, or role terms** — e.g. a therapist still in the hiring process asking about the role, the interview stages, "is this still a good fit", or their employment terms. These belong to the recruitment team, not scheduling.

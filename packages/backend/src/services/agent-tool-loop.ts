@@ -43,6 +43,7 @@ import { getToolsForStage } from './tools-for-stage';
 // exemption + the message builders, so neither is referenced directly here
 // any more.
 import { ToolTurnGuard } from './agent-turn-guard';
+import { getDailyTokenBudgetStatus, recordTokenUsage } from './agent-token-budget';
 import {
   appendToolRoundTrip,
   buildErrorBreakerAdminMessage,
@@ -115,36 +116,178 @@ const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_
 // settings module graph.
 
 /**
- * Shared Anthropic call shape used by both tool loops. Centralises model
- * selection, max_tokens, and circuit-breaker config so changing any of
- * them is a one-line edit. Stays in this module (not in tool-loop-helpers)
- * because it imports anthropic + circuit-breaker — the helpers file is
- * deliberately import-free of runtime side-effects so its tests stay fast.
+ * Return a copy of `messages` whose final content block carries a prompt
+ * cache breakpoint. The loops resend the whole history on every iteration
+ * of a turn (plus one more assistant/tool-result round-trip each time), so
+ * caching up to the latest message lets iteration N+1 read everything
+ * iteration N sent — the ~50KB thread context included — at ~0.1x.
  *
- * `system` accepts either a plain string (booking loop) or a
- * `TextBlockParam[]` (availability loop, which uses cache_control on the
- * stable system + tool prefix). The Anthropic SDK accepts both shapes.
+ * Applied to a per-request copy: `messagesForClaude` itself never carries
+ * a breakpoint, so a request has at most two (this one + the system
+ * block's) against the API's limit of four, however many iterations run.
+ */
+function withTrailingCacheBreakpoint(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  const last = messages[messages.length - 1];
+  if (!last) return messages;
+  const blocks: Anthropic.ContentBlockParam[] =
+    typeof last.content === 'string'
+      ? last.content
+        ? [{ type: 'text', text: last.content }]
+        : []
+      : [...last.content];
+  const tail = blocks[blocks.length - 1];
+  if (!tail) return messages;
+  blocks[blocks.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } } as Anthropic.ContentBlockParam;
+  return [...messages.slice(0, -1), { ...last, content: blocks }];
+}
+
+/**
+ * Shared Anthropic call shape used by both tool loops. Centralises model
+ * selection, max_tokens, prompt caching, token accounting and circuit-
+ * breaker config so changing any of them is a one-line edit. Stays in this
+ * module (not in tool-loop-helpers) because it imports anthropic +
+ * circuit-breaker — the helpers file is deliberately import-free of
+ * runtime side-effects so its tests stay fast.
+ *
+ * Prompt caching: `cache_control` on the single system block caches the
+ * tool definitions AND the system prompt (tools render before system in
+ * the request prefix); both are fixed for the length of a turn. The
+ * trailing message breakpoint (above) caches the growing history.
  */
 async function callAgentClaude(args: {
-  system: string | Anthropic.TextBlockParam[];
+  systemPrompt: string;
   tools: Anthropic.Tool[];
   messages: Anthropic.MessageParam[];
   context: string;
   traceId: string;
+  maxTokens?: number;
 }): Promise<Anthropic.Message> {
-  return resilientCall(
+  const response = await resilientCall(
     () =>
-      anthropicClient.messages.create({
-        model: CLAUDE_MODELS.AGENT,
-        max_tokens: MODEL_CONFIG.agent.maxTokens,
-        system: args.system,
-        tools: args.tools,
-        messages: args.messages,
-      }),
+      anthropicClient.messages.create(
+        {
+          model: CLAUDE_MODELS.AGENT,
+          max_tokens: args.maxTokens ?? MODEL_CONFIG.agent.maxTokens,
+          system: [{ type: 'text', text: args.systemPrompt, cache_control: { type: 'ephemeral' } }],
+          tools: args.tools,
+          messages: withTrailingCacheBreakpoint(args.messages),
+        },
+        { timeout: MODEL_CONFIG.agent.requestTimeoutMs },
+      ),
     { context: args.context, traceId: args.traceId, circuitBreaker: claudeCircuitBreaker },
   );
+  await recordTokenUsage(response.usage, { traceId: args.traceId, context: args.context });
+  return response;
 }
 
+/** Token usage summed over one loop invocation (logged when the turn ends). */
+export interface TurnTokenUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
+function emptyTurnUsage(): TurnTokenUsage {
+  return { calls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+}
+
+function addTurnUsage(total: TurnTokenUsage, usage: Anthropic.Usage | null | undefined): void {
+  total.calls++;
+  if (!usage) return;
+  total.inputTokens += usage.input_tokens ?? 0;
+  total.outputTokens += usage.output_tokens ?? 0;
+  total.cacheCreationInputTokens += usage.cache_creation_input_tokens ?? 0;
+  total.cacheReadInputTokens += usage.cache_read_input_tokens ?? 0;
+}
+
+/**
+ * Why a turn was escalated before any of its tool calls could run:
+ *   - token_budget: the daily token budget is exhausted (Claude not called)
+ *   - truncated: the response stopped on `max_tokens` twice — its tool
+ *     calls may be cut off mid-argument, so none of them run
+ *   - refusal: Claude declined (stop_reason 'refusal')
+ *   - empty_response: no text and no tool calls, with nothing done this turn
+ */
+type ResponseGuardBucket = 'token_budget' | 'truncated' | 'refusal' | 'empty_response';
+
+type GuardedResponse =
+  | { kind: 'response'; response: Anthropic.Message }
+  | { kind: 'escalate'; bucket: ResponseGuardBucket; reason: string };
+
+/**
+ * One Claude round-trip for a loop iteration, with the response-level
+ * guards both loops share. Only a response that is safe to act on comes
+ * back as `kind: 'response'`:
+ *
+ *   - budget exhausted → escalate WITHOUT calling Claude;
+ *   - `max_tokens` → never act on the truncated response (a cut-off
+ *     tool_use can still parse, e.g. an email body ending mid-sentence);
+ *     re-ask once with the larger cap, and escalate if that is cut off too;
+ *   - `refusal` → escalate (a refusal is not a finished turn).
+ */
+async function requestAgentResponse(
+  args: Parameters<typeof callAgentClaude>[0],
+  usage: TurnTokenUsage,
+  turn: { nothingDoneYet: boolean },
+): Promise<GuardedResponse> {
+  const budget = await getDailyTokenBudgetStatus();
+  if (budget.exhausted) {
+    logger.warn(
+      { traceId: args.traceId, used: budget.used, budget: budget.budget },
+      `${args.context} - daily token budget exhausted; not calling Claude`,
+    );
+    return {
+      kind: 'escalate',
+      bucket: 'token_budget',
+      // Stable text (no running count) so repeat alerts dedup on reason.
+      reason: `Daily Claude token budget exhausted (${budget.budget} tokens per UTC day). Agent paused without calling Claude; raise agent.dailyTokenBudget or wait for the midnight UTC reset, then release.`,
+    };
+  }
+
+  let response = await callAgentClaude(args);
+  addTurnUsage(usage, response.usage);
+
+  if (response.stop_reason === 'max_tokens') {
+    const retryCap = MODEL_CONFIG.agent.maxTokensOnTruncation ?? (args.maxTokens ?? MODEL_CONFIG.agent.maxTokens) * 2;
+    logger.warn(
+      { traceId: args.traceId, maxTokens: args.maxTokens ?? MODEL_CONFIG.agent.maxTokens, retryCap },
+      `${args.context} - Claude response hit max_tokens; discarding it and retrying once with a larger cap`,
+    );
+    response = await callAgentClaude({ ...args, maxTokens: retryCap });
+    addTurnUsage(usage, response.usage);
+    if (response.stop_reason === 'max_tokens') {
+      return {
+        kind: 'escalate',
+        bucket: 'truncated',
+        reason: `Claude's response was cut off at the output-token limit twice (${retryCap} tokens), so none of its tool calls were run. Agent paused for review.`,
+      };
+    }
+  }
+
+  if (response.stop_reason === 'refusal') {
+    return {
+      kind: 'escalate',
+      bucket: 'refusal',
+      reason: 'Claude declined to respond to this conversation (stop_reason: refusal). Nothing was sent. Agent paused for review.',
+    };
+  }
+
+  // Neither text nor tool calls. Only an escalation while nothing has been
+  // achieved this turn: after successful tool calls an empty end_turn just
+  // means Claude had nothing to add.
+  const { toolCalls, assistantText } = parseClaudeResponse(response);
+  if (turn.nothingDoneYet && toolCalls.length === 0 && assistantText.trim() === '') {
+    return {
+      kind: 'escalate',
+      bucket: 'empty_response',
+      reason: `Claude returned an empty response (no text, no tool calls; stop_reason: ${response.stop_reason}) and nothing was done this turn. Agent paused for review.`,
+    };
+  }
+
+  return { kind: 'response', response };
+}
 
 /** Tools whose execution produces external side effects (DB mutations, emails).
  *  checkpointBeforeSideEffects() is called before these to ensure conversation state
@@ -195,6 +338,8 @@ export interface ToolLoopResult {
   flaggedForHumanReview: boolean;
   /** Whether max iterations were hit */
   hitMaxIterations: boolean;
+  /** Claude token usage summed over the turn's calls */
+  usage: TurnTokenUsage;
 }
 
 /**
@@ -291,6 +436,9 @@ export async function runToolLoop(
   let totalToolErrors = 0;
   const executedTools: ExecutedTool[] = [];
   let flaggedForHumanReview = false;
+  const usage = emptyTurnUsage();
+  const pushAdminMessage = (content: string) =>
+    conversationState.messages.push({ role: 'admin' as const, content });
 
   // Per-turn budget + same-hash gate. Scoped to this runToolLoop invocation
   // (counters cumulate across iterations, reset per invocation). The decision
@@ -339,13 +487,27 @@ export async function runToolLoop(
         )
       : schedulingTools;
 
-    const response = await callAgentClaude({
-      system: systemPrompt,
-      tools,
-      messages: messagesForClaude,
-      context: logContext,
-      traceId,
-    });
+    const guarded = await requestAgentResponse(
+      { systemPrompt, tools, messages: messagesForClaude, context: logContext, traceId },
+      usage,
+      { nothingDoneYet: executedTools.length === 0 },
+    );
+    if (guarded.kind === 'escalate') {
+      await escalateToHumanReview({
+        traceId,
+        idFields: { appointmentRequestId: context.appointmentRequestId },
+        logContext,
+        logMessage: `Response guard tripped (${guarded.bucket}) — ${guarded.reason}`,
+        logExtra: { iteration, bucket: guarded.bucket },
+        adminMessageContent: `[System: ${guarded.reason}]`,
+        flagReason: guarded.reason,
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage,
+      });
+      flaggedForHumanReview = true;
+      break;
+    }
+    const response = guarded.response;
 
     const { toolCalls, assistantText } = parseClaudeResponse(response);
 
@@ -607,7 +769,7 @@ export async function runToolLoop(
         adminMessageContent: `[System: ${reason}]`,
         flagReason: reason,
         flagForHumanReview: callbacks.flagForHumanReview,
-        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+        pushAdminMessage,
       });
       flaggedForHumanReview = true;
       stopLoop = true;
@@ -632,7 +794,7 @@ export async function runToolLoop(
         adminMessageContent: buildErrorBreakerAdminMessage(totalToolErrors),
         flagReason: buildErrorBreakerFlagReason(totalToolErrors),
         flagForHumanReview: callbacks.flagForHumanReview,
-        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+        pushAdminMessage,
       });
       flaggedForHumanReview = true;
       stopLoop = true;
@@ -673,10 +835,15 @@ export async function runToolLoop(
       adminMessageContent: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
       flagReason: reason,
       flagForHumanReview: callbacks.flagForHumanReview,
-      pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+      pushAdminMessage,
     });
     flaggedForHumanReview = true;
   }
+
+  logger.info(
+    { traceId, appointmentRequestId: context.appointmentRequestId, iterations: iteration, usage },
+    `${logContext} - turn token usage`,
+  );
 
   return {
     messages: messagesForClaude,
@@ -686,6 +853,7 @@ export async function runToolLoop(
       executedTools,
       flaggedForHumanReview,
       hitMaxIterations: iteration >= MAX_TOOL_ITERATIONS,
+      usage,
     },
   };
 }
@@ -697,10 +865,8 @@ export async function runToolLoop(
 // regression checks and a richer side-effect surface (emails, lifecycle
 // transitions) that don't apply here. Keeping them as two focused
 // functions is easier to reason about than one branching generalisation.
-// Adds prompt caching that the booking loop doesn't currently use — the
-// system prompt + tool definitions are stable across a conversation, so
-// caching them at the last system block cuts cost on every iteration
-// after the first.
+// Both share callAgentClaude / requestAgentResponse, so prompt caching,
+// token accounting and the stop_reason guards are identical.
 
 /** Context for the availability-collection agent. Slim by design: no
  *  client counterpart exists, so no userName / userEmail. */
@@ -741,6 +907,8 @@ export interface AvailabilityToolLoopResult {
   /** True if mark_complete fired — conversation reached natural end. */
   markedComplete: boolean;
   hitMaxIterations: boolean;
+  /** Claude token usage summed over the turn's calls */
+  usage: TurnTokenUsage;
 }
 
 /**
@@ -779,6 +947,9 @@ export async function runAvailabilityToolLoop(
   const executedTools: ExecutedTool[] = [];
   let flaggedForHumanReview = false;
   let markedComplete = false;
+  const usage = emptyTurnUsage();
+  const pushAdminMessage = (content: string) =>
+    conversationState.messages.push({ role: 'admin' as const, content });
 
   // Per-turn budget + same-hash gate, shared with the booking loop via
   // ToolTurnGuard. Scoped to this runAvailabilityToolLoop invocation.
@@ -792,18 +963,6 @@ export async function runAvailabilityToolLoop(
   // iteration-cap exhaustion in the post-loop block.
   let loopFinishedNaturally = false;
 
-  // cache_control on the system block caches both tool definitions and
-  // system prompt (tools render before system in the request prefix).
-  // Both are stable for the lifetime of one conversation, so every
-  // iteration after the first reads from the cache at ~0.1x cost.
-  const systemBlocks: Anthropic.TextBlockParam[] = [
-    {
-      type: 'text',
-      text: systemPrompt,
-      cache_control: { type: 'ephemeral' },
-    },
-  ];
-
   while (iteration < MAX_TOOL_ITERATIONS) {
     iteration++;
     logger.debug(
@@ -811,13 +970,27 @@ export async function runAvailabilityToolLoop(
       `${logContext} - availability agent Claude API call iteration`,
     );
 
-    const response = await callAgentClaude({
-      system: systemBlocks,
-      tools: availabilityTools,
-      messages: messagesForClaude,
-      context: logContext,
-      traceId,
-    });
+    const guarded = await requestAgentResponse(
+      { systemPrompt, tools: availabilityTools, messages: messagesForClaude, context: logContext, traceId },
+      usage,
+      { nothingDoneYet: executedTools.length === 0 },
+    );
+    if (guarded.kind === 'escalate') {
+      await escalateToHumanReview({
+        traceId,
+        idFields: { conversationId: context.conversationId },
+        logContext,
+        logMessage: `availability response guard tripped (${guarded.bucket}) — ${guarded.reason}`,
+        logExtra: { iteration, bucket: guarded.bucket },
+        adminMessageContent: `[System: ${guarded.reason}]`,
+        flagReason: guarded.reason,
+        flagForHumanReview: callbacks.flagForHumanReview,
+        pushAdminMessage,
+      });
+      flaggedForHumanReview = true;
+      break;
+    }
+    const response = guarded.response;
 
     const { toolCalls, assistantText } = parseClaudeResponse(response);
 
@@ -958,7 +1131,7 @@ export async function runAvailabilityToolLoop(
         adminMessageContent: `[System: ${reason}]`,
         flagReason: reason,
         flagForHumanReview: callbacks.flagForHumanReview,
-        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+        pushAdminMessage,
       });
       flaggedForHumanReview = true;
       stopLoop = true;
@@ -977,7 +1150,7 @@ export async function runAvailabilityToolLoop(
         adminMessageContent: buildErrorBreakerAdminMessage(totalToolErrors),
         flagReason: buildErrorBreakerFlagReason(totalToolErrors),
         flagForHumanReview: callbacks.flagForHumanReview,
-        pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+        pushAdminMessage,
       });
       flaggedForHumanReview = true;
       stopLoop = true;
@@ -1018,10 +1191,15 @@ export async function runAvailabilityToolLoop(
       adminMessageContent: buildMaxIterationsAdminMessage(MAX_TOOL_ITERATIONS),
       flagReason: reason,
       flagForHumanReview: callbacks.flagForHumanReview,
-      pushAdminMessage: (content) => conversationState.messages.push({ role: 'admin' as const, content }),
+      pushAdminMessage,
     });
     flaggedForHumanReview = true;
   }
+
+  logger.info(
+    { traceId, conversationId: context.conversationId, iterations: iteration, usage },
+    `${logContext} - availability turn token usage`,
+  );
 
   return {
     messages: messagesForClaude,
@@ -1032,6 +1210,7 @@ export async function runAvailabilityToolLoop(
       flaggedForHumanReview,
       markedComplete,
       hitMaxIterations: iteration >= MAX_TOOL_ITERATIONS,
+      usage,
     },
   };
 }

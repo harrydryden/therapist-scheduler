@@ -16,6 +16,7 @@ import {
   safeJsonStringify,
   isConversationStage,
 } from '../utils/json-parser';
+import { CONVERSATION_LIMITS } from '../constants';
 
 describe('safeJsonParse', () => {
   describe('basic parsing', () => {
@@ -162,9 +163,22 @@ describe('parseConversationState', () => {
   it('rejects oversized conversation state strings', () => {
     const hugeState = JSON.stringify({
       systemPrompt: 'test',
-      messages: [{ role: 'user', content: 'x'.repeat(600_000) }],
+      messages: [{ role: 'user', content: 'x'.repeat(CONVERSATION_LIMITS.MAX_STATE_BYTES * 2 + 1) }],
     });
     expect(parseConversationState(hugeState)).toBeNull();
+  });
+
+  // Regression (review #10): the read limit (500,000) sat BELOW the
+  // writer's trim cap (512,000), so a state the writer happily saved was
+  // unreadable on the next turn ("Conversation state not found").
+  it('reads back any state up to (and beyond) the writer\'s trim cap', () => {
+    const atCap = JSON.stringify({
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'x'.repeat(CONVERSATION_LIMITS.MAX_STATE_BYTES - 64) }],
+    });
+    expect(atCap.length).toBeLessThanOrEqual(CONVERSATION_LIMITS.MAX_STATE_BYTES);
+    expect(atCap.length).toBeGreaterThan(500_000);
+    expect(parseConversationState(atCap)).not.toBeNull();
   });
 });
 

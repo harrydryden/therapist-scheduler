@@ -130,6 +130,14 @@ export interface SchedulingContext {
    */
   inboundSender?: InboundSender;
   /**
+   * Identifies the turn this context belongs to — one inbound email
+   * (processEmailReply) or the kickoff (startScheduling). Part of the
+   * tool-call idempotency hash, so an identical call is deduplicated
+   * within a turn (and on a redelivery of the same email) but not across
+   * turns. Optional for legacy callers: without it the hash is unscoped.
+   */
+  turnId?: string;
+  /**
    * Primary keys of the User / Therapist rows linked to this appointment.
    * Optional because legacy appointment rows pre-date the User/Therapist
    * entities and may have null userId/therapistId. The system prompt

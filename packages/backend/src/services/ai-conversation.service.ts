@@ -79,6 +79,68 @@ export function truncateMessageContent(content: string): string {
   return content.slice(0, MAX_LENGTH - SUFFIX.length) + SUFFIX;
 }
 
+/** Limits `trimConversationState` enforces. */
+export interface ConversationTrimLimits {
+  /** Message count above which the state is trimmed (`agent.maxMessages`). */
+  maxMessages: number;
+  /** Message count a count-triggered trim keeps (`agent.trimToMessages`). */
+  trimToMessages: number;
+  /** Serialised-size cap (UTF-8 bytes), enforced on every save. */
+  maxStateBytes: number;
+}
+
+const DEFAULT_TRIM_LIMITS: ConversationTrimLimits = {
+  maxMessages: CONVERSATION_LIMITS.MAX_MESSAGES,
+  trimToMessages: CONVERSATION_LIMITS.TRIM_TO_MESSAGES,
+  maxStateBytes: CONVERSATION_LIMITS.MAX_STATE_BYTES,
+};
+
+function positiveIntOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+/**
+ * Trim limits from the admin settings (`agent.maxMessages`,
+ * `agent.trimToMessages` — defined in setting-definitions but never read
+ * before), falling back to the CONVERSATION_LIMITS defaults when a setting
+ * is unreadable or not a positive number. `trimToMessages` is clamped to
+ * `maxMessages` so a misconfigured pair can't disable trimming.
+ */
+async function readTrimLimits(): Promise<ConversationTrimLimits> {
+  let maxMessages = DEFAULT_TRIM_LIMITS.maxMessages;
+  let trimToMessages = DEFAULT_TRIM_LIMITS.trimToMessages;
+  try {
+    maxMessages = positiveIntOr(await getSettingValue<number>('agent.maxMessages'), maxMessages);
+    trimToMessages = positiveIntOr(await getSettingValue<number>('agent.trimToMessages'), trimToMessages);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to read conversation trim settings; using defaults');
+  }
+  return {
+    maxMessages,
+    trimToMessages: Math.min(trimToMessages, maxMessages),
+    maxStateBytes: DEFAULT_TRIM_LIMITS.maxStateBytes,
+  };
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+/**
+ * Where a turn's in-memory conversation state stands relative to the
+ * stored row: the `conversationVersion` it last read or wrote, and how
+ * many of its in-memory messages that version already contains. Messages
+ * past `persistedCount` are the turn's own and not yet saved. The turn
+ * save methods advance it in place.
+ */
+export interface ConversationSaveCursor {
+  version: number | undefined;
+  persistedCount: number;
+}
+
+/** Rebase attempts before a turn save gives up on a busy row. */
+const MAX_TURN_SAVE_REBASES = 3;
+
 export class AIConversationService {
   private traceId: string;
 
@@ -115,8 +177,9 @@ export class AIConversationService {
     state: StorableConversationState,
     expectedVersion?: number
   ): Promise<number> {
-    // Trim state if needed to prevent unbounded growth
-    const trimmedState = this.trimConversationState(state);
+    // Trim to the admin-configured message limits AND the byte cap —
+    // checked on every save, whatever the message count.
+    const trimmedState = this.trimConversationState(state, await readTrimLimits());
     const { json: stateJson, value: stateValue } = serialiseConversationState(trimmedState);
     const now = new Date();
     // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries.
@@ -146,10 +209,20 @@ export class AIConversationService {
     // together in `update-fragments` so the two writers of
     // `checkpointStage` (this method + `applyCheckpointUpdate`)
     // stay in lock-step on the invariant.
-    const chaseResetFields = chaseResetIfStageChanged(
-      existing?.checkpointStage ?? null,
-      checkpointStage,
-    );
+    //
+    // A state with NO checkpoint (a legacy row, or one that so far only
+    // holds lifecycle audit notes appended before the agent ran) leaves
+    // the stage columns alone: the column is then the only record of the
+    // stage (processEmailReply seeds the checkpoint from it), and a
+    // null-vs-stage "change" would wrongly reset the chase sentinels.
+    const stageFields = checkpointStage === null
+      ? {}
+      : {
+          checkpointStage,
+          checkpointAt,
+          // Chase-reset on stage advance — see the read above.
+          ...chaseResetIfStageChanged(existing?.checkpointStage ?? null, checkpointStage),
+        };
 
     // `!== undefined`, not truthiness: version 0 is a real version (every
     // row starts there).
@@ -177,11 +250,7 @@ export class AIConversationService {
               lastActivityAt: now,
               isStale: false,
               messageCount,
-              checkpointStage,
-              checkpointAt,
-              // Chase-reset on stage advance — see the read at the top
-              // of this method for the rationale.
-              ...chaseResetFields,
+              ...stageFields,
             },
           });
 
@@ -217,11 +286,7 @@ export class AIConversationService {
               lastActivityAt: now,
               isStale: false,
               messageCount,
-              checkpointStage,
-              checkpointAt,
-              // Chase-reset on stage advance — see the read at the top
-              // of this method for the rationale.
-              ...chaseResetFields,
+              ...stageFields,
             },
             select: { id: true, conversationVersion: true },
           });
@@ -301,7 +366,9 @@ export class AIConversationService {
       const oldStage = record.checkpointStage;
 
       state.checkpoint = mutate(state.checkpoint ?? null);
-      const { json: stateJson, value: stateValue } = serialiseConversationState(state);
+      const { json: stateJson, value: stateValue } = serialiseConversationState(
+        this.trimConversationState(state, await readTrimLimits()),
+      );
       const { messageCount, checkpointStage, checkpointAt } = extractConversationMeta(stateJson);
 
       const now = new Date();
@@ -395,38 +462,43 @@ export class AIConversationService {
 
   /**
    * Append a single message to the conversation log under optimistic
-   * locking so a concurrent agent save / chase-tick / second admin click
-   * can't silently overwrite the append.
+   * locking (CAS on conversationVersion, which the append bumps) so a
+   * concurrent agent save / chase-tick / second admin click can't
+   * silently overwrite it — and so an agent turn in flight sees the bump
+   * and rebases onto it (see saveTurnState) instead of saving over it.
    *
-   * Used by admin endpoints (send-message, release-control) that need to
-   * record an audit-style entry alongside other concurrent writers. The
-   * caller's email/Slack side effect should already have fired; this
-   * persists the audit trail.
+   * Used by admin endpoints (send-message, release-control) and by the
+   * lifecycle audit-note writer (lifecycle/audit.ts). The caller's
+   * email/Slack/transition side effect has already happened; this
+   * persists the record of it.
    *
    * Behaviour:
-   *   - If the appointment row has no conversationState, this is a
-   *     no-op (matches the previous read-modify-write call sites'
-   *     silent skip). Returns false in that case.
-   *   - On a single optimistic-lock conflict the helper re-reads and
-   *     re-applies once. If the second attempt also conflicts the error
-   *     bubbles so the caller can log loudly — the prior side effect
-   *     (email send) already happened, so a missed audit entry is the
-   *     loss of record, not duplicate work.
+   *   - A row with no conversationState yet gets one holding just this
+   *     message (lifecycle notes can precede the agent's first save).
+   *     A state that exists but can't be parsed is left alone (returns
+   *     false) rather than overwritten.
+   *   - On an optimistic-lock conflict the helper re-reads and re-applies,
+   *     up to three attempts, then the error bubbles so the caller can log
+   *     loudly — the prior side effect already happened, so a missed entry
+   *     is the loss of a record, not duplicate work.
    *
-   * Returns: true if the message was appended, false if there was no
-   * conversationState to append to.
+   * Returns: true if the message was appended, false if the row is missing
+   * or its state is unreadable.
    */
   async appendConversationMessage(
     appointmentRequestId: string,
     message: ConversationMessage,
   ): Promise<boolean> {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
       const row = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
         select: { conversationState: true, conversationVersion: true },
       });
-      if (!row?.conversationState) return false;
-      const state = parseConversationState(row.conversationState);
+      if (!row) return false;
+      const state: StorableConversationState | null = row.conversationState
+        ? parseConversationState(row.conversationState)
+        : { systemPrompt: '', messages: [] };
       if (!state) return false;
 
       state.messages.push(message);
@@ -434,28 +506,78 @@ export class AIConversationService {
         await this.storeConversationState(appointmentRequestId, state, row.conversationVersion);
         return true;
       } catch (err) {
-        if (err instanceof ConcurrentModificationError && attempt === 0) {
+        if (err instanceof ConcurrentModificationError && attempt < MAX_ATTEMPTS) {
           logger.warn(
-            { traceId: this.traceId, appointmentRequestId },
-            'appendConversationMessage hit optimistic-lock conflict — retrying once',
+            { traceId: this.traceId, appointmentRequestId, attempt },
+            'appendConversationMessage hit optimistic-lock conflict — retrying',
           );
           continue;
         }
         throw err;
       }
     }
-    // Unreachable: the loop either returns or throws.
-    return false;
   }
 
   /**
-   * FIX RSA-4: Retry state save with exponential backoff
-   * If all retries fail, records compensation data for manual recovery
+   * Save an agent turn's state under optimistic locking, rebasing onto any
+   * conversation writes that landed since the turn last read or wrote the
+   * row (a lifecycle audit note from a transition the turn itself
+   * triggered, an admin append, a chase checkpoint update).
+   *
+   * On a ConcurrentModificationError the stored state is re-read and the
+   * turn's own unsaved messages (those past `cursor.persistedCount`) are
+   * appended to it; the turn's checkpoint / facts / responseTracking are
+   * kept, since the turn is the fresher writer of those. The rebased
+   * message list replaces `state.messages` IN PLACE, so the caller's
+   * in-memory state keeps matching the row and later saves in the same
+   * turn stay consistent. Before this, the end-of-turn save simply
+   * overwrote such writes — e.g. the "[System: agent] confirmed" note the
+   * turn's own mark_scheduling_complete had just appended.
+   *
+   * Advances `cursor` on success. Throws the ConcurrentModificationError if
+   * the row is still being written after MAX_TURN_SAVE_REBASES rebases, and
+   * any non-conflict error as-is.
+   */
+  async saveTurnState(
+    appointmentRequestId: string,
+    state: StorableConversationState,
+    cursor: ConversationSaveCursor,
+  ): Promise<void> {
+    for (let rebases = 0; ; rebases++) {
+      try {
+        cursor.version = await this.storeConversationState(appointmentRequestId, state, cursor.version);
+        cursor.persistedCount = state.messages.length;
+        return;
+      } catch (err) {
+        if (!(err instanceof ConcurrentModificationError) || rebases >= MAX_TURN_SAVE_REBASES) throw err;
+        const latest = await this.getConversationState(appointmentRequestId);
+        if (!latest) throw err;
+        const ownMessages = state.messages.slice(cursor.persistedCount);
+        state.messages.splice(0, state.messages.length, ...latest.messages, ...ownMessages);
+        cursor.version = latest._version;
+        cursor.persistedCount = latest.messages.length;
+        logger.info(
+          {
+            traceId: this.traceId,
+            appointmentRequestId,
+            rebasedOntoVersion: latest._version,
+            ownMessages: ownMessages.length,
+          },
+          'Conversation state changed during the turn — rebased the turn\'s messages onto it',
+        );
+      }
+    }
+  }
+
+  /**
+   * FIX RSA-4: end-of-turn save. Conflicts are rebased (saveTurnState);
+   * transient failures are retried with exponential backoff. If all
+   * retries fail, records compensation data for manual recovery.
    */
   async storeConversationStateWithRetry(
     appointmentRequestId: string,
     state: StorableConversationState,
-    expectedVersion: number | undefined,
+    cursor: ConversationSaveCursor,
     executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>
   ): Promise<{ success: boolean; retriesUsed: number }> {
     const MAX_RETRIES = 3;
@@ -463,17 +585,15 @@ export class AIConversationService {
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        await this.storeConversationState(appointmentRequestId, state, expectedVersion);
+        await this.saveTurnState(appointmentRequestId, state, cursor);
         return { success: true, retriesUsed: attempt };
       } catch (error) {
-        // Don't retry optimistic locking conflicts - they indicate a real
-        // conflict: with the dedicated conversationVersion counter, only
-        // another conversation-state writer can cause one (the turn's own
-        // tool writes no longer do).
+        // A conflict that survived saveTurnState's rebases means the row
+        // is under sustained concurrent writes — not a transient error.
         if (error instanceof ConcurrentModificationError) {
           logger.warn(
             { traceId: this.traceId, appointmentRequestId, attempt },
-            'State save conflict - not retrying (concurrent modification)'
+            'State save conflict persisted after rebasing - not retrying (concurrent modification)'
           );
           break;
         }
@@ -571,18 +691,23 @@ export class AIConversationService {
   /**
    * Trim conversation state to prevent unbounded growth.
    *
+   * Two triggers, both checked on EVERY save:
+   *   - count: more than `limits.maxMessages` messages → keep
+   *     `limits.trimToMessages` of them;
+   *   - size: the serialised state exceeds `limits.maxStateBytes` → drop
+   *     as many messages as it takes to fit. (Previously the size check
+   *     only ran above ~256 messages, so a 20-message state of 45KB
+   *     messages grew past the 500KB read limit and became unreadable —
+   *     every later turn failed with "Conversation state not found".)
+   *
    * Strategy: keep BOTH ends of the conversation, drop the middle.
    *   - First TRIM_KEEP_FIRST messages: initial booking context (who, what, when).
    *     The agent always needs these to understand what the conversation is about,
    *     even after a long reschedule chain.
-   *   - Last (TRIM_TO_MESSAGES - TRIM_KEEP_FIRST - 1) messages: recent context.
+   *   - The most recent messages: recent context.
    *   - One placeholder message in between explaining how many messages were dropped.
-   *
-   * The previous strategy kept only the tail, which meant a long reschedule
-   * conversation could lose all the original booking context (who's involved,
-   * what slots were considered, what the original ask was). At ~100 appts/day
-   * this didn't bite often but it produced confusing agent behaviour on the
-   * rare long thread.
+   * When the size cap still isn't met, the tail shrinks first (always keeping
+   * the newest message), then the head.
    *
    * Only `messages` is rewritten: every other field (checkpoint, facts,
    * responseTracking, systemPrompt, anything added later) is carried over
@@ -590,51 +715,69 @@ export class AIConversationService {
    * used to wipe the agent's checkpoint and facts on exactly the long
    * conversations that most need them.
    */
-  trimConversationState<T extends { messages: ConversationMessage[] }>(state: T): T {
-    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
-
-    // Fast path: well below limits, return as-is. Skipping the JSON.stringify
-    // here matters because storeConversationState stringifies the result on
-    // every save — paying the cost twice on the hot path is wasted work.
-    // The byte-size check below only fires when the count threshold doesn't.
-    if (state.messages.length <= MAX_MESSAGES) {
-      // Only stringify-for-size-check when the count is high enough that the
-      // message blob could plausibly approach the byte limit. ~50KB per
-      // message is a generous upper bound (we cap individual messages at 50KB
-      // via truncateMessageContent).
-      const couldBeOversized = state.messages.length * 2_000 > MAX_STATE_BYTES;
-      if (!couldBeOversized || JSON.stringify(state).length <= MAX_STATE_BYTES) {
-        return state;
-      }
+  trimConversationState<T extends { messages: ConversationMessage[] }>(
+    state: T,
+    limits: ConversationTrimLimits = DEFAULT_TRIM_LIMITS,
+  ): T {
+    const { maxMessages, trimToMessages, maxStateBytes } = limits;
+    const messages = state.messages;
+    const total = messages.length;
+    const overCount = total > maxMessages;
+    if (!overCount && jsonBytes(state) <= maxStateBytes) {
+      return state;
     }
 
-    // Reserve one slot for the placeholder summary message; split the rest
-    // between head (initial context) and tail (recent context).
-    const keepFirst = Math.min(TRIM_KEEP_FIRST, state.messages.length);
-    const keepLast = Math.max(0, TRIM_TO_MESSAGES - keepFirst - 1);
-    const droppedCount = state.messages.length - keepFirst - keepLast;
+    // Exact serialised size of a candidate without building it:
+    //   bytes({...state, messages: []}) + Σ bytes(message) + (count - 1) commas.
+    const baseBytes = jsonBytes({ ...state, messages: [] });
+    const prefixBytes = [0];
+    for (const m of messages) prefixBytes.push(prefixBytes[prefixBytes.length - 1] + jsonBytes(m));
+    const placeholderFor = (dropped: number, first: number, last: number): ConversationMessage => ({
+      role: 'user',
+      content: `[System Note: ${dropped} middle messages were trimmed to maintain performance. The first ${first} messages (initial booking context) and the last ${last} messages (recent activity) are preserved.]`,
+    });
+    const sizeOf = (first: number, last: number): number => {
+      const dropped = total - first - last;
+      const kept = first + last + (dropped > 0 ? 1 : 0);
+      const keptBytes =
+        prefixBytes[first] +
+        (prefixBytes[total] - prefixBytes[total - last]) +
+        (dropped > 0 ? jsonBytes(placeholderFor(dropped, first, last)) : 0);
+      return baseBytes + keptBytes + Math.max(0, kept - 1);
+    };
 
+    // Reserve one slot for the placeholder; split the rest between head
+    // (initial context) and tail (recent context). A size-only trim starts
+    // from everything and sheds messages until it fits.
+    // (The head never takes the last message: the newest is always kept.)
+    let keepFirst = Math.min(CONVERSATION_LIMITS.TRIM_KEEP_FIRST, Math.max(0, total - 1));
+    let keepLast = overCount
+      ? Math.max(1, trimToMessages - keepFirst - 1)
+      : total - keepFirst;
+    keepLast = Math.min(keepLast, total - keepFirst);
+    while (sizeOf(keepFirst, keepLast) > maxStateBytes && keepLast > 1) keepLast--;
+    while (sizeOf(keepFirst, keepLast) > maxStateBytes && keepFirst > 0) keepFirst--;
+
+    const droppedCount = total - keepFirst - keepLast;
     // If nothing would actually be dropped (very short conversation), return as-is
     if (droppedCount <= 0) {
       return state;
     }
 
-    const head = state.messages.slice(0, keepFirst);
-    const tail = state.messages.slice(-keepLast);
-    const placeholder: ConversationMessage = {
-      role: 'user',
-      content: `[System Note: ${droppedCount} middle messages were trimmed to maintain performance. The first ${keepFirst} messages (initial booking context) and the last ${keepLast} messages (recent activity) are preserved.]`,
-    };
-
-    const trimmedMessages = [...head, placeholder, ...tail];
+    const trimmedMessages = [
+      ...messages.slice(0, keepFirst),
+      placeholderFor(droppedCount, keepFirst, keepLast),
+      ...messages.slice(total - keepLast),
+    ];
 
     logger.info(
       {
-        originalCount: state.messages.length,
+        originalCount: total,
         trimmedCount: trimmedMessages.length,
         keepFirst,
         keepLast,
         droppedCount,
+        trigger: overCount ? 'message_count' : 'state_bytes',
       },
       'Trimmed conversation state (head+tail strategy)'
     );

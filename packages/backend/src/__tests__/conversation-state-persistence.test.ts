@@ -272,16 +272,21 @@ function seedAppointment(opts: {
  *  checkpoint save, then the dispatch gate + send.ts writes to the row
  *  (both bump @updatedAt), then the in-memory checkpoint advance and the
  *  assistant's closing text. */
-function playToolUsingTurn(captured: { state?: ConversationState; context?: SchedulingContext }) {
+function playToolUsingTurn(captured: {
+  state?: ConversationState;
+  context?: SchedulingContext;
+  messages?: Array<{ role: string; content: unknown }>;
+}) {
   runToolLoopMock.mockImplementation(async (
     _systemPrompt: string,
-    _messages: unknown[],
+    messages: Array<{ role: string; content: unknown }>,
     state: ConversationState,
     context: SchedulingContext,
     callbacks: { checkpointBeforeSideEffects?: () => Promise<void> },
   ) => {
     captured.state = clone(state);
     captured.context = context;
+    captured.messages = clone(messages);
     await callbacks.checkpointBeforeSideEffects?.();
     // dispatch.ts human-control gate
     await appointmentRequestFake.updateMany({
@@ -336,7 +341,7 @@ describe('conversation-state CAS uses conversationVersion, not updatedAt', () =>
     await appointmentRequestFake.update({ where: { id: APT }, data: { lastActivityAt: new Date() } });
 
     state.messages.push({ role: 'assistant', content: 'done' });
-    const result = await svc.storeConversationStateWithRetry(APT, state, afterCheckpoint, [
+    const result = await svc.storeConversationStateWithRetry(APT, state, { version: afterCheckpoint, persistedCount: state.messages.length - 1 }, [
       { toolName: 'send_email', emailSentTo: 'user', timestamp: new Date().toISOString() },
     ]);
 
@@ -543,20 +548,25 @@ describe('inbound sender classification', () => {
     [THERAPIST_EMAIL, 'therapist', 'From: therapist'],
   ])('threads %s through as inboundSender=%s', async (from, expected, label) => {
     seedAppointment();
-    const captured: { state?: ConversationState; context?: SchedulingContext } = {};
+    const captured: Parameters<typeof playToolUsingTurn>[0] = {};
     playToolUsingTurn(captured);
 
     await new JustinTimeService('trace-sender').processEmailReply(APT, 'Hello', from, 'THREAD', CLASSIFICATION);
 
     expect(captured.context!.inboundSender).toBe(expected);
-    const inbound = captured.state!.messages[captured.state!.messages.length - 1].content;
-    expect(inbound).toContain(`${label} (${from})`);
-    expect(inbound).not.toContain('SENDER NOT VERIFIED');
+    // Stored log: the email, attributed to the sender.
+    const stored = captured.state!.messages[captured.state!.messages.length - 1].content;
+    expect(stored).toContain(`Email received from ${expected} (${from})`);
+    expect(stored).not.toContain('SENDER NOT VERIFIED');
+    // What Claude sees this turn (thread context + the new email).
+    const prompt = captured.messages![captured.messages!.length - 1].content as string;
+    expect(prompt).toContain(`${label} (${from})`);
+    expect(prompt).not.toContain('SENDER NOT VERIFIED');
   });
 
   it("labels a third-party sender as unverified and never as the therapist", async () => {
     seedAppointment();
-    const captured: { state?: ConversationState; context?: SchedulingContext } = {};
+    const captured: Parameters<typeof playToolUsingTurn>[0] = {};
     playToolUsingTurn(captured);
 
     await new JustinTimeService('trace-sender').processEmailReply(
@@ -568,10 +578,15 @@ describe('inbound sender classification', () => {
     );
 
     expect(captured.context!.inboundSender).toBe('unknown');
-    const inbound = captured.state!.messages[captured.state!.messages.length - 1].content;
-    expect(inbound).toContain('From: UNVERIFIED THIRD PARTY');
-    expect(inbound).toContain('SENDER NOT VERIFIED');
-    expect(inbound).not.toMatch(/From: therapist/);
+    const prompt = captured.messages![captured.messages!.length - 1].content as string;
+    expect(prompt).toContain('From: UNVERIFIED THIRD PARTY');
+    expect(prompt).toContain('SENDER NOT VERIFIED');
+    expect(prompt).not.toMatch(/From: therapist/);
+    // The stored log keeps the label and the guidance too.
+    const stored = captured.state!.messages[captured.state!.messages.length - 1].content;
+    expect(stored).toContain('Email received from UNVERIFIED THIRD PARTY');
+    expect(stored).toContain('SENDER NOT VERIFIED');
+    expect(stored).not.toMatch(/from therapist/i);
   });
 
   it('labels an unverified sender in the no-thread-context fallback prompt too', async () => {

@@ -3,11 +3,12 @@
  * confirmation emails + Slack + therapist freeze.
  *
  * Two input shapes are accepted:
- *   1. Freeform `confirmed_datetime` string (legacy).
+ *   1. Freeform `confirmed_datetime` string (legacy, read as UK time).
  *   2. Structured form (timezone + year/month/day/hour/minute).
  *      Synthesised into the freeform string via `resolveWallClock`,
  *      so DST / non-existent / unknown-timezone errors surface as
- *      specific tool errors the agent can react to.
+ *      specific tool errors the agent can react to. When a call carries
+ *      both, the structured form wins.
  *
  * Delegates to `appointmentLifecycleService.transitionToConfirmed`
  * for the atomic confirmation. Reschedules (when the row is already
@@ -58,15 +59,17 @@ export async function handleMarkSchedulingComplete(
   }
   const completeData = parsed.data;
 
-  // STEP 1: synthesise confirmed_datetime from the structured form when
-  // the agent supplied one. Routes through the same resolveWallClock
-  // path that resolve_local_time uses, so DST / non-existent /
+  // STEP 1: pick the datetime. The structured form WINS whenever it is
+  // complete — including when the agent also filled the legacy
+  // `confirmed_datetime` string. The freeform string is parsed as
+  // platform (UK) time downstream, so letting it win silently ignored the
+  // structured timezone: "3pm my time" from a New York client was stored
+  // five hours off. The structured form routes through the same
+  // resolveWallClock path resolve_local_time uses, so DST / non-existent /
   // unknown-timezone errors surface as specific tool errors. Legacy
-  // callers passing the freeform `confirmed_datetime` string flow
-  // through unchanged.
+  // callers passing only the freeform string flow through unchanged.
   let confirmedDateTime = completeData.confirmed_datetime;
   if (
-    !confirmedDateTime &&
     completeData.timezone &&
     completeData.year !== undefined &&
     completeData.month !== undefined &&
@@ -102,8 +105,13 @@ export async function handleMarkSchedulingComplete(
     }
     confirmedDateTime = formatIsoWithOffset(resolved.resolved);
     logger.info(
-      { traceId, confirmedDateTime, structuredInput: completeData },
-      'mark_scheduling_complete: synthesised confirmed_datetime from structured form',
+      {
+        traceId,
+        confirmedDateTime,
+        structuredInput: completeData,
+        ignoredFreeform: completeData.confirmed_datetime,
+      },
+      'mark_scheduling_complete: using the structured form for confirmed_datetime',
     );
   }
   if (!confirmedDateTime) {

@@ -23,10 +23,20 @@ import { TIMEOUTS, CLAUDE_API } from '../constants';
 /**
  * Singleton Anthropic client instance.
  * Configured with the API-level timeout from constants.
+ *
+ * `maxRetries: 0` — retries are owned by the call sites: the agent loops
+ * and inquiry replies go through `resilientCall` (5 rate-limit retries on
+ * a 1/5/15/30/60-minute schedule, 2 transient retries), ai.service has its
+ * own transient-retry loop, and the work-report synopsis is best-effort.
+ * The SDK's default of 2 retries sat UNDERNEATH `resilientCall`, so one
+ * logical call could make up to (1 + 5 + 2) x 3 = 24 HTTP attempts and the
+ * circuit breaker only saw a fraction of the failures. One retry layer,
+ * one place to tune it.
  */
 export const anthropicClient = new Anthropic({
   apiKey: config.anthropicApiKey,
   timeout: TIMEOUTS.ANTHROPIC_API_MS,
+  maxRetries: 0,
 });
 
 /**

@@ -17,7 +17,7 @@ import {
   sendEmailInputSchema,
   type SendEmailPurpose,
 } from '../../../../schemas/tool-inputs';
-import { sendAppointmentEmail } from '../send';
+import { sendAppointmentEmail, type AppointmentEmailOutcome } from '../send';
 import type { ConversationAction } from '../../../../services/conversation-checkpoint.service';
 import type {
   SchedulingContext,
@@ -133,19 +133,57 @@ export async function handleSendEmail(
     return { result: { success: false, toolName: 'send_email', error: errorMsg } };
   }
 
-  await sendAppointmentEmail(
+  const delivery = await sendAppointmentEmail(
     { to: emailData.to, subject: emailData.subject, body: emailData.body },
     context.appointmentRequestId,
     traceId,
   );
 
+  // Only an email that went out (or is queued to go out) is a success.
+  // Reporting success for an aborted/failed send used to advance the
+  // checkpoint, mark the call idempotent (so a retry was swallowed as
+  // "already completed") and let the agent tell the other party the
+  // email had been sent.
+  if (delivery.status === 'not_sent' || delivery.status === 'failed') {
+    const error = describeUndelivered(delivery, emailData.to);
+    logger.warn(
+      { traceId, appointmentRequestId: context.appointmentRequestId, to: emailData.to, delivery },
+      'send_email: email was not delivered',
+    );
+    return { result: { success: false, toolName: 'send_email', error } };
+  }
+
   const emailSentTo: 'user' | 'therapist' =
     normalizedTo === context.therapistEmail.toLowerCase() ? 'therapist' : 'user';
 
   return {
-    result: { success: true, toolName: 'send_email' },
+    result: {
+      success: true,
+      toolName: 'send_email',
+      ...(delivery.status === 'queued'
+        ? { resultMessage: `Email to ${emailData.to} could not be sent immediately and has been queued; it will be delivered automatically.` }
+        : {}),
+    },
     checkpointAction: deriveCheckpointAction(emailData.purpose, emailSentTo),
     emailSentTo,
     purpose: emailData.purpose,
   };
+}
+
+function describeUndelivered(
+  delivery: Extract<AppointmentEmailOutcome, { status: 'not_sent' | 'failed' }>,
+  to: string,
+): string {
+  const notSent = `The email to ${to} was NOT sent. Do not tell anyone it was.`;
+  if (delivery.status === 'failed') {
+    return `${notSent} Sending and queueing both failed (${delivery.error}). Try again once; if it fails again, call flag_for_human_review.`;
+  }
+  switch (delivery.reason) {
+    case 'human_control':
+      return `${notSent} An admin has taken control of this conversation — stop and leave it to the admin.`;
+    case 'terminal_status':
+      return `${notSent} The appointment has been cancelled or completed, so no further scheduling emails go out. Stop.`;
+    case 'appointment_not_found':
+      return `${notSent} The appointment no longer exists. Call flag_for_human_review.`;
+  }
 }
