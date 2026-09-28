@@ -67,12 +67,36 @@ _See the PR description for the authoritative list and the per-commit
 detail. Summary by theme:_
 
 **Conversation-state integrity** — parser preserves checkpoint/facts/
-response-tracking; trim preserves them; a dedicated `conversationVersion`
-column replaces `updatedAt` as the CAS version (migration included);
-state is stored as a JSON object with an idempotent normalisation of
-existing rows; unknown senders are classified as `unknown` rather than
-`therapist`; handlers no longer report a lost transition race as
-success.
+response-tracking; trim preserves them; a state with no checkpoint is
+seeded from the `checkpointStage` column; a dedicated `conversationVersion`
+column on `AppointmentRequest` and `TherapistConversation` replaces
+`updatedAt` as the CAS version (migration
+`20260928_add_conversation_version`, idempotent); state is stored as a
+JSON object and legacy string rows are rewritten on their next save;
+unknown senders are classified as `unknown` rather than `therapist`;
+`mark_scheduling_complete` / `cancel_appointment` no longer report a lost
+transition race as success.
+
+> **Operator step after deploy.** Rows that never receive another agent
+> save keep the legacy string shape, and `addAuditMessage` still fails on
+> them. Run once, in a maintenance window (re-runnable, only touches
+> string-typed rows):
+>
+> ```sql
+> UPDATE appointment_requests
+>    SET conversation_state = (conversation_state #>> '{}')::jsonb
+>  WHERE jsonb_typeof(conversation_state) = 'string';
+> UPDATE appointment_conversations
+>    SET conversation_state = (conversation_state #>> '{}')::jsonb
+>  WHERE jsonb_typeof(conversation_state) = 'string';
+> UPDATE weekly_mailing_inquiries
+>    SET conversation_state = (conversation_state #>> '{}')::jsonb
+>  WHERE jsonb_typeof(conversation_state) = 'string';
+> -- then re-run the checkpoint_at backfill from 20260517 for rows where it is still NULL
+> ```
+>
+> The review deliberately did not ship this as a migration: it rewrites
+> production data and belongs with the deployment owner.
 
 **Security** — weekly-mailing replies pinned to the verified sender and
 raw email headers guarded against CR/LF injection; forged display-name
@@ -86,12 +110,16 @@ backend compiled JS; public signup cannot re-subscribe an opted-out
 address.
 
 **Inbound email** — nested MIME parts (attachments, signature logos) are
-read; delay notices and ordinary replies are no longer treated as
-bounces; post-session appointments are never auto-cancelled by a bounce;
+read and non-UTF-8 charsets decoded; delay notices and ordinary replies
+are no longer treated as bounces and only *hard* bounces auto-cancel;
+post-session appointments are never auto-cancelled by a bounce;
 same-therapist rebooks no longer trip the divergence block; old messages
-are not replayed after dedup expiry; bulk failure retry clears Redis;
-availability-agent failures retry instead of misrouting; `stripHtml`
-no longer quadratic.
+are not replayed after dedup expiry (30-day recovery age guard, 45-day
+dedup retention); bulk failure retry clears Redis; availability-agent
+failures retry instead of misrouting; `stripHtml` and the address regexes
+are linear; infrastructure failures (breaker open, rate limit, timeout,
+5xx, connectivity) defer a message instead of consuming one of its three
+abandon attempts.
 
 **Lifecycle / outbox** — a side effect that succeeded is never re-run
 because its completion mark failed; the cancelled Slack alert is not sent
@@ -109,12 +137,14 @@ matches the real status; compose file validates.
 **Frontend** — lint config restored (`lint:all` works); bodyless admin
 POSTs (reset setting, Slack test, reset circuit, send mailing, generate
 report) no longer 400; bad voucher links no longer crash the public site;
-closure "cancel" has a confirm + toast; feedback prefill works and a
-failed submit keeps the answers; post-Notion therapists selectable when
-creating appointments; delete errors visible; bulk invite capped
-client-side; "Book now" only opens the external calendar after the
-request succeeds; undefined Tailwind classes fixed; login verifies the
-secret and shows lockout state.
+closure "cancel" has a confirm + toast; feedback prefill works, a failed
+submit keeps the answers, and the backend now sends `ALREADY_SUBMITTED`;
+post-Notion therapists selectable when creating appointments; the detail
+route returns `confirmedDateTimeParsed` so the confirmed-time picker seeds
+correctly; delete errors visible; bulk invite capped client-side; "Book
+now" only opens the external calendar after the request succeeds;
+undefined Tailwind classes fixed; login verifies the secret and shows
+lockout state; a Log out control exists.
 
 **Tests** — the time-bombed "keeps Sunday slots" test fixed at the root
 (slot generation anchored on `referenceDate`); regression tests added
@@ -129,7 +159,7 @@ Effort: **S** = hours, **M** = a day or two, **L** = a week+.
 | # | Opportunity | Why it matters | Where | Effort |
 |---|---|---|---|---|
 | 1 | **Persist the weekly-mailing "last sent" marker in Postgres, with a per-user `lastWeeklyMailingAt`.** | The only send-once guard is a Redis key. PR #318 makes an unreadable guard fail safe, but a lost/evicted key still re-blasts every subscriber once. The mailing shares the transactional Gmail mailbox, so a repeat blast can exhaust the daily send cap and stall agent replies. | `services/weekly-mailing-list.service.ts` | S |
-| 2 | **Stop counting infrastructure errors against the 3-strike abandon budget.** | `CircuitBreakerError`, 429s after retries, 5xx and timeouts all count. Push at t=0 plus polls at ~3 and ~6 min abandon a message during a 10-minute Anthropic blip, one Slack alert per email, each needing manual retry. Classify infra errors as "defer without counting" (or time-based backoff). Also move the circuit breaker around each attempt, not the whole sleep loop: a single 429 probe holds the breaker half-open for up to ~111 minutes. | `domain/scheduling/inbound/process.ts`, `utils/resilient-call.ts`, `utils/circuit-breaker.ts` | M |
+| 2 | **Put the circuit breaker around each Claude attempt, not the whole retry-sleep loop.** | `resilientCall` wraps its entire 1+5+15+30+60-minute 429 back-off inside `circuitBreaker.execute`, and HALF_OPEN allows one probe, so a single rate-limited probe holds the breaker half-open for up to ~111 minutes while every other agent call is rejected. (The companion problem, infra errors consuming a message's abandon budget, is fixed in #318.) Also alert when a breaker opens. | `utils/resilient-call.ts`, `utils/circuit-breaker.ts` | S |
 | 3 | **Verify email ownership before a booking creates side effects.** | A booking needs no proof of ownership; one fake booking per therapist marks every therapist `in_session` and empties the public directory, and each one emails a therapist and starts a paid Claude turn. Options: magic-link confirmation before the agent starts, or require a voucher that was emailed to the address. | `routes/appointments.routes.ts`, `services/therapist-booking-status.service.ts` | M |
 | 4 | **Make retention safe for graduated therapists.** | Therapist availability is computed live from `COUNT(DISTINCT user_email) WHERE status='completed'`. Retention hard-deletes `completed` rows after 365 days and admin delete only guards `confirmed`, so a graduated therapist silently reappears on the finder. Persist a per-therapist completed-client count (or graduation timestamp) and read that; require force + reason to delete any post-booking row; write a tombstone audit row that isn't cascaded. | `services/stale-check.service.ts`, `routes/admin/appointments/delete.ts`, `services/therapist-booking-status.service.ts` | M |
 | 5 | **Replace `baseline.sh` with plain `prisma migrate deploy` and check in a replayable `0_init` migration.** | Verified: a fresh DB and a `db push` DB both crash-loop on boot, and the fallback marks unapplied migrations as applied on *any* failure (including a transient connection error). The migration history also cannot describe the real schema (dead enum migration; FK, unique tracking code and index names created by no migration). One idempotent reconcile migration after `\d` in prod fixes the drift. | `prisma/baseline.sh`, `prisma/migrations/*`, `scripts/docker-entrypoint.sh` | M |
