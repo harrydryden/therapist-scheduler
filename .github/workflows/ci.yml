@@ -1,0 +1,132 @@
+# CI for the therapist-scheduler monorepo (docs/SYSTEM_REVIEW_2026-09.md §8).
+#
+# Two jobs:
+#   checks       — install, build, typecheck, lint, unit tests, schema and
+#                  compose checks. No services.
+#   integration  — a postgres:16 service bootstrapped exactly the way a new
+#                  dev/staging database is (scripts/bootstrap-dev-db.sh),
+#                  then the backend integration suite.
+#
+# .npmrc no longer sets if-present=true, so a missing script fails its step
+# instead of passing silently.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Build, typecheck, lint, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # prisma validate / generate resolve env("DATABASE_URL"); nothing connects.
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the schema drift guard can diff against the base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build shared package
+        run: npm -w @therapist-scheduler/shared run build
+
+      - name: Backend typecheck (src, tests and scripts/)
+        run: npm -w therapist-scheduler-backend run typecheck
+
+      - name: Backend lint
+        run: npm -w therapist-scheduler-backend run lint
+
+      - name: Frontend typecheck
+        run: npm -w therapist-scheduling-frontend run typecheck
+
+      - name: Frontend lint
+        run: npm -w therapist-scheduling-frontend run lint
+
+      - name: Backend unit tests
+        run: npm -w therapist-scheduler-backend run test -- --forceExit
+
+      - name: Frontend tests
+        run: npm -w therapist-scheduling-frontend run test
+
+      - name: Prisma schema validate
+        working-directory: packages/backend
+        run: npx --no-install prisma validate
+
+      - name: Schema drift guard (schema.prisma changes need a migration)
+        working-directory: packages/backend
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
+        run: npm run check:schema-migration
+
+      - name: docker compose config
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.dev.yml config --quiet
+
+  integration:
+    name: Backend integration tests (Postgres 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scheduler_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/scheduler_ci
+      # The integration helper connects with TEST_DATABASE_URL; the services
+      # under test use the app's Prisma client (DATABASE_URL). Same database.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/scheduler_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build shared package
+        run: npm -w @therapist-scheduler/shared run build
+
+      - name: Generate Prisma client
+        run: npm -w therapist-scheduler-backend run db:generate
+
+      - name: Bootstrap the database (fresh-DB path used for dev/staging)
+        run: npm -w therapist-scheduler-backend run db:bootstrap-dev
+
+      - name: Migrations are fully applied after bootstrap
+        working-directory: packages/backend
+        run: npx --no-install prisma migrate deploy
+
+      - name: Backend integration tests
+        run: npm -w therapist-scheduler-backend run test:integration -- --forceExit

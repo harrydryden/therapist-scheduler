@@ -172,6 +172,7 @@ const redisStore: Record<string, string> = {};
 jest.mock('../utils/redis', () => ({
   redis: {
     get: jest.fn(async (key: string) => redisStore[key] ?? null),
+    getStrict: jest.fn(async (key: string) => redisStore[key] ?? null),
     set: jest.fn(async (key: string, value: string) => {
       redisStore[key] = value;
       return 'OK';

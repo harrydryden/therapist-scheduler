@@ -154,6 +154,24 @@ export function isCountryCode(value: string): value is CountryCode {
   return Object.prototype.hasOwnProperty.call(COUNTRY_BY_CODE, value);
 }
 
+/**
+ * The single country-code validator for every write path (public signup,
+ * admin user/therapist edits, ATS, ingestion). Trims and upper-cases the
+ * input, then returns the canonical code — or `null` for anything that is
+ * not a supported code ('USA', 'GB', '', 42 …). Callers must reject a
+ * `null` rather than store the raw value: an unknown code used to be
+ * persisted and then silently resolved to London time by `getCountry`.
+ */
+export function parseCountryCode(value: unknown): CountryCode | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toUpperCase();
+  return isCountryCode(normalized) ? normalized : null;
+}
+
+/** Message used by every write path when `parseCountryCode` returns null. */
+export const UNSUPPORTED_COUNTRY_MESSAGE =
+  `Unsupported country code. Use one of: ${COUNTRY_CODES.join(', ')}.`;
+
 export function getCountry(code: string | null | undefined): CountryDefinition {
   if (code && isCountryCode(code)) {
     return COUNTRY_BY_CODE[code];
@@ -179,8 +197,13 @@ export function hasMultipleTimezones(code: string | null | undefined): boolean {
 
 /**
  * Get the default timezone for a country. Returns null for countries with
- * multiple timezones (callers should ask the user/therapist for their region).
+ * multiple timezones (callers should ask the user/therapist for their region)
+ * and for a non-empty code that is not a supported country: guessing London
+ * for 'USA' made the agent quote UK times to a US client without asking.
+ * A missing code (null / undefined / '') still means the legacy UK default,
+ * matching the column default every pre-country row was stamped with.
  */
 export function getDefaultTimezone(code: string | null | undefined): string | null {
+  if (code && !isCountryCode(code)) return null;
   return getCountry(code).defaultTimezone;
 }

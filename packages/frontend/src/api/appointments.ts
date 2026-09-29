@@ -15,7 +15,7 @@ import type {
 import { fetchAdminApi, unwrap, EMPTY_PAGINATION } from './core';
 import { TIMEOUTS } from '../config/constants';
 
-function buildQueryString(filters: object): string {
+export function buildQueryString(filters: object): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
     if (value !== undefined && value !== '' && value !== null) {
@@ -44,6 +44,19 @@ export async function getAppointmentDetail(id: string): Promise<AppointmentDetai
   return unwrap(
     await fetchAdminApi<AppointmentDetail>(`/admin/dashboard/appointments/${id}`),
     'appointment'
+  );
+}
+
+/**
+ * Mint a single-use, 60-second ticket for the dashboard's SSE stream, so the
+ * admin secret never goes in the EventSource URL.
+ */
+export async function getSseTicket(): Promise<{ ticket: string; expiresInSeconds: number }> {
+  return unwrap(
+    await fetchAdminApi<{ ticket: string; expiresInSeconds: number }>('/admin/dashboard/events/ticket', {
+      method: 'POST',
+    }),
+    'SSE ticket'
   );
 }
 

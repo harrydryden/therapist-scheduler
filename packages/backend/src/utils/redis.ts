@@ -22,6 +22,8 @@ export const cacheManager = new CacheManager(redisClientManager);
 // Export redis-like interface for email processing
 export const redis = {
   get: (key: string) => cacheManager.getString(key),
+  /** GET that throws on Redis failure — use for guards that must fail closed. */
+  getStrict: (key: string) => cacheManager.getStrict(key),
 
   /**
    * SET command with optional EX/NX modifiers
@@ -93,8 +95,6 @@ export const redis = {
   // Check if operations should be attempted
   shouldAttemptOperation: () => cacheManager.shouldAttemptOperation(),
   shouldAttemptDistributedLock: () => cacheManager.shouldAttemptDistributedLock(),
-  // Stale lock cleanup
-  cleanupStaleLocks: (patterns: string[], maxAgeSeconds: number) => cacheManager.cleanupStaleLocks(patterns, maxAgeSeconds),
   // Graceful shutdown
   quit: () => cacheManager.quit(),
 };

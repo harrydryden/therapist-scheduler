@@ -22,8 +22,9 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 import { sendSuccess, Errors } from '../utils/response';
-import { verifyWebhookSecret, safeCompare } from '../middleware/auth';
-import { RATE_LIMITS } from '../constants';
+import { verifyWebhookSecret, checkAdminSecret } from '../middleware/auth';
+import { RATE_LIMITS, PRE_BOOKING_STATUSES } from '../constants';
+import { findIdsWithHealth } from './admin/appointments/schemas';
 import { therapistBookingStatusService } from '../services/therapist-booking-status.service';
 import { sseService } from '../services/sse.service';
 import { messageQueueHealthService } from '../services/message-queue-health.service';
@@ -49,21 +50,44 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
    * GET /api/admin/dashboard/events
    * SSE stream for real-time appointment updates.
    *
-   * Auth: ?secret=<webhook_secret> (EventSource cannot send custom headers)
+   * Auth: ?ticket=<single-use ticket> from POST /api/admin/dashboard/events/ticket
+   * (EventSource cannot send custom headers). The ticket is consumed on use.
+   *
+   * DEPRECATED: ?secret=<webhook_secret> is still accepted for one release
+   * because the frontend deploys separately and an old dashboard bundle
+   * still sends it. Remove the secret branch once every client fetches
+   * tickets, then rotate WEBHOOK_SECRET (it has been in URLs).
    */
   fastify.get(
     '/api/admin/dashboard/events',
-    async (request: FastifyRequest<{ Querystring: { secret?: string } }>, reply: FastifyReply) => {
-      const { secret } = request.query as { secret?: string };
+    async (request: FastifyRequest<{ Querystring: { secret?: string; ticket?: string } }>, reply: FastifyReply) => {
+      const { secret, ticket } = request.query as { secret?: string; ticket?: string };
 
-      const secretValid =
-        typeof secret === 'string' &&
-        config.webhookSecret &&
-        safeCompare(secret, config.webhookSecret);
-
-      if (!secretValid) {
-        logger.warn({ requestId: request.id }, 'SSE connection rejected - invalid secret');
-        return Errors.unauthorized(reply);
+      if (ticket !== undefined) {
+        if (!(await sseService.consumeTicket(ticket))) {
+          logger.warn({ requestId: request.id }, 'SSE connection rejected - invalid, expired or reused ticket');
+          return Errors.unauthorized(reply);
+        }
+      } else {
+        logger.warn(
+          { requestId: request.id },
+          'SSE connection using deprecated ?secret= auth — the dashboard should fetch a ticket (POST /api/admin/dashboard/events/ticket); remove this path next release',
+        );
+        // Same brute-force limiter as the header-based admin routes. This
+        // route used to compare the secret directly, so the query-string
+        // transport was an unlimited guessing oracle.
+        const check = await checkAdminSecret(request, secret);
+        if (!check.ok) {
+          if (check.status === 429) {
+            reply.header('Retry-After', check.retryAfter.toString());
+            return reply.status(429).send({
+              success: false,
+              error: 'Too many failed authentication attempts. Please try again later.',
+            });
+          }
+          logger.warn({ requestId: request.id }, 'SSE connection rejected - invalid secret');
+          return Errors.unauthorized(reply);
+        }
       }
 
       const connectionId = sseService.addConnection(reply);
@@ -82,6 +106,22 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
     authed.addHook('preHandler', verifyWebhookSecret);
 
     // ------------------------------------------------------------------------
+    // SSE connection ticket
+    // ------------------------------------------------------------------------
+
+    /**
+     * POST /api/admin/dashboard/events/ticket
+     * Mint a 60-second, single-use ticket for GET /api/admin/dashboard/events.
+     * Header-authenticated like every other admin route, so the admin secret
+     * never has to travel in a URL.
+     */
+    authed.post('/api/admin/dashboard/events/ticket', async (_request: FastifyRequest, reply: FastifyReply) => {
+      const issued = await sseService.issueTicket();
+      reply.header('Cache-Control', 'no-store');
+      return sendSuccess(reply, issued);
+    });
+
+    // ------------------------------------------------------------------------
     // Dashboard stats
     // ------------------------------------------------------------------------
 
@@ -96,7 +136,7 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
         logger.info({ requestId }, 'Fetching dashboard stats');
 
         try {
-          const [statusCounts, recentConfirmed, userStats, totalRequests] = await Promise.all([
+          const [statusCounts, recentConfirmed, userStats, totalRequests, attentionIds, humanControl, awaitingVerification] = await Promise.all([
             prisma.appointmentRequest.groupBy({
               by: ['status'],
               _count: { id: true },
@@ -114,12 +154,22 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
               take: 10,
             }),
             prisma.appointmentRequest.count(),
+            // Tile counts over the WHOLE table (the dashboard used to count
+            // these from one 100-row page, so paused/red rows that stopped
+            // getting updates sank below it and vanished from the tiles).
+            // Same predicate as the list's `status=<pre-booking>&health=red`.
+            findIdsWithHealth({ status: { in: [...PRE_BOOKING_STATUSES] } }, 'red'),
+            prisma.appointmentRequest.count({ where: { humanControlEnabled: true } }),
+            prisma.appointmentRequest.count({ where: { emailVerifiedAt: null } }),
           ]);
 
           const stats = {
             byStatus: Object.fromEntries(statusCounts.map((s) => [s.status, s._count.id])),
             confirmedLast7Days: recentConfirmed,
             totalRequests,
+            needsAttention: attentionIds.length,
+            humanControl,
+            awaitingVerification,
             topUsers: userStats.map((u) => ({
               name: u.userName || u.userEmail,
               email: u.userEmail,
@@ -459,6 +509,12 @@ export async function adminMonitoringRoutes(fastify: FastifyInstance) {
 
           if (email.status === 'sent') {
             return Errors.badRequest(reply, 'Email has already been sent');
+          }
+          // A row in 'sending' is leased by a worker mid-send; resetting it
+          // would race that send and can deliver the email twice. Stale
+          // leases expire back to 'pending' on their own within 10 minutes.
+          if (email.status === 'sending') {
+            return Errors.conflict(reply, 'Email is currently being sent — retry in a few minutes if it does not complete');
           }
 
           await prisma.pendingEmail.update({

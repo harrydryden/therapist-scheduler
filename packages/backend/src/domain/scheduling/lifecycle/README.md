@@ -37,6 +37,9 @@ lifecycle/
 │                              recordStatusChangeEvent
 ├── terminal-tx.ts          ← runTerminalTransitionTx — shared transactional
 │                              skeleton for completed/cancelled
+├── completed-clients.ts    ← recordCompletedClient — durable graduation
+│                              record (therapist_completed_clients), written
+│                              in the completion transaction
 ├── dispatch-helpers.ts     ← fireAndForget, notifyTransition,
 │                              catchUpSessionHeldEffects
 ├── transitions/
@@ -94,6 +97,20 @@ lifecycle/
    `adminForceUpdate` requires `bypassStateMachine: true` (literal type
    + runtime check) + a non-empty `reason` + a non-empty `adminId`.
    Status changes via this path emit a Slack alert at severity=high.
+
+6. **Graduation is durable.** Every path that lands an appointment on
+   `completed` (`transitionToCompleted`, `adminForceUpdate`) inserts the
+   client into `therapist_completed_clients` in the same transaction
+   (`completed-clients.ts`, idempotent). The finder's "target reached"
+   rule counts those rows, never completed appointment rows — retention
+   and admin delete remove the latter.
+
+7. **Follow-ups re-arm when the booking they belong to changes.** Walking
+   a row backwards, reviving it from `cancelled`, or moving a confirmed
+   booking to a new slot resets the follow-up sentinels at or after the
+   target (`status-order.ts`, `admin-force.ts`); a slot move also bumps
+   the generation so generation-scoped post-booking effects get fresh rows
+   and stale "confirmed for <old slot>" retries are superseded.
 
 ## Migration note
 

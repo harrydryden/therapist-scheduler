@@ -79,6 +79,7 @@ const mockRedisExpire = jest.fn();
 jest.mock('../utils/redis', () => ({
   redis: {
     get: (...a: unknown[]) => mockRedisGet(...(a as [unknown])),
+    getStrict: (...a: unknown[]) => mockRedisGet(...(a as [unknown])),
     set: (...a: unknown[]) => mockRedisSet(...(a as [unknown])),
     incr: (...a: unknown[]) => mockRedisIncr(...(a as [unknown])),
     expire: (...a: unknown[]) => mockRedisExpire(...(a as [unknown])),
@@ -671,11 +672,37 @@ describe('record_availability_window — dispatch by source', () => {
 // =============================================================================
 
 describe('record_booking_link — persists to Therapist.bookingLink', () => {
+  it('rejects the call when the inbound email was not from the therapist (security gate)', async () => {
+    // A client (or a forged sender) must not be able to plant a link
+    // behind the public "Book now" button.
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'https://evil.example/phish' }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'user' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/only allowed when the inbound email was from the therapist/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
+  it('rejects javascript: URLs even from the therapist', async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('record_booking_link', { url: 'javascript:alert(1)' }),
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Invalid record_booking_link input/i);
+    expect(getPrismaMock().therapist.update.mock.calls.length).toBe(0);
+  });
+
   it('writes the URL via the shared recordTherapistBookingLink helper', async () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'https://calendly.com/dr-jones/50min' }),
-      { ...baseContext, therapistId: 'tx-1' },
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);
@@ -696,7 +723,7 @@ describe('record_booking_link — persists to Therapist.bookingLink', () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'calendly.com/no-scheme' }),
-      { ...baseContext, therapistId: 'tx-1' },
+      { ...baseContext, therapistId: 'tx-1', inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(false);
@@ -708,7 +735,7 @@ describe('record_booking_link — persists to Therapist.bookingLink', () => {
     const exec = new AIToolExecutorService('test');
     const result = await exec.executeToolCall(
       toolCall('record_booking_link', { url: 'https://calendly.com/x' }),
-      { ...baseContext, therapistId: undefined },
+      { ...baseContext, therapistId: undefined, inboundSender: 'therapist' },
     );
 
     expect(result.success).toBe(true);
@@ -759,5 +786,189 @@ describe('unknown tool', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Unknown tool: not_a_real_tool/);
+  });
+});
+
+// =============================================================================
+// Lifecycle handlers — a transition that lost its race is NOT a success
+// =============================================================================
+//
+// `atomicSkipped` means the lifecycle transition wrote nothing (human
+// control flipped on, another writer confirmed a different time, the
+// status moved). Reporting that as success made dispatch record the
+// idempotency key + bump the per-appointment counter, advanced the loop's
+// checkpoint (sent_final_confirmations / processed_cancellation), and told
+// the model the booking was confirmed / cancelled.
+
+function idempotencyMarks(): unknown[][] {
+  return mockRedisSet.mock.calls.filter(
+    (c: unknown[]) => typeof c[0] === 'string' && (c[0] as string).startsWith('tool:executed:'),
+  );
+}
+
+describe('mark_scheduling_complete — atomicSkipped is reported as failure', () => {
+  const input = { confirmed_datetime: 'Monday 3rd February 2031 at 10:00am' };
+
+  it('returns success:false with an explanatory error and no checkpointAction when the transition is atomicSkipped', async () => {
+    mockTransitionToConfirmed.mockResolvedValueOnce({
+      success: false,
+      previousStatus: 'negotiating',
+      newStatus: 'confirmed',
+      atomicSkipped: true,
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('mark_scheduling_complete', input), baseContext);
+
+    expect(mockTransitionToConfirmed).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/NOT confirmed/);
+    expect(result.error).toMatch(/status is now "confirmed"/);
+    expect(result.checkpointAction).toBeUndefined();
+    // Dispatch skipped its post-success bookkeeping.
+    expect(idempotencyMarks()).toHaveLength(0);
+    expect(mockRedisIncr).not.toHaveBeenCalled();
+  });
+
+  it('returns success:false when human control was enabled between the gate and the handler', async () => {
+    getPrismaMock().appointmentRequest.findUnique.mockResolvedValueOnce({
+      status: 'negotiating',
+      confirmedDateTime: null,
+      humanControlEnabled: true,
+      reschedulingInProgress: false,
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('mark_scheduling_complete', input), baseContext);
+
+    expect(mockTransitionToConfirmed).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/admin has taken control/);
+    expect(result.checkpointAction).toBeUndefined();
+    expect(idempotencyMarks()).toHaveLength(0);
+  });
+
+  it('still succeeds (with the checkpoint advance + bookkeeping) when the transition confirms', async () => {
+    mockTransitionToConfirmed.mockResolvedValueOnce({
+      success: true,
+      previousStatus: 'negotiating',
+      newStatus: 'confirmed',
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('mark_scheduling_complete', input), baseContext);
+
+    expect(result.success).toBe(true);
+    expect(result.checkpointAction).toBe('sent_final_confirmations');
+    expect(idempotencyMarks()).toHaveLength(1);
+    expect(mockRedisIncr).toHaveBeenCalled();
+  });
+
+  it('treats an idempotent skip (same datetime already confirmed concurrently) as success', async () => {
+    mockTransitionToConfirmed.mockResolvedValueOnce({
+      success: true,
+      previousStatus: 'negotiating',
+      newStatus: 'confirmed',
+      skipped: true,
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('mark_scheduling_complete', input), baseContext);
+
+    expect(result.success).toBe(true);
+    expect(result.checkpointAction).toBe('sent_final_confirmations');
+  });
+});
+
+describe('cancel_appointment — atomicSkipped is reported as failure', () => {
+  const input = { reason: 'Client no longer needs the session', cancelled_by: 'client' };
+
+  beforeEach(() => {
+    getPrismaMock().appointmentRequest.findUnique.mockResolvedValue({
+      status: 'confirmed',
+      humanControlEnabled: false,
+    });
+  });
+
+  it('returns success:false with an explanatory error and no checkpointAction when the transition is atomicSkipped', async () => {
+    mockTransitionToCancelled.mockResolvedValueOnce({
+      success: false,
+      previousStatus: 'confirmed',
+      newStatus: 'confirmed',
+      atomicSkipped: true,
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('cancel_appointment', input), baseContext);
+
+    expect(mockTransitionToCancelled).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/NOT cancelled/);
+    expect(result.checkpointAction).toBeUndefined();
+    expect(idempotencyMarks()).toHaveLength(0);
+    expect(mockRedisIncr).not.toHaveBeenCalled();
+  });
+
+  it('returns success:false when the appointment row is missing', async () => {
+    getPrismaMock().appointmentRequest.findUnique.mockResolvedValueOnce(null);
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('cancel_appointment', input), baseContext);
+
+    expect(mockTransitionToCancelled).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not found/i);
+  });
+
+  it('returns success:false when human control was enabled between the gate and the handler', async () => {
+    getPrismaMock().appointmentRequest.findUnique.mockResolvedValueOnce({
+      status: 'confirmed',
+      humanControlEnabled: true,
+    });
+
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('cancel_appointment', input), baseContext);
+
+    expect(mockTransitionToCancelled).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/admin has taken control/);
+  });
+
+  it('still succeeds (checkpoint advance + bookkeeping) on a real or idempotent cancellation', async () => {
+    mockTransitionToCancelled.mockResolvedValueOnce({
+      success: true,
+      previousStatus: 'confirmed',
+      newStatus: 'cancelled',
+    });
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(toolCall('cancel_appointment', input), baseContext);
+    expect(result.success).toBe(true);
+    expect(result.checkpointAction).toBe('processed_cancellation');
+    expect(idempotencyMarks()).toHaveLength(1);
+
+    mockTransitionToCancelled.mockResolvedValueOnce({
+      success: true,
+      previousStatus: 'cancelled',
+      newStatus: 'cancelled',
+      skipped: true,
+    });
+    const again = await exec.executeToolCall(
+      toolCall('cancel_appointment', { ...input, reason: 'Client asked again' }),
+      baseContext,
+    );
+    expect(again.success).toBe(true);
+    expect(again.checkpointAction).toBe('processed_cancellation');
+  });
+});
+
+describe('C3 — therapist-only gates stay closed for an unverified sender', () => {
+  it("rejects update_therapist_availability when inboundSender is 'unknown'", async () => {
+    const exec = new AIToolExecutorService('test');
+    const result = await exec.executeToolCall(
+      toolCall('update_therapist_availability', { availability: { Monday: '09:00-17:00' } }),
+      { ...baseContext, inboundSender: 'unknown' },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/only allowed when the inbound email was from the therapist/);
   });
 });

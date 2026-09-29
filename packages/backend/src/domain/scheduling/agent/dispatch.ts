@@ -22,9 +22,10 @@
  *      anomalous. Reaching the ceiling flips to human review.
  *
  *   4. Checks Redis-backed idempotency on the (appointmentId,
- *      toolName, input) hash. Prevents duplicate emails / double
- *      confirmations / voucher re-issues on retries within the
- *      same turn.
+ *      toolName, input, turnId) hash. Prevents duplicate emails /
+ *      double confirmations / voucher re-issues on retries within the
+ *      same turn (or a redelivery of the same inbound email), without
+ *      blocking an identical call in a later turn.
  *
  *   5. Dispatches to the per-tool handler.
  *
@@ -175,7 +176,8 @@ export async function executeToolCall(
   }
 
   // ─── STEP 3: IDEMPOTENCY CHECK ────────────────────────────────
-  const toolHash = hashToolCall(context.appointmentRequestId, name, input);
+  // Turn-scoped: a later turn may repeat an identical call (see hashToolCall).
+  const toolHash = hashToolCall(context.appointmentRequestId, name, input, context.turnId);
   if (await wasToolExecuted(toolHash)) {
     logger.info(
       { traceId, tool: name, appointmentRequestId: context.appointmentRequestId, toolHash },

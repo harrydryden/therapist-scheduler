@@ -63,10 +63,14 @@ type ConversationRow = {
   conversationState: unknown;
   messageCount: number;
   lastActivityAt: Date;
-  // Optimistic-lock version. Real Prisma manages this via @updatedAt;
-  // the mock bumps it on every update so the agent's
-  // persistStateWithLock predicate can detect concurrent writes.
+  // Bumped on EVERY write, exactly like Prisma's @updatedAt — including
+  // the tool executor's gate / thread-id / mark_complete / flag writes.
+  // Deliberately NOT the optimistic-lock token any more (see below).
   updatedAt: Date;
+  // Optimistic-lock version for conversationState. Only conversation-
+  // state writers touch it (`{ increment: 1 }`). Optional so fixtures
+  // can omit it; absent reads as 0, matching the column default.
+  conversationVersion?: number;
   gmailThreadId: string | null;
   initialMessageId: string | null;
   supersededAckSent: boolean;
@@ -78,6 +82,30 @@ type ConversationRow = {
 const therapists: Record<string, TherapistRow> = {};
 const conversations: Record<string, ConversationRow> = {};
 let nextConversationId = 1;
+
+/**
+ * Apply an update's `data` to a row the way Prisma would:
+ *   - `conversationVersion: { increment: n }` is applied arithmetically;
+ *   - `updatedAt` is bumped on every write (strictly later than the
+ *     previous value, so an updatedAt-based CAS would deterministically
+ *     miss after any intervening write — which is exactly the production
+ *     behaviour the old updatedAt-versioned persistStateWithLock tripped
+ *     over) unless the write sets it explicitly.
+ */
+function applyConversationData(row: ConversationRow, data: Record<string, unknown>): ConversationRow {
+  const { conversationVersion, updatedAt, ...rest } = data as {
+    conversationVersion?: number | { increment: number };
+    updatedAt?: Date;
+  } & Record<string, unknown>;
+  const next: ConversationRow = { ...row, ...(rest as Partial<ConversationRow>) };
+  if (typeof conversationVersion === 'number') {
+    next.conversationVersion = conversationVersion;
+  } else if (conversationVersion && typeof conversationVersion.increment === 'number') {
+    next.conversationVersion = (row.conversationVersion ?? 0) + conversationVersion.increment;
+  }
+  next.updatedAt = updatedAt ?? new Date(Math.max(Date.now(), row.updatedAt.getTime() + 1));
+  return next;
+}
 
 const therapistFindUnique = jest.fn(async ({ where }: { where: { id: string } }) => {
   return therapists[where.id] || null;
@@ -106,6 +134,7 @@ const conversationCreate = jest.fn(async ({ data }: { data: Partial<Conversation
     messageCount: data.messageCount ?? 0,
     lastActivityAt: now,
     updatedAt: now,
+    conversationVersion: 0,
     gmailThreadId: data.gmailThreadId ?? null,
     initialMessageId: data.initialMessageId ?? null,
     supersededAckSent: false,
@@ -125,8 +154,11 @@ const conversationFindUnique = jest.fn(
     include?: { therapist?: unknown };
     select?: { therapist?: unknown };
   }) => {
-    const row = conversations[where.id];
-    if (!row) return null;
+    const stored = conversations[where.id];
+    if (!stored) return null;
+    // Real Prisma always returns every scalar column; fixtures may omit
+    // conversationVersion, so default it to the column default (0).
+    const row = { ...stored, conversationVersion: stored.conversationVersion ?? 0 };
     // Always eagerly attach the therapist relation when the caller's
     // include OR select asks for it. The real Prisma client returns
     // shaped projections, but our tests don't depend on shape — just
@@ -141,7 +173,7 @@ const conversationFindUnique = jest.fn(
 const conversationUpdate = jest.fn(
   async ({ where, data }: { where: { id: string }; data: Partial<ConversationRow> }) => {
     if (!conversations[where.id]) throw new Error('P2025: record not found');
-    conversations[where.id] = { ...conversations[where.id], ...data };
+    conversations[where.id] = applyConversationData(conversations[where.id], data as Record<string, unknown>);
     return conversations[where.id];
   },
 );
@@ -159,6 +191,7 @@ const conversationUpdateMany = jest.fn(
       therapistId?: string;
       kind?: string;
       // Optimistic-lock predicate used by persistStateWithLock.
+      conversationVersion?: number;
       updatedAt?: Date;
     };
     data: Partial<ConversationRow>;
@@ -183,27 +216,26 @@ const conversationUpdateMany = jest.fn(
         continue;
       if (where.therapistId !== undefined && row.therapistId !== where.therapistId) continue;
       if (where.kind !== undefined && row.kind !== where.kind) continue;
-      // Optimistic-lock check: predicate must match the row's current
-      // updatedAt exactly. Real Prisma compares Date instances by
-      // getTime so we match that here.
+      // Optimistic-lock check (persistStateWithLock).
+      if (
+        where.conversationVersion !== undefined &&
+        (row.conversationVersion ?? 0) !== where.conversationVersion
+      )
+        continue;
+      // Kept for completeness: real Prisma compares Date instances by
+      // getTime. No production writer predicates on updatedAt any more.
       if (
         where.updatedAt !== undefined &&
         row.updatedAt.getTime() !== where.updatedAt.getTime()
       )
         continue;
-      // We DON'T auto-bump updatedAt here even though real Prisma
-      // does via @updatedAt. Reason: the agent's gate + tool writes
-      // omit updatedAt from their `data`, but the persistStateWithLock
-      // writes ALWAYS pass an explicit `updatedAt`. Auto-bumping on
-      // the gate/tool writes makes the persistStateWithLock predicate
-      // probabilistically miss when the test runs across a millisecond
-      // boundary (faster on isolated runs, slower under load), which
-      // turns deterministic flow tests into flaky ones. Tests that
-      // need to exercise a real updatedAt drift (the optimistic-lock
-      // conflict test) mutate `conversations[id].updatedAt` directly.
-      conversations[row.id] = data.updatedAt !== undefined
-        ? { ...row, ...data, updatedAt: data.updatedAt }
-        : { ...row, ...data };
+      // updatedAt IS auto-bumped on every write here, as real Prisma's
+      // @updatedAt does (applyConversationData). The mock previously
+      // skipped the bump because the agent's own gate/tool writes then
+      // made the updatedAt-based persistStateWithLock fail — that was
+      // the production bug, hidden by the mock. The CAS is now on
+      // conversationVersion, which only conversation-state writes move.
+      conversations[row.id] = applyConversationData(row, data as Record<string, unknown>);
       matched++;
     }
     return { count: matched };
@@ -266,6 +298,7 @@ const redisStore: Record<string, string> = {};
 jest.mock('../utils/redis', () => ({
   redis: {
     get: jest.fn(async (key: string) => redisStore[key] ?? null),
+    getStrict: jest.fn(async (key: string) => redisStore[key] ?? null),
     set: jest.fn(async (key: string, value: string) => {
       redisStore[key] = value;
       return 'OK';
@@ -708,9 +741,10 @@ describe('AvailabilityAgentService.processReply', () => {
     // matters.
     scriptedResponses = [textOnlyResponse('thanks for the info')];
 
-    // Simulate a concurrent write happening BEFORE the final persist:
-    // bump updatedAt on the row directly so the optimistic-lock
-    // predicate fails when processReply tries to save. The
+    // Simulate a concurrent conversation-state write happening BEFORE
+    // the final persist: bump conversationVersion on the row directly so
+    // the optimistic-lock predicate fails when processReply tries to
+    // save. The
     // try/finally restores the default implementation so the swap
     // doesn't leak into other tests (jest.clearAllMocks clears
     // call history but NOT mockImplementation).
@@ -721,11 +755,11 @@ describe('AvailabilityAgentService.processReply', () => {
       // under it so the predicate doesn't match. We detect "the agent's
       // final save attempt" by checking for the conversationState data
       // payload.
-      const a = arg as { where: { id?: string; updatedAt?: Date }; data: { conversationState?: unknown } };
-      if (a.data.conversationState && a.where.updatedAt && !agentCalled) {
+      const a = arg as { where: { id?: string; conversationVersion?: number }; data: { conversationState?: unknown } };
+      if (a.data.conversationState && a.where.conversationVersion !== undefined && !agentCalled) {
         agentCalled = true;
-        // Drift the row's updatedAt so the predicate misses
-        conversations['convo-pre'].updatedAt = new Date('2026-05-11T11:00:00Z');
+        // Another conversation-state writer landed first.
+        conversations['convo-pre'].conversationVersion = (conversations['convo-pre'].conversationVersion ?? 0) + 1;
       }
       return originalCb(arg);
     });
@@ -745,6 +779,76 @@ describe('AvailabilityAgentService.processReply', () => {
     } finally {
       (conversationUpdateMany as jest.Mock).mockImplementation(originalCb);
     }
+  });
+
+  it('A3 regression: side-effecting tools in several iterations do not trip the optimistic lock on their own writes', async () => {
+    // The tool executor's human-control gate (lastToolExecutedAt), the
+    // Gmail thread-id stamp and mark_complete all write the row — and
+    // bump @updatedAt — between the loop's per-iteration checkpoint
+    // saves. When persistStateWithLock CASed on updatedAt, iteration 2's
+    // checkpoint save threw ConcurrentModificationError, processReply
+    // threw, and the message was left for a retry that repeated the same
+    // failure forever. The CAS is now on conversationVersion.
+    seedTherapist();
+    conversations['convo-a3'] = {
+      id: 'convo-a3',
+      therapistId: 'tx-1',
+      kind: 'onboarding',
+      status: 'active',
+      humanControlEnabled: false,
+      humanControlTakenBy: null,
+      humanControlTakenAt: null,
+      humanControlReason: null,
+      completedAt: null,
+      memory: null,
+      conversationState: { messages: [{ role: 'assistant', content: 'Hi Alex!' }] },
+      messageCount: 1,
+      lastActivityAt: new Date(),
+      updatedAt: new Date('2026-05-11T10:00:00Z'),
+      conversationVersion: 4,
+      gmailThreadId: null,
+      initialMessageId: null,
+      supersededAckSent: false,
+      supersededAt: null,
+      supersededByAppointmentId: null,
+    };
+    mockSendEmail.mockResolvedValue({ threadId: 'thread-a3', messageId: 'msg-a3' });
+
+    const futureStart = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const futureEnd = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000 + 60 * 60 * 1000).toISOString();
+    scriptedResponses = [
+      toolUseResponse('record_availability_window', {
+        starts_at: futureStart,
+        ends_at: futureEnd,
+        status: 'available',
+        quote: 'Tuesday 2-3pm',
+      }),
+      toolUseResponse('send_email', { subject: 'Thanks', body: "I've put you down for Tuesday 2-3pm." }),
+      toolUseResponse('mark_complete', { summary: 'Captured Tuesday' }),
+    ];
+
+    const service = new AvailabilityAgentService('trace-a3');
+    const result = await service.processReply({
+      conversationId: 'convo-a3',
+      emailContent: 'Tuesday 2-3pm works',
+      fromEmail: 'alex@example.com',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.message).not.toMatch(/conflict/i);
+    const row = conversations['convo-a3'];
+    // All three tools ran — the loop was not aborted by a lock conflict.
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(row.gmailThreadId).toBe('thread-a3');
+    expect(row.status).toBe('completed');
+    // Three checkpoint saves (one per side-effecting iteration) + the
+    // final save, each CAS-incrementing the version from 4.
+    expect(row.conversationVersion).toBe(8);
+    // The final save landed: the persisted log carries the inbound and
+    // the mark_complete admin note appended after the last checkpoint.
+    const state = row.conversationState as { messages: Array<{ role: string; content: string }> };
+    expect(state.messages.some((m) => m.content.includes('Tuesday 2-3pm works'))).toBe(true);
+    expect(state.messages[state.messages.length - 1].content).toMatch(/marked complete/);
   });
 
   it('flags for human review when the agent escalates', async () => {

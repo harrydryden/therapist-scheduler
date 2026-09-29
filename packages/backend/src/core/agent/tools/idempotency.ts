@@ -1,12 +1,12 @@
 /**
  * Redis-backed idempotency for agent tool calls.
  *
- * Each call's (appointmentId, toolName, input) is canonical-hashed
- * and stored in Redis with a TTL. The hash is checked before
+ * Each call's (appointmentId, toolName, input, turnId) is canonical-
+ * hashed and stored in Redis with a TTL. The hash is checked before
  * execution; a hit means a previous attempt (e.g. a retry within
- * the same turn or a near-simultaneous duplicate) already ran the
- * tool, so we skip to avoid duplicate emails, double-confirmations,
- * voucher reissues, etc.
+ * the same turn, a redelivery of the same inbound email, or a near-
+ * simultaneous duplicate) already ran the tool, so we skip to avoid
+ * duplicate emails, double-confirmations, voucher reissues, etc.
  *
  * Fail-closed on Redis unavailability: when we can't read the
  * idempotency key we assume the tool already ran. The previous
@@ -41,9 +41,19 @@ const TOOL_EXECUTION_TTL_SECONDS = TOOL_EXECUTION.TTL_SECONDS;
  * checking. canonicalStringify sorts keys at every depth so {a,b} and
  * {b,a} hash identically — important because the Anthropic API doesn't
  * guarantee property ordering across retries or model versions.
+ *
+ * `turnId` scopes the hash to one agent turn (one inbound email, or the
+ * kickoff): a duplicate within the turn — or a redelivery of the same
+ * email — is still caught, but a LATER turn may legitimately repeat an
+ * identical call (a second chase with the same wording, re-confirming the
+ * same time after a reschedule) and must not be skipped as "already
+ * completed". Without it the hash spanned every turn for the TTL.
+ * Omitted → unscoped (the pre-turn-id hash, byte for byte).
  */
-export function hashToolCall(appointmentId: string, toolName: string, input: unknown): string {
-  const data = canonicalStringify({ appointmentId, toolName, input });
+export function hashToolCall(appointmentId: string, toolName: string, input: unknown, turnId?: string): string {
+  const data = canonicalStringify(
+    turnId === undefined ? { appointmentId, toolName, input } : { appointmentId, toolName, input, turnId },
+  );
   return crypto.createHash('sha256').update(data).digest('hex').substring(0, 32);
 }
 
@@ -63,7 +73,10 @@ export async function wasToolExecuted(
   keyPrefix: string = TOOL_EXECUTION_PREFIX,
 ): Promise<boolean> {
   try {
-    const result = await redis.get(`${keyPrefix}${hash}`);
+    // getStrict (not get): the plain wrapper swallows Redis errors and
+    // returns null, which this guard would read as "not executed" — the
+    // exact fail-open behaviour the catch below is meant to prevent.
+    const result = await redis.getStrict(`${keyPrefix}${hash}`);
     return result !== null;
   } catch (err) {
     logger.error(

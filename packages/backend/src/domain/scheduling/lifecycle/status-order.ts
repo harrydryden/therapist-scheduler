@@ -11,9 +11,9 @@
  *     `isStale`, which is pre-confirmation-only and must be cleared on
  *     any advance to confirmed-or-beyond OR to cancelled).
  *   - `computeBackwardSentinelResets(from, to)` is the admin-force-update
- *     companion: when an admin walks the row BACKWARDS, the post-stage
- *     follow-up sentinels must be cleared so the post-booking automated
- *     services don't skip the next pass.
+ *     companion: when an admin walks the row BACKWARDS (or revives a
+ *     cancelled row), the post-stage follow-up sentinels must be cleared so
+ *     the post-booking automated services don't skip the next pass.
  *
  * Pure module — no Prisma, no I/O. Safe to import from anywhere.
  */
@@ -61,6 +61,16 @@ export function progressionResetsFor(
  * automated post-booking services would skip re-sending emails because the
  * sentinel is already set from the first pass through.
  *
+ * Reviving a cancelled appointment (`cancelled → anything`) counts as
+ * moving backwards from the END of the lifecycle. `cancelled` has no
+ * position in the forward order, and a cancelled row keeps whatever
+ * sentinels it had reached before it was cancelled — possibly all of them.
+ * Treating it as "past completed" re-arms every sentinel at or after the
+ * target (a revived `confirmed` booking gets its meeting-link check,
+ * reminder and feedback form again); it used to reset nothing, so a revived
+ * booking that had been through feedback once never got a form and sat in
+ * `session_held` forever.
+ *
  * Called only by adminForceUpdate; the normal forward-progress transitions
  * never need to reset post-stage sentinels.
  */
@@ -68,7 +78,10 @@ export function computeBackwardSentinelResets(
   fromStatus: AppointmentStatus,
   toStatus: AppointmentStatus,
 ): { updates: Prisma.AppointmentRequestUpdateInput; reset: boolean } {
-  const fromIdx = LIFECYCLE_STATUS_ORDER.indexOf(fromStatus);
+  const fromIdx =
+    fromStatus === APPOINTMENT_STATUS.CANCELLED
+      ? LIFECYCLE_STATUS_ORDER.length
+      : LIFECYCLE_STATUS_ORDER.indexOf(fromStatus);
   const toIdx = LIFECYCLE_STATUS_ORDER.indexOf(toStatus);
   const movingBackwards = toIdx >= 0 && fromIdx >= 0 && toIdx < fromIdx;
   if (!movingBackwards) return { updates: {}, reset: false };

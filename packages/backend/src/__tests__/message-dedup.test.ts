@@ -17,6 +17,7 @@ jest.mock('../utils/redis', () => ({
     zadd: jest.fn(),
     zscore: jest.fn(),
     get: jest.fn(),
+    getStrict: jest.fn(),
     del: jest.fn(),
     set: jest.fn(),
     incr: jest.fn(),
@@ -31,6 +32,8 @@ jest.mock('../utils/database', () => ({
       findMany: jest.fn(),
       upsert: jest.fn().mockResolvedValue(undefined),
       create: jest.fn(),
+      deleteMany: jest.fn(),
+      updateMany: jest.fn(),
     },
     $transaction: jest.fn(),
   },
@@ -39,6 +42,9 @@ jest.mock('../utils/database', () => ({
 import {
   acquireMessageLock,
   markMessageProcessed,
+  releaseDbLock,
+  renewDbLock,
+  DB_LEASE_TTL_SECONDS,
   releaseMessageLock,
   isMessageProcessed,
   filterUnprocessed,
@@ -82,47 +88,136 @@ describe('acquireMessageLock — Redis path', () => {
   });
 });
 
-describe('acquireMessageLock — DB fallback', () => {
-  it('falls back to DB when Redis throws and reports prior processing', async () => {
+/**
+ * In-memory processed_gmail_messages table with a real primary key, wired
+ * into the prisma mock for the DB-fallback (Redis down) tests.
+ */
+function useInMemoryProcessedTable(): Map<string, { id: string; context: string; processedAt: Date }> {
+  const table = new Map<string, { id: string; context: string; processedAt: Date }>();
+  const m = prismaMock.processedGmailMessage;
+  m.findUnique.mockImplementation(async ({ where }: any) => table.get(where.id) ?? null);
+  m.create.mockImplementation(async ({ data }: any) => {
+    if (table.has(data.id)) throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+    const row = { id: data.id, context: data.context ?? 'legacy', processedAt: new Date() };
+    table.set(data.id, row);
+    return row;
+  });
+  const matches = (row: any, where: any) =>
+    row.id === where.id &&
+    (where.context === undefined || row.context === where.context) &&
+    (where.processedAt?.lt === undefined || row.processedAt < where.processedAt.lt);
+  m.deleteMany.mockImplementation(async ({ where }: any) => {
+    let count = 0;
+    for (const row of [...table.values()]) if (matches(row, where)) { table.delete(row.id); count++; }
+    return { count };
+  });
+  m.updateMany.mockImplementation(async ({ where, data }: any) => {
+    let count = 0;
+    for (const row of table.values()) if (matches(row, where)) { Object.assign(row, data); count++; }
+    return { count };
+  });
+  m.upsert.mockImplementation(async ({ where, create, update }: any) => {
+    const existing = table.get(where.id);
+    if (existing) Object.assign(existing, update);
+    else table.set(where.id, { ...create, processedAt: new Date() });
+  });
+  return table;
+}
+
+describe('acquireMessageLock — DB fallback lease (E7)', () => {
+  beforeEach(() => {
     redisMock.eval.mockRejectedValue(new Error('redis down'));
-    prismaMock.$transaction.mockImplementation(async (cb: any) =>
-      cb({
-        processedGmailMessage: {
-          findUnique: jest.fn().mockResolvedValue({ id: 'msg-1' }),
-          create: jest.fn(),
-        },
-      }),
-    );
-    const r = await acquireMessageLock('msg-1', 'trace-1');
-    expect(r).toEqual({ outcome: 'already_processed_db_fallback' });
   });
 
-  it('falls back to DB and acquires the lock when no prior row exists', async () => {
-    redisMock.eval.mockRejectedValue(new Error('redis down'));
-    prismaMock.$transaction.mockImplementation(async (cb: any) =>
-      cb({
-        processedGmailMessage: {
-          findUnique: jest.fn().mockResolvedValue(null),
-          create: jest.fn().mockResolvedValue({ id: 'msg-1' }),
-        },
-      }),
-    );
+  it('reports prior processing when the message already has a dedup row', async () => {
+    const table = useInMemoryProcessedTable();
+    table.set('msg-1', { id: 'msg-1', context: 'successfully-processed', processedAt: new Date() });
+
     const r = await acquireMessageLock('msg-1', 'trace-1');
-    expect(r).toEqual({ outcome: 'acquired_db_fallback' });
+
+    expect(r).toEqual({ outcome: 'already_processed_db_fallback' });
+    expect(table.has('lease:msg-1')).toBe(false);
   });
 
-  it('treats a P2002 unique-constraint violation as another worker winning the race', async () => {
-    redisMock.eval.mockRejectedValue(new Error('redis down'));
-    prismaMock.$transaction.mockImplementation(async (cb: any) =>
-      cb({
-        processedGmailMessage: {
-          findUnique: jest.fn().mockResolvedValue(null),
-          create: jest.fn().mockRejectedValue({ code: 'P2002' }),
-        },
-      }),
-    );
+  it('takes a lease row in its own namespace and never writes the message\'s dedup row', async () => {
+    const table = useInMemoryProcessedTable();
+
     const r = await acquireMessageLock('msg-1', 'trace-1');
-    expect(r).toEqual({ outcome: 'already_processed_db_fallback' });
+
+    expect(r.outcome).toBe('acquired_db_fallback');
+    expect(table.has('lease:msg-1')).toBe(true);
+    // The old fallback inserted THIS row as the lock — the message then
+    // looked processed on every non-success return.
+    expect(table.has('msg-1')).toBe(false);
+  });
+
+  it('a released lease leaves the message retryable (paused / deferred / unmatched / retry returns)', async () => {
+    const table = useInMemoryProcessedTable();
+    const first = await acquireMessageLock('msg-1', 'trace-1');
+    if (first.outcome !== 'acquired_db_fallback') throw new Error('expected lease');
+
+    // processMessage returns false without marking (e.g. paused) and releases.
+    await releaseDbLock('msg-1', first.leaseToken, 'trace-1');
+
+    expect(table.size).toBe(0);
+    expect((await acquireMessageLock('msg-1', 'trace-2')).outcome).toBe('acquired_db_fallback');
+  });
+
+  it('reports held_by_other (not "already processed") while another worker holds the lease', async () => {
+    useInMemoryProcessedTable();
+    expect((await acquireMessageLock('msg-1', 'trace-1')).outcome).toBe('acquired_db_fallback');
+
+    expect(await acquireMessageLock('msg-1', 'trace-2')).toEqual({ outcome: 'held_by_other' });
+  });
+
+  it('expires a crashed holder\'s lease after the TTL', async () => {
+    const table = useInMemoryProcessedTable();
+    table.set('lease:msg-1', {
+      id: 'lease:msg-1',
+      context: 'processing-lease:dead-worker:x',
+      processedAt: new Date(Date.now() - (DB_LEASE_TTL_SECONDS + 5) * 1000),
+    });
+
+    const r = await acquireMessageLock('msg-1', 'trace-1');
+
+    expect(r.outcome).toBe('acquired_db_fallback');
+    expect(table.get('lease:msg-1')!.context).not.toBe('processing-lease:dead-worker:x');
+  });
+
+  it('backs off if the message was marked processed between the check and the lease insert', async () => {
+    const table = useInMemoryProcessedTable();
+    const m = prismaMock.processedGmailMessage;
+    const realCreate = m.create.getMockImplementation()!;
+    m.create.mockImplementationOnce(async (args: any) => {
+      const row = await realCreate(args);
+      // Another holder finished in the meantime.
+      table.set('msg-1', { id: 'msg-1', context: 'successfully-processed', processedAt: new Date() });
+      return row;
+    });
+
+    expect(await acquireMessageLock('msg-1', 'trace-1')).toEqual({ outcome: 'already_processed_db_fallback' });
+    expect(table.has('lease:msg-1')).toBe(false);
+  });
+
+  it('release and renew are owner-checked', async () => {
+    const table = useInMemoryProcessedTable();
+    const r = await acquireMessageLock('msg-1', 'trace-1');
+    if (r.outcome !== 'acquired_db_fallback') throw new Error('expected lease');
+
+    // A stale holder with another token can neither renew nor release it.
+    expect(await renewDbLock('msg-1', 'processing-lease:someone-else')).toBe(false);
+    await releaseDbLock('msg-1', 'processing-lease:someone-else');
+    expect(table.has('lease:msg-1')).toBe(true);
+
+    const before = table.get('lease:msg-1')!.processedAt;
+    await new Promise((res) => setTimeout(res, 5));
+    expect(await renewDbLock('msg-1', r.leaseToken)).toBe(true);
+    expect(table.get('lease:msg-1')!.processedAt.getTime()).toBeGreaterThan(before.getTime());
+  });
+
+  it('treats a DB error as held_by_other rather than processing without a lock', async () => {
+    prismaMock.processedGmailMessage.findUnique.mockRejectedValue(new Error('db down'));
+    expect(await acquireMessageLock('msg-1', 'trace-1')).toEqual({ outcome: 'held_by_other' });
   });
 });
 

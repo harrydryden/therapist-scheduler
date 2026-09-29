@@ -18,8 +18,13 @@
  *     passes `audience: undefined`, which means Google's library skips
  *     the audience claim check entirely. Tokens minted for any
  *     audience (or by any GCP push subscription pointing at us) would
- *     verify. Less catastrophic than full auth-disabled but still a
- *     silent downgrade vs. the intended security posture.
+ *     verify, and on the history-gap path a forged notification could
+ *     steer the sync checkpoint.
+ *   - The webhook now REJECTS pushes (401 + deduped Slack alert) in that
+ *     configuration — see `isPubsubAudienceRequiredButMissing`. Still
+ *     NOT a startup failure: boot keeps working (the backup poller keeps
+ *     mail flowing) so a tightened check cannot crash-loop the service
+ *     the way #191 did.
  *
  * Both warnings share the same `INSECURE CONFIG` banner shape so log
  * monitoring tools can match a single string and page on either.
@@ -89,16 +94,36 @@ export function checkProductionPubsubAudience(
   pubsubAudienceWarningArmed = true;
 
   const message =
-    'GOOGLE_PUBSUB_AUDIENCE is unset in production. The Gmail push ' +
-    'webhook still verifies that tokens come from a Google service ' +
-    'account, but it does NOT check the audience claim — meaning a ' +
-    'token minted for any GCP push subscription pointing at this ' +
-    'host would verify. Set GOOGLE_PUBSUB_AUDIENCE to the audience ' +
-    'configured on the Pub/Sub push subscription (typically the full ' +
-    'webhook URL: https://<host>/api/webhooks/gmail/push).';
+    'GOOGLE_PUBSUB_AUDIENCE is unset in production. Without it the ' +
+    'audience claim of Pub/Sub push tokens cannot be checked (a token ' +
+    'minted for ANY GCP push subscription pointing at this host would ' +
+    'verify), so while GOOGLE_PUBSUB_TOPIC is set the Gmail push webhook ' +
+    'REJECTS every push with 401 and inbound mail arrives only via the ' +
+    'backup poll. Set GOOGLE_PUBSUB_AUDIENCE to the audience configured ' +
+    'on the Pub/Sub push subscription (typically the full webhook URL: ' +
+    'https://<host>/api/webhooks/gmail/push).';
 
   emitInsecureConfigBanner(message);
   scheduleRecurring(message);
+}
+
+/**
+ * True when the Gmail push webhook must refuse pushes because production
+ * is configured for push (GOOGLE_PUBSUB_TOPIC set) without the audience
+ * that makes token verification meaningful. The explicit
+ * REQUIRE_PUBSUB_AUTH=false override (its own P1 banner above) is left in
+ * charge of its unauthenticated mode.
+ */
+export function isPubsubAudienceRequiredButMissing(cfg: {
+  env: string;
+  googlePubsubTopic?: string;
+  googlePubsubAudience?: string;
+  requirePubsubAuth: boolean;
+}): boolean {
+  if (cfg.env !== 'production') return false;
+  if (cfg.requirePubsubAuth === false) return false;
+  if (!cfg.googlePubsubTopic) return false;
+  return !cfg.googlePubsubAudience || cfg.googlePubsubAudience.length === 0;
 }
 
 /** Test-only helper to reset the once-per-process guards AND clear

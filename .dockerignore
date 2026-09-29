@@ -1,0 +1,20 @@
+# Keep the build context to source + manifests. Host-installed dependencies,
+# build output and local env files must never reach the image: a
+# packages/frontend/.env* copied in would bake VITE_* values into the bundle.
+**/node_modules
+**/.vite
+**/dist
+**/coverage
+**/.env
+**/.env.*
+!**/.env.example
+.git
+.github
+.vercel
+.vscode
+.idea
+.cursor
+.claude
+**/*.log
+**/.DS_Store
+docs

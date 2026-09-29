@@ -57,6 +57,14 @@ export interface SlotConfig {
   maxTotalSlots?: number;
   sessionDurationMinutes?: number;
   slotIntervalMinutes?: number;
+  /**
+   * Slots starting sooner than this are not offered. Callers pass the
+   * `general.minBookingLeadHours` setting — the same value
+   * mark_scheduling_complete's validation enforces — so the agent is never
+   * shown a slot it would then be refused. Defaults to
+   * MIN_BOOKING_LEAD_HOURS (the setting's default).
+   */
+  minBookingLeadHours?: number;
 }
 
 /**
@@ -118,13 +126,16 @@ function generateSlots(
   weeksAhead: number = 3,
   durationMinutes: number = DEFAULT_SLOT_DURATION_MINUTES,
   intervalMinutes: number = DEFAULT_SLOT_INTERVAL_MINUTES,
+  minLeadHours: number = MIN_BOOKING_LEAD_HOURS,
 ): Date[] {
   const slots: Date[] = [];
-  const now = new Date();
   const timezone = availability.timezone || 'Europe/London';
 
-  // Buffer: don't show slots starting within the minimum booking lead time
-  const minStartTime = new Date(now.getTime() + MIN_BOOKING_LEAD_HOURS * 60 * 60 * 1000);
+  // Buffer: don't show slots starting within the minimum booking lead time.
+  // Anchored on `referenceDate` rather than wall-clock `new Date()` so slot
+  // generation is fully deterministic for a given reference instant —
+  // production callers pass "now", while tests and replays can pin a date.
+  const minStartTime = new Date(referenceDate.getTime() + minLeadHours * 60 * 60 * 1000);
 
   // Anchor week iteration on the reference date as it appears in the
   // therapist's timezone — otherwise a referenceDate near UTC midnight could
@@ -214,6 +225,10 @@ export function formatAvailabilityForUser(
   const maxTotalSlots = slotConfig.maxTotalSlots ?? DEFAULT_MAX_TOTAL_SLOTS;
   const sessionDurationMinutes = slotConfig.sessionDurationMinutes ?? DEFAULT_SLOT_DURATION_MINUTES;
   const slotIntervalMinutes = slotConfig.slotIntervalMinutes ?? DEFAULT_SLOT_INTERVAL_MINUTES;
+  const minBookingLeadHours =
+    typeof slotConfig.minBookingLeadHours === 'number' && Number.isFinite(slotConfig.minBookingLeadHours)
+      ? slotConfig.minBookingLeadHours
+      : MIN_BOOKING_LEAD_HOURS;
   const result: FormattedAvailability = {
     thisWeek: [],
     nextWeek: [],
@@ -246,7 +261,14 @@ export function formatAvailabilityForUser(
   result.userTimezone = renderTz;
 
   // Generate concrete slots using provided reference date for consistency
-  const slots = generateSlots(normalizedAvailability, referenceDate, 3, sessionDurationMinutes, slotIntervalMinutes);
+  const slots = generateSlots(
+    normalizedAvailability,
+    referenceDate,
+    3,
+    sessionDurationMinutes,
+    slotIntervalMinutes,
+    minBookingLeadHours,
+  );
 
   if (slots.length === 0) {
     result.summary = 'No available slots in the next 3 weeks. Consider asking the therapist for updated availability.';

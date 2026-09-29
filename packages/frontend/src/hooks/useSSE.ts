@@ -9,6 +9,22 @@
 import { useEffect, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { API_BASE, getAdminSecret } from '../config/env';
+import { AuthError } from '../api/core';
+import { getSseTicket } from '../api/appointments';
+
+/**
+ * The stream URL for one connection. Carries a single-use, 60-second ticket
+ * minted by an authenticated POST — never the admin secret, which used to
+ * sit in this URL (and so in proxy logs and browser history).
+ */
+export function buildEventStreamUrl(ticket: string): string {
+  return `${API_BASE}/admin/dashboard/events?ticket=${encodeURIComponent(ticket)}`;
+}
+
+/** Reconnect delay: 2s, 4s, 8s, 16s, then capped at 30s. */
+export function reconnectDelayMs(attempt: number): number {
+  return Math.min(2000 * Math.pow(2, attempt), 30000);
+}
 
 interface SSEEvent {
   type: string;
@@ -25,22 +41,39 @@ export function useSSE() {
 
   useEffect(() => {
     if (!getAdminSecret()) return; // Not authenticated yet
+    let cancelled = false;
 
-    function connect() {
-      // Get fresh secret on each reconnect to pick up re-authentication
-      const currentSecret = getAdminSecret();
-      if (!currentSecret) return;
+    function scheduleReconnect() {
+      if (cancelled) return;
+      const delay = reconnectDelayMs(reconnectAttemptsRef.current);
+      reconnectAttemptsRef.current++;
+      reconnectTimerRef.current = setTimeout(() => void connect(), delay);
+    }
+
+    async function connect() {
+      // Re-check on every (re)connect to pick up logout / re-authentication.
+      if (cancelled || !getAdminSecret()) return;
 
       // Clean up previous connection
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
+        eventSourceRef.current = null;
       }
 
-      // SECURITY NOTE: Admin secret passed as URL query parameter (appears in server logs,
-      // browser history, proxy logs). Accepted risk for EventSource API limitation.
-      // TODO: Migrate to httpOnly cookie auth when SSE auth is reworked.
-      const url = `${API_BASE}/admin/dashboard/events?secret=${encodeURIComponent(currentSecret)}`;
-      const es = new EventSource(url);
+      // A fresh single-use ticket for every connection attempt (header-
+      // authenticated POST); EventSource can't send the secret as a header.
+      let ticket: string;
+      try {
+        ticket = (await getSseTicket()).ticket;
+      } catch (err) {
+        // Wrong secret / lockout: AdminLayout shows the login screen; stop.
+        if (err instanceof AuthError) return;
+        scheduleReconnect();
+        return;
+      }
+      if (cancelled) return;
+
+      const es = new EventSource(buildEventStreamUrl(ticket));
       eventSourceRef.current = es;
 
       es.onmessage = (event) => {
@@ -70,9 +103,12 @@ export function useSSE() {
               break;
 
             case 'appointment:activity':
-              // Only invalidate the specific appointment detail (less disruptive)
+              // New message / chase / admin email: refetch the open detail
+              // drawer for that appointment (an active query refetches on
+              // invalidation), and mark the list stale.
               if (data.appointmentId) {
                 queryClient.invalidateQueries({ queryKey: ['appointment', data.appointmentId] });
+                queryClient.invalidateQueries({ queryKey: ['appointments'], refetchType: 'none' });
               }
               break;
 
@@ -88,18 +124,15 @@ export function useSSE() {
       es.onerror = () => {
         es.close();
         eventSourceRef.current = null;
-
-        // Exponential backoff: 2s, 4s, 8s, 16s, then cap at 30s
-        const delay = Math.min(2000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-        reconnectAttemptsRef.current++;
-
-        reconnectTimerRef.current = setTimeout(connect, delay);
+        // The ticket is spent; the next attempt fetches a new one.
+        scheduleReconnect();
       };
     }
 
-    connect();
+    void connect();
 
     return () => {
+      cancelled = true;
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;

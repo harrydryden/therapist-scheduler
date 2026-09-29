@@ -212,7 +212,13 @@ export const recordBookingLinkInputSchema = z.object({
     .string()
     .min(1)
     .max(2048)
-    .url('url must be a parseable URL with a scheme (e.g. "https://calendly.com/...")'),
+    .url('url must be a parseable URL with a scheme (e.g. "https://calendly.com/...")')
+    // zod's .url() accepts any scheme, including javascript: and data:.
+    // This link is rendered as the public "Book now" button and fed into
+    // every future booking prompt, so only web URLs are acceptable.
+    .refine((value) => /^https?:\/\//i.test(value), {
+      message: 'url must start with http:// or https://',
+    }),
 });
 
 /**

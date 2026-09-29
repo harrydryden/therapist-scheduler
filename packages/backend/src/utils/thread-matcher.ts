@@ -9,6 +9,7 @@
  *   4. Sender email + therapist name in subject (legacy fallback)
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { logger } from './logger';
 import { extractTrackingCode } from '../services/tracking-code.service';
@@ -291,6 +292,20 @@ function distinctClientCount(requests: Array<{ userEmail: string }>): number {
 }
 
 /**
+ * Prisma `where` fragment matching appointments where `sender` is the
+ * client or the therapist, case-insensitively (E14). Stored `userEmail`
+ * keeps whatever case the user typed at booking time, while the parser
+ * lowercases the inbound sender — an exact-match lookup silently missed
+ * those rows.
+ */
+export function senderIsPartyWhere(sender: string): Prisma.AppointmentRequestWhereInput[] {
+  return [
+    { userEmail: { equals: sender, mode: 'insensitive' } },
+    { therapistEmail: { equals: sender, mode: 'insensitive' } },
+  ];
+}
+
+/**
  * Legacy fallback matching: sender email + therapist name in subject.
  * Limited to 50 results to prevent memory issues with high-volume users.
  *
@@ -310,10 +325,7 @@ async function findByLegacyMatch(
 ): Promise<AppointmentMatch | null> {
   const matchingRequests = await prisma.appointmentRequest.findMany({
     where: {
-      OR: [
-        { userEmail: email.from },
-        { therapistEmail: email.from },
-      ],
+      OR: senderIsPartyWhere(email.from),
       status: { notIn: [...TERMINAL_STATUSES] },
     },
     orderBy: {
@@ -348,10 +360,7 @@ async function findByLegacyMatch(
   const cutoff = new Date(Date.now() - AMBIGUOUS_TERMINAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const recentTerminal = await prisma.appointmentRequest.findFirst({
     where: {
-      OR: [
-        { userEmail: email.from },
-        { therapistEmail: email.from },
-      ],
+      OR: senderIsPartyWhere(email.from),
       status: { in: [...TERMINAL_STATUSES] },
       updatedAt: { gte: cutoff },
     },
@@ -441,7 +450,8 @@ async function findByLegacyMatch(
   }
 
   // Fallback: if sender is a therapist, match by their email
-  const therapistMatches = matchingRequests.filter(r => r.therapistEmail === email.from);
+  const senderLower = email.from.toLowerCase();
+  const therapistMatches = matchingRequests.filter(r => r.therapistEmail.toLowerCase() === senderLower);
   if (therapistMatches.length === 1) {
     logger.info(
       { appointmentId: therapistMatches[0].id, therapistEmail: email.from },

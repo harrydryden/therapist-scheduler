@@ -18,9 +18,19 @@
  *   - FOR UPDATE row lock around the read-modify-write (TOCTOU
  *     protection — concurrent writes can't fire side effects on stale
  *     previousStatus).
- *   - Backward sentinel resets: moving backwards in the lifecycle
- *     clears post-stage follow-up sentinels so automated services
- *     re-send the appropriate emails.
+ *   - Backward sentinel resets: moving backwards in the lifecycle — or
+ *     reviving a cancelled row (cancelled → anything) — clears the
+ *     follow-up sentinels at or after the target so automated services
+ *     re-send the appropriate emails (status-order.ts).
+ *   - Slot moves re-arm follow-ups: giving a confirmed booking a NEW
+ *     datetime resets all four post-booking sentinels and bumps the
+ *     transition generation, mirroring the agent's reschedule path
+ *     (transitionToConfirmed + RESET_ALL_FOLLOWUP_SENTINELS). Without it
+ *     the new slot never got a reminder or meeting-link check because the
+ *     old slot's sentinels were still set, and the generation-scoped
+ *     post-booking effects would have deduped against the old slot's rows.
+ *   - Landing on `completed` records the durable completed-client row in
+ *     the same transaction (completed-clients.ts).
  *   - Active-status reschedule flagging: clearing the date on an
  *     active appointment marks it as `reschedulingInProgress` so the
  *     UI/agent know to chase a new datetime.
@@ -34,13 +44,19 @@
 
 import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
+import { areDatetimesEqual } from '../../../utils/date';
 import { APPOINTMENT_STATUS, type AppointmentStatus } from '../../../constants';
 import { AppointmentNotFoundError } from '../../../errors';
 import { transitionSideEffectsService } from '../../../services/transition-side-effects.service';
 import { recordAppointmentEvent } from '../../../services/appointment-event.service';
 import { isTerminalAppointmentStatus } from '../../../services/terminal-appointment-guard';
 import { addAuditMessage, recordStatusChangeEvent } from './audit';
-import { CLEAR_RESCHEDULING_STATE, startReschedulingState } from './update-fragments';
+import {
+  CLEAR_RESCHEDULING_STATE,
+  RESET_ALL_FOLLOWUP_SENTINELS,
+  startReschedulingState,
+} from './update-fragments';
+import { recordCompletedClient } from './completed-clients';
 import {
   computeBackwardSentinelResets,
   progressionResetsFor,
@@ -97,12 +113,14 @@ export async function adminForceUpdate(
     id: string;
     status: string;
     confirmed_date_time: string | null;
+    confirmed_date_time_parsed: Date | null;
     confirmed_at: Date | null;
     user_name: string | null;
     user_email: string;
     therapist_name: string;
     therapist_email: string | null;
     therapist_handle: string;
+    therapist_id: string | null;
   };
 
   let appointment!: {
@@ -118,13 +136,14 @@ export async function adminForceUpdate(
   };
   // Track whether sentinel fields were reset inside the transaction for audit trail
   let sentinelFieldsReset = false;
+  let followUpsRearmedForNewSlot = false;
 
   await prisma.$transaction(async (tx) => {
     // Lock the row with FOR UPDATE (no NOWAIT — see transitionToCompleted
     // comment) to prevent concurrent modifications.
     const rows = await tx.$queryRaw<AdminForceUpdateRow[]>`
-      SELECT id, status, confirmed_date_time, confirmed_at, user_name, user_email,
-             therapist_name, therapist_email, therapist_handle
+      SELECT id, status, confirmed_date_time, confirmed_date_time_parsed, confirmed_at,
+             user_name, user_email, therapist_name, therapist_email, therapist_handle, therapist_id
       FROM "appointment_requests"
       WHERE id = ${appointmentId}
       FOR UPDATE
@@ -169,7 +188,13 @@ export async function adminForceUpdate(
       // point of the column — without it, side-effects from the
       // re-entered status dedupe against the prior generation.
       updateData.transitionGeneration = { increment: 1 };
-      if (newStatus === APPOINTMENT_STATUS.CONFIRMED && !appointment.confirmedAt) {
+      // Stamp confirmedAt on a first confirmation, and re-stamp it when a
+      // cancelled booking is revived: the old value belongs to the booking
+      // that was cancelled.
+      if (
+        newStatus === APPOINTMENT_STATUS.CONFIRMED &&
+        (!appointment.confirmedAt || previousStatus === APPOINTMENT_STATUS.CANCELLED)
+      ) {
         updateData.confirmedAt = new Date();
       }
 
@@ -226,6 +251,23 @@ export async function adminForceUpdate(
       // When setting a new date, clear the rescheduling flag
       if (confirmedDateTime) {
         Object.assign(updateData, CLEAR_RESCHEDULING_STATE);
+
+        // A confirmed booking moved to a different slot needs the new
+        // slot's own meeting-link check, reminder and feedback cycle.
+        // Mirrors the agent's reschedule path (transitionToConfirmed with
+        // resetFollowUpFlags). The generation bump matters as much as the
+        // reset: post-booking effects are keyed by transitionGeneration, so
+        // without it the new slot's reminder would dedupe against the old
+        // slot's completed row and strand its sentinel; it also lets the
+        // retry runner supersede a still-failing "confirmed for <old slot>"
+        // email instead of sending it. Only for `confirmed` — on a
+        // post-session row a date edit is a historical correction and must
+        // not re-send anything.
+        if (effectiveStatus === APPOINTMENT_STATUS.CONFIRMED && slotMoved(row, confirmedDateTime, confirmedDateTimeParsed)) {
+          Object.assign(updateData, RESET_ALL_FOLLOWUP_SENTINELS);
+          updateData.transitionGeneration = { increment: 1 };
+          followUpsRearmedForNewSlot = true;
+        }
       }
     }
 
@@ -234,6 +276,17 @@ export async function adminForceUpdate(
       data: updateData,
       select: { id: true }, // Minimal select to avoid RETURNING columns that may not exist in DB yet
     });
+
+    // Landing on completed through the bypass still graduates the client:
+    // same durable record, same transaction, as transitionToCompleted.
+    if (statusChanging && newStatus === APPOINTMENT_STATUS.COMPLETED) {
+      await recordCompletedClient(tx, {
+        appointmentId,
+        therapistId: row.therapist_id,
+        therapistHandle: row.therapist_handle,
+        userEmail: row.user_email,
+      });
+    }
   }, {
     maxWait: 5000,
     timeout: 10000,
@@ -257,11 +310,18 @@ export async function adminForceUpdate(
   if (statusChanging) {
     auditParts.push(`Status changed: ${previousStatus} → ${newStatus}`);
     if (sentinelFieldsReset) {
-      auditParts.push('Follow-up email flags reset (moved backwards in lifecycle)');
+      auditParts.push(
+        previousStatus === APPOINTMENT_STATUS.CANCELLED
+          ? 'Follow-up email flags reset (revived from cancelled)'
+          : 'Follow-up email flags reset (moved backwards in lifecycle)',
+      );
     }
   }
   if (dateChanging) {
     auditParts.push(`Date/time updated: ${appointment.confirmedDateTime || 'none'} → ${confirmedDateTime || 'none'}`);
+    if (followUpsRearmedForNewSlot) {
+      auditParts.push('Follow-up email flags reset for the new slot');
+    }
   }
   if (reason) {
     auditParts.push(`Reason: ${reason}`);
@@ -350,4 +410,21 @@ export async function adminForceUpdate(
   });
 
   return { success: true, previousStatus, newStatus: effectiveNewStatus as AppointmentStatus };
+}
+
+/**
+ * Did an admin date edit move the booking to a different slot (as opposed
+ * to re-wording the same one)? Compares the parsed instants when both are
+ * known, otherwise the strings semantically — the same rule
+ * transitionToConfirmed uses to tell a reschedule from a re-send.
+ */
+function slotMoved(
+  row: { confirmed_date_time: string | null; confirmed_date_time_parsed: Date | null },
+  nextDateTime: string,
+  nextParsed: Date | null | undefined,
+): boolean {
+  if (row.confirmed_date_time_parsed && nextParsed) {
+    return Math.abs(row.confirmed_date_time_parsed.getTime() - nextParsed.getTime()) > 60 * 1000;
+  }
+  return !areDatetimesEqual(row.confirmed_date_time, nextDateTime);
 }

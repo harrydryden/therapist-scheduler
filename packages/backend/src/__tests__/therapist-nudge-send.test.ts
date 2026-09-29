@@ -237,6 +237,9 @@ jest.mock('../services/side-effect-tracker.service', () => {
       // pinned in side-effect-claim-lease.test.ts.
       tryClaimEffect: jest.fn().mockResolvedValue(true),
       markCompleted: jest.fn().mockResolvedValue(undefined),
+      // The harness records completion via markCompletedAfterExecute
+      // (retrying, never-throwing wrapper around markCompleted).
+      markCompletedAfterExecute: jest.fn().mockResolvedValue(true),
       markFailed: jest.fn().mockResolvedValue(undefined),
     },
   };

@@ -1,8 +1,17 @@
-version: '3.8'
+# Development stack: backend in watch mode (tsx) with src/ mounted, plus
+# Postgres and Redis on 127.0.0.1. Builds the Dockerfile's `builder` stage,
+# which keeps devDependencies (the production image prunes them).
+#
+# A fresh database needs bootstrapping once (schema + migration history):
+#   docker compose -f docker-compose.dev.yml exec app \
+#     npm -w therapist-scheduler-backend run db:bootstrap-dev
+# See docs/SCHEMA_MIGRATIONS.md.
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: builder
     ports:
       - "3000:3000"
     volumes:
@@ -13,8 +22,9 @@ services:
       - NODE_ENV=development
       - JWT_SECRET=${JWT_SECRET}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/therapist_scheduling}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - SINGLE_INSTANCE_MODE=${SINGLE_INSTANCE_MODE:-false}
     depends_on:
       - postgres
       - redis
@@ -28,12 +38,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
 

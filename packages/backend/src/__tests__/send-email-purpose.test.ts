@@ -23,7 +23,7 @@ jest.mock('../utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-const mockSendAppointmentEmail = jest.fn().mockResolvedValue(undefined);
+const mockSendAppointmentEmail = jest.fn().mockResolvedValue({ status: 'sent' });
 jest.mock('../domain/scheduling/agent/send', () => ({
   sendAppointmentEmail: (...args: unknown[]) => mockSendAppointmentEmail(...args),
 }));

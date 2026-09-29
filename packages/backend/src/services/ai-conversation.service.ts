@@ -41,6 +41,36 @@ import type { ConversationMessage } from './scheduling-context.service';
 
 const claudeCircuitBreaker = circuitBreakerRegistry.getOrCreate(CIRCUIT_BREAKER_CONFIGS.CLAUDE_API);
 
+/**
+ * What a conversation-state writer persists: the message log plus the
+ * optional checkpoint / facts / responseTracking carried by
+ * ConversationState. `systemPrompt` is optional because FIX #20 stores it
+ * as '' (it's rebuilt every turn).
+ */
+export type StorableConversationState = Omit<ConversationState, 'systemPrompt' | 'messages'> & {
+  systemPrompt?: string;
+  messages: ConversationMessage[];
+};
+
+/**
+ * Serialise a conversation state for the `conversationState` Json columns.
+ *
+ * Returns both the JSON text (for size checks / extractConversationMeta)
+ * and a plain JSON OBJECT for the column. The object — never the string —
+ * must be what's written: handing Prisma `JSON.stringify(state)` for a
+ * Json column stores a jsonb string scalar (`jsonb_typeof = 'string'`),
+ * which breaks every SQL-level jsonb path writer (lifecycle/audit.ts's
+ * `jsonb_set` fails with `22023 cannot set path in scalar`, silently
+ * dropping audit notes) and forces readers into `#>> '{}'` unwrap hacks.
+ * Round-tripping through JSON also guarantees the value is plain JSON
+ * (no Date instances / undefined) and matches the text the denormalised
+ * columns are derived from.
+ */
+function serialiseConversationState(state: object): { json: string; value: Prisma.InputJsonObject } {
+  const json = JSON.stringify(state);
+  return { json, value: JSON.parse(json) as Prisma.InputJsonObject };
+}
+
 /** Truncate message content to prevent state size bombs */
 export function truncateMessageContent(content: string): string {
   const MAX_LENGTH = CONVERSATION_LIMITS.MAX_MESSAGE_LENGTH;
@@ -48,6 +78,68 @@ export function truncateMessageContent(content: string): string {
   if (content.length <= MAX_LENGTH) return content;
   return content.slice(0, MAX_LENGTH - SUFFIX.length) + SUFFIX;
 }
+
+/** Limits `trimConversationState` enforces. */
+export interface ConversationTrimLimits {
+  /** Message count above which the state is trimmed (`agent.maxMessages`). */
+  maxMessages: number;
+  /** Message count a count-triggered trim keeps (`agent.trimToMessages`). */
+  trimToMessages: number;
+  /** Serialised-size cap (UTF-8 bytes), enforced on every save. */
+  maxStateBytes: number;
+}
+
+const DEFAULT_TRIM_LIMITS: ConversationTrimLimits = {
+  maxMessages: CONVERSATION_LIMITS.MAX_MESSAGES,
+  trimToMessages: CONVERSATION_LIMITS.TRIM_TO_MESSAGES,
+  maxStateBytes: CONVERSATION_LIMITS.MAX_STATE_BYTES,
+};
+
+function positiveIntOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
+/**
+ * Trim limits from the admin settings (`agent.maxMessages`,
+ * `agent.trimToMessages` — defined in setting-definitions but never read
+ * before), falling back to the CONVERSATION_LIMITS defaults when a setting
+ * is unreadable or not a positive number. `trimToMessages` is clamped to
+ * `maxMessages` so a misconfigured pair can't disable trimming.
+ */
+async function readTrimLimits(): Promise<ConversationTrimLimits> {
+  let maxMessages = DEFAULT_TRIM_LIMITS.maxMessages;
+  let trimToMessages = DEFAULT_TRIM_LIMITS.trimToMessages;
+  try {
+    maxMessages = positiveIntOr(await getSettingValue<number>('agent.maxMessages'), maxMessages);
+    trimToMessages = positiveIntOr(await getSettingValue<number>('agent.trimToMessages'), trimToMessages);
+  } catch (err) {
+    logger.warn({ err }, 'Failed to read conversation trim settings; using defaults');
+  }
+  return {
+    maxMessages,
+    trimToMessages: Math.min(trimToMessages, maxMessages),
+    maxStateBytes: DEFAULT_TRIM_LIMITS.maxStateBytes,
+  };
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+/**
+ * Where a turn's in-memory conversation state stands relative to the
+ * stored row: the `conversationVersion` it last read or wrote, and how
+ * many of its in-memory messages that version already contains. Messages
+ * past `persistedCount` are the turn's own and not yet saved. The turn
+ * save methods advance it in place.
+ */
+export interface ConversationSaveCursor {
+  version: number | undefined;
+  persistedCount: number;
+}
+
+/** Rebase attempts before a turn save gives up on a busy row. */
+const MAX_TURN_SAVE_REBASES = 3;
 
 export class AIConversationService {
   private traceId: string;
@@ -57,23 +149,38 @@ export class AIConversationService {
   }
 
   /**
-   * Store conversation state in database with optimistic locking
-   * Uses updatedAt as version check to prevent concurrent overwrites
-   * Automatically trims state if it exceeds size limits
+   * Store conversation state in database with optimistic locking.
+   *
+   * The version is the dedicated `conversationVersion` counter, NOT
+   * `updatedAt`: every other write to the row (the dispatch human-control
+   * gate, send.ts's outbound stamps, lifecycle transitions) bumps
+   * `@updatedAt`, so an updatedAt CAS made the agent's end-of-turn save
+   * conflict with its own tool calls. Only conversation-state writers
+   * touch `conversationVersion`, and each one increments it.
+   *
+   * Automatically trims state if it exceeds size limits.
    *
    * FIX ST2: Atomic state storage with activity recording
    * Previously, recordActivity was called separately which could succeed
    * while storeConversationState failed, creating inconsistent data.
    * Now includes activity update in the same atomic operation.
+   *
+   * @param expectedVersion - the `conversationVersion` the caller read.
+   *   When supplied the write only lands if the row still carries it
+   *   (ConcurrentModificationError otherwise). Omit only for a first
+   *   write where no version has been read.
+   * @returns the row's new `conversationVersion`, so a caller that saves
+   *   more than once in a turn can chain its CAS without a re-read.
    */
   async storeConversationState(
     appointmentRequestId: string,
-    state: { systemPrompt?: string; messages: ConversationMessage[] },
-    expectedUpdatedAt?: Date
-  ): Promise<void> {
-    // Trim state if needed to prevent unbounded growth
-    const trimmedState = this.trimConversationState(state);
-    const stateJson = JSON.stringify(trimmedState);
+    state: StorableConversationState,
+    expectedVersion?: number
+  ): Promise<number> {
+    // Trim to the admin-configured message limits AND the byte cap —
+    // checked on every save, whatever the message count.
+    const trimmedState = this.trimConversationState(state, await readTrimLimits());
+    const { json: stateJson, value: stateValue } = serialiseConversationState(trimmedState);
     const now = new Date();
     // FIX #21: Extract denormalized metadata to avoid loading full blob in list queries.
     // checkpointAt was added to drop the chase candidate query's conversationState fetch.
@@ -102,20 +209,26 @@ export class AIConversationService {
     // together in `update-fragments` so the two writers of
     // `checkpointStage` (this method + `applyCheckpointUpdate`)
     // stay in lock-step on the invariant.
-    const chaseResetFields = chaseResetIfStageChanged(
-      existing?.checkpointStage ?? null,
-      checkpointStage,
-    );
+    //
+    // A state with NO checkpoint (a legacy row, or one that so far only
+    // holds lifecycle audit notes appended before the agent ran) leaves
+    // the stage columns alone: the column is then the only record of the
+    // stage (processEmailReply seeds the checkpoint from it), and a
+    // null-vs-stage "change" would wrongly reset the chase sentinels.
+    const stageFields = checkpointStage === null
+      ? {}
+      : {
+          checkpointStage,
+          checkpointAt,
+          // Chase-reset on stage advance — see the read above.
+          ...chaseResetIfStageChanged(existing?.checkpointStage ?? null, checkpointStage),
+        };
 
-    if (expectedUpdatedAt) {
+    // `!== undefined`, not truthiness: version 0 is a real version (every
+    // row starts there).
+    if (expectedVersion !== undefined) {
       // Use optimistic locking - only update if version matches.
       // FIX ST2: Include activity recording in same atomic operation.
-      //
-      // Phase 3a dual-write: in the same transaction we mirror
-      // `conversationState` to the sibling `appointment_conversations`
-      // row. The cutover (reads switching to the new table) is a
-      // follow-up PR; until then the legacy column is the source of
-      // truth and the mirror is for safety.
       //
       // withSerializationRetry re-runs the whole transaction on a
       // transient DB error (dropped connection, expired transaction) —
@@ -127,68 +240,58 @@ export class AIConversationService {
           const result = await tx.appointmentRequest.updateMany({
             where: {
               id: appointmentRequestId,
-              updatedAt: expectedUpdatedAt,
+              conversationVersion: expectedVersion,
             },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
+              conversationVersion: { increment: 1 },
               updatedAt: now,
               // FIX ST2: Atomic activity recording - no separate call needed
               lastActivityAt: now,
               isStale: false,
               messageCount,
-              checkpointStage,
-              checkpointAt,
-              // Chase-reset on stage advance — see the read at the top
-              // of this method for the rationale.
-              ...chaseResetFields,
+              ...stageFields,
             },
           });
 
           if (result.count === 0) {
-            // Version mismatch - another process modified the state.
-            // Use the typed error so callers can `instanceof`-check rather
-            // than string-matching the message (fragile across rephrasings).
+            // Version mismatch - another conversation-state writer got
+            // there first. Use the typed error so callers can
+            // `instanceof`-check rather than string-matching the message
+            // (fragile across rephrasings).
             throw new ConcurrentModificationError(appointmentRequestId);
           }
 
-          await tx.appointmentConversation.upsert({
-            where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-            update: { conversationState: stateJson },
-          });
         }),
         { appointmentRequestId, op: 'storeConversationState' },
         (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
       );
+      // The CAS matched `expectedVersion` and incremented it under the
+      // row lock, so the new version is exactly one higher.
+      return expectedVersion + 1;
     } else {
-      // Legacy call without version check (for initial state creation).
+      // Call without a version check (a first write where the caller has
+      // no version to compare against). Still increments the version so
+      // any reader holding the old one detects this write.
       // FIX ST2: Include activity recording in same atomic operation.
-      // Phase 3a dual-write applied as in the optimistic-locked branch.
-      await withSerializationRetry(
+      return withSerializationRetry(
         () => prisma.$transaction(async (tx) => {
-          await tx.appointmentRequest.update({
+          const updated = await tx.appointmentRequest.update({
             where: { id: appointmentRequestId },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
+              conversationVersion: { increment: 1 },
               updatedAt: now,
               // FIX ST2: Atomic activity recording
               lastActivityAt: now,
               isStale: false,
               messageCount,
-              checkpointStage,
-              checkpointAt,
-              // Chase-reset on stage advance — see the read at the top
-              // of this method for the rationale.
-              ...chaseResetFields,
+              ...stageFields,
             },
-            select: { id: true },
+            select: { id: true, conversationVersion: true },
           });
 
-          await tx.appointmentConversation.upsert({
-            where: { appointmentId: appointmentRequestId },
-            create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-            update: { conversationState: stateJson },
-          });
+          return updated?.conversationVersion;
         }),
         { appointmentRequestId, op: 'storeConversationState:init' },
         (msg, ctx) => logger.warn({ traceId: this.traceId, ...ctx }, msg),
@@ -235,12 +338,11 @@ export class AIConversationService {
         where: { id: appointmentRequestId },
         // checkpointStage is the denormalised column kept in sync
         // with `conversationState.checkpoint.stage` (see this very
-        // function's docstring for the invariant). We use it
-        // instead of re-parsing the conversation state because the
-        // Zod schema in `parseConversationState` doesn't include
-        // the `checkpoint` field — it strips it on the way out.
-        // Reading the column directly avoids that hazard.
-        select: { conversationState: true, checkpointStage: true, updatedAt: true },
+        // function's docstring for the invariant). The chase-reset
+        // rule compares against the column because that's what the
+        // chase scheduler reads. conversationVersion is the CAS token
+        // (see storeConversationState).
+        select: { conversationState: true, checkpointStage: true, conversationVersion: true },
       });
       if (!record) {
         return { applied: false, stage: null };
@@ -264,7 +366,9 @@ export class AIConversationService {
       const oldStage = record.checkpointStage;
 
       state.checkpoint = mutate(state.checkpoint ?? null);
-      const stateJson = JSON.stringify(state);
+      const { json: stateJson, value: stateValue } = serialiseConversationState(
+        this.trimConversationState(state, await readTrimLimits()),
+      );
       const { messageCount, checkpointStage, checkpointAt } = extractConversationMeta(stateJson);
 
       const now = new Date();
@@ -274,45 +378,28 @@ export class AIConversationService {
       // `storeConversationState` so the two writers can't drift.
       const chaseResetFields = chaseResetIfStageChanged(oldStage, checkpointStage);
 
-      // Phase 3a dual-write: applyCheckpointUpdate is one of the four
-      // writers of `conversationState`. Mirror to
-      // `appointment_conversations` in the same transaction.
-      //
-      // The transaction returns the updateMany count so the caller
-      // can distinguish optimistic-lock losses from successes. If the
-      // legacy update misses (count=0) we DON'T touch the mirror
-      // table — the rest of the row state didn't change either.
-      //
-      // withSerializationRetry re-runs the transaction on a transient
-      // DB error (dropped connection, expired transaction). If the row
-      // changed between attempts, the re-run just yields count=0 and
-      // the outer optimistic-lock loop takes over.
       const transactionResult = await withSerializationRetry(
         () => prisma.$transaction(async (tx) => {
           const result = await tx.appointmentRequest.updateMany({
             where: {
               id: appointmentRequestId,
-              updatedAt: record.updatedAt,
+              conversationVersion: record.conversationVersion,
               ...options?.extraWhere,
             },
             data: {
-              conversationState: stateJson,
+              conversationState: stateValue,
               messageCount,
               checkpointStage,
               checkpointAt,
               updatedAt: now,
               ...chaseResetFields,
               ...options?.extraUpdates,
+              // After extraUpdates so a caller can't accidentally clobber
+              // the version bump.
+              conversationVersion: { increment: 1 },
             },
           });
 
-          if (result.count === 1) {
-            await tx.appointmentConversation.upsert({
-              where: { appointmentId: appointmentRequestId },
-              create: { appointmentId: appointmentRequestId, conversationState: stateJson },
-              update: { conversationState: stateJson },
-            });
-          }
 
           return result;
         }),
@@ -375,67 +462,122 @@ export class AIConversationService {
 
   /**
    * Append a single message to the conversation log under optimistic
-   * locking so a concurrent agent save / chase-tick / second admin click
-   * can't silently overwrite the append.
+   * locking (CAS on conversationVersion, which the append bumps) so a
+   * concurrent agent save / chase-tick / second admin click can't
+   * silently overwrite it — and so an agent turn in flight sees the bump
+   * and rebases onto it (see saveTurnState) instead of saving over it.
    *
-   * Used by admin endpoints (send-message, release-control) that need to
-   * record an audit-style entry alongside other concurrent writers. The
-   * caller's email/Slack side effect should already have fired; this
-   * persists the audit trail.
+   * Used by admin endpoints (send-message, release-control) and by the
+   * lifecycle audit-note writer (lifecycle/audit.ts). The caller's
+   * email/Slack/transition side effect has already happened; this
+   * persists the record of it.
    *
    * Behaviour:
-   *   - If the appointment row has no conversationState, this is a
-   *     no-op (matches the previous read-modify-write call sites'
-   *     silent skip). Returns false in that case.
-   *   - On a single optimistic-lock conflict the helper re-reads and
-   *     re-applies once. If the second attempt also conflicts the error
-   *     bubbles so the caller can log loudly — the prior side effect
-   *     (email send) already happened, so a missed audit entry is the
-   *     loss of record, not duplicate work.
+   *   - A row with no conversationState yet gets one holding just this
+   *     message (lifecycle notes can precede the agent's first save).
+   *     A state that exists but can't be parsed is left alone (returns
+   *     false) rather than overwritten.
+   *   - On an optimistic-lock conflict the helper re-reads and re-applies,
+   *     up to three attempts, then the error bubbles so the caller can log
+   *     loudly — the prior side effect already happened, so a missed entry
+   *     is the loss of a record, not duplicate work.
    *
-   * Returns: true if the message was appended, false if there was no
-   * conversationState to append to.
+   * Returns: true if the message was appended, false if the row is missing
+   * or its state is unreadable.
    */
   async appendConversationMessage(
     appointmentRequestId: string,
     message: ConversationMessage,
   ): Promise<boolean> {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
       const row = await prisma.appointmentRequest.findUnique({
         where: { id: appointmentRequestId },
-        select: { conversationState: true, updatedAt: true },
+        select: { conversationState: true, conversationVersion: true },
       });
-      if (!row?.conversationState) return false;
-      const state = parseConversationState(row.conversationState);
+      if (!row) return false;
+      const state: StorableConversationState | null = row.conversationState
+        ? parseConversationState(row.conversationState)
+        : { systemPrompt: '', messages: [] };
       if (!state) return false;
 
       state.messages.push(message);
       try {
-        await this.storeConversationState(appointmentRequestId, state, row.updatedAt);
+        await this.storeConversationState(appointmentRequestId, state, row.conversationVersion);
         return true;
       } catch (err) {
-        if (err instanceof ConcurrentModificationError && attempt === 0) {
+        if (err instanceof ConcurrentModificationError && attempt < MAX_ATTEMPTS) {
           logger.warn(
-            { traceId: this.traceId, appointmentRequestId },
-            'appendConversationMessage hit optimistic-lock conflict — retrying once',
+            { traceId: this.traceId, appointmentRequestId, attempt },
+            'appendConversationMessage hit optimistic-lock conflict — retrying',
           );
           continue;
         }
         throw err;
       }
     }
-    // Unreachable: the loop either returns or throws.
-    return false;
   }
 
   /**
-   * FIX RSA-4: Retry state save with exponential backoff
-   * If all retries fail, records compensation data for manual recovery
+   * Save an agent turn's state under optimistic locking, rebasing onto any
+   * conversation writes that landed since the turn last read or wrote the
+   * row (a lifecycle audit note from a transition the turn itself
+   * triggered, an admin append, a chase checkpoint update).
+   *
+   * On a ConcurrentModificationError the stored state is re-read and the
+   * turn's own unsaved messages (those past `cursor.persistedCount`) are
+   * appended to it; the turn's checkpoint / facts / responseTracking are
+   * kept, since the turn is the fresher writer of those. The rebased
+   * message list replaces `state.messages` IN PLACE, so the caller's
+   * in-memory state keeps matching the row and later saves in the same
+   * turn stay consistent. Before this, the end-of-turn save simply
+   * overwrote such writes — e.g. the "[System: agent] confirmed" note the
+   * turn's own mark_scheduling_complete had just appended.
+   *
+   * Advances `cursor` on success. Throws the ConcurrentModificationError if
+   * the row is still being written after MAX_TURN_SAVE_REBASES rebases, and
+   * any non-conflict error as-is.
+   */
+  async saveTurnState(
+    appointmentRequestId: string,
+    state: StorableConversationState,
+    cursor: ConversationSaveCursor,
+  ): Promise<void> {
+    for (let rebases = 0; ; rebases++) {
+      try {
+        cursor.version = await this.storeConversationState(appointmentRequestId, state, cursor.version);
+        cursor.persistedCount = state.messages.length;
+        return;
+      } catch (err) {
+        if (!(err instanceof ConcurrentModificationError) || rebases >= MAX_TURN_SAVE_REBASES) throw err;
+        const latest = await this.getConversationState(appointmentRequestId);
+        if (!latest) throw err;
+        const ownMessages = state.messages.slice(cursor.persistedCount);
+        state.messages.splice(0, state.messages.length, ...latest.messages, ...ownMessages);
+        cursor.version = latest._version;
+        cursor.persistedCount = latest.messages.length;
+        logger.info(
+          {
+            traceId: this.traceId,
+            appointmentRequestId,
+            rebasedOntoVersion: latest._version,
+            ownMessages: ownMessages.length,
+          },
+          'Conversation state changed during the turn — rebased the turn\'s messages onto it',
+        );
+      }
+    }
+  }
+
+  /**
+   * FIX RSA-4: end-of-turn save. Conflicts are rebased (saveTurnState);
+   * transient failures are retried with exponential backoff. If all
+   * retries fail, records compensation data for manual recovery.
    */
   async storeConversationStateWithRetry(
     appointmentRequestId: string,
-    state: { systemPrompt: string; messages: ConversationMessage[] },
-    expectedUpdatedAt: Date | undefined,
+    state: StorableConversationState,
+    cursor: ConversationSaveCursor,
     executedTools: Array<{ toolName: string; emailSentTo?: 'user' | 'therapist'; timestamp: string }>
   ): Promise<{ success: boolean; retriesUsed: number }> {
     const MAX_RETRIES = 3;
@@ -443,14 +585,15 @@ export class AIConversationService {
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
-        await this.storeConversationState(appointmentRequestId, state, expectedUpdatedAt);
+        await this.saveTurnState(appointmentRequestId, state, cursor);
         return { success: true, retriesUsed: attempt };
       } catch (error) {
-        // Don't retry optimistic locking conflicts - they indicate a real conflict
+        // A conflict that survived saveTurnState's rebases means the row
+        // is under sustained concurrent writes — not a transient error.
         if (error instanceof ConcurrentModificationError) {
           logger.warn(
             { traceId: this.traceId, appointmentRequestId, attempt },
-            'State save conflict - not retrying (concurrent modification)'
+            'State save conflict persisted after rebasing - not retrying (concurrent modification)'
           );
           break;
         }
@@ -518,14 +661,16 @@ export class AIConversationService {
   }
 
   /**
-   * Get conversation state from database with version info for optimistic locking
+   * Get conversation state from database with version info for optimistic
+   * locking. `_version` is the row's `conversationVersion` — pass it back
+   * to storeConversationState as `expectedVersion`.
    */
   async getConversationState(
     appointmentRequestId: string
-  ): Promise<ConversationState & { _version: Date } | null> {
+  ): Promise<ConversationState & { _version: number } | null> {
     const request = await prisma.appointmentRequest.findUnique({
       where: { id: appointmentRequestId },
-      select: { conversationState: true, updatedAt: true },
+      select: { conversationState: true, conversationVersion: true },
     });
 
     if (!request?.conversationState) {
@@ -539,79 +684,106 @@ export class AIConversationService {
 
     return {
       ...parsed,
-      _version: request.updatedAt,
+      _version: request.conversationVersion,
     };
   }
 
   /**
    * Trim conversation state to prevent unbounded growth.
    *
+   * Two triggers, both checked on EVERY save:
+   *   - count: more than `limits.maxMessages` messages → keep
+   *     `limits.trimToMessages` of them;
+   *   - size: the serialised state exceeds `limits.maxStateBytes` → drop
+   *     as many messages as it takes to fit. (Previously the size check
+   *     only ran above ~256 messages, so a 20-message state of 45KB
+   *     messages grew past the 500KB read limit and became unreadable —
+   *     every later turn failed with "Conversation state not found".)
+   *
    * Strategy: keep BOTH ends of the conversation, drop the middle.
    *   - First TRIM_KEEP_FIRST messages: initial booking context (who, what, when).
    *     The agent always needs these to understand what the conversation is about,
    *     even after a long reschedule chain.
-   *   - Last (TRIM_TO_MESSAGES - TRIM_KEEP_FIRST - 1) messages: recent context.
+   *   - The most recent messages: recent context.
    *   - One placeholder message in between explaining how many messages were dropped.
+   * When the size cap still isn't met, the tail shrinks first (always keeping
+   * the newest message), then the head.
    *
-   * The previous strategy kept only the tail, which meant a long reschedule
-   * conversation could lose all the original booking context (who's involved,
-   * what slots were considered, what the original ask was). At ~100 appts/day
-   * this didn't bite often but it produced confusing agent behaviour on the
-   * rare long thread.
+   * Only `messages` is rewritten: every other field (checkpoint, facts,
+   * responseTracking, systemPrompt, anything added later) is carried over
+   * unchanged. Returning a hand-picked `{ systemPrompt, messages }` here
+   * used to wipe the agent's checkpoint and facts on exactly the long
+   * conversations that most need them.
    */
-  trimConversationState(
-    state: { systemPrompt?: string; messages: ConversationMessage[] }
-  ): { systemPrompt?: string; messages: ConversationMessage[] } {
-    const { MAX_MESSAGES, TRIM_TO_MESSAGES, MAX_STATE_BYTES, TRIM_KEEP_FIRST } = CONVERSATION_LIMITS;
-
-    // Fast path: well below limits, return as-is. Skipping the JSON.stringify
-    // here matters because storeConversationState stringifies the result on
-    // every save — paying the cost twice on the hot path is wasted work.
-    // The byte-size check below only fires when the count threshold doesn't.
-    if (state.messages.length <= MAX_MESSAGES) {
-      // Only stringify-for-size-check when the count is high enough that the
-      // message blob could plausibly approach the byte limit. ~50KB per
-      // message is a generous upper bound (we cap individual messages at 50KB
-      // via truncateMessageContent).
-      const couldBeOversized = state.messages.length * 2_000 > MAX_STATE_BYTES;
-      if (!couldBeOversized || JSON.stringify(state).length <= MAX_STATE_BYTES) {
-        return state;
-      }
+  trimConversationState<T extends { messages: ConversationMessage[] }>(
+    state: T,
+    limits: ConversationTrimLimits = DEFAULT_TRIM_LIMITS,
+  ): T {
+    const { maxMessages, trimToMessages, maxStateBytes } = limits;
+    const messages = state.messages;
+    const total = messages.length;
+    const overCount = total > maxMessages;
+    if (!overCount && jsonBytes(state) <= maxStateBytes) {
+      return state;
     }
 
-    // Reserve one slot for the placeholder summary message; split the rest
-    // between head (initial context) and tail (recent context).
-    const keepFirst = Math.min(TRIM_KEEP_FIRST, state.messages.length);
-    const keepLast = Math.max(0, TRIM_TO_MESSAGES - keepFirst - 1);
-    const droppedCount = state.messages.length - keepFirst - keepLast;
+    // Exact serialised size of a candidate without building it:
+    //   bytes({...state, messages: []}) + Σ bytes(message) + (count - 1) commas.
+    const baseBytes = jsonBytes({ ...state, messages: [] });
+    const prefixBytes = [0];
+    for (const m of messages) prefixBytes.push(prefixBytes[prefixBytes.length - 1] + jsonBytes(m));
+    const placeholderFor = (dropped: number, first: number, last: number): ConversationMessage => ({
+      role: 'user',
+      content: `[System Note: ${dropped} middle messages were trimmed to maintain performance. The first ${first} messages (initial booking context) and the last ${last} messages (recent activity) are preserved.]`,
+    });
+    const sizeOf = (first: number, last: number): number => {
+      const dropped = total - first - last;
+      const kept = first + last + (dropped > 0 ? 1 : 0);
+      const keptBytes =
+        prefixBytes[first] +
+        (prefixBytes[total] - prefixBytes[total - last]) +
+        (dropped > 0 ? jsonBytes(placeholderFor(dropped, first, last)) : 0);
+      return baseBytes + keptBytes + Math.max(0, kept - 1);
+    };
 
+    // Reserve one slot for the placeholder; split the rest between head
+    // (initial context) and tail (recent context). A size-only trim starts
+    // from everything and sheds messages until it fits.
+    // (The head never takes the last message: the newest is always kept.)
+    let keepFirst = Math.min(CONVERSATION_LIMITS.TRIM_KEEP_FIRST, Math.max(0, total - 1));
+    let keepLast = overCount
+      ? Math.max(1, trimToMessages - keepFirst - 1)
+      : total - keepFirst;
+    keepLast = Math.min(keepLast, total - keepFirst);
+    while (sizeOf(keepFirst, keepLast) > maxStateBytes && keepLast > 1) keepLast--;
+    while (sizeOf(keepFirst, keepLast) > maxStateBytes && keepFirst > 0) keepFirst--;
+
+    const droppedCount = total - keepFirst - keepLast;
     // If nothing would actually be dropped (very short conversation), return as-is
     if (droppedCount <= 0) {
       return state;
     }
 
-    const head = state.messages.slice(0, keepFirst);
-    const tail = state.messages.slice(-keepLast);
-    const placeholder: ConversationMessage = {
-      role: 'user',
-      content: `[System Note: ${droppedCount} middle messages were trimmed to maintain performance. The first ${keepFirst} messages (initial booking context) and the last ${keepLast} messages (recent activity) are preserved.]`,
-    };
-
-    const trimmedMessages = [...head, placeholder, ...tail];
+    const trimmedMessages = [
+      ...messages.slice(0, keepFirst),
+      placeholderFor(droppedCount, keepFirst, keepLast),
+      ...messages.slice(total - keepLast),
+    ];
 
     logger.info(
       {
-        originalCount: state.messages.length,
+        originalCount: total,
         trimmedCount: trimmedMessages.length,
         keepFirst,
         keepLast,
         droppedCount,
+        trigger: overCount ? 'message_count' : 'state_bytes',
       },
       'Trimmed conversation state (head+tail strategy)'
     );
 
     return {
-      systemPrompt: state.systemPrompt,
+      ...state,
       messages: trimmedMessages,
     };
   }
@@ -697,15 +869,16 @@ Please answer their question helpfully and direct them to the booking URL to sch
       const inquiryTools: Anthropic.Tool[] = [
         {
           name: 'send_email',
-          description: 'Send an email response to the user',
+          description:
+            'Send an email reply to the person you are replying to. You do NOT supply a recipient — ' +
+            'the system always sends to the verified sender of this conversation.',
           input_schema: {
             type: 'object',
             properties: {
-              to: { type: 'string', description: 'Recipient email address' },
               subject: { type: 'string', description: 'Email subject line. MUST include "Spill" somewhere in the subject.' },
               body: { type: 'string', description: 'Email body content' },
             },
-            required: ['to', 'subject', 'body'],
+            required: ['subject', 'body'],
           },
         },
         {
@@ -758,7 +931,19 @@ Please answer their question helpfully and direct them to the booking URL to sch
       // Execute tool calls
       for (const toolCall of toolCalls) {
         if (toolCall.name === 'send_email') {
-          const input = toolCall.input as { to: string; subject: string; body: string };
+          const input = toolCall.input as { subject: string; body: string; to?: unknown };
+
+          // SECURITY: the recipient is pinned to the inquiry's verified
+          // sender. The model never chooses the address — a prompt-injected
+          // reply must not be able to make scheduling@ email a third party,
+          // and a model-supplied `to` (legacy schema) is ignored outright.
+          const recipient = inquiry.userEmail;
+          if (typeof input.to === 'string' && input.to.trim().toLowerCase() !== recipient.toLowerCase()) {
+            logger.warn(
+              { traceId: this.traceId, inquiryId, ignoredTo: input.to },
+              'Inquiry send_email supplied a recipient that is not the verified sender — ignoring it',
+            );
+          }
 
           // Ensure subject includes "Spill" for brand consistency
           let normalizedSubject = input.subject;
@@ -771,14 +956,14 @@ Please answer their question helpfully and direct them to the booking URL to sch
           }
 
           logger.info(
-            { traceId: this.traceId, inquiryId, to: input.to, subject: normalizedSubject },
+            { traceId: this.traceId, inquiryId, to: recipient, subject: normalizedSubject },
             'Sending inquiry response email'
           );
 
           // Try to send directly, fall back to queue
           try {
             await sendEmail({
-              to: input.to,
+              to: recipient,
               subject: normalizedSubject,
               body: input.body,
               threadId: inquiry.gmailThreadId || undefined,
@@ -790,7 +975,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
             );
             // Queue without appointmentId (inquiry emails don't have one)
             await emailQueueService.enqueue({
-              to: input.to,
+              to: recipient,
               subject: normalizedSubject,
               body: input.body,
             });
@@ -799,7 +984,7 @@ Please answer their question helpfully and direct them to the booking URL to sch
           // Log tool execution
           conversationState.messages.push({
             role: 'user',
-            content: `[Tool executed: send_email to ${input.to}]`,
+            content: `[Tool executed: send_email to ${recipient}]`,
           });
         } else if (toolCall.name === 'unsubscribe_user') {
           const input = toolCall.input as { reason?: string };
@@ -862,11 +1047,12 @@ Please answer their question helpfully and direct them to the booking URL to sch
         }
       }
 
-      // Save conversation state
+      // Save conversation state — as a JSON object, not a JSON string
+      // (see serialiseConversationState).
       await prisma.weeklyMailingInquiry.update({
         where: { id: inquiryId },
         data: {
-          conversationState: JSON.stringify(conversationState),
+          conversationState: serialiseConversationState(conversationState).value,
           updatedAt: new Date(),
         },
       });

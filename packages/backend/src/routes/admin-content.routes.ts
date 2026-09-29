@@ -20,6 +20,7 @@ import { RATE_LIMITS } from '../constants';
 import { knowledgeService } from '../services/knowledge.service';
 import { sendSuccess, sendError, Errors } from '../utils/response';
 import { getOrCreateFeedbackFormConfig, DEFAULT_QUESTIONS } from '../utils/feedback-form-config';
+import type { FormQuestion } from '@therapist-scheduler/shared';
 
 // ============================================
 // Knowledge Base — Validation Schemas
@@ -68,11 +69,20 @@ const questionSchema = z.object({
   scaleMaxLabel: z.string().optional(),
   options: z.array(z.string()).optional(),
   followUpPlaceholder: z.string().optional(),
+  // Word cap on free-text answers. Omitting it here meant zod stripped it
+  // on every save, silently removing the limit the form editor showed.
+  maxWords: z.number().int().positive().max(10000).optional(),
   conditionalOn: z.object({
     questionId: z.string().min(1),
     values: z.array(z.string()).min(1),
   }).optional(),
 });
+
+// Compile-time guard: every FormQuestion field must be accepted above,
+// otherwise zod drops it on save (how `maxWords` was lost).
+type UnsavedQuestionKeys = Exclude<keyof FormQuestion, keyof z.infer<typeof questionSchema>>;
+const everyQuestionFieldIsSaved: [UnsavedQuestionKeys] extends [never] ? true : never = true;
+void everyQuestionFieldIsSaved;
 
 const updateFormConfigSchema = z.object({
   formName: z.string().min(1).optional(),
@@ -592,8 +602,15 @@ export async function adminContentRoutes(fastify: FastifyInstance) {
 
       const escapeCsv = (val: string | number | null | undefined): string => {
         if (val === null || val === undefined) return '';
-        const str = String(val);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        let str = String(val);
+        // Formula-injection guard: responses are anonymous free text and
+        // spreadsheets evaluate cells beginning with = + - @ (and tab/CR)
+        // as formulas when the export is opened. Neutralise with a leading
+        // apostrophe, the convention Excel/Sheets/LibreOffice all honour.
+        if (/^[=+\-@\t\r]/.test(str)) {
+          str = `'${str}`;
+        }
+        if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
           return `"${str.replace(/"/g, '""')}"`;
         }
         return str;

@@ -7,11 +7,9 @@
  * to remember which key prefix is canonical or what the DB fallback
  * looks like.
  *
- * Behaviour mirrors the original in-place implementation in
- * `email-message-processor.processMessage` exactly — the same Lua
- * script, the same serializable-transaction DB fallback, the same
- * upsert pattern for marking processed. The point is to give the
- * contract a single home, not to change semantics.
+ * The Redis path is the original Lua script; marking processed is the
+ * original ZSET + DB upsert. The Redis-down fallback is a DB *lease*,
+ * separate from the dedup record (see `DB_LEASE_ID_PREFIX`).
  *
  * The primary callsites in `domain/scheduling/inbound/process.ts`
  * (moved there from core/email/inbound/ in Stage D3) were migrated to
@@ -41,6 +39,36 @@ const {
 
 const LOCK_TTL_SECONDS = 300;
 
+/**
+ * DB-fallback processing lease (only used while Redis is unavailable).
+ *
+ * The lease is a `ProcessedGmailMessage` row in its own id namespace
+ * (`lease:<messageId>`), NOT the message's dedup row. The old fallback
+ * inserted the message's own processed row as the lock and deleted it only
+ * on the generic error path, so every other non-success return — paused,
+ * deferred, unmatched-within-budget, divergence retry, optimistic-lock
+ * conflict, a crash — left the message permanently "processed" (E7). A
+ * lease never marks the message processed; the caller releases it on
+ * every return, and a crashed holder's lease expires after
+ * `DB_LEASE_TTL_SECONDS` (`processedAt` is the lease start, refreshed by
+ * `renewDbLock`). `context` carries a per-acquisition owner token so a
+ * holder whose lease expired cannot release or renew its successor's.
+ *
+ * Nothing else reads these rows: every dedup query is by exact message id,
+ * and the retention sweep ages out any lease a crash left behind.
+ */
+const DB_LEASE_ID_PREFIX = 'lease:';
+const DB_LEASE_CONTEXT_PREFIX = 'processing-lease:';
+export const DB_LEASE_TTL_SECONDS = LOCK_TTL_SECONDS;
+
+function dbLeaseId(messageId: string): string {
+  return `${DB_LEASE_ID_PREFIX}${messageId}`;
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'P2002';
+}
+
 /** All possible outcomes of `acquireMessageLock`. */
 export type LockResult =
   /** Lock held; caller is the unique worker for this message. */
@@ -51,8 +79,12 @@ export type LockResult =
   | { outcome: 'held_by_other' }
   /** Redis was unavailable AND the DB fallback found prior work. */
   | { outcome: 'already_processed_db_fallback' }
-  /** Redis was unavailable AND the DB advisory-lock succeeded. */
-  | { outcome: 'acquired_db_fallback' };
+  /**
+   * Redis was unavailable AND the DB lease was acquired. `leaseToken`
+   * identifies this holder: pass it to `renewDbLock` / `releaseDbLock`,
+   * and release on EVERY return path.
+   */
+  | { outcome: 'acquired_db_fallback'; leaseToken: string };
 
 /**
  * Atomic "lock and check" — try to claim the message AND verify it
@@ -63,10 +95,9 @@ export type LockResult =
  *   - return  0 → another worker is already processing this message
  *   - return -1 → message already in processed ZSET
  *
- * When Redis is unavailable, falls back to a serializable DB
- * transaction that races to insert a `ProcessedGmailMessage` row.
- * Unique-constraint failure on the row means another worker beat us
- * to it.
+ * When Redis is unavailable, falls back to a DB lease (see
+ * `DB_LEASE_ID_PREFIX`): the insert of the lease row is the atomic
+ * claim, and a unique-constraint failure means another worker holds it.
  */
 export async function acquireMessageLock(
   messageId: string,
@@ -101,32 +132,34 @@ async function acquireMessageLockViaDb(
   messageId: string,
   traceId: string,
 ): Promise<LockResult> {
+  const leaseId = dbLeaseId(messageId);
+  const leaseToken = `${DB_LEASE_CONTEXT_PREFIX}${traceId}:${Math.random().toString(36).slice(2, 10)}`;
   try {
-    const outcome = await prisma.$transaction(
-      async (tx) => {
-        const existing = await tx.processedGmailMessage.findUnique({
-          where: { id: messageId },
-        });
-        if (existing) return 'already_processed_db_fallback' as const;
+    if (await processedRowExists(messageId)) {
+      return { outcome: 'already_processed_db_fallback' };
+    }
 
-        try {
-          await tx.processedGmailMessage.create({ data: { id: messageId } });
-          return 'acquired_db_fallback' as const;
-        } catch (insertErr: unknown) {
-          if (
-            insertErr &&
-            typeof insertErr === 'object' &&
-            'code' in insertErr &&
-            (insertErr as { code?: string }).code === 'P2002'
-          ) {
-            return 'already_processed_db_fallback' as const;
-          }
-          throw insertErr;
-        }
-      },
-      { isolationLevel: 'Serializable' },
-    );
-    return { outcome };
+    // Expire a lease whose holder crashed or hung past the TTL. Scoped by
+    // age, so a live holder's (renewed) lease is never touched.
+    await prisma.processedGmailMessage.deleteMany({
+      where: { id: leaseId, processedAt: { lt: new Date(Date.now() - DB_LEASE_TTL_SECONDS * 1000) } },
+    });
+
+    try {
+      await prisma.processedGmailMessage.create({ data: { id: leaseId, context: leaseToken } });
+    } catch (insertErr: unknown) {
+      if (isUniqueViolation(insertErr)) return { outcome: 'held_by_other' };
+      throw insertErr;
+    }
+
+    // A holder that finished between our first check and our insert has
+    // marked the message processed and released its lease — re-check now
+    // that we own the lease so we don't process it a second time.
+    if (await processedRowExists(messageId)) {
+      await releaseDbLock(messageId, leaseToken, traceId);
+      return { outcome: 'already_processed_db_fallback' };
+    }
+    return { outcome: 'acquired_db_fallback', leaseToken };
   } catch (err) {
     logger.error(
       { traceId, messageId, err },
@@ -134,6 +167,14 @@ async function acquireMessageLockViaDb(
     );
     return { outcome: 'held_by_other' };
   }
+}
+
+async function processedRowExists(messageId: string): Promise<boolean> {
+  const row = await prisma.processedGmailMessage.findUnique({
+    where: { id: messageId },
+    select: { id: true },
+  });
+  return !!row;
 }
 
 /**
@@ -170,6 +211,9 @@ export type ProcessedContext =
   | 'availability-agent-superseded'
   | 'availability-agent-completed'
   | 'availability-agent-abandoned'
+  // RFC 3834 auto-submitted / out-of-office reply: recorded and never
+  // handed to an agent (no Claude turn for an autoresponder).
+  | 'auto-reply'
   | 'legacy';
 
 export async function markMessageProcessed(
@@ -213,25 +257,45 @@ export async function releaseMessageLock(messageId: string, traceId: string): Pr
 }
 
 /**
- * Release the DB-fallback advisory lock created by `acquireMessageLock`
- * when Redis was unavailable. The fallback creates a `ProcessedGmailMessage`
- * row to serve as a lock placeholder — if processing then fails, this
- * removes the placeholder so the next scanner pass can retry.
+ * Release the DB-fallback lease taken by `acquireMessageLock` when Redis
+ * was unavailable. Must be called on EVERY return path of the holder —
+ * success, skip, retry and failure alike — because the lease is not the
+ * dedup record (`markMessageProcessed` writes that). Owner-checked: only
+ * the holder whose token matches deletes it.
  *
- * Idempotent: P2025 (RecordNotFound) is treated as success. Other errors
- * are logged at WARN but swallowed so failure handling can continue.
+ * Idempotent; errors are logged at WARN and swallowed (an unreleased
+ * lease expires after `DB_LEASE_TTL_SECONDS`).
  */
-export async function releaseDbLock(messageId: string, traceId?: string): Promise<void> {
+export async function releaseDbLock(messageId: string, leaseToken: string, traceId?: string): Promise<void> {
   try {
-    await prisma.processedGmailMessage.delete({ where: { id: messageId } });
+    await prisma.processedGmailMessage.deleteMany({
+      where: { id: dbLeaseId(messageId), context: leaseToken },
+    });
   } catch (err: unknown) {
-    const code = (err as { code?: string } | null)?.code;
-    if (code === 'P2025') return;
     // traceId is also surfaced via the pino mixin when the caller
     // runs inside runWithTrace (which the email pipeline does), but
     // pass it explicitly so the log line is self-contained even when
     // an external caller invokes this outside a trace context.
-    logger.warn({ traceId, messageId, err }, 'Failed to release DB fallback lock');
+    logger.warn({ traceId, messageId, err }, 'Failed to release DB fallback lease (expires on its own)');
+  }
+}
+
+/**
+ * Extend the DB-fallback lease (the DB twin of the Redis lock renewal).
+ * Returns false only when the lease is gone or owned by someone else — a
+ * transient DB error keeps the holder going (the lease has plenty of TTL
+ * left and the next renewal retries).
+ */
+export async function renewDbLock(messageId: string, leaseToken: string): Promise<boolean> {
+  try {
+    const { count } = await prisma.processedGmailMessage.updateMany({
+      where: { id: dbLeaseId(messageId), context: leaseToken },
+      data: { processedAt: new Date() },
+    });
+    return count === 1;
+  } catch (err) {
+    logger.warn({ messageId, err }, 'Failed to renew DB fallback lease — will retry at the next renewal');
+    return true;
   }
 }
 
@@ -272,6 +336,75 @@ export async function filterUnprocessed(messageIds: string[]): Promise<string[]>
   });
   const seen = new Set(rows.map((r) => r.id));
   return messageIds.filter((id) => !seen.has(id));
+}
+
+export interface DedupClearResult {
+  /** ProcessedGmailMessage rows deleted. */
+  processedDeleted: number;
+  /** MessageProcessingFailure rows deleted (0 if the delete failed). */
+  failuresDeleted: number;
+  /** UnmatchedEmailAttempt rows deleted (0 if the delete failed). */
+  unmatchedDeleted: number;
+}
+
+/**
+ * Forget that a set of messages was ever processed, so the next
+ * processMessage call re-runs them from scratch. Used by the admin
+ * recovery paths (per-thread force-reprocess and the bulk
+ * `/api/admin/processing-failures/retry`).
+ *
+ * Clears EVERY dedup layer:
+ *   - the DB `ProcessedGmailMessage` row (awaited — errors propagate),
+ *   - the Redis processed-ZSET member, the per-message lock and the
+ *     unmatched-attempt counter (best effort). Clearing only the DB row
+ *     is a silent no-op: ATOMIC_LOCK_CHECK_SCRIPT still finds the ZSET
+ *     member and reports `already_processed` for up to 30 days (E8).
+ *   - the DB retry budgets (`MessageProcessingFailure`,
+ *     `UnmatchedEmailAttempt`), so a previously abandoned message gets a
+ *     fresh attempt budget instead of re-abandoning on its first failure
+ *     (best effort — logged, reported as 0).
+ */
+export async function clearMessageDedupState(
+  messageIds: string[],
+  traceId?: string,
+): Promise<DedupClearResult> {
+  const result: DedupClearResult = { processedDeleted: 0, failuresDeleted: 0, unmatchedDeleted: 0 };
+  if (messageIds.length === 0) return result;
+
+  const { count } = await prisma.processedGmailMessage.deleteMany({
+    where: { id: { in: messageIds } },
+  });
+  result.processedDeleted = count;
+
+  // Best effort: a Redis outage must not block recovery (the DB is
+  // authoritative and the lock path falls back to it when Redis is down).
+  const bestEffort = async (op: () => Promise<unknown>): Promise<void> => {
+    try {
+      await op();
+    } catch (err) {
+      logger.debug({ traceId, err }, 'Redis dedup clear failed (non-fatal)');
+    }
+  };
+  await Promise.all(
+    messageIds.flatMap((messageId) => [
+      bestEffort(() => redis.zrem(PROCESSED_MESSAGES_KEY, messageId)),
+      bestEffort(() => redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`)),
+      bestEffort(() => redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`)),
+    ]),
+  );
+
+  try {
+    const [failures, unmatched] = await Promise.all([
+      prisma.messageProcessingFailure.deleteMany({ where: { id: { in: messageIds } } }),
+      prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: messageIds } } }),
+    ]);
+    result.failuresDeleted = failures.count;
+    result.unmatchedDeleted = unmatched.count;
+  } catch (err) {
+    logger.warn({ traceId, err }, 'Failed to clear attempt tracking records while clearing dedup state');
+  }
+
+  return result;
 }
 
 /**

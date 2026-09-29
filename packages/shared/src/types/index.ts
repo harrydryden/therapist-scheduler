@@ -71,6 +71,40 @@ export interface AppointmentRequest {
   bookingMethod?: BookingMethod;
 }
 
+/**
+ * POST /api/appointments/request — the request was accepted and scheduling
+ * has started. Returned (HTTP 201) only when the requester already proved
+ * they own the address, i.e. the request carried a valid voucher token that
+ * was emailed to that same address.
+ */
+export interface BookingAcceptedResponse {
+  verificationRequired: false;
+  appointmentRequestId: string;
+  status: AppointmentStatus;
+  message: string;
+}
+
+/**
+ * POST /api/appointments/request — nothing happens until the requester
+ * clicks the confirmation link we emailed (HTTP 202). Deliberately carries
+ * no appointment id: the same response is returned when the address already
+ * has a request with this therapist, so the endpoint can't be used to learn
+ * whether someone else has booked.
+ */
+export interface BookingVerificationPendingResponse {
+  verificationRequired: true;
+  status: 'awaiting_verification';
+  /** The address the confirmation link was sent to (echoed for the UI). */
+  email: string;
+  /** How long the confirmation link stays valid. */
+  expiresInHours: number;
+  /** Typo suggestion for the address, e.g. "jamie@gmail.com", or null. */
+  suggestedEmail: string | null;
+  message: string;
+}
+
+export type AppointmentRequestResponse = BookingAcceptedResponse | BookingVerificationPendingResponse;
+
 // ============================================
 // API Response
 // ============================================
@@ -192,6 +226,30 @@ export interface AppointmentListItem {
    * panel never disagree about the recommended next step.
    */
   nextAction: string;
+  /**
+   * False while a public booking waits for the requester to click the
+   * confirmation link we emailed. Nothing (agent, therapist email, in-session
+   * status) happens for the request until then.
+   */
+  emailVerified: boolean;
+}
+
+/**
+ * One entry of an appointment's conversation log, shaped for display in the
+ * admin detail drawer (GET /api/admin/dashboard/appointments/:id).
+ */
+export interface ConversationMessageView {
+  /** 'agent' = the AI assistant, 'admin' = in-band admin/system notes, 'inbound' = client or therapist email. */
+  role: 'agent' | 'inbound' | 'admin';
+  /** Display text. Inbound entries are reduced to the new email itself (quoted thread context stripped). */
+  text: string;
+  /**
+   * ISO timestamp when the log entry records one. The conversation log does
+   * not store per-message times today, so this is usually null.
+   */
+  timestamp: string | null;
+  /** True when `text` was shortened for display. */
+  truncated: boolean;
 }
 
 /**
@@ -248,13 +306,28 @@ export interface AppointmentDetail extends Omit<AppointmentListItem,
   therapistGmailThreadId: string | null;
   humanControlTakenAt: string | null;
   humanControlReason: string | null;
+  /** The most recent conversation log entries (up to 20), oldest first. */
+  recentMessages: ConversationMessageView[];
+  /** Total entries in the log (recentMessages may be a suffix of it). */
+  totalMessages: number;
 }
 
+/**
+ * Query for GET /api/admin/dashboard/appointments. Every filter is applied
+ * server-side, so tiles and lists see the whole table rather than one page.
+ */
 export interface AppointmentFilters {
+  /** One status, or several comma-separated ('pending,contacted'), or 'all'. */
   status?: string;
   therapistId?: string;
   dateFrom?: string;
   dateTo?: string;
+  /** true = only appointments under human control; false = only automated. */
+  humanControl?: boolean;
+  /** Only appointments whose computed conversation health matches. */
+  health?: HealthStatus;
+  /** Free-text search: tracking code (SPL…), client email/name, therapist name. */
+  q?: string;
   page?: number;
   limit?: number;
   sortBy?: 'createdAt' | 'updatedAt' | 'status' | 'lastActivityAt';
@@ -280,6 +353,12 @@ export interface DashboardStats {
   byStatus: Record<string, number>;
   confirmedLast7Days: number;
   totalRequests: number;
+  /** Pre-booking appointments whose computed health is red (the "Needs Attention" tile). */
+  needsAttention: number;
+  /** Appointments currently under human control (the "Human Control" tile). */
+  humanControl: number;
+  /** Public bookings still waiting for the requester to confirm their email. */
+  awaitingVerification: number;
   topUsers: Array<{
     name: string;
     email: string;
@@ -446,7 +525,8 @@ export interface AdminUser {
 
 export interface AdminTherapist {
   id: string;
-  notionId: string;
+  /** Legacy Notion page ID; null for therapists created after Notion (e.g. PDF ingestion). */
+  notionId: string | null;
   email: string;
   name: string;
   odId: string;

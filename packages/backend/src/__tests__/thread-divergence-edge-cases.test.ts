@@ -25,6 +25,7 @@ jest.mock('../services/slack-notification.service', () => ({
 
 import {
   detectThreadDivergence,
+  shouldBlockProcessing,
   type EmailContext,
   type AppointmentContext,
 } from '../services/thread-divergence.service';
@@ -107,6 +108,10 @@ describe('thread-divergence edge cases', () => {
       const other = makeAppointmentContext({
         id: 'apt-2',
         therapistName: 'Dr. Jones',
+        // A different therapist always has a different email
+        // (Therapist.email is @unique) — same-email rows are treated as
+        // the same therapist and excluded (E4).
+        therapistEmail: 'jones@example.com',
         gmailThreadId: 'thread-2',
         therapistGmailThreadId: 'thread-t2',
       });
@@ -123,6 +128,7 @@ describe('thread-divergence edge cases', () => {
       const other = makeAppointmentContext({
         id: 'apt-2',
         therapistName: 'Dr. Jones',
+        therapistEmail: 'jones@example.com', // different therapist ⇒ different email
       });
       const result = detectThreadDivergence(email, matched, [matched, other]);
       expect(result.detected).toBe(true);
@@ -145,10 +151,122 @@ describe('thread-divergence edge cases', () => {
       const other = makeAppointmentContext({
         id: 'apt-2',
         therapistName: 'Dr. Jones',
+        therapistEmail: 'jones@example.com', // different therapist ⇒ different email
       });
       const result = detectThreadDivergence(email, matched, [matched, other]);
       expect(result.detected).toBe(true);
       expect(result.type).toBe('therapist_name_mismatch');
+    });
+  });
+
+  // E4 regression: the "other therapists" list used to include the SAME
+  // therapist when the sender had two active rows with them, so every
+  // signed reply scored high/manual_review and was blocked, then abandoned.
+  describe('therapist name mismatch — same therapist on two active rows (E4)', () => {
+    const matched = makeAppointmentContext({
+      id: 'apt-new',
+      therapistName: 'Sarah Jones',
+      therapistEmail: 'sarah@clinic.example',
+      status: 'negotiating',
+    });
+    const earlier = makeAppointmentContext({
+      id: 'apt-earlier',
+      therapistName: 'Sarah Jones',
+      therapistEmail: 'sarah@clinic.example',
+      gmailThreadId: 'thread-earlier',
+      therapistGmailThreadId: 'thread-t-earlier',
+      status: 'feedback_requested',
+    });
+
+    it('does not flag (or block) a signed reply when the client is rebooking the same therapist', () => {
+      const email = makeEmailContext({
+        from: 'sarah@clinic.example',
+        body: 'Tuesday at 3pm works for me.\n\nBest,\nSarah',
+      });
+      const result = detectThreadDivergence(email, matched, [matched, earlier]);
+      expect(result.detected).toBe(false);
+      expect(shouldBlockProcessing(result)).toBe(false);
+    });
+
+    it('recognises the same therapist by email even when the stored names differ', () => {
+      const renamed = { ...earlier, therapistName: 'Dr Sarah Jones-Smith', therapistEmail: 'Sarah@Clinic.example' };
+      const email = makeEmailContext({ body: 'Thanks, Dr Sarah Jones-Smith' });
+      const result = detectThreadDivergence(email, matched, [matched, renamed]);
+      expect(result.detected).toBe(false);
+    });
+
+    it('recognises the same therapist by handle / id even when the email changed', () => {
+      const a = { ...matched, therapistHandle: 'sarah-jones', therapistId: 'th-1' };
+      const b = { ...earlier, therapistEmail: 'old-address@clinic.example', therapistHandle: 'sarah-jones', therapistId: 'th-1' };
+      const email = makeEmailContext({ body: 'See you then — Sarah' });
+      expect(detectThreadDivergence(email, a, [a, b]).detected).toBe(false);
+    });
+
+    it('still flags a genuinely different therapist named in the reply (critical, blocking)', () => {
+      const other = makeAppointmentContext({
+        id: 'apt-other',
+        therapistName: 'Emily Clarke',
+        therapistEmail: 'emily@clinic.example',
+        gmailThreadId: 'thread-other',
+        therapistGmailThreadId: 'thread-t-other',
+      });
+      const email = makeEmailContext({ body: 'Actually I would rather see Emily Clarke.' });
+      const result = detectThreadDivergence(email, matched, [matched, earlier, other]);
+      expect(result.detected).toBe(true);
+      expect(result.type).toBe('therapist_name_mismatch');
+      expect(result.severity).toBe('critical');
+      expect(result.relatedAppointmentIds).toEqual(['apt-new', 'apt-other']);
+      expect(shouldBlockProcessing(result)).toBe(true);
+    });
+  });
+
+  describe('therapist name mismatch — whole-word matching (E4)', () => {
+    const otherFor = (therapistName: string) =>
+      makeAppointmentContext({
+        id: 'apt-2',
+        therapistName,
+        therapistEmail: 'other@example.com',
+        gmailThreadId: 'thread-2',
+        therapistGmailThreadId: 'thread-t2',
+      });
+
+    it('does not match a first name inside another word ("Ann" in "planning")', () => {
+      const matched = makeAppointmentContext({ therapistName: 'Emily Smith' });
+      const email = makeEmailContext({ body: 'I am planning to come on Tuesday.' });
+      expect(detectThreadDivergence(email, matched, [matched, otherFor('Ann Lee')]).detected).toBe(false);
+    });
+
+    it('does not treat the honorific "Dr." as a first name', () => {
+      // Old behaviour: firstName of "Dr. Jones" was "dr.", so ANY email
+      // containing "Dr." mentioned "another therapist".
+      const matched = makeAppointmentContext({ therapistName: 'Dr. Smith' });
+      const email = makeEmailContext({ body: 'Thanks Dr. Smith, see you Tuesday.' });
+      expect(detectThreadDivergence(email, matched, [matched, otherFor('Dr. Jones')]).detected).toBe(false);
+    });
+
+    it('ignores very short first names on their own ("Al" in "also")', () => {
+      const matched = makeAppointmentContext({ therapistName: 'Emily Smith' });
+      const email = makeEmailContext({ body: 'I also wanted to ask about Al.' });
+      expect(detectThreadDivergence(email, matched, [matched, otherFor('Al Green')]).detected).toBe(false);
+      // …but the full name still counts.
+      const named = makeEmailContext({ body: 'Can I switch to Al Green?' });
+      expect(detectThreadDivergence(named, matched, [matched, otherFor('Al Green')]).severity).toBe('critical');
+    });
+
+    it('does not flag a first name shared with the matched therapist', () => {
+      const matched = makeAppointmentContext({ therapistName: 'Sarah Jones' });
+      const email = makeEmailContext({ body: 'Thanks Sarah!' });
+      expect(detectThreadDivergence(email, matched, [matched, otherFor('Sarah Clarke')]).detected).toBe(false);
+      const full = makeEmailContext({ body: 'Is this with Sarah Clarke?' });
+      expect(detectThreadDivergence(full, matched, [matched, otherFor('Sarah Clarke')]).severity).toBe('critical');
+    });
+
+    it('still matches a whole-word first name of a different therapist', () => {
+      const matched = makeAppointmentContext({ therapistName: 'Emily Smith' });
+      const email = makeEmailContext({ body: 'Could Ann do Thursday instead?' });
+      const result = detectThreadDivergence(email, matched, [matched, otherFor('Ann Lee')]);
+      expect(result.type).toBe('therapist_name_mismatch');
+      expect(result.severity).toBe('critical');
     });
   });
 

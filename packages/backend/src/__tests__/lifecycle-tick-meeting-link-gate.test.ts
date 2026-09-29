@@ -93,7 +93,9 @@ describe('appointment-lifecycle tick — meeting-link truth gate', () => {
     const result = await runTick();
 
     expect(result).toEqual({ transitioned: 1, unverifiedHeld: 0 });
-    expect(transitionToSessionHeld).toHaveBeenCalledWith({ appointmentId: 'apt-verified', source: 'system' });
+    expect(transitionToSessionHeld).toHaveBeenCalledWith(
+      expect.objectContaining({ appointmentId: 'apt-verified', source: 'system' }),
+    );
     expect(auditLog).not.toHaveBeenCalled();
   });
 
@@ -105,7 +107,9 @@ describe('appointment-lifecycle tick — meeting-link truth gate', () => {
     const result = await runTick();
 
     // Still transitions — we don't block on a heuristic signal.
-    expect(transitionToSessionHeld).toHaveBeenCalledWith({ appointmentId: 'apt-unverified', source: 'system' });
+    expect(transitionToSessionHeld).toHaveBeenCalledWith(
+      expect.objectContaining({ appointmentId: 'apt-unverified', source: 'system' }),
+    );
     expect(result).toEqual({ transitioned: 1, unverifiedHeld: 1 });
 
     // ...but leaves an audit trail so the unverified hold is visible.
@@ -129,6 +133,36 @@ describe('appointment-lifecycle tick — meeting-link truth gate', () => {
     expect(result).toEqual({ transitioned: 2, unverifiedHeld: 1 });
     expect(auditLog).toHaveBeenCalledTimes(1);
     expect(auditLog.mock.calls[0][0]).toBe('apt-bad');
+  });
+
+  it('passes its selection criteria as the atomic precondition of the promotion write', async () => {
+    // The row was selected as "confirmed, not mid-reschedule, session ended
+    // > 1h ago". The write must re-assert exactly that, or a reschedule
+    // landing between the read and the write promotes a future session.
+    appointmentFindMany.mockResolvedValueOnce([
+      { id: 'apt-1', meetingLinkConfirmedAt: new Date(), confirmedDateTime: 'Mon 11am' },
+    ]);
+
+    await runTick();
+
+    const where = appointmentFindMany.mock.calls[0][0].where;
+    const { atomicWhere } = transitionToSessionHeld.mock.calls[0][0];
+    expect(atomicWhere).toEqual({
+      reschedulingInProgress: false,
+      confirmedDateTimeParsed: where.confirmedDateTimeParsed,
+    });
+  });
+
+  it('does not count or audit atomically-skipped transitions (criteria drifted before the write)', async () => {
+    appointmentFindMany.mockResolvedValueOnce([
+      { id: 'apt-raced', meetingLinkConfirmedAt: null, confirmedDateTime: 'Fri 9am' },
+    ]);
+    transitionToSessionHeld.mockResolvedValueOnce({ success: false, atomicSkipped: true });
+
+    const result = await runTick();
+
+    expect(result).toEqual({ transitioned: 0, unverifiedHeld: 0 });
+    expect(auditLog).not.toHaveBeenCalled();
   });
 
   it('does not count or audit idempotently-skipped transitions', async () => {

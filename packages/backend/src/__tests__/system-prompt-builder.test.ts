@@ -59,6 +59,7 @@ function buildDefaultSettings(): Map<string, string | number> {
     ['agent.maxSlotsPerGroup', 3],
     ['agent.maxTotalSlots', 6],
     ['general.timezone', 'Europe/London'],
+    ['general.minBookingLeadHours', 4],
   ]);
 }
 
@@ -82,6 +83,7 @@ jest.mock('../services/settings.service', () => ({
       ['agent.maxSlotsPerGroup', 3],
       ['agent.maxTotalSlots', 6],
       ['general.timezone', 'Europe/London'],
+      ['general.minBookingLeadHours', 4],
     ]);
     return map;
   }),

@@ -12,6 +12,8 @@ import { OAuth2Client } from 'google-auth-library';
 import { redis } from './redis';
 import { logger } from './logger';
 import { RELEASE_LOCK_SCRIPT } from './redis-locks';
+import { withTimeout } from './timeout';
+import { TIMEOUTS } from '../constants';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -127,7 +129,14 @@ export function createOAuth2Client(credentials: GmailCredentials, token: GmailTo
     throw new Error('Gmail credentials must contain either "installed" or "web" client config');
   }
   const { client_id, client_secret, redirect_uris } = clientConfig;
-  const oauth2Client = new OAuth2Client(client_id, client_secret, redirect_uris?.[0]);
+  const oauth2Client = new OAuth2Client({
+    clientId: client_id,
+    clientSecret: client_secret,
+    redirectUri: redirect_uris?.[0],
+    // gaxios has no default timeout: without this a hung token-refresh
+    // request blocks its caller (and the backup poller) indefinitely.
+    transporterOptions: { timeout: TIMEOUTS.OAUTH_TOKEN_REFRESH_MS },
+  });
 
   // Handle token format - might be from MCP (with nested structure) or direct OAuth
   if (token.refresh_token) {
@@ -142,6 +151,19 @@ export function createOAuth2Client(credentials: GmailCredentials, token: GmailTo
   }
 
   return oauth2Client;
+}
+
+/**
+ * `oauth2Client.getAccessToken()` with a hard deadline. Every token refresh
+ * goes through this: the refresh is a network call, and one that never
+ * settles used to stop the backup poller until the process restarted.
+ * Throws `TimeoutError` after `TIMEOUTS.OAUTH_TOKEN_REFRESH_MS`.
+ */
+export async function refreshAccessToken(
+  oauth2Client: Pick<OAuth2Client, 'getAccessToken'>,
+  operation = 'gmail-oauth-token-refresh',
+): Promise<void> {
+  await withTimeout(oauth2Client.getAccessToken(), TIMEOUTS.OAUTH_TOKEN_REFRESH_MS, operation);
 }
 
 /**

@@ -12,6 +12,12 @@
  *   1. In-memory Map  (30 s TTL) — avoids Redis round-trips
  *   2. Redis           (60 s TTL) — shared across server instances
  *   3. PostgreSQL                 — source of truth, falls back to hardcoded defaults
+ *
+ * Read failures (DB or Redis down) return the LAST KNOWN GOOD value this
+ * process resolved for the key, and only fall back to the hard-coded
+ * default if it has never resolved one. Returning the default on a blip
+ * could flip an admin kill switch (chase.enabled, therapistNudge.enabled,
+ * notifications.email.*, all default true) back on mid-outage.
  */
 
 import { prisma } from '../utils/database';
@@ -49,6 +55,22 @@ export function memoryCacheInvalidate(key: string): void {
   memoryCache.delete(key);
 }
 
+// Last value successfully resolved per key (from Redis, the DB, or the
+// default because no row exists). Never expires: it's only consulted when
+// a read fails. Not cleared by invalidation, because after a failed
+// re-read the previous value is still the best answer available.
+const lastKnownGood = new Map<string, unknown>();
+
+function remember(key: string, value: unknown): void {
+  memoryCacheSet(key, value);
+  lastKnownGood.set(key, value);
+}
+
+function fallbackValue<T>(key: SettingKey): T {
+  if (lastKnownGood.has(key)) return lastKnownGood.get(key) as T;
+  return SETTING_DEFINITIONS[key].defaultValue as T;
+}
+
 // Subscribe at module load so peer instances' admin updates clear THIS
 // instance's in-memory cache. Without this, a setting change took up to
 // 30 s to propagate across instances (the memory-cache TTL); during that
@@ -83,7 +105,7 @@ export async function getSettingValue<T>(key: SettingKey): Promise<T> {
     // Try Redis cache
     const cached = await cacheManager.getJson<T>(`${SETTINGS_CACHE_PREFIX}${key}`);
     if (cached !== null) {
-      memoryCacheSet(key, cached);
+      remember(key, cached);
       return cached;
     }
 
@@ -95,16 +117,16 @@ export async function getSettingValue<T>(key: SettingKey): Promise<T> {
     if (setting) {
       const value = JSON.parse(setting.value) as T;
       await cacheManager.setJson(`${SETTINGS_CACHE_PREFIX}${key}`, value, SETTINGS_CACHE_TTL);
-      memoryCacheSet(key, value);
+      remember(key, value);
       return value;
     }
 
     // Return default (also cache it to avoid repeated DB misses)
-    memoryCacheSet(key, definition.defaultValue);
+    remember(key, definition.defaultValue);
     return definition.defaultValue as T;
   } catch (err) {
-    logger.warn({ err, key }, 'Failed to get setting, using default');
-    return definition.defaultValue as T;
+    logger.warn({ err, key, usingLastKnownGood: lastKnownGood.has(key) }, 'Failed to get setting, using last known good value');
+    return fallbackValue<T>(key);
   }
 }
 
@@ -140,26 +162,25 @@ export async function getSettingValues<T = unknown>(keys: SettingKey[]): Promise
       const definition = SETTING_DEFINITIONS[key];
       const raw = dbMap.get(key);
 
-      let value: T;
-      if (raw !== undefined) {
-        try {
-          value = JSON.parse(raw) as T;
-        } catch {
-          value = definition.defaultValue as T;
-        }
-      } else {
-        value = definition.defaultValue as T;
+      if (raw === undefined) {
+        remember(key, definition.defaultValue);
+        result.set(key, definition.defaultValue as T);
+        continue;
       }
-
-      memoryCacheSet(key, value);
-      result.set(key, value);
+      try {
+        const value = JSON.parse(raw) as T;
+        remember(key, value);
+        result.set(key, value);
+      } catch {
+        // Corrupt row: not a successful read, so don't overwrite the
+        // last known good value with it.
+        result.set(key, fallbackValue<T>(key));
+      }
     }
   } catch (err) {
-    // Fall back to defaults for all uncached keys
-    logger.warn({ err, keyCount: uncachedKeys.length }, 'Batch settings fetch failed, using defaults');
+    logger.warn({ err, keyCount: uncachedKeys.length }, 'Batch settings fetch failed, using last known good values');
     for (const key of uncachedKeys) {
-      const definition = SETTING_DEFINITIONS[key];
-      result.set(key, definition.defaultValue as T);
+      result.set(key, fallbackValue<T>(key));
     }
   }
 

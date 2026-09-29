@@ -19,7 +19,7 @@ jest.mock('../config', () => ({
   config: { jwtSecret: 'test', frontendUrl: 'https://test', backendUrl: 'https://test' },
 }));
 jest.mock('../utils/redis', () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redis: { get: jest.fn(), getStrict: jest.fn(), set: jest.fn(), del: jest.fn() },
 }));
 
 const mockFindUnique = jest.fn();
@@ -56,7 +56,7 @@ describe('storeConversationStateWithRetry: compensation on exhausted retries', (
     const result = await aiConversationService.storeConversationStateWithRetry(
       'apt-1',
       state,
-      new Date(),
+      { version: 0, persistedCount: 0 },
       executedTools,
     );
 
@@ -79,7 +79,7 @@ describe('storeConversationStateWithRetry: compensation on exhausted retries', (
     const result = await aiConversationService.storeConversationStateWithRetry(
       'apt-1',
       state,
-      new Date(),
+      { version: 0, persistedCount: 0 },
       executedTools,
     );
 

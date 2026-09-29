@@ -8,68 +8,70 @@ import {
   getCeilingTrippedCount,
   releaseCeilingTripped,
 } from '../api/client';
-import type { AppointmentFilters } from '../types';
 import { useDebounce } from '../hooks/useDebounce';
 import { useSSE } from '../hooks/useSSE';
 import AppointmentPipeline from '../components/AppointmentPipeline';
-import type { DashboardTileFilter } from '../components/AppointmentPipeline';
 import TherapistGroupList from '../components/TherapistGroupList';
 import type { TherapistGroup } from '../components/TherapistGroupList';
 import AppointmentsTable from '../components/AppointmentsTable';
 import AppointmentDetailDrawer from '../components/AppointmentDetailDrawer';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToastContext } from '../components/Toast';
-
-type ViewMode = 'flat' | 'grouped';
+import {
+  buildDashboardQuery,
+  dashboardParamsFromState,
+  parseDashboardParams,
+  type DashboardState,
+} from '../utils/dashboard-filters';
 
 export default function AdminDashboardPage() {
-  const [filters, setFilters] = useState<AppointmentFilters>({
-    page: 1,
-    limit: 100,
-    sortBy: 'updatedAt',
-    sortOrder: 'desc',
-  });
+  // Tile, search, sort, page, view and the open drawer all live in the URL,
+  // so a reload, a shared link or the back button keeps the view.
   const [searchParams, setSearchParams] = useSearchParams();
-  const [selectedAppointment, setSelectedAppointment] = useState<string | null>(
-    searchParams.get('appointment') || null
+  const state = useMemo(() => parseDashboardParams(searchParams), [searchParams]);
+  const updateState = useCallback(
+    (patch: Partial<DashboardState>) => {
+      setSearchParams(
+        (current) => dashboardParamsFromState({ ...parseDashboardParams(current), ...patch }),
+        { replace: true },
+      );
+    },
+    [setSearchParams],
   );
-  const [selectedTile, setSelectedTile] = useState<DashboardTileFilter>('active');
+  const selectedAppointment = state.appointment;
+  const setSelectedAppointment = useCallback(
+    (id: string | null) => updateState({ appointment: id }),
+    [updateState],
+  );
   const [expandedTherapists, setExpandedTherapists] = useState<Set<string>>(new Set());
-  // Flat is the default view shipped with the redesign; group-by-therapist
-  // is retained as an opt-in mode for when admins want to triage one
-  // therapist's load. Falls back to the (unchanged) TherapistGroupList.
-  const [viewMode, setViewMode] = useState<ViewMode>('flat');
 
-  // Sync URL search param when selection changes
+  // Search box: typed text is local, the URL (and so the query) follows 300ms later.
+  const [searchInput, setSearchInput] = useState(state.q);
+  const debouncedSearch = useDebounce(searchInput, 300);
   useEffect(() => {
-    const currentParam = searchParams.get('appointment');
-    if (selectedAppointment && currentParam !== selectedAppointment) {
-      setSearchParams({ appointment: selectedAppointment }, { replace: true });
-    } else if (!selectedAppointment && currentParam) {
-      searchParams.delete('appointment');
-      setSearchParams(searchParams, { replace: true });
-    }
-  }, [selectedAppointment, searchParams, setSearchParams]);
+    if (debouncedSearch.trim() !== state.q) updateState({ q: debouncedSearch, page: 1 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to the debounced input
+  }, [debouncedSearch]);
 
-  const debouncedFilters = useDebounce(filters, 300);
+  const listQuery = useMemo(() => buildDashboardQuery(state), [state]);
 
   // SSE: real-time updates
   useSSE();
 
-  // Fetch appointments list
+  // Fetch appointments list — filtered, sorted and paged by the server.
   const {
     data: appointmentsData,
     isLoading: loadingList,
     error: listError,
   } = useQuery({
-    queryKey: ['appointments', debouncedFilters],
-    queryFn: () => getAppointments(debouncedFilters),
+    queryKey: ['appointments', listQuery],
+    queryFn: () => getAppointments(listQuery),
     refetchInterval: 30000,
     staleTime: 30000,
     refetchOnWindowFocus: false,
   });
 
-  // Fetch stats
+  // Fetch stats (the tile counts, over the whole table)
   const { data: stats } = useQuery({
     queryKey: ['dashboard-stats'],
     queryFn: getDashboardStats,
@@ -129,37 +131,16 @@ export default function AdminDashboardPage() {
     queryFn: () => getAppointmentDetail(selectedAppointment!),
     enabled: !!selectedAppointment,
     staleTime: 30000,
+    // SSE `appointment:activity` refetches the open drawer immediately; this
+    // poll is the fallback when the stream is down.
+    refetchInterval: 30000,
   });
 
-  // Filter appointments based on selected tile
-  const filteredAppointments = useMemo(() => {
-    if (!Array.isArray(appointmentsData?.data)) return [];
-
-    const all = appointmentsData.data;
-
-    switch (selectedTile) {
-      case 'active':
-        return all.filter((apt) =>
-          ['pending', 'contacted', 'negotiating'].includes(apt.status)
-        );
-      case 'confirmed':
-        return all.filter((apt) => apt.status === 'confirmed');
-      case 'post-session':
-        return all.filter((apt) =>
-          ['session_held', 'feedback_requested', 'completed'].includes(apt.status)
-        );
-      case 'attention':
-        return all.filter(
-          (apt) =>
-            apt.healthStatus === 'red' &&
-            ['pending', 'contacted', 'negotiating'].includes(apt.status)
-        );
-      case 'human':
-        return all.filter((apt) => apt.humanControlEnabled);
-      default:
-        return all;
-    }
-  }, [appointmentsData?.data, selectedTile]);
+  // The server already applied the tile, search and paging.
+  const filteredAppointments = useMemo(
+    () => (Array.isArray(appointmentsData?.data) ? appointmentsData.data : []),
+    [appointmentsData?.data],
+  );
 
   // Group filtered appointments by therapist
   const therapistGroups = useMemo(() => {
@@ -299,9 +280,8 @@ export default function AdminDashboardPage() {
         {/* Summary Tiles */}
         <AppointmentPipeline
           stats={stats}
-          appointments={appointmentsData?.data}
-          selectedTile={selectedTile}
-          onTileSelect={setSelectedTile}
+          selectedTile={state.tile}
+          onTileSelect={(tile) => updateState({ tile, page: 1 })}
         />
 
         {/* Error State */}
@@ -316,37 +296,48 @@ export default function AdminDashboardPage() {
         {/* Toolbar: tile-derived heading + count, view-mode toggle, sort. */}
         <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
           <h2 className="text-sm font-medium text-slate-700">
-            {selectedTile ? tileLabel[selectedTile] || 'All' : 'All Appointments'}
+            {state.tile ? tileLabel[state.tile] || 'All' : 'All Appointments'}
             <span className="text-slate-400 font-normal ml-1.5">
-              ({filteredAppointments.length})
+              ({appointmentsData?.pagination.total ?? filteredAppointments.length})
             </span>
           </h2>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label htmlFor="dashboard-search" className="sr-only">
+              Search by tracking code, client or therapist
+            </label>
+            <input
+              id="dashboard-search"
+              type="search"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search SPL code, email, name…"
+              className="text-xs px-2.5 py-1 w-56 border border-slate-200 rounded-lg focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
+            />
             {/* View mode toggle: flat table is the default; grouped falls
                 back to the (existing) TherapistGroupList for admins
                 triaging a single therapist's load. */}
             <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden text-xs" role="group" aria-label="View mode">
               <button
                 type="button"
-                onClick={() => setViewMode('flat')}
-                aria-pressed={viewMode === 'flat'}
-                className={`px-2.5 py-1 transition-colors ${viewMode === 'flat' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
+                onClick={() => updateState({ view: 'flat' })}
+                aria-pressed={state.view === 'flat'}
+                className={`px-2.5 py-1 transition-colors ${state.view === 'flat' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
               >
                 Flat
               </button>
               <button
                 type="button"
-                onClick={() => setViewMode('grouped')}
-                aria-pressed={viewMode === 'grouped'}
-                className={`px-2.5 py-1 transition-colors border-l border-slate-200 ${viewMode === 'grouped' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
+                onClick={() => updateState({ view: 'grouped' })}
+                aria-pressed={state.view === 'grouped'}
+                className={`px-2.5 py-1 transition-colors border-l border-slate-200 ${state.view === 'grouped' ? 'bg-slate-100 text-slate-900 font-medium' : 'text-slate-500 hover:bg-slate-50'}`}
               >
                 By therapist
               </button>
             </div>
             <select
-              value={filters.sortBy || 'updatedAt'}
+              value={state.sortBy}
               onChange={(e) =>
-                setFilters((prev) => ({ ...prev, sortBy: e.target.value as AppointmentFilters['sortBy'], page: 1 }))
+                updateState({ sortBy: e.target.value as DashboardState['sortBy'], page: 1 })
               }
               className="text-xs px-2 py-1 border border-slate-200 rounded-lg text-slate-500 focus:ring-2 focus:ring-spill-blue-800 focus:border-transparent outline-none"
               aria-label="Sort by"
@@ -359,35 +350,34 @@ export default function AdminDashboardPage() {
 
         {/* Main content: one container, not two. Drawer slides over from
             the right when a row is selected. */}
-        {viewMode === 'flat' ? (
+        {state.view === 'flat' ? (
           <AppointmentsTable
             appointments={filteredAppointments}
-            filters={filters}
+            filters={listQuery}
             pagination={appointmentsData?.pagination}
             loadingList={loadingList}
             selectedAppointment={selectedAppointment}
             onSelectAppointment={setSelectedAppointment}
             onSortChange={(sortBy) =>
-              setFilters((prev) => ({
-                ...prev,
+              updateState({
                 sortBy,
-                sortOrder: prev.sortBy === sortBy && prev.sortOrder === 'desc' ? 'asc' : 'desc',
+                sortOrder: state.sortBy === sortBy && state.sortOrder === 'desc' ? 'asc' : 'desc',
                 page: 1,
-              }))
+              })
             }
-            onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
+            onPageChange={(page) => updateState({ page })}
           />
         ) : (
           <TherapistGroupList
             therapistGroups={therapistGroups}
-            filters={filters}
+            filters={listQuery}
             pagination={appointmentsData?.pagination}
             loadingList={loadingList}
             selectedAppointment={selectedAppointment}
             expandedTherapists={expandedTherapists}
             onSelectAppointment={setSelectedAppointment}
             onToggleTherapist={toggleTherapistExpanded}
-            onPageChange={(page) => setFilters((prev) => ({ ...prev, page }))}
+            onPageChange={(page) => updateState({ page })}
           />
         )}
 

@@ -2,6 +2,7 @@
  * Admin Notification Service
  *
  * Centralizes admin alerting for urgent issues requiring human attention:
+ * - Human-review escalations (Slack, deduplicated per appointment + reason)
  * - Thread divergence (critical/high severity)
  * - Conversation stalls (activity but no progress)
  * - Tool execution failures
@@ -11,9 +12,11 @@
  * retrieve and manage all types of alerts across the system.
  */
 
+import { createHash } from 'crypto';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { PRE_BOOKING_STATUSES, ACTIVE_STATUSES } from '../constants';
+import { slackNotificationService } from './slack-notification.service';
 import {
   calculateConversationHealth,
   calculateHealthStats,
@@ -36,7 +39,48 @@ export interface AdminAlert {
   acknowledged: boolean;
 }
 
+/**
+ * A repeat human-review alert for the same appointment AND the same reason
+ * is suppressed for this long (a redelivered email re-flagging, a burst of
+ * guard trips); anything else — a different reason, or the same reason
+ * once the window has passed — alerts.
+ */
+export const HUMAN_REVIEW_ALERT_DEDUP_WINDOW_MS = 10 * 60 * 1000;
+
 class AdminNotificationService {
+  /**
+   * Slack alert for an escalation to human review (the agent's
+   * flag_for_human_review, or a tool-loop / dispatch guard pausing the
+   * conversation).
+   *
+   * Deduplicated on (appointment, reason) within
+   * HUMAN_REVIEW_ALERT_DEDUP_WINDOW_MS. It used to share the 24-hour
+   * per-appointment `human-control` dedup group, so an appointment that an
+   * admin released and the agent then paused again within the day —
+   * whether the same guard tripping or a new problem — produced no alert
+   * at all, and sat paused with nobody told.
+   *
+   * Mechanism: the Slack service's appointment-scoped dedup keys on
+   * `dedupGroup`; the group here is the reason's hash plus the current
+   * window bucket, so identical alerts within one window collapse and
+   * everything else goes through.
+   */
+  async notifyHumanReviewFlagged(
+    params: { appointmentId: string; therapistName: string; reason: string },
+    now: number = Date.now(),
+  ): Promise<boolean> {
+    const reasonKey = createHash('sha256').update(params.reason.trim().toLowerCase()).digest('hex').slice(0, 16);
+    const windowBucket = Math.floor(now / HUMAN_REVIEW_ALERT_DEDUP_WINDOW_MS);
+    return slackNotificationService.sendAlert({
+      title: 'Human Review Requested',
+      severity: 'high',
+      appointmentId: params.appointmentId,
+      therapistName: params.therapistName,
+      details: `AI flagged for review: ${params.reason}`,
+      dedupGroup: `human-review:${reasonKey}:${windowBucket}`,
+    });
+  }
+
   /**
    * Get all unacknowledged alerts for admin dashboard
    */

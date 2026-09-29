@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToastContext } from '../components/Toast';
 import {
@@ -18,6 +18,9 @@ import { getErrorMessage } from '../api/core';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
 import AgentProfilePanel from '../components/AgentProfilePanel';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { useDialogA11y } from '../hooks/useDialogA11y';
+import { COUNTRIES } from '@therapist-scheduler/shared';
 import {
   APPROACH_OPTIONS,
   STYLE_OPTIONS,
@@ -152,6 +155,7 @@ function TargetCell({ row }: { row: TherapistListItem }) {
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setValue(e.target.value)}
       onBlur={commit}
+      aria-label={`Target appointments for ${row.name}`}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
       }}
@@ -173,15 +177,23 @@ function TherapistDetailDrawer({ therapistId, onClose }: DetailDrawerProps) {
     queryKey: ['admin-therapist', therapistId],
     queryFn: () => getAdminTherapist(therapistId),
   });
+  const drawerRef = useRef<HTMLDivElement>(null);
+  // Focus in on open, Tab trapped, Esc closes, focus back to the row.
+  useDialogA11y(drawerRef, { onEscape: onClose });
 
   return (
     <div className="fixed inset-0 bg-black/30 z-40 flex justify-end" onClick={onClose}>
       <div
-        className="bg-white w-full max-w-3xl h-full overflow-y-auto shadow-xl"
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="therapist-drawer-title"
+        tabIndex={-1}
+        className="bg-white w-full max-w-3xl h-full overflow-y-auto shadow-xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between z-10">
-          <h2 className="text-lg font-semibold text-slate-900">Therapist detail</h2>
+          <h2 id="therapist-drawer-title" className="text-lg font-semibold text-slate-900">Therapist detail</h2>
           <button
             type="button"
             onClick={onClose}
@@ -281,6 +293,17 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
 
   const merged = { ...data, ...draft } as TherapistDetail & TherapistUpdate;
 
+  // Archive, freeze and unfreeze change what the public site shows, so each
+  // asks first (they used to fire on one click).
+  const [confirming, setConfirming] = useState<'archive' | 'freeze' | 'unfreeze' | null>(null);
+  const confirmPending = archiveMutation.isPending || freezeMutation.isPending || unfreezeMutation.isPending;
+  const runConfirmed = () => {
+    const done = { onSettled: () => setConfirming(null) };
+    if (confirming === 'archive') archiveMutation.mutate(false, done);
+    else if (confirming === 'freeze') freezeMutation.mutate(undefined, done);
+    else if (confirming === 'unfreeze') unfreezeMutation.mutate(undefined, done);
+  };
+
   const setField = <K extends keyof TherapistUpdate>(key: K, value: TherapistUpdate[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
   };
@@ -303,8 +326,35 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
     updateMutation.mutate(draft);
   };
 
+  const therapistName = merged.name ?? data.name;
+
   return (
     <div className="space-y-6">
+      {confirming && (
+        <ConfirmDialog
+          title={
+            confirming === 'archive'
+              ? `Archive ${therapistName}?`
+              : confirming === 'freeze'
+                ? `Freeze ${therapistName}?`
+                : `Unfreeze ${therapistName}?`
+          }
+          confirmLabel={confirming === 'archive' ? 'Archive' : confirming === 'freeze' ? 'Freeze' : 'Unfreeze'}
+          confirmVariant={confirming === 'unfreeze' ? 'primary' : 'danger'}
+          isPending={confirmPending}
+          onConfirm={runConfirmed}
+          onCancel={() => setConfirming(null)}
+        >
+          <p className="text-sm text-slate-600">
+            {confirming === 'archive'
+              ? 'They disappear from the public directory and the default admin list, and no new bookings can be made with them. You can restore them later.'
+              : confirming === 'freeze'
+                ? 'They are hidden from the public directory and no new booking requests are accepted until you unfreeze them. Appointments already in progress continue.'
+                : 'They can appear on the public directory again and accept new booking requests (if they are active, under their target and not in a session).'}
+          </p>
+        </ConfirmDialog>
+      )}
+
       {/* Header */}
       <div className="flex items-start gap-4">
         {data.profileImage && (
@@ -336,7 +386,7 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
           )}
           <button
             type="button"
-            onClick={() => archiveMutation.mutate(!data.active)}
+            onClick={() => (data.active ? setConfirming('archive') : archiveMutation.mutate(true))}
             disabled={archiveMutation.isPending}
             className={`mt-1 px-2.5 py-1 text-xs font-medium rounded border transition-colors disabled:opacity-50 ${
               data.active
@@ -356,8 +406,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
 
       {/* Name (full-width, since names are long and this is the most-edited field) */}
       <div>
-        <label className="block text-xs font-medium text-slate-500 mb-1">Name</label>
+        <label htmlFor="therapist-name" className="block text-xs font-medium text-slate-500 mb-1">Name</label>
         <input
+          id="therapist-name"
           value={merged.name ?? ''}
           onChange={(e) => setField('name', e.target.value)}
           maxLength={200}
@@ -368,8 +419,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
 
       {/* Toggles + simple fields */}
       <div className="grid grid-cols-2 gap-4">
-        <label className="flex items-center gap-2 text-sm">
+        <label htmlFor="therapist-active" className="flex items-center gap-2 text-sm">
           <input
+            id="therapist-active"
             type="checkbox"
             checked={merged.active ?? false}
             onChange={(e) => setField('active', e.target.checked)}
@@ -379,20 +431,32 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
         </label>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Country</label>
-          <input
+          <label htmlFor="therapist-country" className="block text-xs font-medium text-slate-500 mb-1">Country</label>
+          {/* Only supported codes: the backend rejects anything else (it used
+              to store it and fall back to London time). */}
+          <select
+            id="therapist-country"
             value={merged.country ?? ''}
-            onChange={(e) => setField('country', e.target.value.toUpperCase())}
-            maxLength={4}
-            className="w-full px-2 py-1 text-sm border border-slate-300 rounded font-mono"
-          />
+            onChange={(e) => setField('country', e.target.value)}
+            className="w-full px-2 py-1 text-sm border border-slate-300 rounded"
+          >
+            {!COUNTRIES.some((c) => c.code === merged.country) && (
+              <option value={merged.country ?? ''}>{merged.country || '—'} (unsupported)</option>
+            )}
+            {COUNTRIES.map((c) => (
+              <option key={c.code} value={c.code}>
+                {c.flag} {c.label} ({c.code})
+              </option>
+            ))}
+          </select>
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">
+          <label htmlFor="therapist-target" className="block text-xs font-medium text-slate-500 mb-1">
             Target appointments
           </label>
           <input
+            id="therapist-target"
             type="number"
             min={1}
             max={50}
@@ -416,8 +480,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Profile image URL</label>
+          <label htmlFor="therapist-image" className="block text-xs font-medium text-slate-500 mb-1">Profile image URL</label>
           <input
+            id="therapist-image"
             value={merged.profileImage ?? ''}
             onChange={(e) => setField('profileImage', e.target.value || null)}
             placeholder="https://…"
@@ -426,8 +491,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Booking link</label>
+          <label htmlFor="therapist-booking-link" className="block text-xs font-medium text-slate-500 mb-1">Booking link</label>
           <input
+            id="therapist-booking-link"
             value={merged.bookingLink ?? ''}
             onChange={(e) => setField('bookingLink', e.target.value || null)}
             placeholder="https://calendly.com/…"
@@ -438,8 +504,9 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
 
       {/* Bio */}
       <div>
-        <label className="block text-xs font-medium text-slate-500 mb-1">Bio</label>
+        <label htmlFor="therapist-bio" className="block text-xs font-medium text-slate-500 mb-1">Bio</label>
         <textarea
+          id="therapist-bio"
           value={merged.bio ?? ''}
           onChange={(e) => setField('bio', e.target.value || null)}
           rows={5}
@@ -478,10 +545,11 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
 
       {/* Availability JSON */}
       <div>
-        <label className="block text-xs font-medium text-slate-500 mb-1">
+        <label htmlFor="therapist-availability" className="block text-xs font-medium text-slate-500 mb-1">
           Availability (JSON)
         </label>
         <textarea
+          id="therapist-availability"
           value={availabilityText}
           onChange={(e) => setAvailabilityText(e.target.value)}
           rows={8}
@@ -538,7 +606,7 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
               {!data.bookingStatus?.frozen && (
                 <button
                   type="button"
-                  onClick={() => freezeMutation.mutate()}
+                  onClick={() => setConfirming('freeze')}
                   disabled={freezeMutation.isPending}
                   className="px-3 py-1.5 text-xs font-medium text-blue-800 bg-blue-100 border border-blue-200 rounded hover:bg-blue-200 disabled:opacity-50"
                 >
@@ -548,7 +616,7 @@ function DetailEditor({ data, therapistId, onSaved, onError, onUnfrozen, onFroze
               {data.bookingStatus?.frozen && (
                 <button
                   type="button"
-                  onClick={() => unfreezeMutation.mutate()}
+                  onClick={() => setConfirming('unfreeze')}
                   disabled={unfreezeMutation.isPending}
                   className="px-3 py-1.5 text-xs font-medium text-amber-800 bg-amber-100 border border-amber-200 rounded hover:bg-amber-200 disabled:opacity-50"
                 >
@@ -662,8 +730,9 @@ export default function AdminTherapistsPage() {
 
       <div className="bg-white border border-slate-200 rounded-lg p-4 mb-4 flex flex-wrap gap-3 items-end">
         <div className="flex-1 min-w-[200px]">
-          <label className="block text-xs font-medium text-slate-500 mb-1">Search</label>
+          <label htmlFor="therapist-search" className="block text-xs font-medium text-slate-500 mb-1">Search</label>
           <input
+            id="therapist-search"
             type="text"
             value={search}
             onChange={(e) => {
@@ -676,8 +745,9 @@ export default function AdminTherapistsPage() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Show</label>
+          <label htmlFor="therapist-show" className="block text-xs font-medium text-slate-500 mb-1">Show</label>
           <select
+            id="therapist-show"
             value={active}
             onChange={(e) => {
               setActive(e.target.value as TherapistFilters['active']);
@@ -724,7 +794,16 @@ export default function AdminTherapistsPage() {
                   <tr
                     key={t.id}
                     onClick={() => setSelectedId(t.id)}
-                    className="hover:bg-slate-50 cursor-pointer"
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return; // e.g. typing in the target cell
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelectedId(t.id);
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-label={`Open ${t.name}`}
+                    className="hover:bg-slate-50 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-spill-blue-400"
                   >
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">

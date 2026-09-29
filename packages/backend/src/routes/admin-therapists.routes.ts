@@ -14,6 +14,7 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { parseCountryCode, UNSUPPORTED_COUNTRY_MESSAGE } from '@therapist-scheduler/shared';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
@@ -53,7 +54,13 @@ const updateTherapistSchema = z
     name: z.string().trim().min(1).max(200).optional(),
     email: z.string().trim().email().max(255).optional(),
     bio: z.string().max(5000).nullable().optional(),
-    country: z.string().trim().min(2).max(4).optional(),
+    // One shared validator for every write path; an unknown code is a 400
+    // (it used to be stored and then silently resolved to London time).
+    country: z
+      .string()
+      .refine((v) => parseCountryCode(v) !== null, { message: UNSUPPORTED_COUNTRY_MESSAGE })
+      .transform((v) => parseCountryCode(v)!)
+      .optional(),
     profileImage: z.string().url().max(2000).nullable().optional(),
     bookingLink: z.string().url().max(2000).nullable().optional(),
     active: z.boolean().optional(),

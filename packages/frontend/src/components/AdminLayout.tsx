@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { Link, useLocation, Outlet } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import AdminLogin from './AdminLogin';
+import AdminIdentityPrompt from './AdminIdentityPrompt';
+import { useDocumentTitle } from '../hooks/useDocumentTitle';
+import { getAdminDisplayName, setAdminDisplayName } from '../utils/admin-id';
 
 interface NavItem {
   name: string;
@@ -74,8 +78,27 @@ const navItems: NavItem[] = [
 
 export default function AdminLayout() {
   const location = useLocation();
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
+  const queryClient = useQueryClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [displayName, setDisplayName] = useState<string | null>(getAdminDisplayName);
+  const [editingName, setEditingName] = useState(false);
+
+  // Per-page title, and never index any admin page.
+  const currentPage = navItems.find((item) => item.path === location.pathname);
+  useDocumentTitle(currentPage ? `${currentPage.name} · Admin` : 'Admin', { noindex: true });
+
+  const saveDisplayName = (name: string) => {
+    setDisplayName(setAdminDisplayName(name) ?? name);
+    setEditingName(false);
+  };
+
+  const handleLogout = () => {
+    setSidebarOpen(false);
+    logout();
+    // Drop cached admin data so none of it is shown before the next sign-in.
+    queryClient.clear();
+  };
 
   if (!isAuthenticated) {
     return <AdminLogin />;
@@ -86,6 +109,7 @@ export default function AdminLayout() {
       {/* Mobile overlay backdrop */}
       {sidebarOpen && (
         <div
+          aria-hidden="true"
           className="fixed inset-0 bg-black/30 z-40 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -131,6 +155,7 @@ export default function AdminLayout() {
                 key={item.path}
                 to={item.path}
                 onClick={() => setSidebarOpen(false)}
+                aria-current={isActive ? 'page' : undefined}
                 className={`
                   flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all
                   ${isActive
@@ -160,6 +185,20 @@ export default function AdminLayout() {
 
         {/* Footer */}
         <div className="px-3 py-3 border-t border-slate-200/60 space-y-0.5">
+          {displayName && (
+            <div className="px-3 py-2 text-xs text-slate-500 flex items-center justify-between gap-2">
+              <span className="truncate">
+                Signed in as <strong className="text-slate-700">{displayName}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setEditingName(true)}
+                className="text-spill-blue-800 hover:underline flex-shrink-0"
+              >
+                Change
+              </button>
+            </div>
+          )}
           <Link
             to="/"
             className="flex items-center gap-3 px-3 py-2 text-sm text-slate-500 hover:text-slate-700 hover:bg-white/60 rounded-lg transition-colors"
@@ -169,6 +208,16 @@ export default function AdminLayout() {
             </svg>
             Back to booking site
           </Link>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="w-full flex items-center gap-3 px-3 py-2 text-sm text-slate-500 hover:text-slate-700 hover:bg-white/60 rounded-lg transition-colors"
+          >
+            <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+            Log out
+          </button>
         </div>
       </aside>
 
@@ -192,6 +241,14 @@ export default function AdminLayout() {
         </div>
         <Outlet />
       </main>
+
+      {(!displayName || editingName) && (
+        <AdminIdentityPrompt
+          initialName={displayName}
+          onSave={saveDisplayName}
+          onCancel={displayName ? () => setEditingName(false) : undefined}
+        />
+      )}
     </div>
   );
 }

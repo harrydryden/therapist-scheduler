@@ -30,6 +30,9 @@ jest.mock('../config', () => ({
 jest.mock('../utils/database', () => {
   const userMock = {
     findUnique: jest.fn(),
+    // Pre-existing row by default: these tests predate the weekly-email
+    // opt-in; signup-optin.test.ts covers the new-user path.
+    findFirst: jest.fn().mockResolvedValue({ id: 'user-uuid', subscribed: true }),
     update: jest.fn(),
   };
   const prismaMock: Record<string, unknown> = {
@@ -53,6 +56,14 @@ jest.mock('../utils/unique-id', () => ({
 jest.mock('../services/signup-invitation.service', () => ({
   findInvitationByToken: jest.fn(),
   markAccepted: jest.fn(),
+}));
+
+jest.mock('../services/booking-verification.service', () => ({
+  consumeAddressQuota: jest.fn().mockResolvedValue({ allowed: true, retryAfterSeconds: 0 }),
+}));
+
+jest.mock('../services/voucher-issuance.service', () => ({
+  issueWelcomeVoucher: jest.fn().mockResolvedValue({ tokenIssued: true, emailSent: true }),
 }));
 
 jest.mock('../services/slack-notification.service', () => ({
@@ -140,6 +151,7 @@ describe('signup routes', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (prisma.user.findFirst as jest.Mock).mockResolvedValue({ id: 'user-uuid', subscribed: true });
     app = buildApp();
   });
 
@@ -264,8 +276,10 @@ describe('signup routes', () => {
         acknowledgedRealSession: true,
         agreedToFeedback: true,
         signupSource: 'signup_form',
-        subscribed: true,
       });
+      // The public, unverified form must never (re-)subscribe an address:
+      // new users get the column default, opted-out users stay opted out.
+      expect(call.data).not.toHaveProperty('subscribed');
       expect(call.data.consentGivenAt).toBeInstanceOf(Date);
     });
 

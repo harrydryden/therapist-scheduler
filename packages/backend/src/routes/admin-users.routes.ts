@@ -9,6 +9,7 @@
 
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { parseCountryCode, UNSUPPORTED_COUNTRY_MESSAGE } from '@therapist-scheduler/shared';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
@@ -34,7 +35,13 @@ const listUsersSchema = z.object({
 
 const updateUserSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
-  country: z.string().trim().min(2).max(4).optional(),
+  // One shared validator for every write path; an unknown code is a 400
+  // (it used to be stored and then silently resolved to London time).
+  country: z
+    .string()
+    .refine((v) => parseCountryCode(v) !== null, { message: UNSUPPORTED_COUNTRY_MESSAGE })
+    .transform((v) => parseCountryCode(v)!)
+    .optional(),
   subscribed: z.boolean().optional(),
 });
 

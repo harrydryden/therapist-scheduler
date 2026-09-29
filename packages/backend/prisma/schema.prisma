@@ -57,15 +57,21 @@ model User {
   // agent-profile.service.ts for the read/write contract.
   agentNotes Json? @map("agent_notes")
 
+  // Per-recipient send-once guard for the weekly promotional mailing.
+  // The global "last sent" marker lived only in Redis, so a lost or
+  // unreadable key re-blasted the whole list; this column makes the
+  // 7-day gap enforceable per user from Postgres.
+  lastWeeklyMailingAt DateTime? @map("last_weekly_mailing_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
   appointments AppointmentRequest[]
 
-  @@index([odId])
-  @@index([email])
-  @@index([subscribed])
+  // NOTE: no single-column indexes on odId / email — both are @unique,
+  // which already creates the index; the boolean `subscribed` index was
+  // dropped as it provides no selectivity.
   @@map("users")
 }
 
@@ -168,10 +174,34 @@ model Therapist {
   // constraint on side_effect_logs guarantees exactly one parent.
   sideEffectLogs SideEffectLog[]
 
-  @@index([odId])
-  @@index([notionId])
+  // Durable record of distinct clients who completed a session — the
+  // basis of the "target appointments reached" availability rule.
+  completedClients TherapistCompletedClient[]
+
+  // NOTE: odId / notionId are @unique (index implied); no duplicates.
   @@index([active])
   @@map("therapists")
+}
+
+// Durable per-therapist record of distinct clients who COMPLETED a
+// session. The availability rule ("hide the therapist once they have
+// completed sessions with N distinct clients") used to be computed live
+// from `appointment_requests WHERE status = 'completed'`, which retention
+// hard-deletes after a year and admins can delete at any time — so a
+// graduated therapist silently reappeared on the public finder. Rows here
+// are written when an appointment reaches `completed` and are never
+// removed by retention. Emails are stored hashed (sha256, lowercased) so
+// the table carries no PII.
+model TherapistCompletedClient {
+  id              String   @id @default(uuid())
+  therapistId     String   @map("therapist_id")
+  clientEmailHash String   @map("client_email_hash")
+  completedAt     DateTime @default(now()) @map("completed_at")
+
+  therapist Therapist @relation(fields: [therapistId], references: [id], onDelete: Cascade)
+
+  @@unique([therapistId, clientEmailHash])
+  @@map("therapist_completed_clients")
 }
 
 // ============================================
@@ -225,6 +255,20 @@ model AppointmentRequest {
   // JSON just to read one timestamp — read this column directly,
   // dropping the per-tick blob fetch entirely.
   checkpointAt      DateTime?  @map("checkpoint_at")
+
+  // Optimistic-lock version for `conversationState`. Every conversation-
+  // state writer (storeConversationState, applyCheckpointUpdate,
+  // appendConversationMessage, the one-shot migration script) CASes on
+  // this counter (`where: { id, conversationVersion: expected }`) and
+  // increments it in the same write. It deliberately replaces
+  // `updatedAt` as the CAS token: `@updatedAt` is bumped by EVERY write
+  // to the row — including the agent's own mid-turn tool writes (the
+  // dispatch human-control gate's `lastToolExecutedAt`, send.ts's
+  // outbound stamps, lifecycle transitions) — so an updatedAt-versioned
+  // end-of-turn save lost its own race on nearly every tool-using turn.
+  // Only writes that change `conversationState` touch this column.
+  conversationVersion Int @default(0) @map("conversation_version")
+
   // Agent-curated thread memory (Layer B in the agent memory design).
   // Free-form observations the agent retains via the `remember` tool —
   // preferences, constraints, prior decisions, situational context the
@@ -249,6 +293,16 @@ model AppointmentRequest {
   // How the booking was initiated: 'agent_negotiated' (default) or 'direct_link'
   // direct_link means the user booked via the therapist's external booking page
   bookingMethod String @default("agent_negotiated") @map("booking_method")
+
+  // Booking-request email verification. A public booking used to start
+  // the agent (and freeze the therapist for everyone) with no proof the
+  // requester controlled the address. Now the agent only starts, and the
+  // therapist is only marked in-session, once the requester clicks the
+  // confirmation link — or immediately when the request carries a valid
+  // voucher token (the voucher was itself emailed to that address).
+  // Existing rows were backfilled to their createdAt by the migration.
+  emailVerifiedAt         DateTime? @map("email_verified_at")
+  emailVerificationSentAt DateTime? @map("email_verification_sent_at")
 
   // Tracking code for deterministic email matching (embedded in subjects)
   // Format: SPL<number> (e.g., SPL1, SPL42) - UNIQUE per appointment
@@ -337,7 +391,6 @@ model AppointmentRequest {
   // expand+dual-write phase, `conversationState` + `memory` are
   // mirrored to this table; reads still hit the columns on this
   // row. See docs/REFACTOR_PLAN.md for the cutover plan.
-  conversation AppointmentConversation?
 
   // Relation to feedback submissions
   feedbackSubmissions FeedbackSubmission[]
@@ -364,6 +417,8 @@ model AppointmentRequest {
   @@index([therapistGmailThreadId])
   @@index([userEmail])
   @@index([therapistHandle])
+  @@index([therapistHandle, status]) // completed-client count + serial-booking guard on every finder request
+  @@index([status, updatedAt]) // dashboard / list pagination
   @@index([userEmail, therapistHandle, status])
   @@index([status, lastActivityAt]) // For stale check queries
   @@index([status, isStale]) // For filtering active stale conversations
@@ -374,70 +429,12 @@ model AppointmentRequest {
   @@index([conversationStallAlertAt]) // For admin alert dashboard
   @@index([lastToolExecutedAt]) // For stall detection queries
   @@index([status, reminderSentAt, confirmedDateTimeParsed]) // For reminder queries
-  @@index([idempotencyKey, createdAt]) // For idempotency key lookups
   @@index([userId]) // For user lookup queries
   @@index([therapistId]) // For therapist lookup queries
   @@index([status, chaseSentAt]) // For chase follow-up queries
   @@index([closureRecommendedAt]) // For closure recommendation dashboard
   @@map("appointment_requests")
 }
-
-// Conversation state extracted from AppointmentRequest in Phase 3a
-// of the refactor (see docs/REFACTOR_PLAN.md).
-//
-// Why split: `conversationState` is the largest field on the
-// AppointmentRequest row (~500KB in the worst case, typically tens of
-// KB for active conversations) and the booking-FSM column set is
-// hot-read by background services that don't need the blob.
-// `memory` is much smaller but shares the same "read-only by the
-// agent / writer-by-the-tool" access pattern, so it lives here too.
-//
-// Lifecycle: created LAZILY by the first conversation write — both
-// `storeConversationState` and `addNote` upsert into this table. The
-// cascade delete via the FK keeps cleanup automatic when an
-// appointment is removed.
-//
-// Migration phase (current PR — Phase 3a):
-//   - Schema is EXPANDED: the new table exists, but the legacy
-//     `conversationState` + `memory` columns on `appointment_requests`
-//     are STILL the source of truth for reads.
-//   - Every writer now DUAL-WRITES: same JSON to both tables, both
-//     wrapped in the same transaction.
-//   - A backfill script copies pre-existing rows.
-//
-// Follow-up PR (Phase 3b — cutover):
-//   - Reads switch to this table.
-//   - Dual-write continues for safety so a rollback is one-line.
-//
-// Follow-up PR (Phase 3c — contract):
-//   - Once cutover is proven in production for >= 1 week:
-//     legacy columns dropped from `appointment_requests`.
-model AppointmentConversation {
-  // Primary key IS the appointment id — 1:1 enforced at the schema
-  // level. No surrogate row id, so the join is a trivial PK lookup
-  // and there's no chance of orphaned rows.
-  appointmentId String @id @map("appointment_id")
-
-  // Full conversation log (system prompt + messages + checkpoint +
-  // facts). Up to ~500KB in the largest cases.
-  conversationState Json? @map("conversation_state")
-
-  // Agent-curated Layer B thread memory (notes + availability windows).
-  // Distinct from conversationState because the agent writes it via a
-  // separate tool (`remember`) and the eviction model is different
-  // (FIFO with content-hash dedup; see agent-memory.service.ts).
-  memory Json?
-
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  // Cascade delete keeps cleanup automatic. The FK is also the PK,
-  // so the relation is unambiguous and 1:1 at the schema level.
-  appointment AppointmentRequest @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-
-  @@map("appointment_conversations")
-}
-
 // Therapist-only conversations handled by the availability-collection agent.
 //
 // Distinct from AppointmentRequest, which is always anchored to a specific
@@ -493,6 +490,14 @@ model TherapistConversation {
   memory            Json?
   messageCount      Int   @default(0) @map("message_count")
 
+  // Optimistic-lock version for `conversationState` — same contract as
+  // AppointmentRequest.conversationVersion. The availability agent's
+  // persistStateWithLock CASes on this counter; `updatedAt` can't be
+  // the token because the tool executor's human-control gate
+  // (`lastToolExecutedAt`), the Gmail thread-id stamp and the
+  // memory / mark_complete / flag writes all bump it mid-turn.
+  conversationVersion Int @default(0) @map("conversation_version")
+
   lastActivityAt DateTime @default(now()) @map("last_activity_at")
   isStale        Boolean  @default(false) @map("is_stale")
 
@@ -524,7 +529,6 @@ model TherapistConversation {
 
   @@index([therapistId])
   @@index([gmailThreadId]) // Inbound thread-matcher lookup
-  @@index([status])
   @@index([kind, status]) // For admin listings filtered by both
   @@index([status, lastActivityAt]) // Stale-check scans
   @@map("therapist_conversations")
@@ -548,10 +552,10 @@ model PendingEmail {
   // Cascade delete ensures PendingEmails are cleaned up when their appointment is deleted
   appointment AppointmentRequest? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
 
-  @@index([status])
   @@index([appointmentId])
   @@index([status, createdAt]) // For ordered pending email queries
   @@index([status, nextRetryAt]) // For retry scheduling
+  @@index([status, lastRetryAt]) // Retention sweep of abandoned rows
   @@map("pending_emails")
 }
 
@@ -653,7 +657,6 @@ model MessageProcessingFailure {
   lastFailedAt  DateTime @default(now()) @map("last_failed_at")
   abandoned     Boolean  @default(false) // True after exceeding MAX_PROCESSING_FAILURES
 
-  @@index([abandoned])
   @@index([lastFailedAt])
   @@index([abandoned, lastFailedAt]) // For admin "retry recent abandonments" queries
   @@map("message_processing_failures")
@@ -830,6 +833,13 @@ model SideEffectLog {
   // Idempotency - prevent duplicate execution
   idempotencyKey String @unique @map("idempotency_key")
 
+  // The appointment's transitionGeneration at registration. The retry
+  // runner compares it with the row's current generation and supersedes
+  // (never sends) an effect whose transition has since been overtaken —
+  // e.g. a "confirmed for Tue 3pm" email retried after a reschedule.
+  // Null for legacy rows and for periodic (non-transition) effects.
+  transitionGeneration Int? @map("transition_generation")
+
   // Foreign key relations — at most one will be non-null per row (see
   // CHECK constraint above). Cascade delete: side effect logs are
   // deleted when the parent appointment or therapist is deleted.
@@ -838,9 +848,9 @@ model SideEffectLog {
 
   @@index([appointmentId])
   @@index([therapistId])
-  @@index([status])
   @@index([effectType, status])
   @@index([status, lastAttempt]) // For retry queries
+  @@index([status, createdAt]) // Stale-pending branch of the retry scan
   @@map("side_effect_logs")
 }
 

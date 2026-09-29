@@ -3,11 +3,12 @@
  * confirmation emails + Slack + therapist freeze.
  *
  * Two input shapes are accepted:
- *   1. Freeform `confirmed_datetime` string (legacy).
+ *   1. Freeform `confirmed_datetime` string (legacy, read as UK time).
  *   2. Structured form (timezone + year/month/day/hour/minute).
  *      Synthesised into the freeform string via `resolveWallClock`,
  *      so DST / non-existent / unknown-timezone errors surface as
- *      specific tool errors the agent can react to.
+ *      specific tool errors the agent can react to. When a call carries
+ *      both, the structured form wins.
  *
  * Delegates to `appointmentLifecycleService.transitionToConfirmed`
  * for the atomic confirmation. Reschedules (when the row is already
@@ -58,15 +59,17 @@ export async function handleMarkSchedulingComplete(
   }
   const completeData = parsed.data;
 
-  // STEP 1: synthesise confirmed_datetime from the structured form when
-  // the agent supplied one. Routes through the same resolveWallClock
-  // path that resolve_local_time uses, so DST / non-existent /
+  // STEP 1: pick the datetime. The structured form WINS whenever it is
+  // complete — including when the agent also filled the legacy
+  // `confirmed_datetime` string. The freeform string is parsed as
+  // platform (UK) time downstream, so letting it win silently ignored the
+  // structured timezone: "3pm my time" from a New York client was stored
+  // five hours off. The structured form routes through the same
+  // resolveWallClock path resolve_local_time uses, so DST / non-existent /
   // unknown-timezone errors surface as specific tool errors. Legacy
-  // callers passing the freeform `confirmed_datetime` string flow
-  // through unchanged.
+  // callers passing only the freeform string flow through unchanged.
   let confirmedDateTime = completeData.confirmed_datetime;
   if (
-    !confirmedDateTime &&
     completeData.timezone &&
     completeData.year !== undefined &&
     completeData.month !== undefined &&
@@ -102,8 +105,13 @@ export async function handleMarkSchedulingComplete(
     }
     confirmedDateTime = formatIsoWithOffset(resolved.resolved);
     logger.info(
-      { traceId, confirmedDateTime, structuredInput: completeData },
-      'mark_scheduling_complete: synthesised confirmed_datetime from structured form',
+      {
+        traceId,
+        confirmedDateTime,
+        structuredInput: completeData,
+        ignoredFreeform: completeData.confirmed_datetime,
+      },
+      'mark_scheduling_complete: using the structured form for confirmed_datetime',
     );
   }
   if (!confirmedDateTime) {
@@ -131,7 +139,23 @@ export async function handleMarkSchedulingComplete(
   }
 
   // STEP 3: confirm via the lifecycle service.
-  await markComplete(context, { confirmed_datetime: confirmedDateTime, notes: completeData.notes }, traceId);
+  const outcome = await markComplete(
+    context,
+    { confirmed_datetime: confirmedDateTime, notes: completeData.notes },
+    traceId,
+  );
+
+  // A confirmation that did NOT happen must not be reported as success:
+  // on success dispatch records the idempotency key (so a legitimate
+  // retry within the TTL is swallowed), increments the per-appointment
+  // counter, the loop advances the checkpoint to `confirmed`, and the
+  // model is told the booking went through — and then emails the
+  // parties as if it had.
+  if (outcome.kind === 'not_confirmed') {
+    return {
+      result: { success: false, toolName: 'mark_scheduling_complete', error: outcome.error },
+    };
+  }
 
   return {
     result: { success: true, toolName: 'mark_scheduling_complete' },
@@ -139,11 +163,27 @@ export async function handleMarkSchedulingComplete(
   };
 }
 
+/**
+ * `confirmed` — the lifecycle transition wrote the confirmation, or the
+ *   appointment was already confirmed for this same datetime (idempotent).
+ * `not_confirmed` — nothing was written: human control is on, or the
+ *   atomic transition lost its precondition (another writer confirmed a
+ *   different time, or the status moved). `error` is the message the
+ *   agent sees.
+ */
+type MarkCompleteOutcome =
+  | { kind: 'confirmed' }
+  | { kind: 'not_confirmed'; error: string };
+
+const NOT_CONFIRMED_SUFFIX =
+  'The booking was NOT confirmed and no confirmation emails were sent. ' +
+  'Do not tell either party the session is confirmed.';
+
 async function markComplete(
   context: SchedulingContext,
   params: { confirmed_datetime: string; notes?: string },
   traceId: string,
-): Promise<void> {
+): Promise<MarkCompleteOutcome> {
   logger.info(
     { traceId, appointmentRequestId: context.appointmentRequestId, params },
     'Marking scheduling complete via lifecycle service',
@@ -165,7 +205,10 @@ async function markComplete(
       { traceId, appointmentRequestId: context.appointmentRequestId },
       'Human control enabled - skipping markComplete',
     );
-    return;
+    return {
+      kind: 'not_confirmed',
+      error: `An admin has taken control of this conversation. ${NOT_CONFIRMED_SUFFIX} Stop and leave it to the admin.`,
+    };
   }
 
   // Idempotency: if already confirmed with the same datetime, skip
@@ -184,7 +227,7 @@ async function markComplete(
       },
       'Appointment already confirmed with same datetime - skipping duplicate processing (idempotent)',
     );
-    return;
+    return { kind: 'confirmed' };
   }
 
   const isReschedule = existing?.status === 'confirmed' && (existing?.confirmedDateTime || existing?.reschedulingInProgress);
@@ -237,16 +280,30 @@ async function markComplete(
       : undefined,
   });
 
-  if (result.atomicSkipped) {
+  // `success === false` too, defensively: a failed result means no
+  // confirmation was written, whatever flag the transition set.
+  if (result.atomicSkipped || result.success === false) {
+    // The atomic confirmation's preconditions no longer held when it ran:
+    // human control was switched on, another writer already confirmed a
+    // DIFFERENT datetime, or the status moved out of the allowed set.
+    // (A concurrent write of the SAME datetime comes back as `skipped`,
+    // handled below as idempotent success.)
     logger.info(
       {
         traceId,
         appointmentRequestId: context.appointmentRequestId,
         previousStatus: result.previousStatus,
+        newStatus: result.newStatus,
       },
       'Appointment confirmation skipped atomically (human control or concurrent update)',
     );
-    return;
+    return {
+      kind: 'not_confirmed',
+      error:
+        `The appointment changed while confirming (status is now "${result.newStatus}"; ` +
+        `it may have been confirmed for a different time, or an admin may have taken control). ` +
+        `${NOT_CONFIRMED_SUFFIX} Re-check the conversation, or call flag_for_human_review if it is unclear.`,
+    };
   }
 
   if (result.skipped) {
@@ -254,7 +311,7 @@ async function markComplete(
       { traceId, appointmentRequestId: context.appointmentRequestId },
       'Appointment confirmation skipped (idempotent)',
     );
-    return;
+    return { kind: 'confirmed' };
   }
 
   // (status_change audit event is written by transitionToConfirmed)
@@ -262,4 +319,5 @@ async function markComplete(
     { traceId, appointmentRequestId: context.appointmentRequestId, isReschedule },
     'Appointment confirmed via lifecycle service',
   );
+  return { kind: 'confirmed' };
 }

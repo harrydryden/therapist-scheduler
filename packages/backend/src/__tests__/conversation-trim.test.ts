@@ -105,6 +105,45 @@ describe('trimConversationState (head+tail strategy)', () => {
     expect(placeholder.content).toContain(String(expectedDropped));
   });
 
+  // Regression for A1: the trimmed state used to be rebuilt as
+  // `{ systemPrompt, messages }`, wiping checkpoint / facts /
+  // responseTracking on exactly the long conversations that need them.
+  it('carries every non-message field over when it trims', () => {
+    const messages = makeMessages(CONVERSATION_LIMITS.MAX_MESSAGES + 10);
+    const checkpoint = {
+      stage: 'awaiting_therapist_confirmation' as const,
+      lastSuccessfulAction: 'received_user_slot_selection' as const,
+      pendingAction: 'Waiting for therapist to confirm',
+      checkpoint_at: '2026-09-20T10:00:00.000Z',
+      context: { lastEmailSentTo: 'therapist' as const },
+    };
+    const facts = {
+      proposedTimes: ['Tuesday at 3pm'],
+      therapistPreferences: [],
+      userPreferences: [],
+      blockers: [],
+      specialNotes: [],
+      updatedAt: '2026-09-20T10:00:00.000Z',
+    };
+    const responseTracking = { lastEmailSentToTherapist: '2026-09-19T09:00:00.000Z', events: [] };
+
+    const result = service.trimConversationState({
+      systemPrompt: '',
+      messages,
+      checkpoint,
+      facts,
+      responseTracking,
+    });
+
+    expect(result.messages.length).toBe(CONVERSATION_LIMITS.TRIM_TO_MESSAGES);
+    expect(result.checkpoint).toEqual(checkpoint);
+    expect(result.facts).toEqual(facts);
+    expect(result.responseTracking).toEqual(responseTracking);
+    expect(Object.keys(result).sort()).toEqual(
+      ['checkpoint', 'facts', 'messages', 'responseTracking', 'systemPrompt'],
+    );
+  });
+
   it('does not trim when total messages would not exceed the trim target', () => {
     // Just at the boundary
     const messages = makeMessages(CONVERSATION_LIMITS.TRIM_TO_MESSAGES);

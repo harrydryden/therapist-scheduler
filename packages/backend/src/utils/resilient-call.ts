@@ -8,7 +8,7 @@
  * Provides a single composable function that handles:
  *   1. Rate limit errors (429) with configurable backoff + server retry-after
  *   2. Transient errors (5xx, connection) with shorter backoff
- *   3. Circuit breaker integration (optional)
+ *   3. Circuit breaker integration (optional), applied to each attempt
  *   4. Jitter to prevent thundering herd
  *
  * Usage:
@@ -26,14 +26,14 @@ import {
 import { sleep } from './timeout';
 import { logger } from './logger';
 import { CLAUDE_API } from '../constants';
-import { type CircuitBreaker } from './circuit-breaker';
+import { type CircuitBreaker, CircuitBreakerError } from './circuit-breaker';
 
 export interface ResilientCallConfig {
   /** Context string for log messages */
   context: string;
   /** Trace ID for correlation */
   traceId: string;
-  /** Optional circuit breaker to wrap the call */
+  /** Optional circuit breaker; every attempt goes through it */
   circuitBreaker?: CircuitBreaker;
   /** Rate-limit retry config (defaults to CLAUDE_API constants) */
   rateLimitRetries?: number;
@@ -56,7 +56,13 @@ const DEFAULT_TRANSIENT_CONFIG = {
  *   - Transient (5xx, network): shorter backoff
  *   - Non-retryable: thrown immediately
  *
- * If a circuitBreaker is provided, the entire retry loop is wrapped inside it.
+ * If a circuitBreaker is provided, EACH attempt runs through
+ * `circuitBreaker.execute()` and the back-off sleeps happen outside it.
+ * Wrapping the whole loop instead meant a HALF_OPEN probe that hit a 429
+ * held the breaker's single probe slot through the entire rate-limit
+ * back-off (up to ~111 minutes), rejecting every other caller. A breaker
+ * rejection (CircuitBreakerError) is not retried: failing fast is the
+ * point of the breaker.
  */
 export async function resilientCall<T>(
   operation: () => Promise<T>,
@@ -73,77 +79,76 @@ export async function resilientCall<T>(
     maxServerRetryAfterMs = 5 * 60 * 1000,
   } = config;
 
-  const retryableOperation = async (): Promise<T> => {
-    let rateLimitAttempts = 0;
-    let transientAttempts = 0;
+  const attemptOnce = circuitBreaker
+    ? () => circuitBreaker.execute(operation)
+    : operation;
 
-    // Maximum total attempts is bounded: initial + rate limit retries + transient retries
-    const maxAttempts = 1 + rateLimitRetries + transientRetries;
+  let rateLimitAttempts = 0;
+  let transientAttempts = 0;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        return await operation();
-      } catch (error) {
-        // Rate limit error (429)
-        if (error instanceof RateLimitError) {
-          rateLimitAttempts++;
-          if (rateLimitAttempts > rateLimitRetries) {
-            logger.error(
-              { traceId, context, rateLimitAttempts, maxRetries: rateLimitRetries },
-              'Rate limit retries exhausted',
-            );
-            throw error;
-          }
+  // Maximum total attempts is bounded: initial + rate limit retries + transient retries
+  const maxAttempts = 1 + rateLimitRetries + transientRetries;
 
-          const retryDelay = computeRateLimitDelay(
-            error, rateLimitAttempts, rateLimitDelaysMs, maxServerRetryAfterMs, traceId, context,
-          );
-
-          logger.warn(
-            { traceId, context, attempt: rateLimitAttempts, maxRetries: rateLimitRetries, retryDelayMs: retryDelay },
-            `Rate limited (429) — retrying in ${Math.round(retryDelay / 1000)}s`,
-          );
-          await sleep(retryDelay);
-          continue;
-        }
-
-        // Transient error (5xx, connection issues)
-        if (isTransientError(error)) {
-          transientAttempts++;
-          if (transientAttempts > transientRetries) {
-            logger.error(
-              { traceId, context, transientAttempts, maxRetries: transientRetries },
-              'Transient error retries exhausted',
-            );
-            throw error;
-          }
-
-          const baseDelay = transientDelaysMs[Math.min(transientAttempts - 1, transientDelaysMs.length - 1)];
-          const retryDelay = addJitter(baseDelay);
-
-          logger.warn(
-            { traceId, context, attempt: transientAttempts, maxRetries: transientRetries, retryDelayMs: retryDelay },
-            `Transient error — retrying in ${Math.round(retryDelay / 1000)}s`,
-          );
-          await sleep(retryDelay);
-          continue;
-        }
-
-        // Non-retryable error
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await attemptOnce();
+    } catch (error) {
+      if (error instanceof CircuitBreakerError) {
         throw error;
       }
+
+      // Rate limit error (429)
+      if (error instanceof RateLimitError) {
+        rateLimitAttempts++;
+        if (rateLimitAttempts > rateLimitRetries) {
+          logger.error(
+            { traceId, context, rateLimitAttempts, maxRetries: rateLimitRetries },
+            'Rate limit retries exhausted',
+          );
+          throw error;
+        }
+
+        const retryDelay = computeRateLimitDelay(
+          error, rateLimitAttempts, rateLimitDelaysMs, maxServerRetryAfterMs, traceId, context,
+        );
+
+        logger.warn(
+          { traceId, context, attempt: rateLimitAttempts, maxRetries: rateLimitRetries, retryDelayMs: retryDelay },
+          `Rate limited (429) — retrying in ${Math.round(retryDelay / 1000)}s`,
+        );
+        await sleep(retryDelay);
+        continue;
+      }
+
+      // Transient error (5xx, connection issues)
+      if (isTransientError(error)) {
+        transientAttempts++;
+        if (transientAttempts > transientRetries) {
+          logger.error(
+            { traceId, context, transientAttempts, maxRetries: transientRetries },
+            'Transient error retries exhausted',
+          );
+          throw error;
+        }
+
+        const baseDelay = transientDelaysMs[Math.min(transientAttempts - 1, transientDelaysMs.length - 1)];
+        const retryDelay = addJitter(baseDelay);
+
+        logger.warn(
+          { traceId, context, attempt: transientAttempts, maxRetries: transientRetries, retryDelayMs: retryDelay },
+          `Transient error — retrying in ${Math.round(retryDelay / 1000)}s`,
+        );
+        await sleep(retryDelay);
+        continue;
+      }
+
+      // Non-retryable error
+      throw error;
     }
-
-    // Should never reach here, but TypeScript needs this
-    throw new Error(`resilientCall: unexpected loop exit (${context})`);
-  };
-
-  // Optionally wrap in circuit breaker
-  if (circuitBreaker) {
-    return circuitBreaker.execute(retryableOperation);
   }
 
-  return retryableOperation();
+  // Should never reach here, but TypeScript needs this
+  throw new Error(`resilientCall: unexpected loop exit (${context})`);
 }
 
 /**

@@ -94,6 +94,7 @@ export class LockedTaskRunner {
     let lockValid = true;
     let timedOut = false;
     let renewalId: NodeJS.Timeout | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
 
     // Start lock renewal
     renewalId = setInterval(async () => {
@@ -118,7 +119,7 @@ export class LockedTaskRunner {
       const result = await Promise.race([
         task(ctx),
         new Promise<never>((_, reject) => {
-          setTimeout(() => {
+          timeoutId = setTimeout(() => {
             lockValid = false;
             timedOut = true;
             reject(new Error(
@@ -133,6 +134,10 @@ export class LockedTaskRunner {
       logger.error({ err: error, lockKey, context, maxExecutionMs }, 'Locked task failed');
       return { acquired: true, error };
     } finally {
+      // The race timer outlives a task that finished in time unless it is
+      // cleared: one timer per tick, each pending for up to 10× the lock
+      // TTL (~100 min), holding the event loop open after shutdown.
+      if (timeoutId) clearTimeout(timeoutId);
       if (renewalId) {
         clearInterval(renewalId);
         renewalId = null;

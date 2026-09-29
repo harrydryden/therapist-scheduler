@@ -42,6 +42,32 @@ export function sanitizeImageUrl(url: string | null | undefined): string | null 
   }
 }
 
+/**
+ * Validate an external link (e.g. a therapist's booking page) before it is
+ * rendered as an href or opened. Only absolute http(s) URLs pass;
+ * `javascript:`, `data:`, relative and unparseable values return null.
+ *
+ * Therapist booking links can be written by the scheduling agent from
+ * email text, and zod's `.url()` on the backend accepts `javascript:`, so
+ * the frontend must not trust them.
+ */
+export function sanitizeExternalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      console.warn('Blocked unsafe external URL protocol:', parsed.protocol);
+      return null;
+    }
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
 // Note: sanitizeText was removed as it was dead code.
 // AdminDashboardPage uses DOMPurify.sanitize() for HTML stripping,
 // and JSX auto-escapes text content, making HTML entity encoding unnecessary.

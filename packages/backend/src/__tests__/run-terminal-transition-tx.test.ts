@@ -38,6 +38,7 @@ jest.mock('../config', () => ({
 jest.mock('../utils/redis', () => ({
   redis: {
     get: jest.fn(),
+    getStrict: jest.fn(),
     set: jest.fn(),
     del: jest.fn(),
   },

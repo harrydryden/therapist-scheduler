@@ -12,7 +12,10 @@ import { LockedTaskContext } from '../utils/locked-task-runner';
 import {
   sideEffectTrackerService,
   SideEffectType,
+  type ClaimLease,
+  type SideEffectStatus,
 } from './side-effect-tracker.service';
+import { EPOCH_SENTINEL } from '../utils/atomic-sentinel-claim';
 import { prisma } from '../utils/database';
 import { emailQueueService } from './email-queue.service';
 import { slackNotificationService } from './slack-notification.service';
@@ -24,6 +27,7 @@ import {
   finalizeChase,
   finalizeMeetingLinkCheck,
   finalizeFeedbackDispatch,
+  completeFeedbackRequestedTransition,
   finalizeFeedbackReminder,
   finalizeSessionReminderPair,
   type SessionReminderPairPayload,
@@ -164,6 +168,50 @@ interface RetryCycleResult {
   succeeded: number;
   failed: number;
   abandoned: number;
+  superseded: number;
+}
+
+/**
+ * What executeEffect did. `superseded` means it deliberately did NOT run
+ * the effect because the transition that registered it has been overtaken
+ * (see supersededReason) — the row is closed as `superseded`, not
+ * `completed`, so the log stays honest about what was sent.
+ */
+type ExecuteOutcome = { kind: 'executed' } | { kind: 'superseded'; reason: string };
+
+interface RetryableEffect {
+  id: string;
+  appointmentId: string | null;
+  therapistId: string | null;
+  effectType: SideEffectType;
+  idempotencyKey: string;
+  status: SideEffectStatus;
+  attempts: number;
+  payload: unknown;
+  transitionGeneration: number | null;
+  createdAt: Date;
+}
+
+/**
+ * A transition effect is stale once its appointment has moved to a later
+ * transition generation than the one stamped on the row at registration:
+ * every status change (and an admin slot move) bumps the generation, so a
+ * mismatch means the booking was rescheduled, cancelled, revived or
+ * otherwise moved on since this email/Slack message was rendered. Sending
+ * it now would tell someone about a state that no longer exists — e.g. a
+ * "confirmed for Tue 3pm" arriving after the cancellation. Periodic and
+ * legacy rows carry no stamp and are never superseded here.
+ */
+function supersededReason(
+  effect: { transitionGeneration: number | null },
+  appointment: { transitionGeneration: number },
+): string | null {
+  if (effect.transitionGeneration === null || effect.transitionGeneration === undefined) return null;
+  if (appointment.transitionGeneration === effect.transitionGeneration) return null;
+  return (
+    `Superseded: registered at transition generation ${effect.transitionGeneration}, ` +
+    `appointment is now at ${appointment.transitionGeneration}`
+  );
 }
 
 class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
@@ -172,6 +220,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     totalSucceeded: 0,
     totalFailed: 0,
     totalAbandoned: 0,
+    totalSuperseded: 0,
     lastRunTime: null as Date | null,
   };
 
@@ -194,6 +243,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     this.stats.totalSucceeded += result.succeeded;
     this.stats.totalFailed += result.failed;
     this.stats.totalAbandoned += result.abandoned;
+    this.stats.totalSuperseded += result.superseded;
 
     if (result.retried > 0) {
       logger.info(result, 'Side effect retry cycle complete');
@@ -211,6 +261,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     let succeeded = 0;
     let failed = 0;
     let abandoned = 0;
+    let superseded = 0;
 
     const effectsToRetry = await sideEffectTrackerService.getEffectsToRetry(
       MAX_RETRY_ATTEMPTS,
@@ -230,10 +281,13 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       // duplicate user-visible side effects. The CAS in tryClaimEffect
       // ensures only one worker proceeds. If we lose the race, skip
       // silently: the winning worker will mark the row's terminal state.
-      const claimed = await sideEffectTrackerService.tryClaimEffect(
+      // Every outcome write below carries the lease, so if this worker's
+      // lease expires mid-execute and another worker re-claims the row,
+      // our late write cannot clobber theirs.
+      const lease = await sideEffectTrackerService.tryClaimEffect(
         effect.idempotencyKey,
       );
-      if (!claimed) {
+      if (!lease) {
         logger.debug(
           { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId },
           'Side effect retry skipped — execute-lease held by another worker',
@@ -243,48 +297,42 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
 
       retried++;
 
-      try {
-        await this.executeEffect(effect);
-        await sideEffectTrackerService.markCompleted(effect.idempotencyKey);
-        succeeded++;
-
-        logger.info(
-          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempt: effect.attempts + 1 },
-          'Side effect retry succeeded'
+      // A `running` row reaching us is a crash orphan: its worker died
+      // mid-execute without recording an outcome, and re-claiming it
+      // counted that attempt. Once those count up to the cap, stop
+      // re-running it — an effect that keeps killing the process would
+      // otherwise loop every lease period forever, unalerted.
+      const attemptsSoFar = effect.status === 'running' ? effect.attempts + 1 : effect.attempts;
+      if (effect.status === 'running' && attemptsSoFar >= MAX_RETRY_ATTEMPTS) {
+        await this.abandon(
+          effect,
+          lease,
+          attemptsSoFar,
+          'worker died mid-execute on every attempt (never recorded an outcome)',
         );
+        abandoned++;
+        continue;
+      }
+
+      // Execute and mark-completed are separate phases (lifecycle audit
+      // L3): once executeEffect resolves the email/Slack message has gone
+      // out, so a DB blip on markCompleted must NOT fall into the catch
+      // below — that would markFailed (or markAbandoned + alert at the
+      // cap) a row whose effect succeeded, and the next cycle would send
+      // it again. markCompletedAfterExecute retries the bookkeeping write
+      // and never throws.
+      let outcome: ExecuteOutcome | null = null;
+      try {
+        outcome = await this.executeEffect(effect);
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        const nextAttempt = effect.attempts + 1;
+        const nextAttempt = attemptsSoFar + 1;
 
         if (nextAttempt >= MAX_RETRY_ATTEMPTS) {
-          await sideEffectTrackerService.markAbandoned(
-            effect.idempotencyKey,
-            `Abandoned after ${nextAttempt} attempts: ${errorMessage}`
-          );
+          await this.abandon(effect, lease, nextAttempt, errorMessage);
           abandoned++;
-
-          logger.error(
-            { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempts: nextAttempt },
-            'Side effect permanently abandoned'
-          );
-
-          await this.postAbandonCleanup(effect);
-
-          try {
-            await slackNotificationService.sendAlert({
-              title: 'Side Effect Abandoned',
-              severity: 'high',
-              // Therapist-scoped effects have no appointmentId — surface the
-              // therapist ID in the details body so the alert is still
-              // actionable.
-              appointmentId: effect.appointmentId ?? undefined,
-              details: `\`${effect.effectType}\` failed after *${nextAttempt}* attempts and was abandoned.${effect.therapistId ? ` (therapistId: ${effect.therapistId})` : ''} Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
-            });
-          } catch {
-            // Don't let Slack failure mask the original error
-          }
         } else {
-          await sideEffectTrackerService.markFailed(effect.idempotencyKey, errorMessage);
+          await sideEffectTrackerService.markFailed(effect.idempotencyKey, errorMessage, lease);
           failed++;
 
           logger.warn(
@@ -293,9 +341,70 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
           );
         }
       }
+
+      if (outcome?.kind === 'superseded') {
+        superseded++;
+        await sideEffectTrackerService.markSuperseded(effect.idempotencyKey, outcome.reason, lease);
+        logger.info(
+          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, reason: outcome.reason },
+          'Side effect retry superseded — transition overtaken, not sent'
+        );
+      } else if (outcome?.kind === 'executed') {
+        succeeded++;
+        await sideEffectTrackerService.markCompletedAfterExecute(
+          effect.idempotencyKey,
+          {
+            effectId: effect.id,
+            effectType: effect.effectType,
+            appointmentId: effect.appointmentId,
+            therapistId: effect.therapistId,
+          },
+          { lease },
+        );
+
+        logger.info(
+          { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempt: attemptsSoFar + 1 },
+          'Side effect retry succeeded'
+        );
+      }
     }
 
-    return { retried, succeeded, failed, abandoned };
+    return { retried, succeeded, failed, abandoned, superseded };
+  }
+
+  /** Abandon a row (lease-checked), run its cleanup hook, and alert. */
+  private async abandon(
+    effect: RetryableEffect,
+    lease: ClaimLease,
+    attempts: number,
+    errorMessage: string,
+  ): Promise<void> {
+    await sideEffectTrackerService.markAbandoned(
+      effect.idempotencyKey,
+      `Abandoned after ${attempts} attempts: ${errorMessage}`,
+      lease,
+    );
+
+    logger.error(
+      { effectId: effect.id, effectType: effect.effectType, appointmentId: effect.appointmentId, attempts },
+      'Side effect permanently abandoned'
+    );
+
+    await this.postAbandonCleanup(effect);
+
+    try {
+      await slackNotificationService.sendAlert({
+        title: 'Side Effect Abandoned',
+        severity: 'high',
+        // Therapist-scoped effects have no appointmentId — surface the
+        // therapist ID in the details body so the alert is still
+        // actionable.
+        appointmentId: effect.appointmentId ?? undefined,
+        details: `\`${effect.effectType}\` failed after *${attempts}* attempts and was abandoned.${effect.therapistId ? ` (therapistId: ${effect.therapistId})` : ''} Manual intervention may be needed.\n*Last error:* ${errorMessage.slice(0, 200)}`,
+      });
+    } catch {
+      // Don't let Slack failure mask the original error
+    }
   }
 
   /**
@@ -345,15 +454,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
     }
   }
 
-  private async executeEffect(effect: {
-    id: string;
-    appointmentId: string | null;
-    therapistId: string | null;
-    effectType: SideEffectType;
-    idempotencyKey: string;
-    attempts: number;
-    payload: unknown;
-  }): Promise<void> {
+  private async executeEffect(effect: RetryableEffect): Promise<ExecuteOutcome> {
     // Dispatch on scope (DB CHECK enforces exactly one set). Therapist-
     // scoped retries don't need an appointment row — they re-fetch the
     // therapist and replay the rendered payload.
@@ -366,7 +467,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         attempts: effect.attempts,
         payload: effect.payload,
       });
-      return;
+      return { kind: 'executed' };
     }
 
     if (!effect.appointmentId) {
@@ -390,11 +491,20 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
         trackingCode: true,
         notes: true,
         lastActivityAt: true,
+        transitionGeneration: true,
+        feedbackFormSentAt: true,
       },
     });
 
     if (!appointment) {
       throw new Error(`Appointment ${effect.appointmentId} not found - cannot retry side effect`);
+    }
+
+    // Never replay a transition effect whose transition has been overtaken
+    // (lifecycle audit L4) — checked before any send.
+    const staleReason = supersededReason(effect, appointment);
+    if (staleReason) {
+      return { kind: 'superseded', reason: staleReason };
     }
 
     switch (effect.effectType) {
@@ -439,7 +549,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             { effectId: effect.id, appointmentId: effect.appointmentId, status: richAppointment.status },
             'justintime_start retry skipped: appointment already advanced',
           );
-          return;
+          return { kind: 'executed' };
         }
 
         if (richAppointment.messageCount > 0 || richAppointment.conversationState !== null) {
@@ -447,7 +557,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
             { effectId: effect.id, appointmentId: effect.appointmentId },
             'justintime_start retry skipped: conversation activity already recorded; manual intervention may be required',
           );
-          return;
+          return { kind: 'executed' };
         }
 
         if (richAppointment.gmailThreadId || richAppointment.therapistGmailThreadId) {
@@ -465,7 +575,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
           } catch {
             // Don't let Slack failure mask the underlying condition.
           }
-          return;
+          return { kind: 'executed' };
         }
 
         const context = await fetchSchedulingContext(effect.appointmentId, `retry:${effect.idempotencyKey}`);
@@ -629,6 +739,21 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
           throw new Error(
             `Cannot retry ${effect.effectType}: missing or invalid payload — expected { user, therapist? } envelopes`,
           );
+        }
+        // The feedbackFormSentAt sentinel is confirmed (flipped from the
+        // in-flight epoch to a real timestamp) only AFTER both emails have
+        // been handed off. A real timestamp here therefore means a previous
+        // attempt already sent the pair and failed afterwards — in the
+        // transition to feedback_requested. Re-sending would give the client
+        // a second feedback form; only the transition is still owed
+        // (lifecycle audit L10).
+        if (appointment.feedbackFormSentAt && appointment.feedbackFormSentAt > EPOCH_SENTINEL) {
+          logger.info(
+            { effectId: effect.id, appointmentId: appointment.id },
+            'email_feedback_dispatch retry: emails already sent (sentinel confirmed) — completing the transition only',
+          );
+          await completeFeedbackRequestedTransition(appointment.id);
+          break;
         }
         await emailQueueService.enqueue({
           to: payload.user.to,
@@ -795,6 +920,7 @@ class SideEffectRetryService extends LockedPeriodicService<RetryCycleResult> {
       default:
         throw new Error(`Unknown side effect type: ${effect.effectType}`);
     }
+    return { kind: 'executed' };
   }
 
   /**

@@ -73,6 +73,21 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
   protected async tick(ctx: LockedTaskContext, trigger: ScanTrigger): Promise<ScanResult> {
     const scanId = `scan-${Date.now().toString(36)}`;
     const result = await this.scanActiveThreads(scanId, trigger, ctx.isLockValid);
+
+    // A scan in which most Gmail fetches failed is NOT a completed scan
+    // (O7): treat it as skipped — no heartbeat (written only for healthy
+    // scans, in scanActiveThreads), no skip-counter reset, and the same
+    // escalating unhealthy-alert path as any other skip.
+    if (isDegradedScan(result)) {
+      this.trackSkip(
+        scanId,
+        trigger,
+        'gmail_fetch_failures',
+        `${result.failed} of ${result.scanned} thread checks failed`,
+      );
+      return result;
+    }
+
     // Reached the end without throwing — a real completed scan (possibly a
     // no-op, if there was nothing to scan). Reset the skip counter.
     const skipsBeforeReset = this.consecutiveSkips;
@@ -185,8 +200,10 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
    * then checks each thread against the processedGmailMessage table.
    *
    * Throws on infrastructure failures (OAuth, DB) so the caller can
-   * track skips correctly. Per-thread errors are caught and logged
-   * without aborting the full scan.
+   * track skips correctly. Per-thread errors are caught, logged and
+   * counted in `failed` without aborting the full scan; a scan where more
+   * than half the thread checks failed is degraded (see isDegradedScan)
+   * and does not write the heartbeat.
    */
   private async scanActiveThreads(
     scanId: string,
@@ -266,22 +283,27 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
         const appointmentRecovered = await runWithTrace(
           { traceId, appointmentId: appointment.id, source: 'missed-message-scanner' },
           async () => {
-            try {
-              // The therapist and client threads are independent Gmail API calls.
-              const results = await Promise.all(
-                threadIds.map(threadId =>
-                  emailIngestService.checkThreadForUnprocessedReplies(threadId, traceId)
-                )
-              );
-              return results.reduce((sum, n) => sum + n, 0);
-            } catch (error) {
-              totalFailed++;
-              logger.warn(
-                { scanId, appointmentId: appointment.id, error },
-                'Failed to scan appointment threads — continuing with next'
-              );
-              return 0;
+            // The therapist and client threads are independent Gmail API
+            // calls; each failure is counted per thread (a 404 is not a
+            // failure — checkThreadForUnprocessedReplies returns 0 for it).
+            const results = await Promise.allSettled(
+              threadIds.map(threadId =>
+                emailIngestService.checkThreadForUnprocessedReplies(threadId, traceId)
+              )
+            );
+            let recovered = 0;
+            for (const r of results) {
+              if (r.status === 'fulfilled') {
+                recovered += r.value;
+              } else {
+                totalFailed++;
+                logger.warn(
+                  { scanId, appointmentId: appointment.id, error: r.reason },
+                  'Failed to scan appointment thread — continuing with next'
+                );
+              }
             }
+            return recovered;
           },
         );
 
@@ -332,11 +354,21 @@ class MissedMessageScannerService extends LockedPeriodicService<ScanResult> {
       }).catch(() => {});
     }
 
-    // Record heartbeat: this scan ran to completion. External monitoring +
-    // /health/full reads this to detect a hung/crashed scanner.
-    await this.writeHeartbeat();
+    const result: ScanResult = { scanned: totalScanned, recovered: totalRecovered, failed: totalFailed };
 
-    return { scanned: totalScanned, recovered: totalRecovered, failed: totalFailed };
+    // Record heartbeat: this scan ran to completion. External monitoring +
+    // /health/full reads this to detect a hung/crashed scanner. A degraded
+    // scan (most Gmail fetches failed) is not a healthy one — no heartbeat.
+    if (isDegradedScan(result)) {
+      logger.error(
+        { scanId, trigger, threadsScanned: totalScanned, threadsFailed: totalFailed },
+        'Missed message scan degraded — most Gmail thread fetches failed; not recording a heartbeat',
+      );
+    } else {
+      await this.writeHeartbeat();
+    }
+
+    return result;
   }
 
   /**
@@ -425,5 +457,12 @@ interface ScanResult {
 }
 
 const EMPTY_RESULT: ScanResult = { scanned: 0, recovered: 0, failed: 0 };
+
+/** Fraction of failed thread checks above which a scan counts as skipped. */
+export const DEGRADED_SCAN_FAILURE_RATIO = 0.5;
+
+function isDegradedScan(result: ScanResult): boolean {
+  return result.scanned > 0 && result.failed / result.scanned > DEGRADED_SCAN_FAILURE_RATIO;
+}
 
 export const missedMessageScannerService = new MissedMessageScannerService();

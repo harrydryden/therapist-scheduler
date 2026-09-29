@@ -17,6 +17,7 @@ import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getTaskMetrics } from '../utils/background-task';
 import { missedMessageScannerService } from '../services/missed-message-scanner.service';
+import { clearMessageDedupState } from '../core/messaging/message-dedup';
 
 const setupPushSchema = z.object({
   topicName: z.string().min(1, 'Pub/Sub topic name is required').optional(),
@@ -437,7 +438,12 @@ export async function adminRoutes(fastify: FastifyInstance) {
   /**
    * POST /api/admin/processing-failures/retry
    * Force-retry a list of abandoned (or active-failing) messages. Clears the
-   * dedup record + failure record so the next scanner cycle picks them up.
+   * dedup state (DB row AND Redis processed-set / lock / unmatched keys) and
+   * the retry-budget records, then triggers a scan so the missed-message
+   * scanner re-delivers them. The scanner only walks threads of active,
+   * non-human-controlled appointments and skips messages older than
+   * EMAIL_PROCESSING.SCANNER_MAX_MESSAGE_AGE_DAYS; for anything else use
+   * the per-thread force reprocess (`/api/admin/dashboard/appointments/:id/reprocess-thread`).
    *
    * Use this after fixing the underlying issue (e.g. running a missing
    * migration). Without this endpoint, abandoned messages stay marked as
@@ -506,11 +512,16 @@ export async function adminRoutes(fastify: FastifyInstance) {
           });
         }
 
-        // Clear dedup + failure records in parallel — independent writes
-        const [deletedDedup, deletedFailures] = await Promise.all([
-          prisma.processedGmailMessage.deleteMany({ where: { id: { in: targetIds } } }),
-          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: targetIds } } }),
-        ]);
+        // Clear EVERY dedup layer — the DB row, the Redis processed-ZSET
+        // member (plus lock / unmatched keys) and the DB retry budgets.
+        // Deleting only the DB rows was a silent no-op: the ZSET member
+        // written by markMessageProcessed('processing-failed-abandoned')
+        // kept ATOMIC_LOCK_CHECK_SCRIPT answering `already_processed`
+        // for 30 days, so nothing was reprocessed and the failure
+        // records were gone (E8). Same helper as per-thread reprocess.
+        const cleared = await clearMessageDedupState(targetIds, requestId);
+        const deletedDedup = { count: cleared.processedDeleted };
+        const deletedFailures = { count: cleared.failuresDeleted };
 
         const remaining = all ? Math.max(0, totalAbandoned - targetIds.length) : 0;
 

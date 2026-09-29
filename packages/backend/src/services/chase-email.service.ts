@@ -48,7 +48,9 @@ class ChaseEmailService {
    * - awaiting_user_slot_selection → chase user
    * - initial_contact / stalled / no checkpoint → infer from conversation state or thread existence
    *
-   * Only one chase is ever sent per thread. If it goes unanswered, the system
+   * One chase per party per silence: the chase state is cleared when the
+   * conversation moves to a new stage (CLEAR_CHASE_STATE), so the same
+   * party can be chased again later. If a chase goes unanswered, the system
    * will later recommend closure to the admin.
    *
    * Uses the same sentinel pattern as post-booking follow-ups to prevent
@@ -313,6 +315,17 @@ class ChaseEmailService {
             (Date.now() - appointment.lastActivityAt.getTime()) / (60 * 60 * 1000)
           );
           const effectType = target === 'user' ? 'email_chase_user' : 'email_chase_therapist';
+          const finalize = () =>
+            finalizeChase({
+              appointmentId: appointment.id,
+              target,
+              targetEmail: email,
+              now: new Date(),
+              checkId,
+              userName: appointment.userName,
+              therapistName: appointment.therapistName,
+              inactiveHours,
+            });
 
           // Tracked side effect. Send + checkpoint advance + audit
           // recording all live in execute so retry replays the whole
@@ -321,6 +334,20 @@ class ChaseEmailService {
           // `pending` state doesn't block parallel execute calls), and
           // the stored payload lets retry replay the email without
           // re-rendering against drifted template settings.
+          //
+          // Scope generation = this chase cycle. The effect type names the
+          // party; the generation names the silence being chased — the
+          // appointment's lastActivityAt, which the candidate query just
+          // proved is older than the chase threshold. It is stable across
+          // re-attempts of the same chase (nothing touches lastActivityAt
+          // until the chase lands or someone replies), and every chase that
+          // lands moves it forward (finalizeChase stamps lastActivityAt), so
+          // the next chase to the same party — after a reply moved the
+          // stage on and cleared the chase state — gets a fresh row. The key
+          // used to be "once per party per appointment lifetime": the second
+          // chase hit the first one's completed row and was skipped, the
+          // sentinel was stranded at the epoch, and closure (which needs a
+          // real chaseSentAt) was never recommended (lifecycle audit L8).
           runPeriodicTrackedSideEffect(
             { kind: 'appointment', appointmentId: appointment.id },
             effectType,
@@ -338,22 +365,19 @@ class ChaseEmailService {
                 // metadata + audit event) runs whether this is the first
                 // attempt or a retry replaying the stored payload — see
                 // finalizeChase's own doc comment.
-                await finalizeChase({
-                  appointmentId: appointment.id,
-                  target,
-                  targetEmail: email,
-                  now: new Date(),
-                  checkId,
-                  userName: appointment.userName,
-                  therapistName: appointment.therapistName,
-                  inactiveHours,
-                });
+                await finalize();
               },
+              // This cycle's chase already went out (e.g. the retry runner
+              // sent it but could not record it). Record it now — the
+              // finaliser is epoch-guarded — instead of stranding the
+              // sentinel we just claimed.
+              onAlreadyCompleted: finalize,
             },
             {
               name: 'chase-email',
               context: { appointmentId: appointment.id, target },
             },
+            appointment.lastActivityAt.getTime(),
           );
 
           // Returning void counts this candidate as 'sent' in the

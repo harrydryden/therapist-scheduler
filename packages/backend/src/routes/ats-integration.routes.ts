@@ -32,6 +32,12 @@ import { runBackgroundTask } from '../utils/background-task';
 import { toAppointmentForHealth, computeAppointmentHealthMeta, getHealthThresholds } from '../services/conversation-health.service';
 import { getOrCreateFeedbackFormConfig } from '../utils/feedback-form-config';
 import { parseFormQuestions } from '@therapist-scheduler/shared/utils/form-utils';
+import { parseCountryCode, UNSUPPORTED_COUNTRY_MESSAGE } from '@therapist-scheduler/shared';
+import {
+  VALID_APPROACH_TYPES,
+  VALID_STYLE_TYPES,
+  VALID_AREAS_OF_FOCUS_TYPES,
+} from '../config/therapist-categories';
 import type {
   ATSAppointmentRecord,
   ATSFeedbackSubmission,
@@ -58,9 +64,26 @@ const atsTherapistSchema = z.object({
   name: z.string().min(1).max(255),
   email: z.string().email().max(320),
   bio: z.string().max(10000).optional(),
-  approach: z.array(z.string().max(100)).max(20).optional(),
-  style: z.array(z.string().max(100)).max(20).optional(),
-  areasOfFocus: z.array(z.string().max(100)).max(50).optional(),
+  // Same shared category enums the admin editor enforces: free text here
+  // broke the explainer lookup and made any admin PATCH that echoed an
+  // ATS-written value back fail validation.
+  approach: z.array(z.enum(VALID_APPROACH_TYPES as [string, ...string[]])).max(20).optional(),
+  style: z.array(z.enum(VALID_STYLE_TYPES as [string, ...string[]])).max(20).optional(),
+  areasOfFocus: z.array(z.enum(VALID_AREAS_OF_FOCUS_TYPES as [string, ...string[]])).max(20).optional(),
+  // Country code (UK, US, …) via the one shared validator; unknown codes
+  // are rejected rather than stored (they used to resolve to London time).
+  country: z
+    .unknown()
+    .optional()
+    .transform((value, ctx) => {
+      if (value === undefined || value === null || value === '') return undefined;
+      const code = parseCountryCode(value);
+      if (!code) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNSUPPORTED_COUNTRY_MESSAGE });
+        return z.NEVER;
+      }
+      return code;
+    }),
   availability: z.object({
     timezone: z.string().max(100),
     slots: z.array(z.object({
@@ -815,6 +838,7 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
             data: {
               name: data.name,
               email: data.email,
+              ...(data.country ? { country: data.country } : {}),
             },
           });
 
@@ -829,7 +853,8 @@ export async function atsIntegrationRoutes(fastify: FastifyInstance) {
           therapistEntity = await getOrCreateTherapist(
             data.externalId,
             data.email,
-            data.name
+            data.name,
+            data.country,
           );
 
           logger.info(

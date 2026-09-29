@@ -52,6 +52,7 @@ jest.mock('../utils/unsubscribe-token', () => ({
 jest.mock('../utils/redis', () => ({
   cacheManager: {
     getString: jest.fn().mockResolvedValue(null),
+    getStrict: jest.fn().mockResolvedValue(null),
     incr: jest.fn().mockResolvedValue(1),
     expire: jest.fn(),
     set: jest.fn(),
@@ -209,9 +210,13 @@ describe('Admin Voucher Routes', () => {
     });
 
     it('computes status=expired for old voucher', async () => {
+      // A voucher's OWN token expiry wins over the global setting (C6), so
+      // the fixture's freshly-minted token must be absent for the
+      // sent-at + expiryDays fallback to apply.
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       const record = makeRecord({
         lastVoucherSentAt: thirtyDaysAgo,
+        lastVoucherToken: null,
       });
       (prisma.$queryRaw as jest.Mock).mockResolvedValue(defaultSummaryRow);
       (prisma.voucherTracking.findMany as jest.Mock).mockResolvedValue([record]);

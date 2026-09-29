@@ -176,9 +176,15 @@ export function useAppointmentControls(
       queryClient.invalidateQueries({ queryKey: ['appointments'] });
       invalidateStats();
       setMutationError(null);
+      showToast('Appointment deleted.', 'success');
     },
     onError: (error) => {
+      // DeleteSection renders the error inline (deleteMutation.error).
+      // Refetch the detail too: the usual refusal is a status that changed
+      // under a stale panel (e.g. now confirmed), and the fresh status shows
+      // the "session did NOT take place" confirmation needed to proceed.
       setMutationError(error instanceof Error ? error.message : 'Failed to delete appointment');
+      invalidateDetail();
     },
   });
 

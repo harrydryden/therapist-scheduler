@@ -8,10 +8,33 @@ import {
   createOAuth2Client,
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
+  refreshAccessToken,
 } from '../utils/gmail-auth';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { withTimeout } from '../utils/timeout';
+import { EMAIL } from '../constants';
+
+/**
+ * Compare the Gmail account the OAuth token belongs to with the configured
+ * scheduler address (EMAIL.FROM_ADDRESS / EMAIL_FROM_ADDRESS — the single
+ * source of truth for "our address"). A mismatch means the own-mail skip,
+ * the thread labels and divergence detection would all treat our own sent
+ * mail as someone else's, so it is logged loudly at boot. Never throws.
+ */
+export function checkSchedulerAddressMatches(profileAddress: string | null | undefined): boolean {
+  if (!profileAddress) return true; // nothing to compare against
+  const configured = EMAIL.FROM_ADDRESS.trim().toLowerCase();
+  const actual = profileAddress.trim().toLowerCase();
+  if (configured === actual) return true;
+  logger.error(
+    { configuredFromAddress: EMAIL.FROM_ADDRESS, gmailProfileAddress: profileAddress },
+    '!!! SCHEDULER ADDRESS MISMATCH: EMAIL_FROM_ADDRESS does not match the Gmail account the OAuth token ' +
+      'belongs to. Our own outbound mail will not be recognised as ours (own-mail skip, thread labels, ' +
+      'divergence checks). Set EMAIL_FROM_ADDRESS to the Gmail account address (or re-authorise the right account).',
+  );
+  return false;
+}
 
 /**
  * Gmail API Circuit Breaker
@@ -127,6 +150,7 @@ export class EmailOAuthService {
         retry: true,
       });
       logger.info('Gmail client initialized with timeout protection');
+      void this.verifySchedulerAddress();
     } catch (error) {
       logger.error({ error }, 'Failed to initialize Gmail client');
 
@@ -167,7 +191,7 @@ export class EmailOAuthService {
       if (!expiryDate) {
         // No expiry date - try to refresh to get one
         logger.warn('No token expiry date - attempting refresh');
-        await this.oauth2Client.getAccessToken();
+        await refreshAccessToken(this.oauth2Client, 'proactive-token-refresh');
         return { valid: true, refreshed: true };
       }
 
@@ -186,7 +210,7 @@ export class EmailOAuthService {
         const lockValue = await acquireTokenRefreshLock('proactive-refresh');
         if (lockValue) {
           try {
-            await this.oauth2Client.getAccessToken();
+            await refreshAccessToken(this.oauth2Client, 'proactive-token-refresh');
             const newExpiry = this.oauth2Client.credentials.expiry_date;
             const newExpiresIn = newExpiry ? Math.floor((newExpiry - Date.now()) / 60000) : undefined;
 
@@ -237,6 +261,24 @@ export class EmailOAuthService {
       hasRefreshToken,
       expiresInMinutes,
     };
+  }
+
+  /**
+   * Boot-time check that the Gmail account matches EMAIL_FROM_ADDRESS
+   * (see checkSchedulerAddressMatches). Best effort, bounded, never throws.
+   */
+  async verifySchedulerAddress(): Promise<boolean> {
+    if (!this.gmail) return true;
+    try {
+      const profile = await executeGmailWithProtection(
+        'verify-scheduler-address',
+        () => this.gmail!.users.getProfile({ userId: 'me' }),
+      );
+      return checkSchedulerAddressMatches(profile.data.emailAddress);
+    } catch (err) {
+      logger.warn({ err }, 'Could not read the Gmail profile to verify the scheduler address');
+      return true;
+    }
   }
 
   // ─── Push notifications (watch) ─────────────────────────────────────

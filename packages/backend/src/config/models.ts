@@ -50,7 +50,26 @@ export const CLAUDE_MODELS = {
 export const MODEL_CONFIG = {
   agent: {
     primary: CLAUDE_MODELS.AGENT,
-    maxTokens: 1024,
+    /**
+     * Per-response output cap for the tool-using agent loops. Sonnet 5
+     * thinks adaptively by default and thinking tokens count against this
+     * cap, and a single turn can carry two full `send_email` bodies (slot
+     * rejection: one to each party). The old 1024 truncated those turns
+     * mid tool call (stop_reason 'max_tokens'); 4096 leaves room for both.
+     */
+    maxTokens: 4096,
+    /**
+     * Cap for the ONE retry a loop makes when a response still stops on
+     * `max_tokens`. A second truncation escalates to human review rather
+     * than running a cut-off tool call.
+     */
+    maxTokensOnTruncation: 8192,
+    /**
+     * Per-request timeout for the agent loops. The client default
+     * (TIMEOUTS.ANTHROPIC_API_MS, 60s) was sized for 1024-token replies;
+     * an 8K-token response can legitimately take longer than that.
+     */
+    requestTimeoutMs: 180_000,
     temperature: 0.7,
   },
   extraction: {

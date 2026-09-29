@@ -65,18 +65,36 @@ export async function handleUpdateTherapistAvailability(
     return { result: { success: false, toolName: 'update_therapist_availability', error: errorMsg } };
   }
 
-  await persistAvailability(context, parsed.data, traceId);
+  const outcome = await persistAvailability(context, parsed.data, traceId);
+  // Nothing saved → not a success. Reporting success here advanced the
+  // checkpoint to received_therapist_availability, marked the call
+  // idempotent, and let the agent tell the client "availability is on
+  // file" when it wasn't (e.g. "Mondays after 3pm" parses to no slots).
+  if (outcome.kind === 'not_saved') {
+    return { result: { success: false, toolName: 'update_therapist_availability', error: outcome.error } };
+  }
   return {
-    result: { success: true, toolName: 'update_therapist_availability' },
+    result: {
+      success: true,
+      toolName: 'update_therapist_availability',
+      resultMessage: `Therapist availability saved (${outcome.slotCount} weekly slot(s), timezone ${outcome.timezone}).`,
+    },
     checkpointAction: 'received_therapist_availability',
   };
 }
+
+type PersistAvailabilityOutcome =
+  | { kind: 'saved'; slotCount: number; timezone: string }
+  | { kind: 'not_saved'; error: string };
+
+const NOT_SAVED_SUFFIX =
+  'Nothing was saved. Do not tell anyone the availability is on file.';
 
 async function persistAvailability(
   context: SchedulingContext,
   params: { availability: { [day: string]: string }; timezone?: string },
   traceId: string,
-): Promise<void> {
+): Promise<PersistAvailabilityOutcome> {
   logger.info(
     { traceId, availability: params.availability },
     'Updating therapist availability',
@@ -90,7 +108,10 @@ async function persistAvailability(
 
     if (!appointmentRequest?.therapistHandle) {
       logger.error({ traceId }, 'No therapist handle found on appointment');
-      return;
+      return {
+        kind: 'not_saved',
+        error: `This appointment has no linked therapist record, so the availability could not be stored. ${NOT_SAVED_SUFFIX} Use flag_for_human_review.`,
+      };
     }
 
     // therapistHandle is the public handle: legacy Notion page id for
@@ -110,7 +131,10 @@ async function persistAvailability(
         { traceId, therapistHandle: appointmentRequest.therapistHandle },
         'Therapist not found in Postgres — cannot persist availability',
       );
-      return;
+      return {
+        kind: 'not_saved',
+        error: `The therapist record for this appointment was not found, so the availability could not be stored. ${NOT_SAVED_SUFFIX} Use flag_for_human_review.`,
+      };
     }
 
     const slots = parseDayStringsToSlots(params.availability);
@@ -119,7 +143,13 @@ async function persistAvailability(
         { traceId, raw: params.availability },
         'update_therapist_availability called with no parseable slots — skipping write',
       );
-      return;
+      return {
+        kind: 'not_saved',
+        error:
+          `None of the availability could be parsed into weekly time ranges (${JSON.stringify(params.availability).slice(0, 200)}). ` +
+          `Each value must be 24-hour ranges like "09:00-12:00, 14:00-17:00". ${NOT_SAVED_SUFFIX} ` +
+          `Retry with explicit ranges, or ask the therapist for specific times.`,
+      };
     }
 
     const platformTimezone = (await getSettingValue<string>('general.timezone')) || 'Europe/London';
@@ -146,6 +176,7 @@ async function persistAvailability(
       },
       'Therapist availability updated in Postgres',
     );
+    return { kind: 'saved', slotCount: slots.length, timezone: newAvailability.timezone };
   } catch (error) {
     logger.error(
       { traceId, error },

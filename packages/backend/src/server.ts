@@ -47,12 +47,18 @@ import { slackWeeklySummaryService } from './services/slack-weekly-summary.servi
 import { workReportService } from './services/work-report.service';
 import { appointmentLifecycleTickService } from './domain/scheduling/lifecycle';
 import { invitationLifecycleService } from './services/invitation-lifecycle.service';
+import { bookingVerificationService } from './services/booking-verification.service';
 import { emailQueueService } from './services/email-queue.service';
 import { sideEffectRetryService } from './services/side-effect-retry.service';
 import { prisma, checkDatabaseHealth } from './utils/database';
 import { redis } from './utils/redis';
 import { circuitBreakerRegistry } from './utils/circuit-breaker';
-import { getAllTaskMetrics, getBackgroundTaskHealth } from './utils/background-task';
+import {
+  getAllTaskMetrics,
+  getBackgroundTaskHealth,
+  recordUnhandledRejection,
+  getUnhandledRejectionStats,
+} from './utils/background-task';
 import { getTimeoutStats } from './utils/timeout';
 import { slackNotificationService } from './services/slack-notification.service';
 import { sseService } from './services/sse.service';
@@ -63,6 +69,7 @@ import { missedMessageScannerService } from './services/missed-message-scanner.s
 import { verifyWebhookSecret } from './middleware/auth';
 import { runWithTrace, generateTraceId, logRequestMetrics } from './utils/request-tracing';
 import { withTimeout, TimeoutError } from './utils/timeout';
+import { sanitizeUrlForLog } from './utils/log-sanitize';
 
 // Liveness probes must answer quickly even if the underlying connection
 // is wedged — the orchestrator can't tell "probe hung" apart from "pod
@@ -70,31 +77,28 @@ import { withTimeout, TimeoutError } from './utils/timeout';
 // instead of letting the request hang forever.
 const HEALTH_PROBE_TIMEOUT_MS = 2000;
 
-// Process-wide tally of `unhandledRejection` events. The handler logs
-// each one but deliberately doesn't crash; the count is surfaced in
-// /health/full so an outside monitor can alert on rejections piling up
-// even when individual log lines slip past.
-const UNHANDLED_REJECTION_SAMPLE_SIZE = 5;
-let unhandledRejectionCount = 0;
-const recentUnhandledRejections: Array<{ at: string; reason: string }> = [];
+// Upper bound on graceful shutdown before the process force-exits.
+const SHUTDOWN_FORCE_EXIT_MS = 30_000;
 
-function recordUnhandledRejection(reason: unknown): void {
-  unhandledRejectionCount++;
-  const text = reason instanceof Error
-    ? `${reason.name}: ${reason.message}`
-    : String(reason);
-  recentUnhandledRejections.push({ at: new Date().toISOString(), reason: text.slice(0, 500) });
-  if (recentUnhandledRejections.length > UNHANDLED_REJECTION_SAMPLE_SIZE) {
-    recentUnhandledRejections.shift();
-  }
-}
-
-function getUnhandledRejectionStats(): { count: number; recent: Array<{ at: string; reason: string }> } {
-  return { count: unhandledRejectionCount, recent: [...recentUnhandledRejections] };
-}
+// How long shutdown waits for in-flight background ticks to finish after
+// their timers are stopped. Leaves room inside SHUTDOWN_FORCE_EXIT_MS for
+// the email-queue drain and closing Redis/Prisma.
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 15_000;
 
 const logger = pino({
   level: config.logLevel,
+  serializers: {
+    req(req: { method?: string; url?: string; headers?: Record<string, unknown>; hostname?: string; ip?: string; socket?: { remotePort?: number } }) {
+      return {
+        method: req.method,
+        url: sanitizeUrlForLog(req.url),
+        version: req.headers?.['accept-version'],
+        hostname: req.hostname,
+        remoteAddress: req.ip,
+        remotePort: req.socket?.remotePort,
+      };
+    },
+  },
   transport:
     config.env === 'development'
       ? {
@@ -105,6 +109,13 @@ const logger = pino({
         }
       : undefined,
 });
+
+// Number of reverse-proxy hops in front of the app (Railway adds one).
+// Shared with the auth middleware's client-IP extraction so the
+// per-IP rate limiter and the brute-force limiter agree on who the
+// client is. Without `trustProxy`, `request.ip` is the proxy's own
+// address and every per-IP limit collapses into one global bucket.
+const TRUSTED_PROXY_DEPTH = Math.max(0, parseInt(process.env.TRUSTED_PROXY_DEPTH || '1', 10) || 1);
 
 async function buildServer() {
   // Pino's `Logger` type is structurally compatible with Fastify's
@@ -117,6 +128,7 @@ async function buildServer() {
     logger: logger as unknown as import('fastify').FastifyBaseLogger,
     requestIdHeader: 'x-request-id',
     requestIdLogLabel: 'requestId',
+    trustProxy: TRUSTED_PROXY_DEPTH,
   });
 
   // Register plugins
@@ -203,10 +215,12 @@ async function buildServer() {
         HEALTH_PROBE_TIMEOUT_MS,
         'health.database',
       );
+      // Public probe: report state, not the raw driver error text
+      // (connection strings / hostnames leak through those messages).
       checks.database = {
         ok: dbHealth.connected,
         latencyMs: dbHealth.latencyMs,
-        error: dbHealth.error,
+        error: dbHealth.connected ? undefined : 'unavailable',
       };
       if (!dbHealth.connected) allHealthy = false;
     } catch (err) {
@@ -224,7 +238,7 @@ async function buildServer() {
       checks.redis = {
         ok: redisHealth.connected,
         latencyMs: redisHealth.latencyMs,
-        error: redisHealth.error,
+        error: redisHealth.connected ? undefined : 'unavailable',
       };
       if (!redisHealth.connected) {
         logger.warn('Redis unavailable - distributed locking disabled');
@@ -295,8 +309,9 @@ async function buildServer() {
   });
 
   // /health/full - Comprehensive health check combining all checks (auth required)
-  // Use this for detailed debugging and monitoring dashboards
-  fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async () => {
+  // Use this for detailed debugging and monitoring dashboards. Answers 503
+  // when degraded, so an uptime monitor can alert on the status code alone.
+  fastify.get('/health/full', { preHandler: verifyWebhookSecret }, async (_request, reply) => {
     const checks: Record<string, unknown> = {};
 
     // Database — timeout-bounded so a wedged connection doesn't hang the probe.
@@ -378,12 +393,15 @@ async function buildServer() {
     };
 
     // Unhandled rejections — the process keeps running on these, so we
-    // surface the count + a recent sample here. Any non-zero count is
-    // degraded; the recent sample helps locate the leaking promise.
+    // surface them here. Any in the last hour is degraded (a rolling
+    // window, so one old rejection doesn't pin the probe degraded for the
+    // life of the process); the recent sample helps locate the leak.
     const rejectionStats = getUnhandledRejectionStats();
     checks.unhandledRejections = {
       status: rejectionStats.count === 0 ? 'ok' : 'degraded',
       count: rejectionStats.count,
+      windowMs: rejectionStats.windowMs,
+      totalSinceBoot: rejectionStats.total,
       recent: rejectionStats.recent,
     };
 
@@ -396,11 +414,11 @@ async function buildServer() {
       rejectionStats.count === 0
       ? 'ok' : 'degraded';
 
-    return {
+    return reply.status(overallStatus === 'ok' ? 200 : 503).send({
       status: overallStatus,
       timestamp: new Date().toISOString(),
       checks,
-    };
+    });
   });
 
   // ==========================================
@@ -435,13 +453,22 @@ async function buildServer() {
 
   // In production, serve the frontend SPA build
   if (config.env === 'production') {
-    // Frontend dist is at /app/dist relative to the Docker WORKDIR
-    // In local builds, it's at ../../frontend/dist relative to the backend
-    const frontendDistDir = fs.existsSync(path.resolve(process.cwd(), 'dist'))
-      ? path.resolve(process.cwd(), 'dist')
-      : path.resolve(__dirname, '../../frontend/dist');
+    // Resolve the SPA build from candidate locations and REQUIRE an
+    // index.html. The previous `process.cwd()/dist` probe matched the
+    // backend's own compiled output when the entrypoint cd'd into
+    // packages/backend, which registered every compiled server file
+    // (including tests and prompt templates) as a public static route.
+    //   - FRONTEND_DIST_DIR: explicit override
+    //   - /app/dist in the Docker image (dist/server.js → ../../../dist)
+    //   - packages/frontend/dist for a local monorepo build
+    const candidates = [
+      process.env.FRONTEND_DIST_DIR,
+      path.resolve(__dirname, '../../../dist'),
+      path.resolve(__dirname, '../../frontend/dist'),
+    ].filter((p): p is string => !!p);
+    const frontendDistDir = candidates.find((dir) => fs.existsSync(path.join(dir, 'index.html')));
 
-    if (fs.existsSync(frontendDistDir)) {
+    if (frontendDistDir) {
       await fastify.register(fastifyStatic, {
         root: frontendDistDir,
         prefix: '/',
@@ -456,6 +483,8 @@ async function buildServer() {
           reply.sendFile('index.html');
         }
       });
+    } else {
+      logger.info({ candidates }, 'No frontend build with index.html found — not serving static assets');
     }
   }
 
@@ -501,7 +530,23 @@ async function start() {
 
     logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown...');
 
+    // Hard deadline. Documented for a long time but never implemented:
+    // without it a shutdown that stalls (e.g. an SSE client holding a
+    // connection open) waits until the orchestrator SIGKILLs us, with
+    // every periodic service still firing alongside the new instance.
+    const forceExitTimer = setTimeout(() => {
+      logger.error({ signal, timeoutMs: SHUTDOWN_FORCE_EXIT_MS }, 'Graceful shutdown timed out — forcing exit');
+      process.exit(1);
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    forceExitTimer.unref();
+
     try {
+      // End long-lived SSE streams FIRST. Fastify's close() only closes
+      // idle keep-alive sockets; an active event stream with a heartbeat
+      // is never idle, so closing the server before the streams hung
+      // shutdown for as long as an admin dashboard stayed open.
+      sseService.stop();
+
       // Close Fastify server (stops accepting new requests and waits for in-flight to complete)
       if (server) {
         await server.close();
@@ -510,35 +555,43 @@ async function start() {
 
       // Stop background services in dependency order:
       // 1. Real-time connections (SSE) — stop pushing updates to clients
-      // 2. Producers (polling, scanning, scheduling) — stop generating new work
-      // 3. Side-effect processors — let in-flight retries finish
-      // 4. Consumers (email queue) — drain remaining jobs
+      // 2. Producers (polling, scanning, scheduling) and side-effect
+      //    processors — stop their timers, then wait (bounded) for any tick
+      //    already running to finish and release its lock
+      // 3. Consumers (email queue) — drain remaining jobs
       logger.info('Stopping background services...');
       if (slackQueueInterval) clearInterval(slackQueueInterval);
-      sseService.stop();
 
-      // Stop producers
-      emailPollingService.stop();
-      gmailWatchService.stop();
-      missedMessageScannerService.stop();
-      staleCheckService.stop();
-      postBookingFollowupService.stop();
-      weeklyMailingListService.stop();
-      slackWeeklySummaryService.stop();
-      workReportService.stop();
-      therapistNudgeService.stop();
-      appointmentLifecycleTickService.stop();
-      invitationLifecycleService.stop();
-
-      // Stop side-effect retries and pending email processing
-      sideEffectRetryService.stop();
-      pendingEmailService.stop();
+      // Every stop() clears its timers synchronously; periodic services
+      // return a promise that settles when their in-flight run finishes.
+      const drains: Array<Promise<void> | void> = [
+        emailPollingService.stop(),
+        gmailWatchService.stop(),
+        missedMessageScannerService.stop(),
+        staleCheckService.stop(),
+        postBookingFollowupService.stop(),
+        weeklyMailingListService.stop(),
+        slackWeeklySummaryService.stop(),
+        workReportService.stop(),
+        therapistNudgeService.stop(),
+        appointmentLifecycleTickService.stop(),
+        invitationLifecycleService.stop(),
+        bookingVerificationService.stop(),
+        sideEffectRetryService.stop(),
+        pendingEmailService.stop(),
+      ];
+      const drained = await Promise.race([
+        Promise.allSettled(drains).then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), SHUTDOWN_DRAIN_TIMEOUT_MS).unref()),
+      ]);
+      if (drained) {
+        logger.info('Background services stopped; in-flight runs finished');
+      } else {
+        logger.warn({ timeoutMs: SHUTDOWN_DRAIN_TIMEOUT_MS }, 'Background runs still in flight at shutdown deadline — continuing');
+      }
 
       // Drain the email queue last (it may still have in-flight jobs)
       await emailQueueService.stop();
-
-      // Give services a moment to release locks
-      await new Promise((resolve) => setTimeout(resolve, 2000));
 
       // Close Redis connection
       await redis.quit();
@@ -564,7 +617,7 @@ async function start() {
   process.on('unhandledRejection', (reason, promise) => {
     recordUnhandledRejection(reason);
     logger.error(
-      { reason, promise: String(promise), unhandledRejectionCount: getUnhandledRejectionStats().count },
+      { reason, promise: String(promise), unhandledRejectionsLastHour: getUnhandledRejectionStats().count },
       'Unhandled promise rejection - logging but not crashing'
     );
   });
@@ -599,28 +652,19 @@ async function start() {
   try {
     server = await buildServer();
 
+    // Register the agent processor BEFORE the port opens. Pub/Sub delivers
+    // its post-deploy backlog the moment we listen, and a push that raced
+    // ahead of registration failed with "AgentProcessor not registered",
+    // burning one of the message's three processing attempts.
+    registerAgentProcessor((traceId) => new JustinTimeService(traceId));
+
     await server.listen({
       port: config.port,
       host: config.host,
     });
 
-    // Cleanup stale locks from previous runs (crash recovery)
-    // Run asynchronously to avoid blocking server startup during deploys
-    const staleLockPatterns = [
-      'gmail:lock:*',
-      'appointment:lock:*',
-      'pending-email:lock:*',
-      'weekly-mailing:lock:*',
-      'stale-check:lock:*',
-      'missed-message-scanner:lock:*',
-    ];
-    redis.cleanupStaleLocks(staleLockPatterns, 300).then((cleanedLocks) => {
-      if (cleanedLocks > 0) {
-        logger.info({ cleanedLocks }, 'Cleaned up stale locks from previous run');
-      }
-    }).catch((err) => {
-      logger.warn({ err }, 'Failed to cleanup stale locks (non-fatal)');
-    });
+    // No boot-time stale-lock sweep: every lock is SET with EX, so a
+    // crashed holder's lock simply expires via its TTL.
 
     // Load persisted Slack notification queue from Redis
     const loadedSlackNotifications = await slackNotificationService.loadPersistedQueue();
@@ -637,10 +681,6 @@ async function start() {
       }
     }, 30000);
 
-    // Register agent processor to break circular dependency
-    // email-message-processor needs to call JustinTimeService but can't import it directly
-    registerAgentProcessor((traceId) => new JustinTimeService(traceId));
-
     // Start background services with error isolation.
     // Each service is started independently so a failure in one doesn't prevent
     // the others from running. Critical services (email queue) log fatal if they
@@ -656,6 +696,7 @@ async function start() {
       { name: 'weeklyMailingListService', service: weeklyMailingListService, critical: false, async: false },
       { name: 'appointmentLifecycleTickService', service: appointmentLifecycleTickService, critical: false, async: false },
       { name: 'invitationLifecycleService', service: invitationLifecycleService, critical: false, async: false },
+      { name: 'bookingVerificationService', service: bookingVerificationService, critical: false, async: false },
       { name: 'slackWeeklySummaryService', service: slackWeeklySummaryService, critical: false, async: false },
       { name: 'workReportService', service: workReportService, critical: false, async: false },
       { name: 'therapistNudgeService', service: therapistNudgeService, critical: false, async: false },

@@ -81,6 +81,8 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
     // If a schema field didn't exist in the DB, the findUnique above would
     // have thrown before reaching this assertion.
     expect(found?.bookingMethod).toBeDefined();
+    // Optimistic-lock counter for conversationState (20260928 migration).
+    expect(found?.conversationVersion).toBe(0);
   });
 
   it('findMany with no select reads every column without error', async () => {
@@ -249,26 +251,16 @@ integrationDescribe('Prisma client ↔ schema coherence', () => {
         },
       },
       {
-        name: 'AppointmentConversation',
+        name: 'TherapistConversation',
         run: async () => {
-          // Create the parent appointment first since AppointmentConversation
-          // is FK-bound to AppointmentRequest with onDelete: Cascade.
-          const apt = await prisma.appointmentRequest.create({
-            data: {
-              userEmail: 'apt-conv@x',
-              therapistHandle: 'n-conv',
-              therapistEmail: 't-conv@x',
-              therapistName: 'T',
-            },
+          const therapist = await prisma.therapist.create({
+            data: { odId: 'ther-od-tc', notionId: 'n-tc', email: 'tc@example.com', name: 'TC' },
           });
-          await prisma.appointmentConversation.create({
-            data: {
-              appointmentId: apt.id,
-              conversationState: { messages: [] },
-              memory: { notes: [], availabilityWindows: [] },
-            },
+          const convo = await prisma.therapistConversation.create({
+            data: { therapistId: therapist.id, kind: 'onboarding' },
           });
-          return prisma.appointmentConversation.findMany();
+          expect(convo.conversationVersion).toBe(0);
+          return prisma.therapistConversation.findMany();
         },
       },
     ];

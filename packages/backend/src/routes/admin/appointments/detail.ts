@@ -19,7 +19,7 @@ import {
   toAppointmentForHealth,
 } from '../../../services/conversation-health.service';
 import { deriveAttentionReasons } from '../../../utils/attention-reasons';
-import { buildLastMessagePreview } from './schemas';
+import { buildLastMessagePreview, buildRecentMessages } from './schemas';
 
 export async function detailRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Params: { id: string } }>(
@@ -44,6 +44,7 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
             status: true,
             confirmedAt: true,
             confirmedDateTime: true,
+            confirmedDateTimeParsed: true,
             notes: true,
             createdAt: true,
             updatedAt: true,
@@ -74,6 +75,7 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
             threadDivergenceAcknowledged: true,
             conversationStallAlertAt: true,
             conversationStallAcknowledged: true,
+            emailVerifiedAt: true,
           },
         });
 
@@ -154,6 +156,11 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           trackingCode: appointment.trackingCode,
           confirmedAt: appointment.confirmedAt,
           confirmedDateTime: appointment.confirmedDateTime,
+          // The ISO instant the admin-UI confirmed-time picker seeds from.
+          // The shared AppointmentDetail type has always declared it, but the
+          // route never returned it, so the picker fell back to parsing the
+          // prose string and showed a misleading "legacy value" warning.
+          confirmedDateTimeParsed: appointment.confirmedDateTimeParsed,
           notes: appointment.notes,
           createdAt: appointment.createdAt,
           updatedAt: appointment.updatedAt,
@@ -171,7 +178,13 @@ export async function detailRoute(fastify: FastifyInstance): Promise<void> {
           closureRecommendedAt: appointment.closureRecommendedAt,
           closureRecommendedReason: appointment.closureRecommendedReason,
           closureRecommendationActioned: appointment.closureRecommendationActioned,
+          reschedulingInProgress: appointment.reschedulingInProgress,
+          emailVerified: appointment.emailVerifiedAt !== null,
           lastMessagePreview,
+          // The conversation itself, so an admin taking over can read it
+          // in the drawer instead of a snippet plus raw thread ids.
+          recentMessages: buildRecentMessages(messages),
+          totalMessages: messages.length,
         });
       } catch (err) {
         logger.error({ err, requestId, appointmentId: id }, 'Failed to fetch appointment detail');

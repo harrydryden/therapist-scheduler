@@ -32,6 +32,48 @@ export interface VoucherValidationResult {
   valid: boolean;
   email: string | null;
   expired: boolean;
+  /** When this voucher expires (its own validity, else the default). Null when unparseable. */
+  expiresAt: Date | null;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Payload is `email` (legacy) or `email\n<validityDays>`. The validity is
+ * signed in so a voucher issued with a custom expiry (admin "issue for 30
+ * days") is honoured at booking time instead of the global setting, and
+ * can't be extended by editing the token. A newline can't occur in a
+ * validated email address.
+ */
+function parseVoucherPayload(payload: string): { email: string; validityDays: number | null } {
+  const newline = payload.indexOf('\n');
+  if (newline === -1) return { email: payload, validityDays: null };
+  const days = Number(payload.slice(newline + 1));
+  return {
+    email: payload.slice(0, newline),
+    validityDays: Number.isFinite(days) && days > 0 ? days : null,
+  };
+}
+
+/**
+ * The expiry of a voucher token: issue time plus the validity signed into
+ * it, or `defaultValidityDays` for legacy tokens that carry none. Does NOT
+ * check the signature — use validateVoucherToken for that. Null when the
+ * token is malformed.
+ */
+export function getVoucherExpiresAt(token: string, defaultValidityDays: number = DEFAULT_VALIDITY_DAYS): Date | null {
+  const parts = token.split(':');
+  if (parts.length !== 4) return null;
+  const issuedAt = parseInt(parts[1], 36);
+  if (isNaN(issuedAt)) return null;
+  let payload: string;
+  try {
+    payload = Buffer.from(parts[2], 'base64url').toString('utf-8');
+  } catch {
+    return null;
+  }
+  const { validityDays } = parseVoucherPayload(payload);
+  return new Date(issuedAt + (validityDays ?? defaultValidityDays) * DAY_MS);
 }
 
 /**
@@ -58,9 +100,10 @@ export function getDisplayCodeFromToken(token: string): string | null {
 /**
  * Generate a signed voucher token for an email address.
  *
- * The validity window is enforced at validation time, not signed in,
- * so admins can change the expiry policy without invalidating live
- * tokens.
+ * The validity window is signed into the token, so the expiry the
+ * recipient was told (e.g. an admin-issued 30-day voucher) is the one
+ * enforced at booking time. Tokens issued before this carried no
+ * validity and are still checked against the global setting.
  */
 export function generateVoucherToken(
   email: string,
@@ -69,19 +112,23 @@ export function generateVoucherToken(
   const token = signTimestampedToken({
     context: HMAC_KEY_CONTEXT,
     version: TOKEN_VERSION,
-    payload: email.toLowerCase(),
+    payload: `${email.toLowerCase()}\n${validityDays}`,
   });
   return {
     token,
     displayCode: getDisplayCodeFromToken(token)!,
-    expiresAt: new Date(Date.now() + validityDays * 24 * 60 * 60 * 1000),
+    expiresAt: getVoucherExpiresAt(token, validityDays)!,
   };
 }
 
 /**
  * Validate a voucher token and extract the email address.
  *
- * Returns `{valid, email, expired}` where:
+ * Expiry is the token's OWN signed validity; `defaultValidityDays` (the
+ * global `voucher.expiryDays` setting) only applies to legacy tokens that
+ * carry none.
+ *
+ * Returns `{valid, email, expired, expiresAt}` where:
  *   - signature invalid / malformed: `{valid: false, email: null, expired: false}`
  *   - signature valid but expired: `{valid: false, email, expired: true}`
  *     (caller surfaces "your voucher expired" with the email shown)
@@ -89,20 +136,24 @@ export function generateVoucherToken(
  */
 export function validateVoucherToken(
   token: string,
-  validityDays: number = DEFAULT_VALIDITY_DAYS,
+  defaultValidityDays: number = DEFAULT_VALIDITY_DAYS,
 ): VoucherValidationResult {
   const verified = verifyTimestampedToken(token, {
     context: HMAC_KEY_CONTEXT,
     expectedVersion: TOKEN_VERSION,
-    validityDays,
+    validityDays: defaultValidityDays,
   });
   if (!verified) {
-    return { valid: false, email: null, expired: false };
+    return { valid: false, email: null, expired: false, expiresAt: null };
   }
+  const { email } = parseVoucherPayload(verified.payload);
+  const expiresAt = getVoucherExpiresAt(token, defaultValidityDays);
+  const expired = !expiresAt || Date.now() > expiresAt.getTime();
   return {
-    valid: !verified.expired,
-    email: verified.payload,
-    expired: verified.expired,
+    valid: !expired,
+    email,
+    expired,
+    expiresAt,
   };
 }
 

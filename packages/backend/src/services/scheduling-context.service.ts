@@ -17,6 +17,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { firstName } from '../utils/first-name';
+import { emailEquals } from '../utils/email-equals';
 import type { ConversationAction } from '../services/conversation-checkpoint.service';
 import type { SendEmailPurpose } from '../schemas/tool-inputs';
 
@@ -120,8 +121,22 @@ export interface SchedulingContext {
    * form). Used to gate sender-attributable tools like
    * update_therapist_availability so a user cannot prompt-inject a
    * schedule overwrite.
+   *
+   * `'unknown'` = the From address matches NEITHER the client nor the
+   * therapist on this appointment (a CC'd colleague, the client writing
+   * from a second address, a forwarded or spoofed message). Therapist-
+   * only gates MUST test `=== 'therapist'` so an unknown sender never
+   * unlocks them. See {@link classifyInboundSender}.
    */
-  inboundSender?: 'user' | 'therapist';
+  inboundSender?: InboundSender;
+  /**
+   * Identifies the turn this context belongs to — one inbound email
+   * (processEmailReply) or the kickoff (startScheduling). Part of the
+   * tool-call idempotency hash, so an identical call is deduplicated
+   * within a turn (and on a redelivery of the same email) but not across
+   * turns. Optional for legacy callers: without it the hash is unscoped.
+   */
+  turnId?: string;
   /**
    * Primary keys of the User / Therapist rows linked to this appointment.
    * Optional because legacy appointment rows pre-date the User/Therapist
@@ -140,6 +155,33 @@ export interface SchedulingContext {
 export interface ConversationMessage {
   role: 'user' | 'assistant' | 'admin';
   content: string;
+}
+
+export type InboundSender = 'user' | 'therapist' | 'unknown';
+
+/**
+ * Attribute an inbound email to a party on the appointment by its From
+ * address.
+ *
+ *   - matches the appointment's `userEmail`      → 'user'
+ *   - matches the appointment's `therapistEmail` → 'therapist'
+ *   - anything else                              → 'unknown'
+ *
+ * The previous two-way rule (`from === userEmail ? 'user' : 'therapist'`)
+ * turned every non-client sender into the therapist, unlocking the
+ * therapist-only tool gates for anyone who could land a message on the
+ * thread. `fromEmail` is the bare address the inbound parser extracted;
+ * comparison is case-insensitive via the shared `emailEquals`. If the two
+ * stored addresses are identical (test data), 'user' wins — the narrower
+ * privilege.
+ */
+export function classifyInboundSender(
+  fromEmail: string,
+  appointment: { userEmail: string; therapistEmail: string },
+): InboundSender {
+  if (emailEquals(fromEmail, appointment.userEmail)) return 'user';
+  if (emailEquals(fromEmail, appointment.therapistEmail)) return 'therapist';
+  return 'unknown';
 }
 
 /**

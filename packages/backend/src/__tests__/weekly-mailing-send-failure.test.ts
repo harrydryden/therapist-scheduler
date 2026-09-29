@@ -32,7 +32,13 @@ jest.mock('../config', () => ({
 jest.mock('../utils/database', () => ({
   prisma: {
     voucherTracking: { findUnique: jest.fn(), upsert: jest.fn(), update: jest.fn() },
-    user: { findMany: jest.fn(), update: jest.fn() },
+    user: {
+      findMany: jest.fn(),
+      update: jest.fn(),
+      // Per-recipient send-once guard; default: no prior sends, claims succeed.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      aggregate: jest.fn().mockResolvedValue({ _max: { lastWeeklyMailingAt: null } }),
+    },
     therapist: { findMany: jest.fn(), count: jest.fn() },
     appointmentRequest: { findMany: jest.fn() },
   },
@@ -46,6 +52,7 @@ jest.mock('../utils/redis', () => {
   return {
     redis: {
       get: jest.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
+      getStrict: jest.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
       set: jest.fn((key: string, value: string) => { store.set(key, value); return Promise.resolve('OK'); }),
       del: jest.fn((key: string) => { store.delete(key); return Promise.resolve(1); }),
       acquireLock: jest.fn((key: string, value: string) => {

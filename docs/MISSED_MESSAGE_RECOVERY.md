@@ -19,7 +19,7 @@ goes wrong.
 ### The happy path
 
 1. A user or therapist email arrives via Gmail push notification
-2. `email-message-processor.processMessage()` matches it to an appointment
+2. `processMessage()` (`domain/scheduling/inbound/process.ts`) matches it to an appointment
 3. The AI agent processes the reply
 4. The Gmail message ID is recorded in `processed_gmail_messages` (dedup)
 
@@ -30,8 +30,12 @@ outages, network blips). The **missed-message scanner** is the safety net:
 
 1. Runs every hour (`MISSED_MESSAGE_SCANNER_INTERVALS.SCAN_INTERVAL_MS`)
 2. Scans every active appointment thread
-3. For each Gmail message not in `processed_gmail_messages`, calls
-   `processMessage()` to recover it
+3. For each Gmail message not in `processed_gmail_messages` **and no older
+   than 30 days** (`EMAIL_PROCESSING.SCANNER_MAX_MESSAGE_AGE_DAYS`), calls
+   `processMessage()` to recover it. The age guard exists because dedup rows
+   are retained for 45 days; without it, a message whose dedup row had
+   expired would be replayed to the agent as new. Admin force-reprocess
+   bypasses the guard.
 4. Writes a heartbeat to Redis on every successful scan completion
 
 ### When recovery itself fails

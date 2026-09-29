@@ -1,4 +1,5 @@
 import { emailIngestService } from './email-ingest.service';
+import { slackNotificationService } from './slack-notification.service';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 
@@ -12,8 +13,13 @@ import { config } from '../config';
  * Features:
  * - Renews watch every 6 days (1 day buffer before expiration)
  * - Attempts renewal on startup (after delay for Gmail client init)
- * - Logs success/failure for monitoring
+ * - Logs success/failure for monitoring; a failed renewal raises a Slack
+ *   alert and is retried hourly (the watch expires 7 days after the last
+ *   success, so waiting for the next 6-day tick used to let it lapse)
  * - Graceful handling of missing Pub/Sub configuration
+ *
+ * Renewal never moves the stored history checkpoint — see
+ * emailIngestService.setupPushNotifications.
  */
 
 // Renewal interval: 6 days (watches expire after 7 days)
@@ -23,9 +29,13 @@ const DEFAULT_RENEWAL_INTERVAL_MS = 6 * 24 * 60 * 60 * 1000; // 6 days
 // Startup delay to allow Gmail client initialization
 const STARTUP_DELAY_MS = 30000; // 30 seconds
 
+// Retry cadence after a failed renewal
+export const WATCH_RENEWAL_RETRY_MS = 60 * 60 * 1000; // 1 hour
+
 class GmailWatchService {
   private intervalId: NodeJS.Timeout | null = null;
   private startupTimeoutId: NodeJS.Timeout | null = null;
+  private retryTimeoutId: NodeJS.Timeout | null = null;
   private renewalIntervalMs: number;
   private lastRenewalTime: Date | null = null;
   private lastExpirationTime: string | null = null;
@@ -91,13 +101,17 @@ class GmailWatchService {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    if (this.retryTimeoutId) {
+      clearTimeout(this.retryTimeoutId);
+      this.retryTimeoutId = null;
+    }
     logger.info('Gmail watch service stopped');
   }
 
   /**
    * Renew the Gmail watch
    */
-  private async renewWatch(trigger: 'startup' | 'scheduled' | 'manual'): Promise<boolean> {
+  private async renewWatch(trigger: 'startup' | 'scheduled' | 'manual' | 'retry'): Promise<boolean> {
     const topicName = config.googlePubsubTopic;
     if (!topicName) {
       logger.warn('Cannot renew Gmail watch - GOOGLE_PUBSUB_TOPIC not configured');
@@ -129,14 +143,41 @@ class GmailWatchService {
         'Gmail watch renewed successfully'
       );
 
+      if (this.retryTimeoutId) {
+        clearTimeout(this.retryTimeoutId);
+        this.retryTimeoutId = null;
+      }
       return true;
     } catch (error) {
       logger.error(
         { renewalId, trigger, error },
         'Failed to renew Gmail watch - push notifications may stop working'
       );
+      this.onRenewalFailure(trigger, error);
       return false;
     }
+  }
+
+  /** Alert, and retry hourly until a renewal succeeds (one pending retry at a time). */
+  private onRenewalFailure(trigger: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    slackNotificationService
+      .sendAlert({
+        title: 'Gmail Watch Renewal Failed',
+        severity: 'high',
+        details:
+          'Renewing the Gmail push watch failed. The watch lapses 7 days after the last successful ' +
+          'renewal, after which inbound mail arrives only via the backup poll. Retrying every hour.',
+        additionalFields: { Trigger: trigger, Error: message.slice(0, 200) },
+      })
+      .catch(() => undefined);
+
+    if (this.retryTimeoutId || !this.intervalId) return;
+    this.retryTimeoutId = setTimeout(() => {
+      this.retryTimeoutId = null;
+      void this.renewWatch('retry');
+    }, WATCH_RENEWAL_RETRY_MS);
+    if (typeof this.retryTimeoutId.unref === 'function') this.retryTimeoutId.unref();
   }
 
   /**

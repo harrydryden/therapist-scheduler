@@ -19,30 +19,83 @@
 
 import { createHash } from 'crypto';
 import { logger } from '../utils/logger';
-import { circuitBreakerRegistry, CircuitBreakerError } from '../utils/circuit-breaker';
+import { circuitBreakerRegistry, CircuitBreakerError, setCircuitBreakerAlertSink } from '../utils/circuit-breaker';
 import { DEFAULT_TIMEOUTS } from '../utils/timeout';
 import { cacheManager } from '../utils/redis';
 import { SLACK_OPERATIONAL } from '../constants';
 import { firstName } from '../utils/first-name';
 
 // Operational constants — imported from centralized constants
-const SLACK_QUEUE_KEY = SLACK_OPERATIONAL.QUEUE_KEY;
 const SLACK_QUEUE_TTL = SLACK_OPERATIONAL.QUEUE_TTL_SECONDS;
 const NOTIFICATION_DEDUP_TTL_SECONDS = SLACK_OPERATIONAL.NOTIFICATION_DEDUP_TTL_SECONDS;
 const APPOINTMENT_DEDUP_TTL_SECONDS = SLACK_OPERATIONAL.APPOINTMENT_DEDUP_TTL_SECONDS;
 const MAX_QUEUE_SIZE = SLACK_OPERATIONAL.MAX_QUEUE_SIZE;
 
-// Get or create the Slack circuit breaker
-const slackCircuitBreaker = circuitBreakerRegistry.getOrCreate(SLACK_OPERATIONAL.CIRCUIT_BREAKER);
+// Persisted retry queue: a Redis LIST (RPUSH + LTRIM), not a JSON blob
+// rewritten with get-push-set, which dropped items when two notifications
+// were queued at once. New key name because the old key holds a string.
+const SLACK_QUEUE_LIST_KEY = `${SLACK_OPERATIONAL.QUEUE_KEY}:list`;
 
-// Notification queue for retry (in-memory for simplicity, could be Redis for persistence)
+// Retry schedule for queued notifications: exponential from 30s, capped at
+// 30 min, dropped after MAX_DELIVERY_ATTEMPTS (≈2h of trying). Three flat
+// 30-second retries used to lose alerts to any outage longer than 90s.
+const QUEUE_BATCH_SIZE = 10;
+const QUEUE_RETRY_BASE_MS = 30_000;
+const QUEUE_RETRY_MAX_DELAY_MS = 30 * 60_000;
+const MAX_DELIVERY_ATTEMPTS = 10;
+
+// Group dedup for alerts that aren't about one appointment (see
+// isDuplicateAlert layer 3).
+const GROUP_DEDUP_TTL_SECONDS = 60 * 60;
+
+// Atomically append to the persisted queue, keep only the newest
+// MAX_QUEUE_SIZE entries and refresh the TTL.
+const QUEUE_APPEND_SCRIPT = `
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('LTRIM', KEYS[1], -tonumber(ARGV[2]), -1)
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+return redis.call('LLEN', KEYS[1])
+`;
+
+// Atomically replace the persisted queue with this instance's view of it
+// (after a drain pass removed delivered/dropped items).
+const QUEUE_REPLACE_SCRIPT = `
+redis.call('DEL', KEYS[1])
+if #ARGV > 1 then
+  redis.call('RPUSH', KEYS[1], unpack(ARGV, 2))
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return #ARGV - 1
+`;
+
+// Return the previous value of a key and set a new one (with TTL).
+const SWAP_SCRIPT = `
+local previous = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return previous
+`;
+
+// The Slack breaker only logs its own transitions: an alert about Slack
+// being down cannot be delivered through Slack.
+const slackCircuitBreaker = circuitBreakerRegistry.getOrCreate({
+  ...SLACK_OPERATIONAL.CIRCUIT_BREAKER,
+  alertOnStateChange: false,
+});
+
 interface QueuedNotification {
   message: SlackMessage;
   useUrgentChannel: boolean;
   queuedAt: Date;
+  /** Delivery attempts that reached Slack and failed. */
   attempts: number;
+  /** Epoch ms before which the queue processor leaves the item alone. */
+  nextAttemptAt: number;
 }
-const notificationQueue: QueuedNotification[] = [];
+
+/** Backoff after the n-th failed delivery attempt (n ≥ 1). */
+function queueRetryDelayMs(attempts: number): number {
+  return Math.min(QUEUE_RETRY_BASE_MS * 2 ** (attempts - 1), QUEUE_RETRY_MAX_DELAY_MS);
+}
 
 // Slack Block Kit types for rich message formatting
 interface SlackTextBlock {
@@ -115,11 +168,36 @@ function escapeSlackMrkdwn(text: string): string {
     .replace(/([*_~`])/g, '\u200B$1');
 }
 
+function serializeQueueItem(item: QueuedNotification): string {
+  return JSON.stringify({ ...item, queuedAt: item.queuedAt.toISOString() });
+}
+
+function parseQueueItem(raw: string): QueuedNotification | null {
+  try {
+    const parsed = JSON.parse(raw) as Omit<QueuedNotification, 'queuedAt'> & { queuedAt: string };
+    const queuedAt = new Date(parsed.queuedAt);
+    if (!parsed.message || isNaN(queuedAt.getTime())) return null;
+    return {
+      message: parsed.message,
+      useUrgentChannel: !!parsed.useUrgentChannel,
+      queuedAt,
+      attempts: typeof parsed.attempts === 'number' ? parsed.attempts : 0,
+      nextAttemptAt: typeof parsed.nextAttemptAt === 'number' ? parsed.nextAttemptAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 class SlackNotificationService {
   private webhookUrl: string | null = null;
   private webhookUrlUrgent: string | null = null;
   private adminDashboardBaseUrl: string = 'https://free.spill.app/admin';
   private enabled: boolean = false;
+  /** Notifications awaiting retry, oldest first (bounded by MAX_QUEUE_SIZE). */
+  private queue: QueuedNotification[] = [];
+  /** True while processQueue runs, so overlapping interval ticks skip. */
+  private draining = false;
 
   constructor() {
     this.webhookUrl = process.env.SLACK_WEBHOOK_URL || null;
@@ -142,43 +220,30 @@ class SlackNotificationService {
   }
 
   /**
-   * Queue a notification for retry (persisted to Redis)
+   * Queue a notification for retry: in memory for this process, plus an
+   * atomic RPUSH/LTRIM onto the Redis list for crash recovery.
    */
   private async queueForRetry(message: SlackMessage, useUrgentChannel: boolean): Promise<void> {
-    // Also keep in memory for immediate retry attempts
-    if (notificationQueue.length >= MAX_QUEUE_SIZE) {
-      notificationQueue.shift();
+    if (this.queue.length >= MAX_QUEUE_SIZE) {
+      this.queue.shift();
       logger.warn('Slack notification in-memory queue full - dropping oldest item');
     }
-    notificationQueue.push({
+    const item: QueuedNotification = {
       message,
       useUrgentChannel,
       queuedAt: new Date(),
       attempts: 0,
-    });
+      nextAttemptAt: Date.now(),
+    };
+    this.queue.push(item);
 
-    // Persist to Redis for crash recovery
     try {
-      const queueItem = {
-        message,
-        useUrgentChannel,
-        queuedAt: new Date().toISOString(),
-        attempts: 0,
-      };
-
-      // Get existing queue
-      const existing = await cacheManager.getJson<typeof queueItem[]>(SLACK_QUEUE_KEY) || [];
-
-      // Trim if too large
-      while (existing.length >= MAX_QUEUE_SIZE) {
-        existing.shift();
-      }
-
-      existing.push(queueItem);
-      await cacheManager.setJson(SLACK_QUEUE_KEY, existing, SLACK_QUEUE_TTL);
-
+      const persistedLength = await cacheManager.eval(
+        QUEUE_APPEND_SCRIPT, 1, SLACK_QUEUE_LIST_KEY,
+        serializeQueueItem(item), MAX_QUEUE_SIZE, SLACK_QUEUE_TTL,
+      );
       logger.info(
-        { queueLength: existing.length, inMemoryLength: notificationQueue.length },
+        { queueLength: persistedLength, inMemoryLength: this.queue.length },
         'Slack notification queued for retry (persisted to Redis)'
       );
     } catch (err) {
@@ -192,40 +257,35 @@ class SlackNotificationService {
    */
   async loadPersistedQueue(): Promise<number> {
     try {
-      const persisted = await cacheManager.getJson<QueuedNotification[]>(SLACK_QUEUE_KEY);
-      if (persisted && persisted.length > 0) {
-        // Restore to in-memory queue, dropping stale items that are older than
-        // the appointment-scoped dedup window. Sending day-old notifications
-        // after a restart causes confusing duplicates.
-        const maxAgeMs = APPOINTMENT_DEDUP_TTL_SECONDS * 1000;
-        let dropped = 0;
-        for (const item of persisted) {
-          const age = Date.now() - new Date(item.queuedAt).getTime();
-          if (age > maxAgeMs) {
-            dropped++;
-            continue;
-          }
-          if (notificationQueue.length < MAX_QUEUE_SIZE) {
-            notificationQueue.push({
-              ...item,
-              queuedAt: new Date(item.queuedAt),
-            });
-          }
-        }
-        if (dropped > 0) {
-          logger.info({ dropped }, 'Dropped stale Slack notifications from persisted queue (older than 24h)');
-        }
+      const persisted = await cacheManager.lrange(SLACK_QUEUE_LIST_KEY, 0, -1);
+      if (persisted.length === 0) return 0;
 
-        // Clear Redis queue after loading to prevent duplicate loading on rapid restarts
-        try {
-          await cacheManager.delete(SLACK_QUEUE_KEY);
-        } catch {
-          // Non-fatal — queue will be overwritten on next processQueue sync
+      // Restore to in-memory queue, dropping stale items that are older than
+      // the appointment-scoped dedup window. Sending day-old notifications
+      // after a restart causes confusing duplicates.
+      const maxAgeMs = APPOINTMENT_DEDUP_TTL_SECONDS * 1000;
+      let dropped = 0;
+      for (const raw of persisted) {
+        const item = parseQueueItem(raw);
+        if (!item || Date.now() - item.queuedAt.getTime() > maxAgeMs) {
+          dropped++;
+          continue;
         }
-
-        logger.info({ count: persisted.length }, 'Loaded persisted Slack notifications from Redis');
-        return persisted.length;
+        if (this.queue.length < MAX_QUEUE_SIZE) this.queue.push(item);
       }
+      if (dropped > 0) {
+        logger.info({ dropped }, 'Dropped stale or unreadable Slack notifications from persisted queue');
+      }
+
+      // Clear Redis queue after loading to prevent duplicate loading on rapid restarts
+      try {
+        await cacheManager.delete(SLACK_QUEUE_LIST_KEY);
+      } catch {
+        // Non-fatal — the next processQueue pass rewrites it
+      }
+
+      logger.info({ count: persisted.length }, 'Loaded persisted Slack notifications from Redis');
+      return persisted.length;
     } catch (err) {
       logger.warn({ err }, 'Failed to load persisted Slack notifications from Redis');
     }
@@ -233,82 +293,105 @@ class SlackNotificationService {
   }
 
   /**
-   * Process queued notifications (call periodically or on circuit close)
+   * Retry queued notifications (called every 30s from server.ts).
+   *
+   * Deliveries go through the circuit breaker's execute(), so the queue
+   * itself is what probes Slack once the breaker's reset timeout passes.
+   * It used to return early whenever the breaker was OPEN — but only
+   * execute() moves OPEN → HALF_OPEN, and the drain bypassed it, so after
+   * an outage nothing was retried until some unrelated new alert happened
+   * to be sent. A breaker rejection is not a delivery attempt: the item
+   * waits without using up its retry budget.
    */
   async processQueue(): Promise<{ processed: number; failed: number }> {
-    if (notificationQueue.length === 0) {
+    if (this.queue.length === 0 || this.draining) {
       return { processed: 0, failed: 0 };
     }
+    this.draining = true;
 
-    // Don't process if circuit is open
-    if (slackCircuitBreaker.isOpen()) {
-      logger.debug('Skipping queue processing - circuit is open');
-      return { processed: 0, failed: 0 };
-    }
-
+    // Work on a snapshot; anything queued while we await Slack lands in
+    // the fresh this.queue and is merged back afterwards.
+    const pass = this.queue;
+    this.queue = [];
+    const remaining: QueuedNotification[] = [];
+    const now = Date.now();
     let processed = 0;
     let failed = 0;
-    const maxRetries = 3;
+    let dropped = 0;
+    let attempted = 0;
+    let breakerRejected = false;
 
-    // Process up to 10 items per batch
-    const batch = notificationQueue.splice(0, 10);
-
-    for (const item of batch) {
-      if (item.attempts >= maxRetries) {
-        logger.error(
-          {
-            attempts: item.attempts,
-            message: item.message.text?.substring(0, 200),
-            queuedAt: item.queuedAt,
-            ageSeconds: Math.round((Date.now() - item.queuedAt.getTime()) / 1000),
-          },
-          'Permanently dropping Slack notification after max retries — message lost'
-        );
-        failed++;
-        continue;
-      }
-
-      try {
-        const success = await this.sendToSlackDirect(item.message, item.useUrgentChannel);
-        if (success) {
-          processed++;
-        } else {
-          // Put back in queue with incremented attempts
-          item.attempts++;
-          notificationQueue.push(item);
-          failed++;
+    try {
+      for (const item of pass) {
+        if (breakerRejected || attempted >= QUEUE_BATCH_SIZE || item.nextAttemptAt > now) {
+          remaining.push(item);
+          continue;
         }
-      } catch (err) {
-        item.attempts++;
-        notificationQueue.push(item);
-        failed++;
+
+        attempted++;
+        try {
+          await this.deliverThroughBreaker(item.message, item.useUrgentChannel);
+          processed++;
+        } catch (err) {
+          if (err instanceof CircuitBreakerError) {
+            // Slack is known-down and the breaker isn't ready for a probe.
+            breakerRejected = true;
+            remaining.push(item);
+            continue;
+          }
+          failed++;
+          item.attempts++;
+          if (item.attempts >= MAX_DELIVERY_ATTEMPTS) {
+            dropped++;
+            logger.error(
+              {
+                attempts: item.attempts,
+                message: item.message.text?.substring(0, 200),
+                queuedAt: item.queuedAt,
+                ageSeconds: Math.round((Date.now() - item.queuedAt.getTime()) / 1000),
+              },
+              'Permanently dropping Slack notification after max retries — message lost'
+            );
+            continue;
+          }
+          item.nextAttemptAt = Date.now() + queueRetryDelayMs(item.attempts);
+          remaining.push(item);
+        }
       }
+    } finally {
+      // Keep the newest MAX_QUEUE_SIZE, oldest first.
+      this.queue = remaining.concat(this.queue).slice(-MAX_QUEUE_SIZE);
+      this.draining = false;
     }
 
-    // Update Redis queue
     if (processed > 0 || failed > 0) {
-      try {
-        await cacheManager.setJson(SLACK_QUEUE_KEY, notificationQueue, SLACK_QUEUE_TTL);
-      } catch (err) {
-        // Non-fatal
-        logger.warn({ err }, 'Failed to update Redis Slack queue');
-      }
-    }
-
-    if (processed > 0 || failed > 0) {
-      logger.info({ processed, failed, remaining: notificationQueue.length }, 'Processed Slack notification queue');
+      await this.persistQueue();
+      logger.info({ processed, failed, dropped, remaining: this.queue.length }, 'Processed Slack notification queue');
     }
 
     return { processed, failed };
+  }
+
+  /** Rewrite the persisted Redis list to match the in-memory queue. */
+  private async persistQueue(): Promise<void> {
+    try {
+      await cacheManager.eval(
+        QUEUE_REPLACE_SCRIPT, 1, SLACK_QUEUE_LIST_KEY,
+        SLACK_QUEUE_TTL, ...this.queue.map(serializeQueueItem),
+      );
+    } catch (err) {
+      // Non-fatal
+      logger.warn({ err }, 'Failed to update Redis Slack queue');
+    }
   }
 
   /**
    * Get queue stats for monitoring
    */
   getQueueStats(): { inMemory: number; oldestAge?: number } {
-    const oldest = notificationQueue[0];
+    const oldest = this.queue[0];
     return {
-      inMemory: notificationQueue.length,
+      inMemory: this.queue.length,
       oldestAge: oldest ? Math.floor((Date.now() - oldest.queuedAt.getTime()) / 1000) : undefined,
     };
   }
@@ -327,89 +410,62 @@ class SlackNotificationService {
     slackCircuitBreaker.reset();
   }
 
-  /**
-   * Direct send without queuing (used by queue processor)
-   */
-  private async sendToSlackDirect(message: SlackMessage, useUrgentChannel: boolean): Promise<boolean> {
-    const url = useUrgentChannel && this.webhookUrlUrgent
-      ? this.webhookUrlUrgent
-      : this.webhookUrl;
-
-    if (!url) {
-      return false;
-    }
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUTS.EXTERNAL_API);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(message),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      return response.ok;
-    } catch (err) {
-      clearTimeout(timeoutId);
-      throw err;
-    }
+  private webhookUrlFor(useUrgentChannel: boolean): string | null {
+    return useUrgentChannel && this.webhookUrlUrgent ? this.webhookUrlUrgent : this.webhookUrl;
   }
 
   /**
-   * Send a raw message to Slack (with circuit breaker protection)
+   * POST one message to the webhook through the circuit breaker. Throws on
+   * a non-2xx response, a timeout, or a breaker rejection
+   * (CircuitBreakerError). The single delivery path for live sends and
+   * queue retries.
+   */
+  private async deliverThroughBreaker(message: SlackMessage, useUrgentChannel: boolean): Promise<void> {
+    const url = this.webhookUrlFor(useUrgentChannel);
+    if (!url) {
+      throw new Error('Slack webhook URL not configured');
+    }
+
+    await slackCircuitBreaker.execute(async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUTS.EXTERNAL_API);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(message),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Slack API error: ${response.status} - ${errorText}`);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    });
+  }
+
+  /**
+   * Send a raw message to Slack; on any failure it is queued for retry.
    */
   private async sendToSlack(message: SlackMessage, useUrgentChannel: boolean = false): Promise<boolean> {
-    const url = useUrgentChannel && this.webhookUrlUrgent
-      ? this.webhookUrlUrgent
-      : this.webhookUrl;
-
-    if (!url) {
+    if (!this.webhookUrlFor(useUrgentChannel)) {
       logger.debug('Slack notification skipped - webhook URL not configured');
       return false;
     }
 
     try {
-      // Use circuit breaker to protect against Slack outages
-      const result = await slackCircuitBreaker.execute(async () => {
-        // Create abort controller for timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUTS.EXTERNAL_API);
-
-        try {
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(message),
-            signal: controller.signal,
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Slack API error: ${response.status} - ${errorText}`);
-          }
-
-          return true;
-        } finally {
-          clearTimeout(timeoutId);
-        }
-      });
-
+      await this.deliverThroughBreaker(message, useUrgentChannel);
       logger.debug('Slack notification sent successfully');
-      return result;
+      return true;
     } catch (error) {
-      // Handle circuit breaker open state - queue for retry
       if (error instanceof CircuitBreakerError) {
         logger.warn('Slack circuit open - queueing notification for retry');
-        this.queueForRetry(message, useUrgentChannel);
-        return false;
+      } else {
+        logger.error({ error }, 'Error sending Slack notification');
       }
-
-      logger.error({ error }, 'Error sending Slack notification');
-      // Queue for retry on other errors too
-      this.queueForRetry(message, useUrgentChannel);
+      void this.queueForRetry(message, useUrgentChannel);
       return false;
     }
   }
@@ -436,6 +492,14 @@ class SlackNotificationService {
    *    more than once per day per appointment — e.g. repeated OOO auto-replies
    *    from the same therapist, or the AI re-flagging human review on each
    *    email processing cycle. Only applies when appointmentId is present.
+   *
+   * 3. **Group-scoped (1h, no appointment)**: when `dedupGroup` is set on an
+   *    alert that isn't about one appointment, a repeat of the *same title*
+   *    in that group is suppressed until the group has been quiet for an
+   *    hour, while a different title in the group always goes through. Used
+   *    by circuit-breaker alerts: every instance reporting "opened" collapses
+   *    to one message, but "recovered" → "opened" again is never swallowed,
+   *    so the last alert an admin saw always matches the breaker's state.
    */
   private async isDuplicateAlert(options: SlackAlertOptions): Promise<boolean> {
     try {
@@ -477,6 +541,21 @@ class SlackNotificationService {
               appointmentId: options.appointmentId,
             },
             'Suppressed duplicate Slack notification (appointment-scoped, 24h window)'
+          );
+          return true;
+        }
+      }
+
+      // Layer 3: group-scoped (see doc above).
+      if (!options.appointmentId && options.dedupGroup) {
+        const groupHash = createHash('sha256').update(options.dedupGroup).digest('hex').slice(0, 16);
+        const previousTitle = await cacheManager.eval(
+          SWAP_SCRIPT, 1, `slack:dedup:group:${groupHash}`, options.title, GROUP_DEDUP_TTL_SECONDS,
+        );
+        if (previousTitle === options.title) {
+          logger.info(
+            { title: options.title, dedupGroup: options.dedupGroup },
+            'Suppressed duplicate Slack notification (group-scoped)'
           );
           return true;
         }
@@ -1160,3 +1239,8 @@ class SlackNotificationService {
 
 // Singleton instance
 export const slackNotificationService = new SlackNotificationService();
+
+// Circuit breakers (Claude, Gmail) report opening and recovery here. The
+// breaker module can't import this service directly: this service owns a
+// breaker of its own, so that would be an import cycle.
+setCircuitBreakerAlertSink((alert) => slackNotificationService.sendAlert(alert));

@@ -20,6 +20,9 @@ import { listUsers } from '../api/users';
 import { getErrorMessage } from '../api/core';
 import { useDebounce } from '../hooks/useDebounce';
 import Pagination from '../components/Pagination';
+import ModalFrame from '../components/ModalFrame';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { getAdminDisplayName } from '../utils/admin-id';
 
 function formatDate(value: string | null): string {
   if (!value) return '—';
@@ -53,7 +56,7 @@ interface InviteModalProps {
 function InviteModal({ onClose, onCreated }: InviteModalProps) {
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
-  const [invitedBy, setInvitedBy] = useState('');
+  const [invitedBy, setInvitedBy] = useState(() => getAdminDisplayName() ?? '');
   const [sendEmail, setSendEmail] = useState(true);
   const [result, setResult] = useState<CreateInvitationResponse | null>(null);
 
@@ -93,8 +96,7 @@ function InviteModal({ onClose, onCreated }: InviteModalProps) {
   // Result screen — shown after successful creation so admin can grab the URL
   if (result) {
     return (
-      <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-        <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+      <ModalFrame onClose={onClose} ariaLabel="Invitation created" className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
           <svg className="w-12 h-12 text-green-500 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
           </svg>
@@ -139,14 +141,12 @@ function InviteModal({ onClose, onCreated }: InviteModalProps) {
           >
             Done
           </button>
-        </div>
-      </div>
+      </ModalFrame>
     );
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
+    <ModalFrame onClose={onClose} ariaLabel="Invite a user" className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
         <h3 className="text-lg font-semibold text-slate-900 mb-4">Invite a user</h3>
 
         <div className="space-y-4">
@@ -235,8 +235,7 @@ function InviteModal({ onClose, onCreated }: InviteModalProps) {
             {mutation.isPending ? 'Creating…' : sendEmail ? 'Create & email' : 'Create invitation'}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -263,11 +262,14 @@ export default function AdminInvitationsPage() {
     placeholderData: (prev) => prev,
   });
 
+  // Revoking kills the recipient's link for good, so it asks first.
+  const [revokeTarget, setRevokeTarget] = useState<Invitation | null>(null);
   const revokeMutation = useMutation({
     mutationFn: (id: string) => revokeInvitation(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-invitations'] });
       showToast('Invitation revoked', 'success');
+      setRevokeTarget(null);
     },
     onError: (err) => showToast(getErrorMessage(err, 'Failed to revoke'), 'error'),
   });
@@ -317,7 +319,7 @@ export default function AdminInvitationsPage() {
       {summary && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
           <SummaryCard label="Total" value={summary.total} />
-          <SummaryCard label="Pending" value={summary.pending} accent="bg-spill-blue-50 text-spill-blue-800" />
+          <SummaryCard label="Pending" value={summary.pending} accent="bg-spill-blue-100 text-spill-blue-800" />
           <SummaryCard label="Accepted" value={summary.accepted} accent="bg-green-50 text-green-800" />
           <SummaryCard label="Expired" value={summary.expired} accent="bg-amber-50 text-amber-800" />
           <SummaryCard label="Revoked" value={summary.revoked} />
@@ -327,8 +329,9 @@ export default function AdminInvitationsPage() {
       {/* Filters */}
       <div className="bg-white border border-slate-200 rounded-lg p-4 mb-4 flex flex-wrap gap-3 items-end">
         <div className="flex-1 min-w-[200px]">
-          <label className="block text-xs font-medium text-slate-500 mb-1">Search</label>
+          <label htmlFor="invitation-search" className="block text-xs font-medium text-slate-500 mb-1">Search</label>
           <input
+            id="invitation-search"
             type="text"
             value={search}
             onChange={(e) => {
@@ -341,8 +344,9 @@ export default function AdminInvitationsPage() {
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-500 mb-1">Status</label>
+          <label htmlFor="invitation-status" className="block text-xs font-medium text-slate-500 mb-1">Status</label>
           <select
+            id="invitation-status"
             value={status}
             onChange={(e) => {
               setStatus(e.target.value as InvitationFilters['status']);
@@ -392,7 +396,7 @@ export default function AdminInvitationsPage() {
                   <InvitationRow
                     key={inv.id}
                     invitation={inv}
-                    onRevoke={() => revokeMutation.mutate(inv.id)}
+                    onRevoke={() => setRevokeTarget(inv)}
                     onResend={() => resendMutation.mutate(inv.id)}
                     actionsPending={revokeMutation.isPending || resendMutation.isPending}
                   />
@@ -414,6 +418,22 @@ export default function AdminInvitationsPage() {
           )}
         </>
       ) : null}
+
+      {revokeTarget && (
+        <ConfirmDialog
+          title="Revoke this invitation?"
+          confirmLabel="Revoke"
+          confirmVariant="danger"
+          isPending={revokeMutation.isPending}
+          onConfirm={() => revokeMutation.mutate(revokeTarget.id)}
+          onCancel={() => setRevokeTarget(null)}
+        >
+          <p className="text-sm text-slate-600">
+            The link sent to <strong>{revokeTarget.email}</strong> stops working immediately and can&rsquo;t be
+            restored. To invite them again you&rsquo;ll need to send a new invitation.
+          </p>
+        </ConfirmDialog>
+      )}
 
       {showInviteModal && (
         <InviteModal
@@ -473,7 +493,7 @@ function InvitationRow({ invitation, onRevoke, onResend, actionsPending }: RowPr
               type="button"
               onClick={onResend}
               disabled={actionsPending}
-              className="px-2 py-1 text-xs font-medium text-spill-blue-800 hover:bg-spill-blue-50 rounded disabled:opacity-50"
+              className="px-2 py-1 text-xs font-medium text-spill-blue-800 hover:bg-spill-blue-100 rounded disabled:opacity-50"
               title={
                 'Send a reminder email asking the recipient to use the original invitation link. ' +
                 `Sent ${invitation.sendCount}× so far. (The reminder does NOT contain the link — ` +
@@ -519,6 +539,9 @@ interface BulkInviteModalProps {
   onCreated: (response: BulkInvitationResponse) => void;
 }
 
+/** Backend `bulkSchema.entries` is `.max(100)`: a larger batch is rejected whole. */
+const BULK_INVITE_LIMIT = 100;
+
 /** Parses a textarea where each line is `email` or `email,name`. */
 function parseBulkInput(raw: string): { entries: { email: string; name?: string }[]; errors: string[] } {
   const entries: { email: string; name?: string }[] = [];
@@ -540,19 +563,27 @@ function parseBulkInput(raw: string): { entries: { email: string; name?: string 
 
 function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
   const [raw, setRaw] = useState('');
-  const [invitedBy, setInvitedBy] = useState('');
+  const [invitedBy, setInvitedBy] = useState(() => getAdminDisplayName() ?? '');
   const [sendEmail, setSendEmail] = useState(true);
   const [result, setResult] = useState<BulkInvitationResponse | null>(null);
+  // Entries beyond the batch limit at the time of sending, so the result
+  // screen can say exactly which ones still need a second batch.
+  const [skippedAtSend, setSkippedAtSend] = useState<{ email: string; name?: string }[]>([]);
 
   const { entries, errors: parseErrors } = parseBulkInput(raw);
+  const batch = entries.slice(0, BULK_INVITE_LIMIT);
+  const overflow = entries.slice(BULK_INVITE_LIMIT);
 
   const mutation = useMutation({
     mutationFn: () =>
       createBulkInvitations({
-        entries,
+        entries: batch,
         invitedBy: invitedBy.trim() || undefined,
         sendEmail,
       }),
+    onMutate: () => {
+      setSkippedAtSend(overflow);
+    },
     onSuccess: (data) => {
       setResult(data);
       onCreated(data);
@@ -561,14 +592,29 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
 
   if (result) {
     return (
-      <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-        <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6" onClick={(e) => e.stopPropagation()}>
+      <ModalFrame onClose={onClose} ariaLabel="Bulk invitation results" className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
           <h3 className="text-lg font-semibold text-slate-900 mb-3">Bulk invitation results</h3>
           <p className="text-sm text-slate-600 mb-4">
             <span className="text-green-700 font-medium">{result.summary.succeeded} succeeded</span>,{' '}
             <span className="text-red-600 font-medium">{result.summary.failed} failed</span>,{' '}
             of {result.summary.total} total.
           </p>
+          {skippedAtSend.length > 0 && (
+            <div className="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded text-sm text-amber-800">
+              <p className="font-medium">
+                {skippedAtSend.length} {skippedAtSend.length === 1 ? 'entry was' : 'entries were'} not sent
+                (over the {BULK_INVITE_LIMIT}-per-batch limit). Copy them into another batch:
+              </p>
+              <textarea
+                readOnly
+                rows={Math.min(skippedAtSend.length, 4)}
+                value={skippedAtSend.map((e) => (e.name ? `${e.email},${e.name}` : e.email)).join('\n')}
+                aria-label="Entries not sent"
+                className="mt-2 w-full px-2 py-1 text-xs font-mono bg-white border border-amber-200 rounded"
+                onFocus={(e) => e.currentTarget.select()}
+              />
+            </div>
+          )}
           <div className="border border-slate-200 rounded-lg max-h-80 overflow-y-auto">
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
@@ -602,14 +648,12 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
           >
             Done
           </button>
-        </div>
-      </div>
+      </ModalFrame>
     );
   }
 
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6" onClick={(e) => e.stopPropagation()}>
+    <ModalFrame onClose={onClose} ariaLabel="Bulk invite" className="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
         <h3 className="text-lg font-semibold text-slate-900 mb-2">Bulk invite</h3>
         <p className="text-sm text-slate-500 mb-4">
           One per line, in <code className="text-xs bg-slate-100 px-1.5 py-0.5 rounded">email</code> or{' '}
@@ -627,8 +671,10 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
 
         <div className="flex items-center justify-between mt-2 text-xs text-slate-500">
           <span>{entries.length} valid {entries.length === 1 ? 'entry' : 'entries'}</span>
-          {entries.length > 100 && (
-            <span className="text-red-600">Over 100 — only the first 100 will be sent.</span>
+          {overflow.length > 0 && (
+            <span className="text-red-600">
+              Over {BULK_INVITE_LIMIT} — only the first {BULK_INVITE_LIMIT} will be sent; {overflow.length} will be skipped.
+            </span>
           )}
         </div>
 
@@ -689,10 +735,9 @@ function BulkInviteModal({ onClose, onCreated }: BulkInviteModalProps) {
           >
             {mutation.isPending
               ? 'Processing…'
-              : `Send ${Math.min(entries.length, 100)} ${entries.length === 1 ? 'invitation' : 'invitations'}`}
+              : `Send ${batch.length} ${batch.length === 1 ? 'invitation' : 'invitations'}`}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

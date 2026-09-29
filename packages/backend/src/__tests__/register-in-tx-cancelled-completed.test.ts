@@ -16,7 +16,7 @@ jest.mock('../config', () => ({
   config: { jwtSecret: 'test', frontendUrl: 'https://test', backendUrl: 'https://test' },
 }));
 jest.mock('../utils/redis', () => ({
-  redis: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+  redis: { get: jest.fn(), getStrict: jest.fn(), set: jest.fn(), del: jest.fn() },
 }));
 jest.mock('../services/slack-notification.service', () => ({
   slackNotificationService: {
@@ -122,6 +122,8 @@ jest.mock('../utils/database', () => ({
 
 import { transitionToCancelled } from '../domain/scheduling/lifecycle/transitions/cancelled';
 import { transitionToCompleted } from '../domain/scheduling/lifecycle/transitions/completed';
+import { appointmentNotificationsService } from '../services/appointment-notifications.service';
+import { sideEffectTrackerService } from '../services/side-effect-tracker.service';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -133,6 +135,10 @@ beforeEach(() => {
 function makeTx(row: Record<string, unknown>) {
   return {
     $queryRaw: jest.fn().mockResolvedValue([row]),
+    // transitionToCompleted records the durable completed-client row in
+    // the same transaction (completed-clients.ts).
+    $executeRaw: jest.fn().mockResolvedValue(1),
+    therapist: { findFirst: jest.fn().mockResolvedValue({ id: 'ther-1' }) },
     appointmentRequest: {
       update: jest.fn().mockResolvedValue({ id: 'apt-1' }),
     },
@@ -210,7 +216,7 @@ describe('transitionToCancelled — register-in-tx intent registration', () => {
     ]);
   });
 
-  it('registers the two email rows WITH a transitionGeneration-derived key, and slack/unfreeze WITHOUT one', async () => {
+  it('keys slack + both emails WITH the post-update generation (matching notifyCancelled) and unfreeze WITHOUT one', async () => {
     await transitionToCancelled({
       appointmentId: 'apt-1',
       reason: 'Test',
@@ -219,12 +225,38 @@ describe('transitionToCancelled — register-in-tx intent registration', () => {
       adminId: 'admin-7',
     });
 
-    // Every registerInTransaction call generates the idempotency key
-    // internally; we can't predict the exact hash, but we CAN assert
-    // that calls made with a `transitionGeneration` produce a DIFFERENT
-    // key input than calls made without one, by checking two calls for
-    // the same appointment+transition don't collide when they shouldn't.
-    // Simpler and more direct: assert each row's payload — only the
+    // The post-commit writer is notifyCancelled, which hashes every one of
+    // its three effects with the generation it is handed. Pin both halves:
+    // what the in-tx rows were keyed with, and what notifyCancelled was
+    // handed — they must be the same generation or the post-commit path
+    // creates a duplicate row and the in-tx one is re-sent by the retry
+    // runner (lifecycle audit L6: a second Slack "cancelled" message).
+    const postUpdateGeneration = CANCELLED_ROW.transition_generation + 1;
+    expect(appointmentNotificationsService.notifyCancelled).toHaveBeenCalledWith(
+      expect.objectContaining({ transitionGeneration: postUpdateGeneration }),
+    );
+    const keyFor = (effectType: string, generation?: number) =>
+      (sideEffectTrackerService as unknown as {
+        generateIdempotencyKey: (a: string, t: string, e: string, g?: number) => string;
+      }).generateIdempotencyKey('apt-1', 'cancelled', effectType, generation);
+    const keys = new Map(captured.map((c) => [c.data.effectType, c.data.idempotencyKey]));
+    expect(keys.get('slack_notify_cancelled')).toBe(keyFor('slack_notify_cancelled', postUpdateGeneration));
+    expect(keys.get('email_client_cancellation')).toBe(keyFor('email_client_cancellation', postUpdateGeneration));
+    expect(keys.get('email_therapist_cancellation')).toBe(keyFor('email_therapist_cancellation', postUpdateGeneration));
+    // transitionSideEffectsService.onCancelled registers unfreeze without a generation.
+    expect(keys.get('therapist_unfreeze_sync')).toBe(keyFor('therapist_unfreeze_sync'));
+  });
+
+  it('attaches the {cancelledBy, reason} render context only to the two email rows', async () => {
+    await transitionToCancelled({
+      appointmentId: 'apt-1',
+      reason: 'Test',
+      cancelledBy: 'client',
+      source: 'admin',
+      adminId: 'admin-7',
+    });
+
+    // Key derivation is pinned by the previous test. Here: only the
     // cancellation emails carry the {cancelledBy, reason} render context;
     // slack/unfreeze carry no payload at all.
     const byType = new Map(captured.map((c) => [c.data.effectType, c.data]));

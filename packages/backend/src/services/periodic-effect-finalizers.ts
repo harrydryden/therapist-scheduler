@@ -23,6 +23,7 @@ import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { confirmSentinelClaim, EPOCH_SENTINEL } from '../utils/atomic-sentinel-claim';
 import { appointmentLifecycleService } from '../domain/scheduling/lifecycle';
+import { InvalidTransitionError } from '../errors';
 import { aiConversationService } from './ai-conversation.service';
 import { recordAppointmentEvent } from './appointment-event.service';
 import { auditEventService } from './audit-event.service';
@@ -94,11 +95,32 @@ export async function finalizeChase(args: {
   );
 
   if (!checkpointResult.applied) {
-    logger.error(
-      { checkId, appointmentId },
-      'ALERT: Chase email sent but sentinel update failed - possible duplicate',
+    // The checkpoint advance needs conversation state and can lose its
+    // optimistic-lock retries; recording the chase must not depend on it.
+    // The email has gone out, so confirm the sentinel directly (same
+    // epoch guard). Without this the sentinel stayed at the in-flight
+    // epoch, the stuck-sentinel sweep reset it, and — with the chase key
+    // scoped per cycle — the next tick chased the same party again; nor
+    // could closure ever be recommended (it needs a real chaseSentAt).
+    const recorded = await confirmSentinelClaim(appointmentId, 'chaseSentAt', now, {
+      extraData: {
+        chaseSentTo: target,
+        chaseTargetEmail: targetEmail,
+        lastActivityAt: now,
+        isStale: false,
+      },
+    });
+    if (!recorded) {
+      logger.error(
+        { checkId, appointmentId },
+        'ALERT: Chase email sent but sentinel update failed - possible duplicate',
+      );
+      return;
+    }
+    logger.warn(
+      { checkId, appointmentId, target },
+      'Chase recorded on the appointment, but the conversation checkpoint could not be advanced',
     );
-    return;
   }
 
   await recordAppointmentEvent({
@@ -159,6 +181,26 @@ export async function finalizeMeetingLinkCheck(args: {
 
 // ─── Feedback dispatch (email_feedback_dispatch) ────────────────────────
 
+/**
+ * Runs after BOTH feedback emails have been handed off. Two steps:
+ *
+ *   1. Confirm the `feedbackFormSentAt` sentinel (epoch → now). That real
+ *      timestamp is the durable "the pair went out" marker: the retry
+ *      executor checks it before sending, so a retry after a failure in
+ *      step 2 re-attempts ONLY the transition, never the emails.
+ *   2. Transition session_held → feedback_requested (which also stamps
+ *      feedbackFormSentAt, atomically with the status).
+ *
+ * The transition is attempted even when the confirm misses: the emails
+ * have gone either way, and returning early is what used to strand the row
+ * in `session_held` with no reminder or auto-complete ever following
+ * (lifecycle audit L10). A miss only alerts when the sentinel is not
+ * already a real timestamp — i.e. something other than our own earlier
+ * attempt moved it, so a duplicate is possible.
+ *
+ * Throws only for a transient transition failure, so the retry runner
+ * re-drives it (sends skipped, see side-effect-retry.service.ts).
+ */
 export async function finalizeFeedbackDispatch(args: {
   appointmentId: string;
   now: Date;
@@ -175,23 +217,57 @@ export async function finalizeFeedbackDispatch(args: {
   const confirmed = await confirmSentinelClaim(appointmentId, 'feedbackFormSentAt', now);
 
   if (!confirmed) {
-    logger.error(
-      { checkId, appointmentId },
-      'ALERT: Feedback form email sent but sentinel update failed - possible duplicate',
-    );
-    await appendSystemAlertNote(appointmentId, notesSoFar, 'feedbackForm email sent but tracking update failed - review for duplicates');
-    return;
+    const current = await prisma.appointmentRequest.findUnique({
+      where: { id: appointmentId },
+      select: { feedbackFormSentAt: true },
+    });
+    const alreadyConfirmed =
+      !!current?.feedbackFormSentAt && current.feedbackFormSentAt > EPOCH_SENTINEL;
+    if (!alreadyConfirmed) {
+      logger.error(
+        { checkId, appointmentId },
+        'ALERT: Feedback form email sent but sentinel update failed - possible duplicate',
+      );
+      await appendSystemAlertNote(appointmentId, notesSoFar, 'feedbackForm email sent but tracking update failed - review for duplicates');
+    }
   }
 
-  await appointmentLifecycleService.transitionToFeedbackRequested({
-    appointmentId,
-    source: 'system',
-  });
+  await completeFeedbackRequestedTransition(appointmentId, { checkId });
 
   logger.info(
     { checkId, appointmentId, userEmail },
     'Sent feedback form dispatch and transitioned to feedback_requested',
   );
+}
+
+/**
+ * The transition half of the feedback dispatch, on its own so the retry
+ * executor can run it without re-sending. A status that moved on while the
+ * emails were in flight (admin walk-back, cancellation, completion — the
+ * light transition throws InvalidTransitionError for those) is not an
+ * error: there is nothing left to transition, and throwing would only make
+ * the retry runner re-drive a unit whose emails have already gone.
+ * Anything else (DB error) propagates.
+ */
+export async function completeFeedbackRequestedTransition(
+  appointmentId: string,
+  context: { checkId?: string } = {},
+): Promise<void> {
+  try {
+    await appointmentLifecycleService.transitionToFeedbackRequested({
+      appointmentId,
+      source: 'system',
+    });
+  } catch (err) {
+    if (err instanceof InvalidTransitionError) {
+      logger.info(
+        { ...context, appointmentId, reason: err.message },
+        'Feedback emails sent but the appointment is no longer session_held — no transition needed',
+      );
+      return;
+    }
+    throw err;
+  }
 }
 
 // ─── Feedback reminder (email_feedback_reminder) ────────────────────────

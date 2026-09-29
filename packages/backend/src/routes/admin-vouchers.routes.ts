@@ -11,7 +11,7 @@ import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { verifyWebhookSecret } from '../middleware/auth';
 import { getSettingValue } from '../services/settings.service';
-import { generateVoucherUrl, getDisplayCodeFromToken } from '../utils/voucher-token';
+import { generateVoucherUrl, getDisplayCodeFromToken, getVoucherExpiresAt } from '../utils/voucher-token';
 import { formatVoucherExpiry } from '../utils/voucher-section';
 import { generateUnsubscribeUrl } from '../utils/unsubscribe-token';
 import { renderTemplate } from '../utils/email-templates';
@@ -55,12 +55,20 @@ function computeVoucherStatus(r: VoucherRecord, expiryThreshold: Date): string {
   return 'expired';
 }
 
-// Helper to format a DB record into the API response shape
+// Helper to format a DB record into the API response shape.
+// The expiry shown (and the active/expired status) is the voucher's OWN
+// expiry, signed into its token — an admin-issued 30-day voucher reads as
+// 30 days even when the global `voucher.expiryDays` is 14. The global
+// setting only applies to legacy tokens that carry no validity.
 function formatRecord(r: VoucherRecord, expiryDays: number, maxStrikes: number) {
-  const expiryThreshold = new Date(Date.now() - expiryDays * 24 * 60 * 60 * 1000);
-  const expiresAt = r.lastVoucherSentAt
-    ? new Date(r.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000)
-    : null;
+  const tokenExpiresAt = r.lastVoucherToken ? getVoucherExpiresAt(r.lastVoucherToken, expiryDays) : null;
+  const expiresAt = tokenExpiresAt
+    ?? (r.lastVoucherSentAt ? new Date(r.lastVoucherSentAt.getTime() + expiryDays * 24 * 60 * 60 * 1000) : null);
+  // computeVoucherStatus compares lastVoucherSentAt against a threshold;
+  // shift the threshold so that comparison uses this voucher's own window.
+  const expiryThreshold = expiresAt && r.lastVoucherSentAt
+    ? new Date(Date.now() - (expiresAt.getTime() - r.lastVoucherSentAt.getTime()))
+    : new Date(Date.now() - expiryDays * 24 * 60 * 60 * 1000);
   return {
     email: r.id,
     displayCode: r.lastVoucherToken ? getDisplayCodeFromToken(r.lastVoucherToken) : null,

@@ -1,26 +1,22 @@
 /**
- * Regression tests for the email-queue split-brain bugs surfaced by
- * the deep audit and verified by manual code-walk:
+ * Regression tests for the email-queue split-brain bugs.
  *
- *   - C1 (DB status check): when the polling fallback sends an email
- *     during a Redis outage, the Redis send-guard never gets written.
- *     If BullMQ later processes the same job after Redis recovers,
- *     processJob's old logic would only check the missing guard and
- *     send the email AGAIN. processJob must check the DB row's
- *     `status` first — that's the authoritative source of truth.
+ *   - C1 / #8: the BullMQ worker and the polling fallback both consumed the
+ *     same pending_emails rows with "check status → send" (first a Redis
+ *     guard, later a DB status read), so a retry could be sent twice. The
+ *     worker now delegates every attempt to core/email/outbound/queue.ts's
+ *     `attemptPendingEmailSend`, which claims the row atomically
+ *     (pending → sending) — the claim semantics themselves are covered in
+ *     pending-email-atomic-claim.test.ts. Pinned here: the worker never
+ *     sends outside that path, completes the job when the row is not
+ *     claimable (already sent by the poller, abandoned, gone), and rethrows
+ *     only when the attempt was put back for retry so BullMQ reschedules.
  *
- *   - H4 (nextRetryAt on BullMQ retry): the polling fallback's filter
- *     is `nextRetryAt <= now OR nextRetryAt IS NULL`. BullMQ's
- *     updateRetryState was only writing retryCount/lastRetryAt and
- *     leaving nextRetryAt null, so the polling fallback would re-pick
- *     the row up on its 2-minute tick and bypass BullMQ's exponential
- *     backoff. updateRetryState must set nextRetryAt to the backoff
- *     window so both paths agree.
+ *   - H4: the DB row's retry state is written by the claim holder (with
+ *     nextRetryAt on the shared backoff schedule), not by the worker's
+ *     async 'failed' event — which used to race the claim.
  *
- * Both methods are private on the EmailQueueService class. The tests
- * reach in via `as unknown as { method }` — same pattern other tests
- * in this suite use for private-method coverage. The contract is the
- * DB writes those methods perform; that's what the asserts pin.
+ *   - #9: a permanently abandoned email raises a deduped Slack alert.
  */
 
 jest.mock('../utils/logger', () => ({
@@ -47,14 +43,6 @@ jest.mock('../constants', () => ({
     TTL_SECONDS: 60,
     RENEWAL_INTERVAL_MS: 30_000,
   },
-  PENDING_EMAIL_QUEUE: {
-    DEFAULT_BATCH_SIZE: 10,
-    MAX_BATCH_SIZE: 50,
-    BACKLOG_WARNING_THRESHOLD: 20,
-    BACKLOG_CRITICAL_THRESHOLD: 50,
-    BATCH_SIZE_MULTIPLIER_WARNING: 2,
-    BATCH_SIZE_MULTIPLIER_CRITICAL: 3,
-  },
 }));
 
 jest.mock('../utils/redis-locks', () => ({
@@ -62,29 +50,27 @@ jest.mock('../utils/redis-locks', () => ({
   renewLock: jest.fn(() => Promise.resolve(true)),
 }));
 
-const findUniqueMock = jest.fn();
-const updateMock = jest.fn();
-
-jest.mock('../utils/database', () => ({
-  prisma: {
-    pendingEmail: {
-      findUnique: (...args: unknown[]) => findUniqueMock(...args),
-      update: (...args: unknown[]) => updateMock(...args),
-    },
-  },
-}));
-
-const redisGetMock = jest.fn();
-jest.mock('../utils/redis', () => ({
-  redis: {
-    get: (...args: unknown[]) => redisGetMock(...args),
-    set: jest.fn(),
-  },
-}));
+jest.mock('../utils/database', () => ({ prisma: { pendingEmail: {} } }));
+jest.mock('../utils/redis', () => ({ redis: { get: jest.fn(), getStrict: jest.fn(), set: jest.fn() } }));
 
 const sendEmailMock = jest.fn();
 jest.mock('../core/email', () => ({
   sendEmail: (...args: unknown[]) => sendEmailMock(...args),
+  processPendingEmails: jest.fn(),
+}));
+
+const mockAttempt = jest.fn();
+jest.mock('../core/email/outbound/queue', () => ({
+  attemptPendingEmailSend: (...a: unknown[]) => mockAttempt(...a),
+  // Called at import time (before module-level consts exist), so the mock
+  // lives inside the factory and is read back via jest.requireMock.
+  registerEmailAbandonedNotifier: jest.fn(),
+  retryDelayMs: (attempt: number) => [60_000, 300_000][attempt - 1] ?? 900_000,
+}));
+
+const sendAlertMock = jest.fn().mockResolvedValue(true);
+jest.mock('../services/slack-notification.service', () => ({
+  slackNotificationService: { sendAlert: (...a: unknown[]) => sendAlertMock(...a) },
 }));
 
 // Avoid pulling the BullMQ + Worker modules into the test process —
@@ -97,17 +83,18 @@ jest.mock('bullmq', () => ({
   QueueEvents: jest.fn(),
 }));
 
-import { emailQueueService } from '../services/email-queue.service';
+import { emailQueueService, notifyEmailAbandoned } from '../services/email-queue.service';
+
+// Captured at import time, before any beforeEach clears the mocks.
+const registeredNotifier = (
+  jest.requireMock('../core/email/outbound/queue') as { registerEmailAbandonedNotifier: jest.Mock }
+).registerEmailAbandonedNotifier.mock.calls[0]?.[0];
 
 beforeEach(() => {
   jest.clearAllMocks();
-  redisGetMock.mockResolvedValue(null);
-  updateMock.mockResolvedValue({});
-  sendEmailMock.mockResolvedValue({});
 });
 
-// Helper: build the minimal Job<EmailJobData> shape processJob expects.
-function buildJob(overrides: Partial<{ id: string; pendingEmailId: string; attemptsMade: number }> = {}) {
+function buildJob(overrides: Partial<{ id: string; pendingEmailId: string; attemptsMade: number; threadId: string }> = {}) {
   return {
     id: overrides.id ?? 'job-1',
     attemptsMade: overrides.attemptsMade ?? 0,
@@ -116,101 +103,74 @@ function buildJob(overrides: Partial<{ id: string; pendingEmailId: string; attem
       to: 'recipient@example.com',
       subject: 'Subject',
       body: 'Body',
+      ...(overrides.threadId ? { threadId: overrides.threadId } : {}),
     },
   };
 }
 
 const internal = emailQueueService as unknown as {
   processJob: (job: ReturnType<typeof buildJob>) => Promise<void>;
-  updateRetryState: (job: ReturnType<typeof buildJob>, msg: string) => Promise<void>;
 };
 
-describe('processJob: DB status check (C1 fix)', () => {
-  it('skips the send when DB row already has status=sent (polling fallback won during Redis outage)', async () => {
-    findUniqueMock.mockResolvedValue({ status: 'sent' });
+describe('processJob delegates to the atomic claim-then-send path (C1 / #8)', () => {
+  it('completes without sending when the row is not claimable (e.g. the poller already sent it)', async () => {
+    mockAttempt.mockResolvedValue({ outcome: 'not-claimed' });
 
-    await internal.processJob(buildJob());
+    await expect(internal.processJob(buildJob())).resolves.toBeUndefined();
 
-    expect(sendEmailMock).not.toHaveBeenCalled();
-    // Crucial: did NOT update DB either — the polling fallback
-    // already set status=sent, no need to overwrite.
-    expect(updateMock).not.toHaveBeenCalled();
-  });
-
-  it('skips the send when DB row is abandoned (final-fail handler ran in another path)', async () => {
-    findUniqueMock.mockResolvedValue({ status: 'abandoned' });
-
-    await internal.processJob(buildJob());
-
+    expect(mockAttempt).toHaveBeenCalledWith('pending-1', 'bullmq:job-1', undefined);
+    // The worker itself never talks to Gmail.
     expect(sendEmailMock).not.toHaveBeenCalled();
   });
 
-  it('skips and logs when the DB row is gone entirely (cascade-delete after enqueue)', async () => {
-    findUniqueMock.mockResolvedValue(null);
+  it('passes the enqueuer\'s thread id through as the thread hint', async () => {
+    mockAttempt.mockResolvedValue({ outcome: 'sent' });
 
-    await internal.processJob(buildJob());
+    await internal.processJob(buildJob({ threadId: 'thread-42' }));
 
-    expect(sendEmailMock).not.toHaveBeenCalled();
+    expect(mockAttempt).toHaveBeenCalledWith('pending-1', 'bullmq:job-1', 'thread-42');
   });
 
-  it('proceeds with send when DB status=pending (normal happy path)', async () => {
-    findUniqueMock.mockResolvedValue({ status: 'pending' });
-    redisGetMock.mockResolvedValue(null); // No Redis guard present
-
-    await internal.processJob(buildJob());
-
-    expect(sendEmailMock).toHaveBeenCalledTimes(1);
-    // Final DB update flips status='sent'.
-    const lastUpdate = updateMock.mock.calls[updateMock.mock.calls.length - 1][0];
-    expect(lastUpdate.data).toMatchObject({ status: 'sent' });
+  it.each(['sent', 'already-sent', 'skipped', 'marker'])('completes the job on %s', async (outcome) => {
+    mockAttempt.mockResolvedValue({ outcome });
+    await expect(internal.processJob(buildJob())).resolves.toBeUndefined();
   });
 
-  it('checks DB BEFORE Redis guard (DB is authoritative)', async () => {
-    // Sequence test: with status=sent in DB, we should never even
-    // reach the redis.get call.
-    findUniqueMock.mockResolvedValue({ status: 'sent' });
+  it('completes (does not rethrow) once the row was abandoned — retries are over and the alert is sent', async () => {
+    mockAttempt.mockResolvedValue({ outcome: 'abandoned', error: new Error('invalid_grant'), attempt: 5 });
+    await expect(internal.processJob(buildJob())).resolves.toBeUndefined();
+  });
 
-    await internal.processJob(buildJob());
+  it('rethrows when the attempt was put back for retry, so BullMQ reschedules it', async () => {
+    const error = new Error('Gmail rate limited');
+    mockAttempt.mockResolvedValue({ outcome: 'retrying', error, attempt: 1, nextRetryAt: new Date() });
 
-    expect(findUniqueMock).toHaveBeenCalledTimes(1);
-    expect(redisGetMock).not.toHaveBeenCalled();
-    expect(sendEmailMock).not.toHaveBeenCalled();
+    await expect(internal.processJob(buildJob())).rejects.toBe(error);
   });
 });
 
-describe('updateRetryState: nextRetryAt set from BullMQ backoff (H4 fix)', () => {
-  it('writes nextRetryAt so the polling fallback respects BullMQ backoff', async () => {
-    const before = Date.now();
-    await internal.updateRetryState(buildJob({ attemptsMade: 1 }), 'Gmail rate limited');
-
-    expect(updateMock).toHaveBeenCalledTimes(1);
-    const data = updateMock.mock.calls[0][0].data;
-    expect(data.errorMessage).toBe('Gmail rate limited');
-    expect(data.retryCount).toBe(1);
-    expect(data.lastRetryAt).toBeInstanceOf(Date);
-    // nextRetryAt must be in the future and roughly at attempt-1's
-    // backoff window (60_000 ms — index [0] of RETRY_DELAYS_MS).
-    expect(data.nextRetryAt).toBeInstanceOf(Date);
-    const delay = (data.nextRetryAt as Date).getTime() - before;
-    // getBackoffDelay adds up to +10% jitter (so 60_000 → up to 66_000).
-    // Allow generous bounds — exact-value pinning isn't the contract;
-    // the contract is that nextRetryAt sits in the BullMQ backoff
-    // window, not null.
-    expect(delay).toBeGreaterThanOrEqual(50_000);
-    expect(delay).toBeLessThanOrEqual(80_000);
+describe('email-abandoned alert (#9)', () => {
+  it('registers the Slack notifier with the shared delivery module at import', () => {
+    expect(registeredNotifier).toEqual(expect.any(Function));
+    expect(registeredNotifier).toBe(notifyEmailAbandoned);
   });
 
-  it('uses progressively longer backoff for higher attemptsMade (matches RETRY_DELAYS_MS)', async () => {
-    await internal.updateRetryState(buildJob({ attemptsMade: 1 }), 'fail');
-    const firstDelay = (updateMock.mock.calls[0][0].data.nextRetryAt as Date).getTime() - Date.now();
+  it('sends a high-severity alert deduped per appointment under the email-abandoned group', async () => {
+    await notifyEmailAbandoned({
+      pendingEmailId: 'pe-1',
+      appointmentId: 'apt-1',
+      subject: '[SPL-1] Spill: availability',
+      attempts: 5,
+      errorMessage: 'invalid_grant',
+    });
 
-    updateMock.mockClear();
-
-    await internal.updateRetryState(buildJob({ attemptsMade: 3 }), 'fail');
-    const thirdDelay = (updateMock.mock.calls[0][0].data.nextRetryAt as Date).getTime() - Date.now();
-
-    // Attempt 3 should sit at index [2] = 900_000ms = 15 min, much
-    // longer than attempt 1's 60_000 ms.
-    expect(thirdDelay).toBeGreaterThan(firstDelay);
+    expect(sendAlertMock).toHaveBeenCalledTimes(1);
+    expect(sendAlertMock.mock.calls[0][0]).toMatchObject({
+      title: 'Outbound Email Abandoned',
+      severity: 'high',
+      appointmentId: 'apt-1',
+      dedupGroup: 'email-abandoned',
+    });
+    expect(sendAlertMock.mock.calls[0][0].details).toContain('invalid_grant');
   });
 });

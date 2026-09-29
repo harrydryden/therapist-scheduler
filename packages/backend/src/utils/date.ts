@@ -20,6 +20,7 @@ import { parse as chronoParse } from 'chrono-node';
 import { config } from '../config';
 import { getSettingValue } from '../services/settings.service';
 import { logger } from './logger';
+import { POST_BOOKING } from '../constants';
 
 // ---------------------------------------------------------------------------
 // 1. Constants
@@ -482,37 +483,41 @@ export function isWithinHours(date: Date, hours: number): boolean {
 /**
  * Calculate when to send the meeting-link check email.
  *
- * Rules:
- *   - 24 hours after confirmation
- *   - UNLESS that would be after appointment time
- *   - Then send at least 4 hours before appointment
- *   - If appointment is very soon (< 4 hours), return current time (send immediately)
+ * Rules (hours come from the postBooking.* settings; defaults 24 / 4):
+ *   - `delayHours` after confirmation
+ *   - UNLESS that would be later than `minBeforeHours` before the appointment
+ *   - Then send `minBeforeHours` before the appointment
+ *   - If that moment has already passed, the returned time is in the past,
+ *     i.e. due now. (It used to return a fresh `new Date()`, which is a
+ *     few ms later than the caller's own "now", so a `sendTime > now`
+ *     due-check read it as not yet due on every tick.)
  */
 export function calculateMeetingLinkCheckTime(
   confirmedAt: Date,
-  appointmentTime: Date
+  appointmentTime: Date,
+  delayHours: number = POST_BOOKING.MEETING_LINK_CHECK_DELAY_HOURS,
+  minBeforeHours: number = POST_BOOKING.MEETING_LINK_CHECK_MIN_BEFORE_HOURS,
 ): Date {
-  const twentyFourHoursAfterConfirmation = new Date(
-    confirmedAt.getTime() + 24 * 60 * 60 * 1000
+  const afterConfirmation = new Date(
+    confirmedAt.getTime() + delayHours * 60 * 60 * 1000
   );
-  const fourHoursBeforeAppointment = new Date(
-    appointmentTime.getTime() - 4 * 60 * 60 * 1000
+  const beforeAppointment = new Date(
+    appointmentTime.getTime() - minBeforeHours * 60 * 60 * 1000
   );
 
-  if (twentyFourHoursAfterConfirmation <= fourHoursBeforeAppointment) {
-    return twentyFourHoursAfterConfirmation;
-  }
-
-  const now = new Date();
-  return fourHoursBeforeAppointment > now ? fourHoursBeforeAppointment : now;
+  return afterConfirmation <= beforeAppointment ? afterConfirmation : beforeAppointment;
 }
 
 /**
- * Calculate when to send feedback form.
- * Session is 50 minutes; send 1 hour after start (10 min buffer after session ends).
+ * Calculate when to send feedback form: `delayHours` after the session
+ * start (postBooking.feedbackFormDelayHours; default 1 = 50min session +
+ * 10 min buffer).
  */
-export function calculateFeedbackFormTime(appointmentTime: Date): Date {
-  return new Date(appointmentTime.getTime() + 60 * 60 * 1000);
+export function calculateFeedbackFormTime(
+  appointmentTime: Date,
+  delayHours: number = POST_BOOKING.FEEDBACK_FORM_DELAY_HOURS,
+): Date {
+  return new Date(appointmentTime.getTime() + delayHours * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------

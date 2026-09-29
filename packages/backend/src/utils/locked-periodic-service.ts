@@ -87,7 +87,7 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
   /**
    * Subclass implements with the per-tick work. The `LockedTaskContext`
    * exposes `isLockValid()` for long-running ticks that want to abort
-   * cleanly if the lock is lost mid-run. `trigger` distinguishes the
+   * cleanly if the lock is lost mid-run or the service is stopping. `trigger` distinguishes the
    * delayed first run, a regular scheduled run, and an explicit
    * `.trigger()` call — most subclasses ignore it (a 0- or 1-arg override
    * is a valid implementation of this abstract method).
@@ -122,7 +122,13 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
   }
 
   private async runOnceWithLock(trigger: 'startup' | 'scheduled' | 'manual'): Promise<LockedTaskResult<TResult>> {
-    const taskResult = await this.lockedRunner.run((ctx) => this.tick(ctx, trigger));
+    // isLockValid() also turns false once stop() is called, so a long tick
+    // that checks it between items (e.g. the weekly mailing's send loop)
+    // winds down promptly and stop() doesn't wait out the whole batch.
+    const taskResult = await this.lockedRunner.run((ctx) => this.tick(
+      { isLockValid: () => ctx.isLockValid() && !this.isStopping() },
+      trigger,
+    ));
     this.lastRunAt = new Date();
     this.lastResult = taskResult;
     if (!taskResult.acquired) {
@@ -147,7 +153,7 @@ export abstract class LockedPeriodicService<TResult = void> extends PeriodicServ
    * from "ran with result" from "ran but errored".
    */
   async trigger(): Promise<LockedTaskResult<TResult>> {
-    return this.runOnceWithLock('manual');
+    return this.trackRun(this.runOnceWithLock('manual'));
   }
 
   getStatus(): LockedPeriodicStatus<TResult> {

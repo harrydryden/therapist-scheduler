@@ -4,23 +4,31 @@ import { redis } from '../utils/redis';
 import { emailOAuthService, executeGmailWithProtection } from './email-oauth.service';
 import { getLastProcessingErrors } from '../core/email';
 import { processMessage } from '../domain/scheduling/inbound';
+import type { gmail_v1 } from 'googleapis';
 import {
   acquireTokenRefreshLock,
   releaseTokenRefreshLock,
+  refreshAccessToken,
 } from '../utils/gmail-auth';
-import { EMAIL_PROCESSING } from '../constants';
+import { EMAIL_PROCESSING, GMAIL_SYNC } from '../constants';
 import { isGmail404 } from '../utils/gmail-errors';
+import { parseGmailInternalDate } from '../utils/email-mime-parser';
+import { clearMessageDedupState } from '../core/messaging/message-dedup';
 
 // Redis keys
 const HISTORY_ID_KEY = 'gmail:lastHistoryId';
-const {
-  PROCESSED_MESSAGES_KEY,
-  MESSAGE_LOCK_PREFIX,
-  UNMATCHED_ATTEMPT_PREFIX,
-} = EMAIL_PROCESSING;
+const { SCANNER_MAX_MESSAGE_AGE_DAYS } = EMAIL_PROCESSING;
 
 // DB key for Gmail history ID persistence (SystemSetting id)
 const HISTORY_ID_SETTING_KEY = 'gmail.lastHistoryId';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function gmailErrorCode(err: unknown): number | undefined {
+  const e = err as { code?: unknown; status?: unknown } | null;
+  const code = typeof e?.code === 'number' ? e.code : typeof e?.status === 'number' ? e.status : undefined;
+  return code;
+}
 
 /**
  * Safely execute a Redis operation, suppressing errors when Redis is unavailable.
@@ -56,51 +64,83 @@ export class EmailIngestService {
   /**
    * Read the Gmail history ID checkpoint from Redis with database fallback.
    * If Redis has no value (e.g., after a Redis restart), falls back to the
-   * durable copy in the SystemSetting table.
+   * durable copy in the SystemSetting table. 0 = no checkpoint (or unreadable).
    */
   private async getHistoryId(): Promise<number> {
-    // Try Redis first (fast path)
     try {
-      const redisValue = await redis.get(HISTORY_ID_KEY);
-      if (redisValue) {
-        return parseInt(redisValue, 10);
-      }
-    } catch {
-      // Redis unavailable — fall through to DB
-    }
-
-    // Fallback to database
-    try {
-      const setting = await prisma.systemSetting.findUnique({
-        where: { id: HISTORY_ID_SETTING_KEY },
-      });
-      if (setting) {
-        const dbValue = parseInt(JSON.parse(setting.value), 10);
-        // Re-populate Redis for future fast lookups
-        await safeRedisOp(
-          () => redis.set(HISTORY_ID_KEY, dbValue.toString()),
-          'restore history ID to Redis from DB'
-        );
-        logger.info({ historyId: dbValue }, 'Restored Gmail history ID from database fallback');
-        return dbValue;
-      }
+      return (await this.loadCheckpoint()) ?? 0;
     } catch (err) {
       logger.warn({ err }, 'Failed to read history ID from database fallback');
+      return 0;
     }
-
-    return 0;
   }
 
   /**
-   * Register Gmail push notifications and persist the returned historyId
-   * as our sync checkpoint. Combines emailOAuthService's watch-registration
-   * call with this service's own checkpoint persistence — lives here
-   * (rather than in email-oauth.service.ts) because storing the
-   * checkpoint is this service's job, not OAuth's.
+   * Checkpoint lookup that distinguishes "no checkpoint" (null) from "could
+   * not read it" (throws) — watch renewal must not initialise a checkpoint
+   * over one it merely failed to read.
+   */
+  private async loadCheckpoint(): Promise<number | null> {
+    // Try Redis first (fast path)
+    const redisValue = await redis.get(HISTORY_ID_KEY);
+    if (redisValue) {
+      const parsed = parseInt(redisValue, 10);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+
+    // Fallback to database
+    const setting = await prisma.systemSetting.findUnique({
+      where: { id: HISTORY_ID_SETTING_KEY },
+    });
+    if (!setting) return null;
+    const dbValue = parseInt(JSON.parse(setting.value), 10);
+    if (!Number.isFinite(dbValue) || dbValue <= 0) return null;
+    // Re-populate Redis for future fast lookups
+    await safeRedisOp(
+      () => redis.set(HISTORY_ID_KEY, dbValue.toString()),
+      'restore history ID to Redis from DB'
+    );
+    logger.info({ historyId: dbValue }, 'Restored Gmail history ID from database fallback');
+    return dbValue;
+  }
+
+  /**
+   * Register Gmail push notifications (watch).
+   *
+   * CHECKPOINT RULE (#7): the watch response's historyId is the mailbox's
+   * CURRENT position. Storing it on every renewal (every boot and every 6
+   * days) silently skipped everything between the old checkpoint and now
+   * — every deploy, and the mandatory restart after re-auth. It is now
+   * used only to INITIALISE a checkpoint that does not exist yet. An
+   * existing checkpoint is never moved by watch renewal; a checkpoint
+   * Gmail no longer recognises is repaired by the 404 gap path in
+   * processGmailNotification (recoverFromHistoryGap). If the checkpoint
+   * cannot be read, it is left alone.
    */
   async setupPushNotifications(topicName: string): Promise<{ historyId: string; expiration: string }> {
     const result = await emailOAuthService.setupPushNotifications(topicName);
-    await this.setHistoryId(parseInt(result.historyId, 10));
+    const watchHistoryId = parseInt(result.historyId, 10);
+
+    let existing: number | null;
+    try {
+      existing = await this.loadCheckpoint();
+    } catch (err) {
+      logger.warn(
+        { err, watchHistoryId },
+        'Gmail watch renewed but the history checkpoint could not be read — leaving it untouched',
+      );
+      return result;
+    }
+
+    if (existing !== null) {
+      logger.info(
+        { checkpoint: existing, watchHistoryId },
+        'Gmail watch renewed — keeping the existing history checkpoint (watch renewal never moves it)',
+      );
+    } else if (Number.isFinite(watchHistoryId) && watchHistoryId > 0) {
+      await this.setHistoryId(watchHistoryId);
+      logger.info({ historyId: watchHistoryId }, 'Initialised Gmail history checkpoint from watch registration');
+    }
     return result;
   }
 
@@ -147,6 +187,15 @@ export class EmailIngestService {
    * 1. Always fetch history from our last known point
    * 2. The individual message deduplication (processMessage) handles duplicates
    * 3. Update historyId to the ACTUAL latest from the API response, not the notification
+   *
+   * PAGINATION (#7): history.list returns at most one page per call. Every
+   * page is followed (nextPageToken), so a burst of more than one page of
+   * history records — our own sent mail counts, so a mailing blast does it
+   * — no longer silently skips everything past page 1. The checkpoint
+   * advances to the FIRST page's historyId (the mailbox position when the
+   * listing started): everything up to it has been listed. If the page cap
+   * is hit, it advances only to the last history record listed, and the
+   * next notification continues from there.
    */
   async processGmailNotification(
     emailAddress: string,
@@ -168,147 +217,81 @@ export class EmailIngestService {
 
       const startHistoryId = lastHistoryIdNum > 0 ? lastHistoryIdNum : notificationHistoryId - 1;
 
-      let history;
+      let firstPage;
       try {
-        // Fetch history since last processed
-        history = await gmail.users.history.list({
-          userId: 'me',
-          startHistoryId: startHistoryId.toString(),
-          historyTypes: ['messageAdded'],
-        });
-      } catch (historyError: any) {
-        const errorCode = historyError?.code || historyError?.status;
+        firstPage = await this.listHistoryPage(gmail, startHistoryId, undefined, traceId);
+      } catch (historyError: unknown) {
+        const errorCode = gmailErrorCode(historyError);
 
-        // Handle 401 - Token expired, try to refresh
-        // FIX T1: Use mutex to prevent concurrent refresh attempts
-        if (errorCode === 401) {
-          logger.warn(
-            { traceId, errorCode },
-            'Gmail API 401 - Token may be expired, attempting refresh'
-          );
-          try {
-            const oauth2Client = emailOAuthService.getOAuth2ClientRaw();
-            if (oauth2Client) {
-              // FIX T1: Acquire lock before refreshing to prevent race condition
-              const lockValue = await acquireTokenRefreshLock(traceId);
-              if (lockValue) {
-                try {
-                  await oauth2Client.getAccessToken();
-                } finally {
-                  await releaseTokenRefreshLock(lockValue);
-                }
-              }
-              // Retry the request once after refresh (or after waiting for another refresh)
-              history = await gmail.users.history.list({
-                userId: 'me',
-                startHistoryId: startHistoryId.toString(),
-                historyTypes: ['messageAdded'],
-              });
-            } else {
-              throw new Error('OAuth client not initialized');
-            }
-          } catch (refreshError) {
-            logger.error(
-              { traceId, refreshError },
-              'Failed to refresh Gmail token - manual reauthorization may be required'
-            );
-            throw new Error('Gmail token refresh failed - reauthorization required');
-          }
-        }
         // Handle 403 - Permission denied
-        else if (errorCode === 403) {
+        if (errorCode === 403) {
           logger.error(
-            { traceId, errorCode, errorMessage: historyError?.message },
+            { traceId, errorCode, errorMessage: (historyError as Error)?.message },
             'Gmail API 403 - Permission denied. Check OAuth scopes and account permissions.'
           );
           throw new Error('Gmail permission denied - check OAuth configuration');
         }
         // Handle 429 - Rate limit exceeded
-        else if (errorCode === 429) {
-          const retryAfter = historyError?.response?.headers?.['retry-after'] || 60;
-          // Do NOT advance the history checkpoint on 429.
-          // The previous fix (E6) skipped unprocessed messages by jumping to notificationHistoryId.
-          // Instead, keep the checkpoint unchanged so the next notification retries from
-          // the same position. Message-level deduplication prevents double-processing.
+        if (errorCode === 429) {
+          const retryAfter =
+            (historyError as { response?: { headers?: Record<string, string> } })?.response?.headers?.['retry-after'] || 60;
+          // Do NOT advance the history checkpoint on 429: the next
+          // notification retries from the same position; message-level
+          // deduplication prevents double-processing.
           logger.warn(
             { traceId, errorCode, retryAfterSeconds: retryAfter, currentCheckpoint: lastHistoryIdNum },
             'Gmail API rate limit - keeping checkpoint unchanged to avoid skipping messages'
           );
           return;
         }
-        // Handle 404 error - history ID doesn't exist (account switch or stale data)
-        // FIX M12: Detect history gaps and trigger full sync fallback
-        else if (errorCode === 404) {
-          logger.warn(
-            { traceId, startHistoryId, notificationHistoryId },
-            'History gap detected (404) - triggering partial sync of recent messages'
-          );
-
-          // Instead of just resetting, try to fetch recent messages directly
-          // This ensures we don't miss any messages during the gap
-          try {
-            const recentMessages = await gmail.users.messages.list({
-              userId: 'me',
-              maxResults: 50, // Fetch last 50 messages to cover the gap
-              q: 'newer_than:1d', // Only last 24 hours to limit scope
-            });
-
-            if (recentMessages.data.messages) {
-              logger.info(
-                { traceId, messageCount: recentMessages.data.messages.length },
-                'Processing recent messages to cover history gap'
-              );
-              for (const msg of recentMessages.data.messages) {
-                if (msg.id) {
-                  await processMessage(msg.id, traceId);
-                }
-              }
-            }
-          } catch (syncError) {
-            logger.error(
-              { traceId, error: syncError },
-              'Failed to sync recent messages after history gap - some emails may be missed'
-            );
-          }
-
-          // Reset to notification history ID and persist to both Redis and DB
-          await this.setHistoryId(notificationHistoryId);
+        // Handle 404 - the stored history ID is no longer valid (older than
+        // Gmail's history retention, or from another mailbox).
+        if (errorCode === 404) {
+          await this.recoverFromHistoryGap(gmail, traceId, notificationHistoryId, startHistoryId);
           return;
         }
-        // Unknown error - rethrow
-        else {
-          throw historyError;
-        }
+        throw historyError;
       }
 
-      // Get the actual latest historyId from the API response
-      // This is the correct value to store, NOT the notification's historyId
-      const actualLatestHistoryId = history.data.historyId
-        ? parseInt(history.data.historyId, 10)
+      // The mailbox's position when the listing started. Everything up to
+      // it is covered once every page has been read.
+      const snapshotHistoryId = firstPage.data.historyId
+        ? parseInt(firstPage.data.historyId, 10)
         : notificationHistoryId;
 
-      if (!history.data.history) {
-        logger.info({ traceId }, 'No new messages in history');
-        // Use MAX to ensure we only move forward, never backward
-        if (actualLatestHistoryId > lastHistoryIdNum) {
-          await this.setHistoryId(actualLatestHistoryId);
-        }
-        return;
-      }
-
-      // Collect unique messageIds first — Gmail history can contain the same
-      // messageId in multiple history records (e.g. messageAdded + labelAdded).
-      // Deduplicating here avoids unnecessary Redis lock round-trips in processMessage.
+      // Collect unique messageIds across ALL pages — Gmail history can contain
+      // the same messageId in multiple history records (e.g. messageAdded +
+      // labelAdded), and deduplicating avoids redundant lock round-trips.
       const seenMessageIds = new Set<string>();
-      for (const historyRecord of history.data.history) {
-        if (historyRecord.messagesAdded) {
-          for (const messageAdded of historyRecord.messagesAdded) {
+      let page = firstPage;
+      let pages = 1;
+      let lastRecordId = 0;
+      let truncated = false;
+      for (;;) {
+        for (const historyRecord of page.data.history ?? []) {
+          const recordId = historyRecord.id ? parseInt(historyRecord.id, 10) : NaN;
+          if (Number.isFinite(recordId) && recordId > lastRecordId) lastRecordId = recordId;
+          for (const messageAdded of historyRecord.messagesAdded ?? []) {
             const messageId = messageAdded.message?.id;
-            if (messageId) {
-              seenMessageIds.add(messageId);
-            }
+            if (messageId) seenMessageIds.add(messageId);
           }
         }
+        const nextPageToken = page.data.nextPageToken;
+        if (!nextPageToken) break;
+        if (pages >= GMAIL_SYNC.MAX_HISTORY_PAGES) {
+          truncated = true;
+          logger.warn(
+            { traceId, pages, lastRecordId, maxPages: GMAIL_SYNC.MAX_HISTORY_PAGES },
+            'Gmail history listing hit the page cap — processing what was listed; the next notification continues from here'
+          );
+          break;
+        }
+        page = await this.listHistoryPage(gmail, startHistoryId, nextPageToken, traceId);
+        pages++;
+      }
+
+      if (seenMessageIds.size === 0) {
+        logger.info({ traceId, pages }, 'No new messages in history');
       }
 
       // Process each unique message
@@ -316,12 +299,13 @@ export class EmailIngestService {
         await processMessage(messageId, traceId);
       }
 
-      // Update to the actual latest history ID from the API response
-      // Only move forward to prevent re-processing on out-of-order notifications
-      if (actualLatestHistoryId > lastHistoryIdNum) {
-        await this.setHistoryId(actualLatestHistoryId);
+      // Advance the checkpoint (forward only). When truncated, only as far
+      // as the last history record actually listed.
+      const newCheckpoint = truncated && lastRecordId > 0 ? lastRecordId : snapshotHistoryId;
+      if (newCheckpoint > lastHistoryIdNum) {
+        await this.setHistoryId(newCheckpoint);
         logger.info(
-          { traceId, previousHistoryId: lastHistoryIdNum, newHistoryId: actualLatestHistoryId },
+          { traceId, previousHistoryId: lastHistoryIdNum, newHistoryId: newCheckpoint, pages, messages: seenMessageIds.size },
           'Updated history ID checkpoint'
         );
       }
@@ -329,6 +313,150 @@ export class EmailIngestService {
       logger.error({ error, traceId }, 'Failed to process Gmail notification');
       throw error;
     }
+  }
+
+  /**
+   * One page of `users.history.list`. A 401 triggers one mutex-guarded,
+   * time-bounded token refresh and a single retry (FIX T1); every other
+   * error propagates to the caller.
+   */
+  private async listHistoryPage(
+    gmail: gmail_v1.Gmail,
+    startHistoryId: number,
+    pageToken: string | undefined,
+    traceId: string,
+  ) {
+    const params = {
+      userId: 'me',
+      startHistoryId: startHistoryId.toString(),
+      historyTypes: ['messageAdded'],
+      maxResults: GMAIL_SYNC.HISTORY_PAGE_SIZE,
+      ...(pageToken ? { pageToken } : {}),
+    };
+    try {
+      return await gmail.users.history.list(params);
+    } catch (err) {
+      if (gmailErrorCode(err) !== 401) throw err;
+      logger.warn({ traceId }, 'Gmail API 401 - Token may be expired, attempting refresh');
+      try {
+        const oauth2Client = emailOAuthService.getOAuth2ClientRaw();
+        if (!oauth2Client) throw new Error('OAuth client not initialized');
+        // Acquire lock before refreshing to prevent concurrent refreshes
+        const lockValue = await acquireTokenRefreshLock(traceId);
+        if (lockValue) {
+          try {
+            await refreshAccessToken(oauth2Client, 'history-list-token-refresh');
+          } finally {
+            await releaseTokenRefreshLock(lockValue);
+          }
+        }
+        // Retry the request once after refresh (or after waiting for another refresh)
+        return await gmail.users.history.list(params);
+      } catch (refreshError) {
+        logger.error(
+          { traceId, refreshError },
+          'Failed to refresh Gmail token - manual reauthorization may be required'
+        );
+        throw new Error('Gmail token refresh failed - reauthorization required');
+      }
+    }
+  }
+
+  /**
+   * History gap (404 on history.list): the stored checkpoint is no longer
+   * valid, so the history API cannot say what was missed.
+   *
+   * Recovery lists every message received since the checkpoint was last
+   * written (its SystemSetting row's updatedAt, minus a margin), clamped
+   * to [GAP_RECOVERY_MIN_LOOKBACK_DAYS, GAP_RECOVERY_MAX_LOOKBACK_DAYS]
+   * and paginated up to GAP_RECOVERY_MAX_MESSAGES — it used to be only
+   * the 50 newest messages of the last day. Messages are replayed oldest
+   * first; the dedup layer makes already-processed ones a no-op.
+   *
+   * The new checkpoint is the mailbox's current historyId from Gmail's
+   * own profile, snapshotted BEFORE the listing so anything arriving
+   * during recovery is picked up by the next history.list — never the
+   * notification's historyId, which is only as trustworthy as the push
+   * that carried it. If the listing fails the checkpoint is left as it is
+   * and the error propagates, so the failed-notification retry re-runs
+   * the recovery instead of skipping the gap.
+   */
+  private async recoverFromHistoryGap(
+    gmail: gmail_v1.Gmail,
+    traceId: string,
+    notificationHistoryId: number,
+    staleHistoryId: number,
+  ): Promise<void> {
+    let resumeHistoryId: number | null = null;
+    try {
+      const profile = await gmail.users.getProfile({ userId: 'me' });
+      const parsed = profile.data.historyId ? parseInt(profile.data.historyId, 10) : NaN;
+      if (Number.isFinite(parsed) && parsed > 0) resumeHistoryId = parsed;
+    } catch (err) {
+      logger.warn({ traceId, err }, 'History gap: could not read the mailbox historyId from the Gmail profile');
+    }
+
+    const sinceMs = await this.gapRecoveryStartMs();
+    logger.warn(
+      { traceId, staleHistoryId, notificationHistoryId, since: new Date(sinceMs).toISOString() },
+      'History gap detected (404) - recovering every message received since the last checkpoint'
+    );
+
+    const messageIds: string[] = [];
+    let pageToken: string | undefined;
+    do {
+      const response = await gmail.users.messages.list({
+        userId: 'me',
+        // `after:` takes epoch seconds; our own sent mail is skipped
+        // downstream anyway, so leave it out of the listing.
+        q: `after:${Math.floor(sinceMs / 1000)} -from:me`,
+        maxResults: GMAIL_SYNC.GAP_RECOVERY_PAGE_SIZE,
+        ...(pageToken ? { pageToken } : {}),
+      });
+      for (const msg of response.data.messages ?? []) {
+        if (msg.id) messageIds.push(msg.id);
+      }
+      pageToken = response.data.nextPageToken ?? undefined;
+    } while (pageToken && messageIds.length < GMAIL_SYNC.GAP_RECOVERY_MAX_MESSAGES);
+
+    if (pageToken) {
+      logger.error(
+        { traceId, listed: messageIds.length, cap: GMAIL_SYNC.GAP_RECOVERY_MAX_MESSAGES },
+        'History gap recovery hit its message cap — older messages in the gap are left to the missed-message scanner'
+      );
+    }
+
+    // messages.list is newest first; replay in arrival order.
+    const toProcess = messageIds.slice(0, GMAIL_SYNC.GAP_RECOVERY_MAX_MESSAGES).reverse();
+    logger.info({ traceId, messageCount: toProcess.length }, 'Processing messages to cover history gap');
+    for (const messageId of toProcess) {
+      try {
+        await processMessage(messageId, traceId);
+      } catch (err) {
+        logger.warn({ traceId, messageId, err }, 'History gap recovery: message failed — continuing');
+      }
+    }
+
+    await this.setHistoryId(resumeHistoryId ?? notificationHistoryId);
+  }
+
+  /** Start of the gap-recovery window (epoch ms); see recoverFromHistoryGap. */
+  private async gapRecoveryStartMs(): Promise<number> {
+    const now = Date.now();
+    const earliest = now - GMAIL_SYNC.GAP_RECOVERY_MAX_LOOKBACK_DAYS * DAY_MS;
+    const latest = now - GMAIL_SYNC.GAP_RECOVERY_MIN_LOOKBACK_DAYS * DAY_MS;
+    let lastCheckpointAt: number | null = null;
+    try {
+      const row = await prisma.systemSetting.findUnique({
+        where: { id: HISTORY_ID_SETTING_KEY },
+        select: { updatedAt: true },
+      });
+      if (row?.updatedAt) lastCheckpointAt = row.updatedAt.getTime() - GMAIL_SYNC.GAP_RECOVERY_MARGIN_MS;
+    } catch (err) {
+      logger.warn({ err }, 'History gap: could not read when the checkpoint was last written — using the maximum lookback');
+    }
+    if (lastCheckpointAt === null) return earliest;
+    return Math.min(latest, Math.max(earliest, lastCheckpointAt));
   }
 
   // ─── Polling ────────────────────────────────────────────────────────
@@ -359,7 +487,7 @@ export class EmailIngestService {
         () => gmail.users.messages.list({
           userId: 'me',
           q: 'is:unread in:inbox newer_than:3d',
-          maxResults: 20,
+          maxResults: GMAIL_SYNC.POLL_MAX_RESULTS,
         })
       );
 
@@ -383,7 +511,7 @@ export class EmailIngestService {
         () => gmail.users.messages.list({
           userId: 'me',
           q: 'in:inbox newer_than:1d',
-          maxResults: 20,
+          maxResults: GMAIL_SYNC.POLL_MAX_RESULTS,
         })
       );
 
@@ -519,12 +647,28 @@ export class EmailIngestService {
 
   /**
    * Check a specific Gmail thread for unprocessed replies.
-   * Used by the stale check service to recover missed therapist replies
-   * that fell outside the normal polling window.
+   * Used by the missed-message scanner, the human-control release replay
+   * and the chase pre-send check to recover replies that fell outside the
+   * normal polling window.
    *
-   * Returns the number of messages successfully processed.
+   * AGE GUARD (E1): messages whose Gmail `internalDate` is older than
+   * EMAIL_PROCESSING.SCANNER_MAX_MESSAGE_AGE_DAYS are never re-delivered.
+   * "Unprocessed" is decided from the DB dedup table alone, and its rows
+   * expire (DATA_RETENTION.PROCESSED_MESSAGE_RETENTION_DAYS) — without the
+   * guard a long-running appointment's first replies were replayed to the
+   * agent as NEW emails once their rows aged out (or after a Redis flush).
+   * `options.forceMessageIds` (admin force-reprocess) bypasses the guard
+   * for exactly those ids.
+   *
+   * Returns the number of messages successfully processed. A thread that no
+   * longer exists (404) counts as 0; any other Gmail failure THROWS so the
+   * caller (the scanner's failure count, the admin route) sees it.
    */
-  async checkThreadForUnprocessedReplies(threadId: string, traceId: string): Promise<number> {
+  async checkThreadForUnprocessedReplies(
+    threadId: string,
+    traceId: string,
+    options: { forceMessageIds?: string[] } = {},
+  ): Promise<number> {
     const gmail = await emailOAuthService.ensureGmailClient();
 
     try {
@@ -536,6 +680,9 @@ export class EmailIngestService {
 
       const messages = threadResponse.data.messages || [];
       let processed = 0;
+      const forced = new Set(options.forceMessageIds ?? []);
+      const cutoffMs = Date.now() - SCANNER_MAX_MESSAGE_AGE_DAYS * 24 * 60 * 60 * 1000;
+      let skippedTooOld = 0;
 
       // FIX: Collect all non-SENT message IDs from the thread, then cross-reference
       // against the processedGmailMessage table to find truly unprocessed messages.
@@ -552,7 +699,23 @@ export class EmailIngestService {
         // Skip messages in SENT (our outgoing emails)
         if (labels.includes('SENT') && !labels.includes('INBOX')) continue;
 
+        // Age guard. Gmail's internalDate is an epoch-ms STRING — parse
+        // with Number(), not new Date(). Missing/unparseable → no guard
+        // (Gmail always sends it; recovery errs on processing).
+        const internalMs = parseGmailInternalDate(message.internalDate);
+        if (internalMs !== null && internalMs < cutoffMs && !forced.has(message.id)) {
+          skippedTooOld++;
+          continue;
+        }
+
         candidateMessages.push({ id: message.id, labels });
+      }
+
+      if (skippedTooOld > 0) {
+        logger.debug(
+          { traceId, threadId, skippedTooOld, maxAgeDays: SCANNER_MAX_MESSAGE_AGE_DAYS },
+          'Skipped messages older than the recovery age guard',
+        );
       }
 
       if (candidateMessages.length === 0) {
@@ -586,8 +749,11 @@ export class EmailIngestService {
         logger.warn({ traceId, threadId }, 'Thread not found during stale recovery check');
         return 0;
       }
+      // Rethrow everything else (O7). Returning 0 here made the scanner
+      // count a failed Gmail fetch as a clean "nothing to recover", so it
+      // reported healthy and wrote its heartbeat while every fetch failed.
       logger.error({ traceId, threadId, error }, 'Failed to check thread for unprocessed replies');
-      return 0;
+      throw error;
     }
   }
 
@@ -815,32 +981,11 @@ export class EmailIngestService {
         'Force-clearing processed records for specific messages'
       );
 
-      // Clear from database
-      const { count: dbCleared } = await prisma.processedGmailMessage.deleteMany({
-        where: { id: { in: forceMessageIds } },
-      });
+      // Clear every dedup layer (DB row, Redis ZSET/lock/unmatched keys)
+      // and reset the DB retry budgets so a previously abandoned message
+      // gets a fresh attempt budget — shared with the bulk admin retry.
+      const { processedDeleted: dbCleared } = await clearMessageDedupState(forceMessageIds, traceId);
       cleared = dbCleared;
-
-      // Clear from Redis (best effort): dedup set and locks. All concurrent.
-      await Promise.all(
-        forceMessageIds.flatMap((messageId) => [
-          redis.zrem(PROCESSED_MESSAGES_KEY, messageId).catch(() => {}),
-          redis.del(`${MESSAGE_LOCK_PREFIX}${messageId}`).catch(() => {}),
-          redis.del(`${UNMATCHED_ATTEMPT_PREFIX}${messageId}`).catch(() => {}),
-        ])
-      );
-
-      // Reset DB-tracked retry counters so users get a fresh attempt budget
-      // when they explicitly recover messages — otherwise a previously
-      // abandoned message would re-abandon on its first failed retry.
-      try {
-        await Promise.all([
-          prisma.unmatchedEmailAttempt.deleteMany({ where: { id: { in: forceMessageIds } } }),
-          prisma.messageProcessingFailure.deleteMany({ where: { id: { in: forceMessageIds } } }),
-        ]);
-      } catch (err) {
-        logger.warn({ traceId, err }, 'Failed to clear attempt tracking records during force reprocess');
-      }
 
       logger.info(
         { traceId, threadId, dbCleared, forceCount: forceMessageIds.length },
@@ -848,8 +993,12 @@ export class EmailIngestService {
       );
     }
 
-    // Now run standard thread recovery — processes only messages NOT in processedGmailMessage
-    const reprocessed = await this.checkThreadForUnprocessedReplies(threadId, traceId);
+    // Now run standard thread recovery — processes only messages NOT in
+    // processedGmailMessage. Explicitly force-selected ids bypass the
+    // recovery age guard (the admin chose them); nothing else does.
+    const reprocessed = await this.checkThreadForUnprocessedReplies(threadId, traceId, {
+      forceMessageIds,
+    });
 
     logger.info(
       { traceId, threadId, cleared, reprocessed },

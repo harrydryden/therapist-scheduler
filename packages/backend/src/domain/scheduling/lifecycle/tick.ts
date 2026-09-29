@@ -7,6 +7,7 @@
  * multiple instances racing on the same appointment is safe.
  */
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../../utils/database';
 import { logger } from '../../../utils/logger';
 import { LockedPeriodicService } from '../../../utils/locked-periodic-service';
@@ -48,20 +49,30 @@ class AppointmentLifecycleTickService extends LockedPeriodicService<TickResult> 
   protected async tick(): Promise<TickResult> {
     const sessionEndBuffer = new Date(Date.now() - SESSION_END_BUFFER_MS);
 
+    // Eligibility beyond `status = confirmed`. Used BOTH to select rows and
+    // as the atomic precondition on each row's promotion write: a
+    // reschedule (initiate_reschedule) or a re-confirmation to a new future
+    // datetime (mark_scheduling_complete) that lands between this read and
+    // the write must make the write a no-op, not promote a future session
+    // to session_held (lifecycle audit L12).
+    const eligibility = {
+      // A row mid-reschedule has abandoned its booked slot; asserting
+      // session_held off that slot would be wrong even when a stale
+      // confirmedDateTimeParsed survived (rows written before the
+      // reschedule-entry fields were unified cleared only the display
+      // string). The reschedule either finalises with a new datetime
+      // (clearing this flag) or the stale-check watchdog surfaces it.
+      reschedulingInProgress: false,
+      confirmedDateTimeParsed: {
+        not: null,
+        lt: sessionEndBuffer,
+      },
+    } satisfies Prisma.AppointmentRequestWhereInput;
+
     const appointments = await prisma.appointmentRequest.findMany({
       where: {
         status: APPOINTMENT_STATUS.CONFIRMED,
-        // A row mid-reschedule has abandoned its booked slot; asserting
-        // session_held off that slot would be wrong even when a stale
-        // confirmedDateTimeParsed survived (rows written before the
-        // reschedule-entry fields were unified cleared only the display
-        // string). The reschedule either finalises with a new datetime
-        // (clearing this flag) or the stale-check watchdog surfaces it.
-        reschedulingInProgress: false,
-        confirmedDateTimeParsed: {
-          not: null,
-          lt: sessionEndBuffer,
-        },
+        ...eligibility,
       },
       // meetingLinkConfirmedAt is the truth gate: null means we never saw an
       // actual meeting link for this booking, so promoting it to session_held
@@ -81,10 +92,14 @@ class AppointmentLifecycleTickService extends LockedPeriodicService<TickResult> 
         const result = await transitionToSessionHeld({
           appointmentId: apt.id,
           source: 'system',
+          atomicWhere: eligibility,
         });
         return {
           id: apt.id,
-          skipped: result.skipped,
+          // Idempotent skip (already session_held) or atomic skip (the
+          // eligibility above no longer held at write time) — either way
+          // nothing was promoted this tick.
+          skipped: Boolean(result.skipped || result.atomicSkipped),
           meetingLinkConfirmed: apt.meetingLinkConfirmedAt != null,
           confirmedDateTime: apt.confirmedDateTime,
         };

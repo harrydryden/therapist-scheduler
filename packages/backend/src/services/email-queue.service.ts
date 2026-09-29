@@ -4,29 +4,122 @@
  * Replaces the database-polled PendingEmail queue with a proper message queue
  * backed by Redis. Provides:
  * - Automatic retry with the same exponential backoff schedule (1m, 5m, 15m, 1h, 4h)
- * - Dead letter queue for permanently failed jobs
  * - Concurrency control (one email at a time to respect Gmail rate limits)
  * - Job deduplication
  *
- * The PendingEmail DB table is kept as an audit trail: records are created when
- * jobs are enqueued and updated when they complete or fail permanently.
+ * The PendingEmail DB row is the source of truth. Every send — from this
+ * worker or from the DB poller fallback — goes through
+ * core/email/outbound/queue.ts's `attemptPendingEmailSend`, which claims
+ * the row atomically (pending → sending) before sending, so the two
+ * consumers can no longer both send the same row. The row's retryCount
+ * decides retry vs abandonment; an abandoned email raises a deduped Slack
+ * alert (registered below).
  */
 
+import { createHash } from 'crypto';
 import { Queue, Worker, Job, QueueEvents } from 'bullmq';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { prisma } from '../utils/database';
 import { redis } from '../utils/redis';
 import { EMAIL, PENDING_EMAIL_LOCK } from '../constants';
-import { sendEmail, processPendingEmails } from '../core/email';
+import { processPendingEmails } from '../core/email';
+import {
+  attemptPendingEmailSend,
+  registerEmailAbandonedNotifier,
+  retryDelayMs,
+  type EmailAbandonedEvent,
+} from '../core/email/outbound/queue';
+import { slackNotificationService } from './slack-notification.service';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import type { LockedTaskContext } from '../utils/locked-task-runner';
 
-// Redis keys for reliability features
-const SEND_GUARD_PREFIX = 'email:send-guard:'; // Idempotent send guard
-const SEND_GUARD_TTL_SECONDS = 5 * 3600; // 5 hours (must exceed max retry backoff of 4h)
+/**
+ * Slack alert for a permanently abandoned outbound email (#9). Deduped
+ * per appointment for 24h under the 'email-abandoned' group, so an outage
+ * that abandons a whole conversation's mail raises one alert, not one per
+ * email. Exported for tests.
+ */
+export async function notifyEmailAbandoned(event: EmailAbandonedEvent): Promise<void> {
+  await slackNotificationService.sendAlert({
+    title: 'Outbound Email Abandoned',
+    severity: 'high',
+    appointmentId: event.appointmentId ?? undefined,
+    dedupGroup: 'email-abandoned',
+    details:
+      `An outbound email could not be sent after *${event.attempts}* attempts and has been abandoned — ` +
+      'the recipient has NOT received it. Check Gmail OAuth / send-quota health, then retry it from the ' +
+      'admin queue view or follow up manually.\n\n' +
+      `\`\`\`${event.errorMessage.slice(0, 500)}\`\`\``,
+    additionalFields: {
+      'Pending email ID': event.pendingEmailId,
+      'Subject': event.subject.slice(0, 120),
+    },
+  });
+}
+
+registerEmailAbandonedNotifier(notifyEmailAbandoned);
+
 const WAL_KEY = 'email:write-ahead-log'; // Write-ahead log for DB downtime
 const WAL_ENTRY_TTL_SECONDS = 86400; // 24 hours
+
+interface WalEntry {
+  id?: string;
+  to: string;
+  subject: string;
+  body: string;
+  threadId?: string;
+  appointmentId?: string;
+  createdAt?: string;
+}
+
+/** Parse a WAL entry; null if it is not JSON or lacks the fields a send needs. */
+function parseWalEntry(entryStr: string): WalEntry | null {
+  try {
+    const parsed = JSON.parse(entryStr) as Partial<WalEntry> | null;
+    if (
+      !parsed ||
+      typeof parsed.to !== 'string' ||
+      typeof parsed.subject !== 'string' ||
+      typeof parsed.body !== 'string'
+    ) {
+      return null;
+    }
+    return parsed as WalEntry;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic PendingEmail id for a WAL entry (UUID-formatted SHA-256 of
+ * the entry's own id, or of the raw entry for legacy entries without one).
+ * Makes WAL recovery idempotent: recovering the same entry twice collides
+ * on the primary key instead of creating a duplicate email.
+ */
+function walEntryPendingEmailId(entry: WalEntry, entryStr: string): string {
+  const bytes = createHash('sha256')
+    .update(`email-wal:${entry.id ?? entryStr}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50; // version nibble (name-based)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Remove one occurrence of exactly this entry (LREM), wherever it now sits. */
+async function removeWalEntry(entryStr: string): Promise<void> {
+  await redis.eval("return redis.call('LREM', KEYS[1], 1, ARGV[1])", 1, WAL_KEY, entryStr);
+}
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { code?: unknown }).code === 'P2002'
+  );
+}
 
 // ============================================
 // Types
@@ -49,16 +142,6 @@ export interface EmailJobData {
 
 const QUEUE_NAME = 'email-send';
 
-// Map the existing backoff schedule to BullMQ's format
-// Original: 1min, 5min, 15min, 1h, 4h
-// BullMQ custom backoff receives attempt number (1-indexed)
-function getBackoffDelay(attemptsMade: number): number {
-  const idx = Math.min(attemptsMade - 1, EMAIL.RETRY_DELAYS_MS.length - 1);
-  const baseDelay = EMAIL.RETRY_DELAYS_MS[idx];
-  // 10% jitter to prevent thundering herd
-  const jitter = Math.floor(baseDelay * 0.1 * Math.random());
-  return baseDelay + jitter;
-}
 
 // ============================================
 // Queue & Worker
@@ -111,7 +194,8 @@ class EmailQueueService {
         connection,
         concurrency: 1, // One at a time to respect Gmail rate limits
         settings: {
-          backoffStrategy: (attemptsMade: number) => getBackoffDelay(attemptsMade),
+          // Same schedule the DB poller uses (1m, 5m, 15m, 1h, 4h + jitter).
+          backoffStrategy: (attemptsMade: number) => retryDelayMs(attemptsMade),
         },
       }
     );
@@ -120,27 +204,14 @@ class EmailQueueService {
       logger.debug({ jobId: job.id, to: job.data.to }, 'Email job completed');
     });
 
+    // The DB row's retry / abandon state is written inside processJob by
+    // the code that holds the send claim; this handler only logs.
     this.worker.on('failed', (job: Job<EmailJobData> | undefined, err: Error) => {
       if (!job) return;
-      const isFinal = (job.attemptsMade ?? 0) >= EMAIL.MAX_RETRIES;
-      if (isFinal) {
-        logger.error(
-          { jobId: job.id, to: job.data.to, attempts: job.attemptsMade, err: err.message },
-          'Email permanently failed — moved to dead letter'
-        );
-        this.handlePermanentFailure(job, err.message).catch((e) =>
-          logger.error({ err: e }, 'Failed to handle permanent email failure')
-        );
-      } else {
-        logger.warn(
-          { jobId: job.id, to: job.data.to, attempt: job.attemptsMade, err: err.message },
-          `Email send failed — will retry (${job.attemptsMade}/${EMAIL.MAX_RETRIES})`
-        );
-        // Update the DB record with the retry count
-        this.updateRetryState(job, err.message).catch((e) =>
-          logger.error({ err: e }, 'Failed to update pending email retry state')
-        );
-      }
+      logger.warn(
+        { jobId: job.id, attempt: job.attemptsMade, maxAttempts: EMAIL.MAX_RETRIES, err: err.message },
+        'Email job attempt failed — retry state recorded on the pending_emails row',
+      );
     });
 
     this.worker.on('error', (err: Error) => {
@@ -250,162 +321,26 @@ class EmailQueueService {
   }
 
   /**
-   * Process a single email job.
+   * Process a single email job via the shared claim-then-send path.
+   *
+   * Throws only when the attempt failed and the row was put back to
+   * `pending` for a retry, so BullMQ schedules its own retry. Everything
+   * else (sent, skipped, abandoned, or the row not claimable because it
+   * was already sent / is being sent by the DB poller) completes the job.
    */
   private async processJob(job: Job<EmailJobData>): Promise<void> {
-    const { pendingEmailId, to, subject, body, threadId } = job.data;
+    const { pendingEmailId, threadId } = job.data;
+    const result = await attemptPendingEmailSend(pendingEmailId, `bullmq:${job.id}`, threadId);
 
-    // Resolve thread ID from appointment if not provided directly
-    let resolvedThreadId = threadId;
-    if (!resolvedThreadId && job.data.appointmentId) {
-      const apt = await prisma.appointmentRequest.findUnique({
-        where: { id: job.data.appointmentId },
-        select: { gmailThreadId: true, therapistGmailThreadId: true, therapistEmail: true },
-      });
-      if (apt) {
-        const isTherapistEmail = to.toLowerCase() === apt.therapistEmail.toLowerCase();
-        resolvedThreadId = (isTherapistEmail
-          ? apt.therapistGmailThreadId
-          : apt.gmailThreadId) ?? undefined;
-      }
-    }
-
-    // Database status check (authoritative) — short-circuits when the
-    // polling fallback already sent this email.
-    //
-    // The Redis send-guard below is an OPTIMIZATION, not the source of
-    // truth. Critical scenario: during a Redis outage, the polling
-    // fallback (`processPendingEmails`) sends successfully and marks
-    // the DB row `status='sent'` but cannot write the send-guard
-    // (Redis is down). When Redis recovers and BullMQ processes the
-    // delayed job for the same row, the guard isn't there, so without
-    // this DB check BullMQ would send again — a real duplicate send.
-    //
-    // The DB read is cheap (~1ms) and is on every job, but `processJob`
-    // is concurrency: 1 so this isn't a hot path.
-    const dbRow = await prisma.pendingEmail.findUnique({
-      where: { id: pendingEmailId },
-      select: { status: true },
-    });
-    if (!dbRow) {
-      logger.warn(
-        { jobId: job.id, pendingEmailId },
-        'BullMQ job references a pendingEmail that no longer exists — skipping'
-      );
-      return;
-    }
-    if (dbRow.status === 'sent' || dbRow.status === 'abandoned') {
+    if (result.outcome === 'not-claimed') {
       logger.info(
-        { jobId: job.id, pendingEmailId, status: dbRow.status },
-        `BullMQ saw pendingEmail already in terminal state '${dbRow.status}' — skipping (likely sent by polling fallback during a Redis outage)`
+        { jobId: job.id, pendingEmailId },
+        'BullMQ job skipped — pendingEmail already sent, abandoned, deleted, or claimed by the polling fallback'
       );
       return;
     }
-
-    // Idempotent send guard: faster than the DB check above when Redis
-    // is healthy. Catches the narrower case of "Gmail sent successfully
-    // but DB update failed" — on retry, the guard prevents the duplicate
-    // send before the failed DB row gets re-read.
-    const sendGuardKey = `${SEND_GUARD_PREFIX}${pendingEmailId}`;
-    try {
-      const alreadySent = await redis.get(sendGuardKey);
-      if (alreadySent) {
-        logger.info(
-          { jobId: job.id, pendingEmailId },
-          'Send guard: email already sent (Redis guard exists) — skipping send, updating DB only'
-        );
-        await prisma.pendingEmail.update({
-          where: { id: pendingEmailId },
-          data: { status: 'sent', sentAt: new Date() },
-        });
-        return;
-      }
-    } catch {
-      // Redis unavailable for guard check — proceed with send.
-      // The DB status check above is the authoritative guard against
-      // duplicates; the Redis guard is just an optimization.
-    }
-
-    // Use top-level import (circular dependency resolved via event bus architecture)
-    await sendEmail({
-      to,
-      subject,
-      body,
-      threadId: resolvedThreadId,
-    });
-
-    // Mark send guard in Redis BEFORE DB update.
-    // If the DB update fails, the guard prevents duplicate sends on retry.
-    try {
-      await redis.set(sendGuardKey, 'sent', 'EX', SEND_GUARD_TTL_SECONDS);
-    } catch {
-      // Redis unavailable — proceed without guard (DB update is still our primary record)
-    }
-
-    // Mark as sent in audit trail
-    await prisma.pendingEmail.update({
-      where: { id: pendingEmailId },
-      data: { status: 'sent', sentAt: new Date() },
-    });
-  }
-
-  /**
-   * Update DB retry state when a job fails (non-final).
-   *
-   * `nextRetryAt` is set to the BullMQ-computed backoff delay so the
-   * polling fallback's `WHERE nextRetryAt <= now` filter respects the
-   * exponential backoff. Previously this only set
-   * retryCount/lastRetryAt, leaving nextRetryAt null — and the polling
-   * fallback's null-allowed filter would then re-pick the row up on
-   * its next 2-minute tick, sending right away despite BullMQ having
-   * scheduled the next retry hours out. The two paths now agree on
-   * when this row is eligible for the next attempt.
-   */
-  private async updateRetryState(job: Job<EmailJobData>, errorMessage: string): Promise<void> {
-    const attemptsMade = job.attemptsMade ?? 0;
-    const nextRetryDelayMs = getBackoffDelay(attemptsMade);
-    const nextRetryAt = new Date(Date.now() + nextRetryDelayMs);
-    await prisma.pendingEmail.update({
-      where: { id: job.data.pendingEmailId },
-      data: {
-        errorMessage,
-        retryCount: attemptsMade,
-        lastRetryAt: new Date(),
-        nextRetryAt,
-      },
-    });
-  }
-
-  /**
-   * Handle permanent failure (all retries exhausted).
-   * Marks DB record as abandoned and notifies admins via appointment notes.
-   */
-  private async handlePermanentFailure(job: Job<EmailJobData>, errorMessage: string): Promise<void> {
-    const { pendingEmailId, to, subject, appointmentId } = job.data;
-    const now = new Date();
-
-    await prisma.pendingEmail.update({
-      where: { id: pendingEmailId },
-      data: {
-        status: 'abandoned',
-        errorMessage: `Abandoned after ${job.attemptsMade} attempts: ${errorMessage}`,
-        retryCount: job.attemptsMade ?? 0,
-        lastRetryAt: now,
-      },
-    });
-
-    // Propagate to appointment for admin visibility
-    // Uses atomic SQL append to prevent note loss under concurrent updates
-    if (appointmentId) {
-      const note = `\n\n[EMAIL ABANDONED - ${now.toISOString()}]\nTo: ${to}\nSubject: ${subject.slice(0, 100)}${subject.length > 100 ? '...' : ''}\nFailed after ${job.attemptsMade} retries: ${errorMessage.slice(0, 200)}`;
-
-      await prisma.$executeRaw`
-        UPDATE "appointment_requests"
-        SET "notes" = COALESCE("notes", '') || ${note},
-            "conversation_stall_alert_at" = ${now},
-            "conversation_stall_acknowledged" = false
-        WHERE "id" = ${appointmentId}
-      `;
+    if (result.outcome === 'retrying') {
+      throw result.error;
     }
   }
 
@@ -413,6 +348,20 @@ class EmailQueueService {
    * Recover emails from the Redis write-ahead log (WAL).
    * Called on startup and periodically to sync any emails that were
    * buffered in Redis when the database was unavailable.
+   *
+   * Peek → insert → remove, never pop-first. The head entry is only
+   * removed from the WAL after its PendingEmail row is committed, so a
+   * failed insert (typically: the DB is still down) leaves it — and every
+   * entry behind it — in place for the next recovery run instead of
+   * dropping the email (lifecycle audit L13).
+   *
+   * Duplicate-safety: the PendingEmail id is derived deterministically from
+   * the WAL entry, so re-inserting an entry that was already recovered (a
+   * crash between insert and removal, or two recoverers — server startup
+   * and the stale-check tick — peeking the same head concurrently) hits the
+   * primary key instead of creating a second row, and is treated as
+   * "already recovered". Only the recoverer whose insert created the row
+   * enqueues it.
    *
    * Returns the number of recovered emails.
    */
@@ -429,15 +378,29 @@ class EmailQueueService {
       const maxEntries = Math.min(walLength, 100);
 
       for (let i = 0; i < maxEntries; i++) {
-        const entryStr = await redis.lpop(WAL_KEY);
+        // Peek, don't pop.
+        const [entryStr] = await redis.lrange(WAL_KEY, 0, 0);
         if (!entryStr) break;
 
-        try {
-          const entry = JSON.parse(entryStr);
+        const entry = parseWalEntry(entryStr);
+        if (!entry) {
+          // Genuinely unparseable — retrying can never succeed, and leaving
+          // it at the head would block every entry behind it. Drop it.
+          logger.error(
+            { entry: entryStr.slice(0, 200) },
+            'Dropping corrupt write-ahead log entry (unparseable or missing to/subject/body)'
+          );
+          await removeWalEntry(entryStr);
+          continue;
+        }
 
+        const pendingEmailId = walEntryPendingEmailId(entry, entryStr);
+        let created = false;
+        try {
           // Create the DB record that was missed during downtime
-          const pendingEmail = await prisma.pendingEmail.create({
+          await prisma.pendingEmail.create({
             data: {
+              id: pendingEmailId,
               toEmail: entry.to,
               subject: entry.subject,
               body: entry.body,
@@ -445,36 +408,53 @@ class EmailQueueService {
               appointmentId: entry.appointmentId || null,
             },
           });
-
-          // Also enqueue in BullMQ if available
-          if (this.queue) {
-            try {
-              await this.queue.add('send-email', {
-                pendingEmailId: pendingEmail.id,
-                to: entry.to,
-                subject: entry.subject,
-                body: entry.body,
-                threadId: entry.threadId,
-                appointmentId: entry.appointmentId,
-              }, {
-                jobId: pendingEmail.id,
-              });
-            } catch {
-              // DB record exists; polling fallback will handle it
-            }
+          created = true;
+        } catch (insertErr) {
+          if (!isUniqueConstraintViolation(insertErr)) {
+            // DB still unavailable (or another transient failure): keep the
+            // entry — and everything behind it, in order — for the next run.
+            logger.warn(
+              { err: insertErr, walEntryId: entry.id, remaining: walLength - recovered },
+              'Failed to insert WAL entry into pending_emails — leaving it in the write-ahead log for the next recovery run'
+            );
+            break;
           }
-
-          recovered++;
+          // Row already exists: an earlier run inserted it and died before
+          // removing the entry, or a concurrent recoverer won. Its owner
+          // (or the PendingEmail polling fallback) sends it.
           logger.info(
-            { walEntryId: entry.id, pendingEmailId: pendingEmail.id, to: entry.to },
-            'Recovered email from write-ahead log'
-          );
-        } catch (parseErr) {
-          logger.error(
-            { err: parseErr, entry: entryStr.slice(0, 200) },
-            'Failed to recover WAL entry — entry may be corrupt'
+            { walEntryId: entry.id, pendingEmailId },
+            'WAL entry already recovered — removing it from the write-ahead log'
           );
         }
+
+        // Remove exactly this entry now that its row is committed.
+        await removeWalEntry(entryStr);
+        if (!created) continue;
+
+        // Also enqueue in BullMQ if available
+        if (this.queue) {
+          try {
+            await this.queue.add('send-email', {
+              pendingEmailId,
+              to: entry.to,
+              subject: entry.subject,
+              body: entry.body,
+              threadId: entry.threadId,
+              appointmentId: entry.appointmentId,
+            }, {
+              jobId: pendingEmailId,
+            });
+          } catch {
+            // DB record exists; polling fallback will handle it
+          }
+        }
+
+        recovered++;
+        logger.info(
+          { walEntryId: entry.id, pendingEmailId, to: entry.to },
+          'Recovered email from write-ahead log'
+        );
       }
 
       if (recovered > 0) {

@@ -21,7 +21,7 @@ import {
   getHealthThresholds,
 } from '../../../services/conversation-health.service';
 import { sendSuccess, Errors } from '../../../utils/response';
-import { listAllAppointmentsSchema } from './schemas';
+import { buildSearchWhere, listAllAppointmentsSchema } from './schemas';
 
 export async function listAllRoute(fastify: FastifyInstance): Promise<void> {
   fastify.get(
@@ -49,15 +49,10 @@ export async function listAllRoute(fastify: FastifyInstance): Promise<void> {
         }
       }
 
-      // Search across user name / email / therapist name (case-insensitive).
-      if (search && search.trim()) {
-        const searchTerm = search.trim();
-        where.OR = [
-          { userName: { contains: searchTerm, mode: 'insensitive' } },
-          { userEmail: { contains: searchTerm, mode: 'insensitive' } },
-          { therapistName: { contains: searchTerm, mode: 'insensitive' } },
-        ];
-      }
+      // Search across tracking code / user name / email / therapist name
+      // (case-insensitive) — the same matcher as the dashboard's `q`.
+      const searchWhere = buildSearchWhere(search);
+      if (searchWhere) where.OR = searchWhere.OR;
 
       try {
         const [appointments, total] = await Promise.all([
@@ -96,6 +91,7 @@ export async function listAllRoute(fastify: FastifyInstance): Promise<void> {
               conversationStallAlertAt: true,
               conversationStallAcknowledged: true,
               reschedulingInProgress: true,
+              emailVerifiedAt: true,
             },
           }),
           prisma.appointmentRequest.count({ where }),
@@ -130,6 +126,7 @@ export async function listAllRoute(fastify: FastifyInstance): Promise<void> {
             lastActivityAt: apt.lastActivityAt,
             isStale: apt.isStale,
             reschedulingInProgress: apt.reschedulingInProgress,
+            emailVerified: apt.emailVerifiedAt !== null,
             checkpointStage,
             checkpointProgress,
             ...healthMeta,

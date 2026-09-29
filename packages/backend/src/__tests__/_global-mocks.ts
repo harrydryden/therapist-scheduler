@@ -42,6 +42,7 @@ export const configMock = () => ({
 export const redisMock = () => ({
   redis: {
     get: jest.fn(),
+    getStrict: jest.fn(),
     set: jest.fn(),
     del: jest.fn(),
     incr: jest.fn(),

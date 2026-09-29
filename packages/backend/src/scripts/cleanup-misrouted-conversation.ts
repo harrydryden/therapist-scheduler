@@ -223,7 +223,15 @@ async function main(): Promise<void> {
       const meta = extractConversationMeta(stateJson);
       await tx.appointmentRequest.update({
         where: { id: appointment.id },
-        data: { conversationState: stateJson, ...meta },
+        // Store the JSON object, not the JSON string (a string lands as a
+        // jsonb scalar and breaks jsonb path writers), and bump the
+        // conversation-state version so an in-flight agent turn's CAS
+        // save detects this rewrite instead of undoing it.
+        data: {
+          conversationState: JSON.parse(stateJson) as Prisma.InputJsonObject,
+          conversationVersion: { increment: 1 },
+          ...meta,
+        },
         select: { id: true },
       });
       console.log(`  Trimmed conversationState to ${messagesToKeep.length} message(s).`);

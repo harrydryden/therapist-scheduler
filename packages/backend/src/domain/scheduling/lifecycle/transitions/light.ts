@@ -60,6 +60,15 @@ async function applyLightTransition(args: {
   validFromStatuses: readonly AppointmentStatus[];
   /** Extra fields to write alongside status. */
   extraData?: Prisma.AppointmentRequestUpdateInput;
+  /**
+   * Extra preconditions ANDed into the atomic updateMany's WHERE (on top
+   * of `id` + `status IN validFromStatuses`, which it cannot override).
+   * For callers that selected the row on more than its status and must
+   * not act if those conditions drifted between their read and this
+   * write. A miss on these (status still valid) returns `atomicSkipped`
+   * instead of throwing InvalidTransitionError.
+   */
+  extraWhere?: Prisma.AppointmentRequestWhereInput;
   buildAuditMessage: (previousStatus: AppointmentStatus) => string;
   /** Optional reason to embed in the status_change audit event payload. */
   auditReason?: string;
@@ -75,6 +84,7 @@ async function applyLightTransition(args: {
     targetStatus,
     validFromStatuses,
     extraData,
+    extraWhere,
     buildAuditMessage,
     auditReason,
     onAfterUpdate,
@@ -100,6 +110,7 @@ async function applyLightTransition(args: {
 
   const updateResult = await prisma.appointmentRequest.updateMany({
     where: {
+      ...extraWhere,
       id: appointmentId,
       status: { in: [...validFromStatuses] },
     },
@@ -119,6 +130,28 @@ async function applyLightTransition(args: {
   });
 
   if (updateResult.count === 0) {
+    if (extraWhere) {
+      // Distinguish "a caller-supplied precondition drifted" (e.g. a
+      // reschedule landed between the tick's read and this write) from a
+      // genuinely invalid status. Only the latter is an error.
+      const current = await prisma.appointmentRequest.findUnique({
+        where: { id: appointmentId },
+        select: { status: true },
+      });
+      const currentStatus = (current?.status ?? previousStatus) as AppointmentStatus;
+      if (current && validFromStatuses.includes(currentStatus)) {
+        logger.info(
+          { ...logContext, currentStatus },
+          `Atomic transition to ${targetStatus} skipped - preconditions no longer hold`,
+        );
+        return {
+          success: false,
+          previousStatus: currentStatus,
+          newStatus: currentStatus,
+          atomicSkipped: true,
+        };
+      }
+    }
     logger.warn(
       { ...logContext, currentStatus: previousStatus },
       `Invalid transition: ${previousStatus} → ${targetStatus}`,
@@ -190,17 +223,28 @@ export async function transitionToNegotiating(
  *
  * Called automatically by the periodic tick service when the session
  * datetime passes (with a one-hour buffer for sessions that run long).
+ *
+ * `atomicWhere` lets the tick re-assert the conditions it selected the
+ * row on (not mid-reschedule, session ended before the buffer) inside the
+ * same atomic write, so a reschedule / re-confirmation that lands between
+ * the tick's read and this write can't promote a FUTURE session to
+ * session_held (lifecycle audit L12). When those conditions no longer hold
+ * the result is `atomicSkipped` rather than a thrown error. Admin callers
+ * (updateStatus) omit it and keep the status-only precondition.
  */
 export async function transitionToSessionHeld(
-  params: TransitionToSessionHeldParams,
+  params: TransitionToSessionHeldParams & {
+    atomicWhere?: Prisma.AppointmentRequestWhereInput;
+  },
 ): Promise<TransitionResult> {
-  const { appointmentId, source, adminId } = params;
+  const { appointmentId, source, adminId, atomicWhere } = params;
   return applyLightTransition({
     appointmentId,
     source,
     adminId,
     targetStatus: APPOINTMENT_STATUS.SESSION_HELD,
     validFromStatuses: [APPOINTMENT_STATUS.CONFIRMED],
+    extraWhere: atomicWhere,
     buildAuditMessage: (prev) => `Status changed: ${prev} → session_held`,
     onAfterUpdate: (_prev, apt) => {
       fireAndForget(

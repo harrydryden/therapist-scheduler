@@ -1,8 +1,9 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../utils/database';
 import { logger } from '../utils/logger';
 import { LockedPeriodicService } from '../utils/locked-periodic-service';
 import { LockedTaskRunner } from '../utils/locked-task-runner';
-import { therapistBookingStatusService } from './therapist-booking-status.service';
+import { sideEffectTrackerService } from './side-effect-tracker.service';
 import { slackNotificationService } from './slack-notification.service';
 import { emailQueueService } from './email-queue.service';
 import { DATA_RETENTION, STALE_CHECK_LOCK, RETENTION_CLEANUP_LOCK, STALE_CHECK_INTERVALS, PRE_BOOKING_STATUSES, POST_BOOKING_STATUSES, RESCHEDULE_OVERDUE_GRACE_MS, TERMINAL_STATUSES } from '../constants';
@@ -74,8 +75,9 @@ class StaleCheckService extends LockedPeriodicService {
 
   /**
    * Stop both timers — primary tick via super, retention sweep here.
+   * Resolves once an in-flight primary tick has finished.
    */
-  stop(): void {
+  stop(): Promise<void> {
     if (this.retentionStartupTimeoutId) {
       clearTimeout(this.retentionStartupTimeoutId);
       this.retentionStartupTimeoutId = null;
@@ -84,7 +86,7 @@ class StaleCheckService extends LockedPeriodicService {
       clearInterval(this.retentionIntervalId);
       this.retentionIntervalId = null;
     }
-    super.stop();
+    return super.stop();
   }
 
   /**
@@ -129,10 +131,21 @@ class StaleCheckService extends LockedPeriodicService {
     let processedMessagesDeleted = 0;
     let abandonedEmailsDeleted = 0;
 
+    // Retention windows are admin settings (retention.*). They were
+    // defined and editable in the dashboard but never read here, so edits
+    // silently did nothing while rows were hard-deleted on the constants.
+    const [cancelledRetentionDays, completedRetentionDays] = await Promise.all([
+      getSettingValue<number>('retention.cancelledDays').catch(() => DATA_RETENTION.CANCELLED_RETENTION_DAYS),
+      getSettingValue<number>('retention.completedDays').catch(() => DATA_RETENTION.COMPLETED_RETENTION_DAYS),
+    ]).then(([c, d]) => [
+      Number.isFinite(c) && c > 0 ? c : DATA_RETENTION.CANCELLED_RETENTION_DAYS,
+      Number.isFinite(d) && d > 0 ? d : DATA_RETENTION.COMPLETED_RETENTION_DAYS,
+    ]);
+
     try {
       // 1. Archive old cancelled appointments
       const cancelledThreshold = new Date(
-        now.getTime() - DATA_RETENTION.CANCELLED_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        now.getTime() - cancelledRetentionDays * 24 * 60 * 60 * 1000
       );
 
       // FIX B7: Properly handle cascade delete to prevent orphaned records
@@ -175,7 +188,7 @@ class StaleCheckService extends LockedPeriodicService {
           {
             cleanupId,
             deletedCount: cancelledCount,
-            thresholdDays: DATA_RETENTION.CANCELLED_RETENTION_DAYS,
+            thresholdDays: cancelledRetentionDays,
           },
           'Deleted old cancelled appointments with cascade cleanup'
         );
@@ -184,7 +197,7 @@ class StaleCheckService extends LockedPeriodicService {
 
       // 2. Delete old confirmed/completed/session_held/feedback_requested appointments
       const completedThreshold = new Date(
-        now.getTime() - DATA_RETENTION.COMPLETED_RETENTION_DAYS * 24 * 60 * 60 * 1000
+        now.getTime() - completedRetentionDays * 24 * 60 * 60 * 1000
       );
 
       const completedCount = await prisma.$transaction(async (tx) => {
@@ -200,6 +213,27 @@ class StaleCheckService extends LockedPeriodicService {
         if (toDelete.length === 0) return 0;
 
         const appointmentIds = toDelete.map((a) => a.id);
+
+        // Graduation must survive retention. Every completion already
+        // writes its therapist_completed_clients row in the completion
+        // transaction, and the 20260928 migration seeded the table from
+        // every completed row that existed then; this re-assertion (same
+        // hash as the migration, ON CONFLICT no-op) makes it impossible for
+        // retention to be the thing that un-graduates a therapist, even for
+        // a row that reached `completed` some other way.
+        await tx.$executeRaw`
+          INSERT INTO "therapist_completed_clients" ("id", "therapist_id", "client_email_hash", "completed_at")
+          SELECT gen_random_uuid()::text, t.id,
+                 encode(sha256(convert_to(lower(trim(a.user_email)), 'UTF8')), 'hex'),
+                 a.updated_at
+          FROM "appointment_requests" a
+          JOIN "therapists" t
+            ON t.id = a.therapist_id
+            OR (a.therapist_id IS NULL AND (t.notion_id = a.therapist_handle OR t.id = a.therapist_handle))
+          WHERE a.id IN (${Prisma.join(appointmentIds)})
+            AND a.status = 'completed'
+          ON CONFLICT ("therapist_id", "client_email_hash") DO NOTHING
+        `;
 
         // Delete children first (cascade)
         await tx.pendingEmail.deleteMany({
@@ -218,7 +252,7 @@ class StaleCheckService extends LockedPeriodicService {
           {
             cleanupId,
             deletedCount: completedCount,
-            thresholdDays: DATA_RETENTION.COMPLETED_RETENTION_DAYS,
+            thresholdDays: completedRetentionDays,
           },
           'Deleted old completed/confirmed appointments with cascade cleanup'
         );
@@ -333,13 +367,28 @@ class StaleCheckService extends LockedPeriodicService {
         );
       }
 
+      // 6b. Side-effect outbox rows. Only rows that can never run again
+      // (completed / superseded) and finished more than 30 days ago;
+      // pending/failed/running/abandoned rows are kept. The unique
+      // idempotency key on these rows is the dedup guard, so the window
+      // must outlast any re-registration of the same key: transition
+      // effects re-register only within seconds of the transition (the
+      // post-commit dispatch), and periodic effects are keyed per
+      // generation/cycle, so a 30-day-old finished row is never looked up
+      // again.
+      const sideEffectsDeleted = await sideEffectTrackerService.cleanupOldEffects();
+
       // 7. Clean up old completed WeeklyMailingInquiry records (30 days)
       const inquiryThreshold = new Date(
         now.getTime() - 30 * 24 * 60 * 60 * 1000
       );
+      // The inquiry handler only ever writes 'active' and 'resolved'
+      // (see domain/scheduling/inbound/weekly-mailing.ts); the previous
+      // filter matched statuses that never existed, so these rows — which
+      // hold users' email content — were kept forever.
       const deletedInquiries = await prisma.weeklyMailingInquiry.deleteMany({
         where: {
-          status: { in: ['completed', 'closed'] },
+          status: { in: ['resolved', 'completed', 'closed'] },
           updatedAt: { lt: inquiryThreshold },
         },
       });
@@ -359,6 +408,7 @@ class StaleCheckService extends LockedPeriodicService {
           abandonedEmailsDeleted,
           unmatchedAttemptsDeleted: deletedUnmatched.count,
           weeklyMailingInquiriesDeleted: deletedInquiries.count,
+          sideEffectLogsDeleted: sideEffectsDeleted,
           orphanedAppointments: orphanedCount,
         },
         'Data retention cleanup completed'
@@ -487,27 +537,6 @@ class StaleCheckService extends LockedPeriodicService {
         logger.info(
           { checkId, cleared: clearedTerminalStallResult.count },
           'Cleared stall alerts from terminal-status appointments'
-        );
-      }
-
-      // Get configurable inactivity threshold (unified for admin alert + auto-unfreeze)
-      const inactivityHours = await getSettingValue<number>('notifications.inactivityAlertHours');
-      const inactivityThreshold = new Date(Date.now() - inactivityHours * 60 * 60 * 1000);
-
-      // Check for and auto-unfreeze therapists with inactive conversations
-      const { flaggedCount, unfrozenCount } = await therapistBookingStatusService.checkAndHandleInactiveTherapists(
-        inactivityThreshold
-      );
-      if (flaggedCount > 0) {
-        logger.info(
-          { checkId, flaggedForAdmin: flaggedCount },
-          'Flagged therapists for admin attention'
-        );
-      }
-      if (unfrozenCount > 0) {
-        logger.info(
-          { checkId, unfrozenCount },
-          'Auto-unfroze therapists due to conversation inactivity'
         );
       }
 

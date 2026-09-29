@@ -24,6 +24,18 @@ export async function handleRecordTherapistTimezone(
   context: SchedulingContext,
   traceId: string,
 ): Promise<ToolExecutionResult> {
+  // Inbound-sender gate (security): the therapist's timezone drives how
+  // every session time is presented to them and to future clients, so
+  // only the therapist's own email may set it.
+  if (context.inboundSender !== 'therapist') {
+    return {
+      success: false,
+      toolName: 'record_therapist_timezone',
+      error:
+        'record_therapist_timezone is only allowed when the inbound email was from the therapist. ' +
+        `Current inbound sender: ${context.inboundSender ?? 'none'}.`,
+    };
+  }
   const parsed = recordTherapistTimezoneInputSchema.safeParse(rawInput);
   if (!parsed.success) {
     return {

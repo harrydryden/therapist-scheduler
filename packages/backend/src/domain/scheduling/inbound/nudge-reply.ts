@@ -73,9 +73,11 @@ export async function detectNudgeReplyBySender(
 ): Promise<NudgeTherapist | null> {
   try {
     // Step 1: Is the sender a nudged therapist?
+    // Case-insensitive: Therapist.email keeps whatever case it was
+    // ingested with; the parsed sender is lowercased (E14).
     const therapist = await prisma.therapist.findFirst({
       where: {
-        email: email.from.toLowerCase(),
+        email: { equals: email.from, mode: 'insensitive' },
         lastNudgeAt: { not: null },
       },
       select: { id: true, name: true, email: true, notionId: true },

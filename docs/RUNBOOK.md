@@ -385,8 +385,12 @@ once. Three layered mechanisms prevent double-firing:
 
 - **Light transitions** (`contacted`, `negotiating`, `session_held`,
   `feedback_requested`) use one atomic `updateMany` whose `WHERE` requires
-  `status IN (validFrom)`. Only one concurrent writer wins; the loser sees 0
-  rows and returns `atomicSkipped` (`transitions/light.ts:101`).
+  `status IN (validFrom)`. Only one concurrent writer wins. A loser whose
+  *status* precondition failed gets an `InvalidTransitionError`; a loser
+  whose *extra* precondition failed (e.g. the lifecycle tick's
+  "not mid-reschedule, session already ended" guard, which is ANDed into
+  the same write) sees 0 rows and returns `atomicSkipped`
+  (`transitions/light.ts`).
 - **`confirmed`** uses `update` with `WHERE` preconditions inside a
   **Read-Committed** transaction (deliberately *not* serializable — see the
   code comment at `confirmed.ts:210`). Safety comes from the preconditions +
@@ -833,7 +837,7 @@ sequenceDiagram
 > weekly mailing), then tries to match an appointment. Unmatched → tracked and
 > abandoned after three tries. Matched → classify, dismiss stale closures, check
 > thread divergence, fetch full thread history, hand to the agent, mark
-> processed **unless the agent paused or deferred**, and remove the UNREAD label.
+> processed **unless the agent paused or deferred** (deferred ids are recorded so the poll skips them until release). The UNREAD label is removed on every terminal outcome, including bounces, auto-replies and abandoned messages, so handled mail never clogs the poll window.
 
 Two facts to internalise:
 
@@ -841,8 +845,12 @@ Two facts to internalise:
   200 (even for forged/invalid bodies) so Pub/Sub doesn’t retry forever. Check
   processing logs by `traceId`, not the HTTP status.
 - **The database is the dedup source of truth.** `ProcessedGmailMessage` rows are
-  authoritative; Redis is a fast cache. A full Redis flush is safe. Paused/deferred
-  messages are deliberately left *unmarked* so they get re-delivered.
+  authoritative (kept **45 days**); Redis is a fast cache (30 days). The
+  recovery paths (hourly scanner, release-control replay, chase pre-send
+  check) additionally skip any Gmail message older than **30 days**, so a
+  full Redis flush cannot replay old mail; admin force-reprocess bypasses
+  that age guard on purpose. Paused/deferred messages are deliberately left
+  *unmarked* so they get re-delivered.
 
 ### 5.2 Idempotency & dedup inventory
 
@@ -1107,8 +1115,11 @@ A few env vars are load-bearing (the service refuses to start or logs a loud
 ### 6.6 Data retention
 
 Automatic cleanup (24-hourly): cancelled appointments after **90 days**,
-completed after **365 days**, processed Gmail message records after **7 days**,
-completed weekly-mailing inquiries after **30 days**.
+completed after **365 days**, processed Gmail message records after **45 days**
+(longer than the 30-day recovery age guard, so old mail is never replayed),
+resolved weekly-mailing inquiries after **30 days**. The appointment windows
+are the admin settings `retention.cancelledDays` / `retention.completedDays`;
+the values above are their defaults.
 
 ---
 

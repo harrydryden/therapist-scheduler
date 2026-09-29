@@ -315,6 +315,28 @@ export class CacheManager {
     }
   }
 
+  /**
+   * Strict GET for correctness guards (tool idempotency, auth brute-force
+   * limiting, send-once markers). Unlike `getString`, a Redis failure
+   * THROWS instead of returning null, so callers can tell "key absent"
+   * apart from "Redis unavailable" and fail closed. `getString` swallowing
+   * errors meant every guard written as `try { get } catch { fail closed }`
+   * silently failed OPEN during an outage.
+   */
+  async getStrict(key: string): Promise<string | null> {
+    if (!this.redis) {
+      throw new Error('Redis client not available');
+    }
+    try {
+      const result = await this.redis.get(key);
+      this.redisManager.recordSuccess();
+      return result;
+    } catch (err) {
+      this.redisManager.recordFailure();
+      throw err;
+    }
+  }
+
   async setString(key: string, value: string, ttlSeconds: number = 86400): Promise<void> {
     if (!this.redis) return;
     try {
@@ -628,68 +650,6 @@ export class CacheManager {
     } catch (err) {
       logger.warn({ err }, 'Error closing Redis connection');
     }
-  }
-
-  /**
-   * Cleanup stale locks that may have been orphaned
-   *
-   * This runs on startup to recover from crashes where locks weren't released.
-   * Scans for keys matching lock patterns and checks their age.
-   * Locks older than maxAgeSeconds are considered stale and deleted.
-   *
-   * @param patterns - Array of glob patterns to scan (e.g., ['gmail:lock:*', 'appointment:lock:*'])
-   * @param maxAgeSeconds - Maximum age in seconds before a lock is considered stale
-   * @returns Number of stale locks cleaned up
-   */
-  async cleanupStaleLocks(patterns: string[], maxAgeSeconds: number): Promise<number> {
-    if (!this.redis) {
-      logger.warn('Redis not available - skipping stale lock cleanup');
-      return 0;
-    }
-
-    const SCAN_COUNT = 100;
-    let totalCleaned = 0;
-
-    for (const pattern of patterns) {
-      try {
-        let cursor = '0';
-
-        do {
-          const [nextCursor, keys] = await this.redis.scan(
-            cursor,
-            'MATCH',
-            pattern,
-            'COUNT',
-            SCAN_COUNT
-          );
-          cursor = nextCursor;
-
-          for (const key of keys) {
-            // Check TTL - if TTL is -1 (no expiry) or very high, it might be orphaned
-            // If TTL is positive but less than maxAgeSeconds, it's probably fine
-            const ttl = await this.redis.ttl(key);
-
-            // TTL of -1 means no expiry set - this is a stale lock
-            // TTL of -2 means key doesn't exist (already cleaned)
-            if (ttl === -1) {
-              logger.warn({ key }, 'Found lock with no TTL - cleaning up as potentially orphaned');
-              await this.redis.del(key);
-              totalCleaned++;
-            }
-            // Note: We don't delete locks with valid TTLs even if old,
-            // as they will expire naturally and may still be valid
-          }
-        } while (cursor !== '0');
-      } catch (err) {
-        logger.error({ err, pattern }, 'Error during stale lock cleanup');
-      }
-    }
-
-    if (totalCleaned > 0) {
-      logger.info({ totalCleaned, patterns }, 'Stale lock cleanup completed');
-    }
-
-    return totalCleaned;
   }
 
   // --------------------------------------------------

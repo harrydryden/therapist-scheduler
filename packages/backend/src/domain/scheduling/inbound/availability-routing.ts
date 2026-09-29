@@ -3,9 +3,16 @@
  * the appropriate downstream behaviour, based on the conversation's
  * lifecycle status.
  *
- * Returns true when the email is fully handled (caller should mark
- * processed and stop); false when the caller should fall through to
- * the next dispatch branch.
+ * Returns true when the email is fully handled (caller should stop).
+ *
+ * Throws when the availability agent's processReply fails (e.g. a
+ * Claude outage). The error MUST propagate to processMessage's outer
+ * catch, which records a MessageProcessingFailure, alerts, and leaves
+ * the message unmarked for retry (abandoning after the budget). The old
+ * behaviour — return false "leaving for retry" — made the caller fall
+ * through to the nudge / onboarding / appointment branches, so the
+ * failure was never tracked and the reply was misrouted
+ * (`therapist-nudge-reply`) or abandoned as unmatched (E9).
  *
  * Status semantics:
  *   - `active`: hand to availabilityAgent.processReply for the usual
@@ -18,8 +25,8 @@
  *     message processed so it doesn't churn the unmatched-retry
  *     loop.
  *
- * All branches return true (the inbound has been accounted for one
- * way or another), so the caller short-circuits to markProcessed.
+ * All non-throwing branches return true (the inbound has been
+ * accounted for one way or another) and mark the message processed.
  */
 
 import { logger } from '../../../utils/logger';
@@ -92,9 +99,9 @@ export async function routeToAvailabilityAgent(
     } catch (err) {
       logger.error(
         { traceId, messageId, conversationId: convoMatch.id, err },
-        'availability-agent processReply threw — leaving for retry',
+        'availability-agent processReply threw — propagating to failure tracking for retry',
       );
-      return false;
+      throw err;
     }
   }
 

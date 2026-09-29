@@ -19,6 +19,7 @@ import StatusBadge from './StatusBadge';
 import HealthStatusBadge from './HealthStatusBadge';
 import TherapistGroupSkeleton from './skeletons/TherapistGroupSkeleton';
 import Pagination from './Pagination';
+import { appointmentRowLabel } from '../utils/appointment-labels';
 
 interface AppointmentsTableProps {
   appointments: AppointmentListItem[];
@@ -59,7 +60,7 @@ interface RowContentProps {
 // is the primary triage signal and now carries longer party-plus-
 // context wording.
 const GRID_TEMPLATE =
-  'grid-cols-[24px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,3.8fr)_minmax(0,1fr)_64px]';
+  'grid-cols-[52px_minmax(0,1.8fr)_minmax(0,1.8fr)_110px_minmax(0,3.8fr)_minmax(0,1fr)_64px]';
 
 const RowContent = memo(function RowContent({
   appointment,
@@ -74,15 +75,15 @@ const RowContent = memo(function RowContent({
       type="button"
       onClick={onClick}
       aria-pressed={isSelected}
-      aria-label={`Open appointment for ${appointment.userName || appointment.userEmail} with ${appointment.therapistName}`}
+      aria-label={appointmentRowLabel(appointment)}
       className={`w-full text-left border-b border-slate-100 px-3 py-2.5 grid ${GRID_TEMPLATE} gap-3 items-center transition-colors ${
-        isSelected ? 'bg-spill-blue-50 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
+        isSelected ? 'bg-spill-blue-100 ring-1 ring-spill-blue-200' : 'hover:bg-slate-50'
       }`}
       style={{ height: APPOINTMENT_ROW_HEIGHT }}
     >
-      {/* Health dot */}
-      <span className="flex justify-center" aria-hidden="false">
-        <HealthStatusBadge status={appointment.healthStatus} score={appointment.healthScore} size="sm" />
+      {/* Health: dot plus a short word, so it isn't colour-only */}
+      <span className="flex justify-start">
+        <HealthStatusBadge status={appointment.healthStatus} score={appointment.healthScore} size="sm" showLabel />
       </span>
 
       {/* Client */}
@@ -100,8 +101,11 @@ const RowContent = memo(function RowContent({
       </span>
 
       {/* Status */}
-      <span>
+      <span className="flex flex-col items-start gap-1">
         <StatusBadge status={appointment.status} />
+        {appointment.emailVerified === false && (
+          <span className="text-[10px] font-medium text-spill-yellow-600">Email unconfirmed</span>
+        )}
       </span>
 
       {/* Next action — short imperative; wraps across up to 2 lines.
@@ -249,9 +253,7 @@ export default function AppointmentsTable({
           that occupies the 24px health column. The inner
           `sr-only` span retains the screen-reader label.
         */}
-        <span aria-hidden="true">
-          <span className="sr-only">Health</span>
-        </span>
+        <HeaderCell label="Health" />
         <HeaderCell label="Client" />
         <HeaderCell label="Therapist" />
         <HeaderCell label="Status" />

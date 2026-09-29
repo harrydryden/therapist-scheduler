@@ -38,6 +38,10 @@ jest.mock('../utils/database', () => ({
     user: {
       findMany: jest.fn(),
       update: jest.fn(),
+      // Per-recipient send-once guard (claim + newest stamp); default: no
+      // prior sends, every claim succeeds.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      aggregate: jest.fn().mockResolvedValue({ _max: { lastWeeklyMailingAt: null } }),
     },
     therapist: {
       findMany: jest.fn(),
@@ -57,6 +61,7 @@ jest.mock('../utils/redis', () => {
   return {
     redis: {
       get: jest.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
+      getStrict: jest.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
       set: jest.fn((key: string, value: string) => { store.set(key, value); return Promise.resolve('OK'); }),
       del: jest.fn((key: string) => { store.delete(key); return Promise.resolve(1); }),
       __store: store,

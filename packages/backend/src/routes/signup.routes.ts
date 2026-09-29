@@ -12,7 +12,9 @@ import {
 } from '../services/signup-invitation.service';
 import { slackNotificationService } from '../services/slack-notification.service';
 import { issueWelcomeVoucher } from '../services/voucher-issuance.service';
-import { isCountryCode, DEFAULT_COUNTRY } from '@therapist-scheduler/shared';
+import { consumeAddressQuota } from '../services/booking-verification.service';
+import { normalizeEmail } from '../utils/email-equals';
+import { parseCountryCode, DEFAULT_COUNTRY, UNSUPPORTED_COUNTRY_MESSAGE } from '@therapist-scheduler/shared';
 
 /**
  * Public signup endpoint. Captures the consent + intake fields the public
@@ -53,13 +55,25 @@ const signupSchema = z.object({
   // Drives the IANA timezone every email salutation/time block uses for
   // this user (resolveRecipientTimezone reads User.country). Defaults to
   // UK to match the column default — legacy users were stamped UK by the
-  // 20260427 migration.
+  // 20260427 migration. Validated by the one shared validator every write
+  // path uses; an unknown code is rejected, never stored.
   country: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .refine(isCountryCode, { message: 'Unsupported country code' })
-    .default(DEFAULT_COUNTRY),
+    .unknown()
+    .optional()
+    .transform((value, ctx) => {
+      if (value === undefined) return DEFAULT_COUNTRY;
+      const code = parseCountryCode(value);
+      if (!code) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: UNSUPPORTED_COUNTRY_MESSAGE });
+        return z.NEVER;
+      }
+      return code;
+    }),
+  /**
+   * Explicit opt-in to the weekly availability email. Unticked by default
+   * on the form; `subscribed` is only ever set from a tick (see handler).
+   */
+  weeklyEmails: z.boolean().optional().default(false),
 });
 
 type SignupBody = z.infer<typeof signupSchema>;
@@ -97,6 +111,7 @@ export async function signupRoutes(fastify: FastifyInstance) {
         agreedToFeedback,
         invitationToken,
         country,
+        weeklyEmails,
       } = validation.data;
 
       // If an invitation token is supplied, verify it before doing any
@@ -133,6 +148,21 @@ export async function signupRoutes(fastify: FastifyInstance) {
         }
       }
 
+      // Per-address cap on top of the per-IP route limit: every signup
+      // emails a welcome voucher, so one address can't be flooded from
+      // many IPs.
+      const addressQuota = await consumeAddressQuota('signup', email);
+      if (!addressQuota.allowed) {
+        logger.warn({ requestId, retryAfter: addressQuota.retryAfterSeconds }, 'Per-address signup rate limit exceeded');
+        reply.header('Retry-After', String(addressQuota.retryAfterSeconds));
+        return reply.status(429).send({
+          success: false,
+          error: 'Too many signups for this email address. Please try again later, or check your inbox for the email we already sent.',
+          code: 'ADDRESS_RATE_LIMITED',
+          retryAfter: addressQuota.retryAfterSeconds,
+        });
+      }
+
       // Same email validation we run for booking: MX records, disposable
       // detection, typo suggestions. We don't want signups from bogus
       // addresses polluting the user database.
@@ -152,10 +182,19 @@ export async function signupRoutes(fastify: FastifyInstance) {
           error: emailValidation.errors[0] || 'Invalid email address',
           details: emailValidation.errors,
           suggestions: emailValidation.suggestions,
+          suggestedEmail: emailValidation.suggestedEmail ?? null,
         });
       }
 
       try {
+        // Whether this signup creates the User row. Case-insensitive so a
+        // legacy mixed-case row counts as existing (getOrCreateUser adopts
+        // it rather than creating a new one).
+        const preExisting = await prisma.user.findFirst({
+          where: { email: { equals: normalizeEmail(email), mode: 'insensitive' } },
+          select: { id: true, subscribed: true },
+        });
+
         // Ensure the row exists with an odId. getOrCreateUser is idempotent —
         // re-signing-up with the same email updates the name and refreshes
         // the consent timestamps below. That's the desired UX: a second
@@ -190,9 +229,14 @@ export async function signupRoutes(fastify: FastifyInstance) {
                 // acceptances so the admin user filter can split conversion
                 // attribution (a self-service signup vs. a prospect we invited).
                 signupSource: invitationToken ? 'invitation' : 'signup_form',
-                // Auto-subscribe to weekly mailing list, matching the booking
-                // flow's behaviour for newly-created users.
-                subscribed: true,
+                // Weekly-email consent comes only from the explicit opt-in
+                // tick. A user this signup creates gets exactly what they
+                // ticked (the column default would silently subscribe them).
+                // An EXISTING user is never changed: this form is public
+                // and unverified, so it must not be able to re-subscribe an
+                // address that opted out (or unsubscribe one) — anyone who
+                // knows the email could otherwise flip it.
+                ...(preExisting ? {} : { subscribed: weeklyEmails }),
               },
               select: {
                 id: true,
@@ -259,6 +303,9 @@ export async function signupRoutes(fastify: FastifyInstance) {
           email: updated.email,
           name: updated.name,
           traceId: requestId,
+          // Only an explicit opt-in may clear a previous weekly-mail opt-out
+          // or strike count on the voucher tracking row.
+          optedIn: weeklyEmails && (!preExisting || preExisting.subscribed),
         }).catch((err) => {
           logger.error(
             { err, requestId, userId: updated.id, email: updated.email },
@@ -278,6 +325,9 @@ export async function signupRoutes(fastify: FastifyInstance) {
             odId: updated.odId,
             email: updated.email,
             name: updated.name,
+            // What the weekly-email opt-in did (existing users are left as
+            // they were, see above).
+            weeklyEmails: preExisting ? preExisting.subscribed : weeklyEmails,
           },
           {
             statusCode: 201,
