@@ -74,7 +74,21 @@ export class RedisClientManager {
     // sockets never closed, producing the "worker process force exited"
     // warning. Guard so the singleton stays inert in tests; consumers
     // already handle `client === null` (see cache-manager.ts:20).
-    if (config.env === 'test') {
+    //
+    // NODE_ENV is checked alongside config.env because the config check alone
+    // is only as good as each suite's config mock. Most suites mock '../config'
+    // with a hand-written object and the large majority omit `env` — including
+    // the shared `configMock()` helper in __tests__/_global-mocks.ts — so
+    // `config.env` is undefined there and the guard silently doesn't fire.
+    // chase-reset-on-stage-change.test.ts opens a real client that way (via
+    // settings-pubsub, which duplicates this one to subscribe) and hangs on
+    // ioredis's reconnect loop. Jest sets NODE_ENV=test itself, so reading it
+    // directly cannot be defeated by a partial mock.
+    //
+    // This is not a second condition in production: config.env IS
+    // process.env.NODE_ENV (config/index.ts:122), so outside tests the two are
+    // the same value and this changes nothing.
+    if (config.env === 'test' || process.env.NODE_ENV === 'test') {
       this.client = null;
       return;
     }
