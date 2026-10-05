@@ -193,6 +193,23 @@ describe('buildSystemPrompt — section presence', () => {
     expect(prompt).toMatch(/do not comply/i);
     expect(prompt).toMatch(/flag_for_human_review/);
   });
+
+  it('tells the agent that free.spill sessions are separate from the Spill platform', async () => {
+    // Some clients are also customers of the main Spill platform, go looking
+    // for a free.spill session in their Spill account, and find nothing —
+    // then conclude the booking failed. (Reported verbatim: "I tried to log
+    // on to Spill to see if it was there, and there's nothing there to say I
+    // have a session... I'm not sure if I want to go ahead with it.") The
+    // agent must volunteer the distinction rather than leave the client to
+    // infer a cancellation.
+    const prompt = await buildSystemPrompt(baseContext);
+    expect(prompt).toMatch(/free\.spill/i);
+    expect(prompt).toMatch(/Spill platform/i);
+    // The two load-bearing facts: it won't show up there, and the link comes
+    // from the therapist rather than the platform.
+    expect(prompt).toMatch(/not.{0,40}appear/i);
+    expect(prompt).toMatch(/onboard/i);
+  });
 });
 
 describe('buildSystemPrompt — section ordering (PR #194)', () => {
